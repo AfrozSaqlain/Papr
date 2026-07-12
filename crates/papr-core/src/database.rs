@@ -1,6 +1,9 @@
 //! `SQLite` persistence and schema migrations.
 
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -30,6 +33,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         6,
         include_str!("../migrations/0006_filesystem_collections.sql"),
     ),
+    (7, include_str!("../migrations/0007_dashboard_feed_cache.sql")),
 ];
 
 /// Database initialization and query errors.
@@ -41,6 +45,9 @@ pub enum DatabaseError {
     /// `SQLite` operation failed.
     #[error("database operation failed: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// Cached JSON payload could not be encoded or decoded.
+    #[error("database JSON payload failed: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 /// Local `SQLite` database with explicit migrations.
@@ -197,7 +204,7 @@ impl Database {
             .map_err(Into::into)
     }
 
-    /// List local catalog entries with author display metadata.
+    /// List catalog entries that have a local PDF with author display metadata.
     ///
     /// # Errors
     ///
@@ -209,7 +216,9 @@ impl Database {
                               FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
                               WHERE pa.paper_id = p.id ORDER BY pa.position), ''),
                     p.doi, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
-             FROM papers p ORDER BY p.created_at DESC, p.id DESC",
+             FROM papers p
+             WHERE p.pdf_path IS NOT NULL
+             ORDER BY p.created_at DESC, p.id DESC",
         )?;
         let rows = statement.query_map([], |row| {
             let file_size: Option<i64> = row.get(5)?;
@@ -225,6 +234,73 @@ impl Database {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// List local PDF-backed papers whose files are inside the configured roots.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the library query fails.
+    pub fn library_papers_in_roots(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<Vec<LibraryPaper>, DatabaseError> {
+        Ok(self
+            .library_papers()?
+            .into_iter()
+            .filter(|paper| {
+                paper.pdf_path.as_deref().is_some_and(|path| {
+                    let path = Path::new(path);
+                    path.is_file() && roots.iter().any(|root| path.starts_with(root))
+                })
+            })
+            .collect())
+    }
+
+    /// Load the cached dashboard feed for one local date and keyword set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the query or JSON decoding fails.
+    pub fn dashboard_feed_cache(
+        &self,
+        feed_date: &str,
+        keyword_signature: &str,
+    ) -> Result<Option<Vec<RemotePaper>>, DatabaseError> {
+        self.connection
+            .query_row(
+                "SELECT payload FROM dashboard_feed_cache
+                 WHERE feed_date = ?1 AND keyword_signature = ?2",
+                params![feed_date, keyword_signature],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|payload| serde_json::from_str(&payload).map_err(Into::into))
+            .transpose()
+    }
+
+    /// Save the dashboard feed for one local date and keyword set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when JSON encoding or persistence fails.
+    pub fn save_dashboard_feed_cache(
+        &self,
+        feed_date: &str,
+        keyword_signature: &str,
+        papers: &[RemotePaper],
+    ) -> Result<(), DatabaseError> {
+        let payload = serde_json::to_string(papers)?;
+        self.connection.execute(
+            "INSERT INTO dashboard_feed_cache
+                (feed_date, keyword_signature, payload, refreshed_at)
+             VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
+             ON CONFLICT(feed_date, keyword_signature) DO UPDATE SET
+                payload = excluded.payload,
+                refreshed_at = CURRENT_TIMESTAMP",
+            params![feed_date, keyword_signature, payload],
+        )?;
+        Ok(())
     }
 
     /// Upsert downloaded arXiv metadata and attach its local PDF path.
@@ -986,7 +1062,7 @@ fn weekday_name(value: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{fs, path::PathBuf};
 
     use chrono::{TimeZone, Utc};
     use rusqlite::params;
@@ -1026,6 +1102,60 @@ mod tests {
         assert!(database.import_pdf(&first)?);
         assert!(!database.import_pdf(&duplicate)?);
         assert_eq!(database.library_papers()?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn remote_only_papers_do_not_appear_in_library() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        let timestamp = Utc
+            .with_ymd_and_hms(2026, 2, 1, 0, 0, 0)
+            .single()
+            .ok_or("invalid test timestamp")?;
+        let paper = RemotePaper {
+            id: "https://arxiv.org/abs/2602.00002".into(),
+            title: "Search result only".into(),
+            authors: vec!["Remote Author".into()],
+            abstract_text: "Metadata without a downloaded PDF.".into(),
+            published: timestamp,
+            updated: timestamp,
+            categories: vec!["cs.DL".into()],
+            pdf_url: Some("https://arxiv.org/pdf/2602.00002".into()),
+            doi: Some("10.1000/remote-only".into()),
+            journal_ref: None,
+        };
+
+        database.ensure_remote_paper(&paper)?;
+
+        assert!(database.library_papers()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn root_filtered_library_only_includes_existing_pdfs_inside_roots()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        let root = std::env::temp_dir().join(format!("papr-root-filter-{}", std::process::id()));
+        fs::create_dir_all(&root)?;
+        let inside_path = root.join("inside.pdf");
+        fs::write(&inside_path, b"%PDF-1.7\ninside")?;
+        let outside_path = root.with_extension("outside.pdf");
+        fs::write(&outside_path, b"%PDF-1.7\noutside")?;
+        let inside_path_string = inside_path.to_string_lossy().into_owned();
+        let outside_path_string = outside_path.to_string_lossy().into_owned();
+
+        database.import_pdf(&imported_pdf(&inside_path_string, "inside-hash"))?;
+        database.import_pdf(&imported_pdf(&outside_path_string, "outside-hash"))?;
+
+        let rows = database.library_papers_in_roots(std::slice::from_ref(&root))?;
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].pdf_path.as_deref(),
+            Some(inside_path_string.as_str())
+        );
+        let _ = fs::remove_file(outside_path);
+        let _ = fs::remove_dir_all(root);
         Ok(())
     }
 

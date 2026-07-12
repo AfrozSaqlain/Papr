@@ -68,6 +68,8 @@ pub struct Config {
     pub library_folders: Vec<PathBuf>,
     /// Destination for downloaded papers.
     pub download_path: Option<PathBuf>,
+    /// Comma-separated search terms used for dashboard recommendations.
+    pub dashboard_keywords: String,
     /// Whether mouse event capture is enabled.
     pub mouse: bool,
     /// Plugin identifiers explicitly allowed to execute.
@@ -82,6 +84,7 @@ impl Default for Config {
             pdf_viewer: None,
             library_folders: Vec::new(),
             download_path: None,
+            dashboard_keywords: String::new(),
             mouse: false,
             enabled_plugins: Vec::new(),
         }
@@ -105,6 +108,17 @@ impl Config {
         fs::write(&paths.config_file, toml::to_string_pretty(&config)?)?;
         Ok(config)
     }
+
+    /// Return configured dashboard recommendation terms.
+    #[must_use]
+    pub fn dashboard_keyword_list(&self) -> Vec<String> {
+        self.dashboard_keywords
+            .split(',')
+            .map(str::trim)
+            .filter(|keyword| !keyword.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -116,6 +130,17 @@ mod tests {
         let config: Config = toml::from_str("theme = 'nord'")?;
         assert_eq!(config.theme, "nord");
         assert_eq!(config.startup_page, "dashboard");
+        Ok(())
+    }
+
+    #[test]
+    fn dashboard_keywords_parse_as_comma_separated_terms() -> Result<(), toml::de::Error> {
+        let config: Config =
+            toml::from_str("dashboard_keywords = 'machine learning, gravitational waves,  '")?;
+        assert_eq!(
+            config.dashboard_keyword_list(),
+            ["machine learning", "gravitational waves"]
+        );
         Ok(())
     }
 }

@@ -10,6 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use chrono::Local;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -99,10 +100,6 @@ async fn main() -> Result<()> {
     };
     app.plugins = plugin_host.plugins();
     app.plugin_diagnostics = plugin_host.diagnostics().len();
-    app.library.papers = database
-        .library_papers()
-        .context("failed to load library")?;
-    refresh_organization(&database, &mut app)?;
 
     let download_dir = config.download_path.clone().unwrap_or(paths.downloads_dir);
     std::fs::create_dir_all(&download_dir).context("failed to create download directory")?;
@@ -110,6 +107,10 @@ async fn main() -> Result<()> {
     if !library_roots.contains(&download_dir) {
         library_roots.push(download_dir.clone());
     }
+    app.library.papers = database
+        .library_papers_in_roots(&library_roots)
+        .context("failed to load library")?;
+    refresh_organization(&database, &mut app)?;
     let (watch_sender, watch_receiver) = mpsc::unbounded_channel();
     let _watcher = LibraryWatcher::start(&library_roots, move |path| {
         let _ = watch_sender.send(path);
@@ -120,6 +121,8 @@ async fn main() -> Result<()> {
     let downloads = DownloadManager::new().context("failed to initialize download manager")?;
     let mut session = TerminalSession::start(config.mouse)?;
     let primary_library_root = library_roots[0].clone();
+    let dashboard_keywords = config.dashboard_keyword_list();
+    let dashboard_keyword_signature = dashboard_keywords.join(",");
     let runtime = Runtime {
         arxiv,
         downloads,
@@ -128,6 +131,9 @@ async fn main() -> Result<()> {
         pdf_viewer: config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer),
         primary_library_root,
         library_roots,
+        dashboard_keywords,
+        dashboard_keyword_signature,
+        dashboard_feed_date: local_feed_date(),
         watch_receiver,
     };
     run(&mut session, &mut app, &theme, runtime).await
@@ -202,7 +208,10 @@ struct SearchResponse {
 }
 
 #[derive(Debug)]
-struct TodayResponse(Result<Vec<RemotePaper>, String>);
+struct TodayResponse {
+    feed_date: String,
+    result: Result<Vec<RemotePaper>, String>,
+}
 
 struct Runtime {
     arxiv: ArxivClient,
@@ -212,6 +221,9 @@ struct Runtime {
     pdf_viewer: String,
     primary_library_root: PathBuf,
     library_roots: Vec<PathBuf>,
+    dashboard_keywords: Vec<String>,
+    dashboard_keyword_signature: String,
+    dashboard_feed_date: String,
     watch_receiver: mpsc::UnboundedReceiver<PathBuf>,
 }
 
@@ -219,6 +231,7 @@ struct ActionSenders {
     search: mpsc::UnboundedSender<SearchResponse>,
     index: mpsc::UnboundedSender<IndexResponse>,
     download: mpsc::UnboundedSender<DownloadEvent>,
+    today: mpsc::UnboundedSender<TodayResponse>,
 }
 
 #[derive(Debug)]
@@ -244,17 +257,10 @@ async fn run(
         search: sender,
         index: index_sender,
         download: download_sender,
+        today: today_sender,
     };
     let mut pending_downloads = HashMap::<String, RemotePaper>::new();
-    app.today_status = DiscoveryStatus::Loading;
-    let today_client = runtime.arxiv.clone();
-    tokio::spawn(async move {
-        let result = today_client
-            .latest(12)
-            .await
-            .map_err(|error| error.to_string());
-        let _ = today_sender.send(TodayResponse(result));
-    });
+    refresh_dashboard_papers(&runtime, &senders, app);
     start_scan(&runtime.library_roots, &senders.index, app);
     while !app.should_quit {
         while let Ok(TodayResponse(result)) = today_receiver.try_recv() {
@@ -288,13 +294,13 @@ async fn run(
             });
         }
         while let Ok(response) = index_receiver.try_recv() {
-            apply_index_response(response, &runtime.database, app)?;
+            apply_index_response(response, &runtime, app)?;
         }
         while let Ok(event) = download_receiver.try_recv() {
             apply_download_event(
                 event,
                 &mut pending_downloads,
-                &mut runtime.database,
+                &mut runtime,
                 app,
                 &senders.index,
             )?;
@@ -346,6 +352,7 @@ fn apply_ui_action(
                     .map_err(|error| error.to_string());
                 let _ = response_sender.send(SearchResponse { query, result });
             });
+            refresh_dashboard_papers(runtime, senders, app);
         }
         UiAction::OpenPaper(paper) => {
             let paper_id = runtime.database.ensure_remote_paper(&paper)?;
@@ -519,7 +526,7 @@ fn apply_collection_prompt(
         }
         return Err(error.into());
     }
-    app.library.papers = runtime.database.library_papers()?;
+    refresh_library(runtime, app)?;
     Ok(())
 }
 
@@ -568,6 +575,78 @@ fn resolve_target(target: PaperTarget, database: &Database) -> Result<i64> {
 fn refresh_organization(database: &Database, app: &mut App) -> Result<()> {
     app.collections = database.collections()?;
     app.bookmarks = database.bookmarks()?;
+    Ok(())
+}
+
+fn refresh_dashboard_papers(runtime: &Runtime, senders: &ActionSenders, app: &mut App) {
+    app.today_status = DiscoveryStatus::Loading;
+    let client = runtime.arxiv.clone();
+    let keywords = runtime.dashboard_keywords.clone();
+    let sender = senders.today.clone();
+    tokio::spawn(async move {
+        let result = dashboard_papers(client, keywords)
+            .await
+            .map_err(|error| error.to_string());
+        let _ = sender.send(TodayResponse(result));
+    });
+}
+
+async fn dashboard_papers(client: ArxivClient, keywords: Vec<String>) -> Result<Vec<RemotePaper>> {
+    if keywords.is_empty() {
+        return client.latest(10).await.map_err(Into::into);
+    }
+
+    let mut buckets = Vec::new();
+    let mut last_error = None;
+    for keyword in keywords {
+        match client.search_latest(&keyword, 20).await {
+            Ok(papers) => buckets.push(papers),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if buckets.is_empty() {
+        if let Some(error) = last_error {
+            return Err(error.into());
+        }
+        return Ok(Vec::new());
+    }
+    Ok(diverse_latest_papers(buckets, 10))
+}
+
+fn diverse_latest_papers(mut buckets: Vec<Vec<RemotePaper>>, limit: usize) -> Vec<RemotePaper> {
+    let mut selected = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut index = 0_usize;
+    while selected.len() < limit {
+        let mut added_this_round = false;
+        for bucket in &mut buckets {
+            while let Some(paper) = bucket.get(index) {
+                if seen.insert(paper.id.clone()) {
+                    selected.push(paper.clone());
+                    added_this_round = true;
+                    break;
+                }
+                bucket.remove(index);
+            }
+            if selected.len() == limit {
+                break;
+            }
+        }
+        if !added_this_round {
+            break;
+        }
+        index = index.saturating_add(1);
+    }
+    selected
+}
+
+fn refresh_library(runtime: &Runtime, app: &mut App) -> Result<()> {
+    app.library.papers = runtime
+        .database
+        .library_papers_in_roots(&runtime.library_roots)?;
+    if app.library.selected >= app.library.papers.len() {
+        app.library.selected = app.library.papers.len().saturating_sub(1);
+    }
     Ok(())
 }
 
@@ -671,7 +750,8 @@ fn start_scan(roots: &[PathBuf], sender: &mpsc::UnboundedSender<IndexResponse>, 
     });
 }
 
-fn apply_index_response(response: IndexResponse, database: &Database, app: &mut App) -> Result<()> {
+fn apply_index_response(response: IndexResponse, runtime: &Runtime, app: &mut App) -> Result<()> {
+    let database = &runtime.database;
     match response {
         IndexResponse::Scan { pdfs, directories } => {
             let found = pdfs.len();
@@ -701,7 +781,7 @@ fn apply_index_response(response: IndexResponse, database: &Database, app: &mut 
         }
         IndexResponse::File(Err(error)) => app.library.message = Some(error),
     }
-    app.library.papers = database.library_papers()?;
+    refresh_library(runtime, app)?;
     refresh_dashboard(database, app)?;
     Ok(())
 }
@@ -751,7 +831,7 @@ fn start_download(
 fn apply_download_event(
     event: DownloadEvent,
     pending: &mut HashMap<String, RemotePaper>,
-    database: &mut Database,
+    runtime: &mut Runtime,
     app: &mut App,
     index_sender: &mpsc::UnboundedSender<IndexResponse>,
 ) -> Result<()> {
@@ -778,14 +858,16 @@ fn apply_download_event(
         DownloadEvent::Completed { id, path } => {
             let pdf = LibraryIndexer::inspect(&path).context("failed to index downloaded PDF")?;
             if let Some(paper) = pending.remove(&id) {
-                let paper_id = database.attach_download(&paper, &pdf)?;
-                database.record_activity("downloaded", Some(paper_id), None)?;
+                let paper_id = runtime.database.attach_download(&paper, &pdf)?;
+                runtime
+                    .database
+                    .record_activity("downloaded", Some(paper_id), None)?;
             }
             task.downloaded = pdf.file_size;
             task.total = Some(pdf.file_size);
             task.status = DownloadStatus::Completed;
-            app.library.papers = database.library_papers()?;
-            refresh_dashboard(database, app)?;
+            refresh_library(runtime, app)?;
+            refresh_dashboard(&runtime.database, app)?;
             let _ = index_sender.send(IndexResponse::File(Ok(pdf)));
         }
         DownloadEvent::Failed { id, error } => {
@@ -1116,10 +1198,11 @@ fn selected_library_pdf(app: &App) -> Option<(i64, PathBuf)> {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone, Utc};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use papr_core::{App, AppMode, CollectionSummary, LibraryPaper, Page, PaperNote};
+    use papr_core::{App, AppMode, CollectionSummary, LibraryPaper, Page, PaperNote, RemotePaper};
 
-    use super::{UiAction, handle_key, parse_command};
+    use super::{UiAction, diverse_latest_papers, handle_key, parse_command};
 
     #[test]
     fn control_p_opens_palette() {
@@ -1253,5 +1336,45 @@ mod tests {
             Some(UiAction::OpenPdf { paper_id: 9, path })
                 if path == std::path::Path::new("/tmp/collected.pdf")
         ));
+    }
+
+    #[test]
+    fn dashboard_paper_selection_interleaves_keyword_results_and_deduplicates() {
+        let buckets = vec![
+            vec![
+                remote_paper("https://arxiv.org/abs/1", "First keyword latest"),
+                remote_paper("https://arxiv.org/abs/shared", "Shared paper"),
+            ],
+            vec![
+                remote_paper("https://arxiv.org/abs/2", "Second keyword latest"),
+                remote_paper("https://arxiv.org/abs/shared", "Shared paper"),
+            ],
+        ];
+
+        let selected = diverse_latest_papers(buckets, 10);
+
+        assert_eq!(selected.len(), 3);
+        assert_eq!(selected[0].id, "https://arxiv.org/abs/1");
+        assert_eq!(selected[1].id, "https://arxiv.org/abs/2");
+        assert_eq!(selected[2].id, "https://arxiv.org/abs/shared");
+    }
+
+    fn remote_paper(id: &str, title: &str) -> RemotePaper {
+        let timestamp = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .unwrap_or_else(Utc::now);
+        RemotePaper {
+            id: id.into(),
+            title: title.into(),
+            authors: vec!["Researcher".into()],
+            abstract_text: String::new(),
+            published: timestamp,
+            updated: timestamp,
+            categories: vec!["cs.DL".into()],
+            pdf_url: None,
+            doi: None,
+            journal_ref: None,
+        }
     }
 }

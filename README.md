@@ -214,8 +214,10 @@ tags and their paper assignments are copied into same-named collections.
 
 ## Dashboard, History, and Statistics
 
-The dashboard combines a non-blocking latest-paper feed with local library,
-queue, download, unread, streak, activity, collection, and storage data.
+The dashboard combines a non-blocking arXiv paper feed with local library,
+queue, download, unread, streak, activity, collection, and storage data. Set
+`dashboard_keywords` to a comma-separated list of research interests to show
+the latest matching recommendations.
 
 Opening remote paper details or local PDFs records reading history. Searches,
 downloads, note opens, bookmarks, and collection changes are also
@@ -259,6 +261,7 @@ library_folders = [
 ]
 
 download_path = "/home/you/Documents/papers"
+dashboard_keywords = "machine learning, gravitational waves, arxiv search"
 mouse = false
 enabled_plugins = []
 ```

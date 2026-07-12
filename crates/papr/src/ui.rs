@@ -1062,35 +1062,30 @@ fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme)
 
 fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     let today = match &app.today_status {
-        DiscoveryStatus::Loading => vec![ListItem::new("Loading today's arXiv papers...")],
-        DiscoveryStatus::Error(_) => vec![ListItem::new("Today's feed is unavailable")],
+        DiscoveryStatus::Loading => vec![ListItem::new("Loading dashboard papers...")],
+        DiscoveryStatus::Error(_) => vec![ListItem::new("Dashboard papers are unavailable")],
         _ if app.today_papers.is_empty() => vec![ListItem::new("No new papers loaded")],
         _ => app
             .today_papers
             .iter()
-            .take(5)
+            .take(10)
             .map(|paper| {
-                ListItem::new(vec![
-                    Line::styled(
-                        &paper.title,
-                        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                ListItem::new(Line::styled(
+                    format!(
+                        "{}  {}  {}",
+                        paper.published.format("%Y-%m-%d"),
+                        compact_authors(paper),
+                        paper.title
                     ),
-                    Line::styled(
-                        format!(
-                            "{}  {}",
-                            compact_authors(paper),
-                            paper.published.format("%Y-%m-%d")
-                        ),
-                        Style::default().fg(theme.muted),
-                    ),
-                ])
+                    Style::default().fg(theme.text),
+                ))
             })
             .collect(),
     };
     frame.render_widget(
         List::new(today).block(
             Block::default()
-                .title(" TODAY'S NEW PAPERS ")
+                .title(" DASHBOARD PAPERS ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.border)),
         ),

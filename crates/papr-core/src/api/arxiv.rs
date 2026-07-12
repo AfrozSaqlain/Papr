@@ -84,6 +84,20 @@ impl ArxivClient {
         self.query(LATEST_QUERY, limit, "submittedDate").await
     }
 
+    /// Search arXiv and return the newest matching submissions first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails or Atom content is malformed.
+    pub async fn search_latest(
+        &self,
+        query: &str,
+        limit: u16,
+    ) -> Result<Vec<RemotePaper>, ArxivError> {
+        self.query(&build_search_query(query), limit, "submittedDate")
+            .await
+    }
+
     async fn query(
         &self,
         search_query: &str,

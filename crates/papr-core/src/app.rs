@@ -215,6 +215,8 @@ pub struct App {
     pub dashboard: ResearchDashboard,
     /// Latest papers loaded for Today in Research.
     pub today_papers: Vec<RemotePaper>,
+    /// Selected dashboard paper row.
+    pub today_selected: usize,
     /// Loading state for the latest-paper feed.
     pub today_status: DiscoveryStatus,
     /// Command palette query.
@@ -265,6 +267,7 @@ impl Default for App {
             stats: DashboardStats::default(),
             dashboard: ResearchDashboard::default(),
             today_papers: Vec::new(),
+            today_selected: 0,
             today_status: DiscoveryStatus::Idle,
             palette_query: String::new(),
             discovery: DiscoveryState::default(),
@@ -293,7 +296,9 @@ impl App {
     pub fn dispatch(&mut self, command: Command) {
         match command {
             Command::MoveUp => {
-                if self.page == Page::Discover {
+                if self.page == Page::Dashboard {
+                    self.today_selected = self.today_selected.saturating_sub(1);
+                } else if self.page == Page::Discover {
                     self.discovery.selected = self.discovery.selected.saturating_sub(1);
                 } else if self.page == Page::Library {
                     self.library.selected = self.library.selected.saturating_sub(1);
@@ -311,7 +316,10 @@ impl App {
                 }
             }
             Command::MoveDown => {
-                if self.page == Page::Discover {
+                if self.page == Page::Dashboard {
+                    self.today_selected =
+                        (self.today_selected + 1).min(self.today_papers.len().saturating_sub(1));
+                } else if self.page == Page::Discover {
                     self.discovery.selected = (self.discovery.selected + 1)
                         .min(self.discovery.results.len().saturating_sub(1));
                 } else if self.page == Page::Library {
@@ -333,7 +341,14 @@ impl App {
                 }
             }
             Command::Open => {
-                if self.page == Page::Discover && !self.discovery.results.is_empty() {
+                if self.page == Page::Dashboard && !self.today_papers.is_empty() {
+                    self.discovery.results.clone_from(&self.today_papers);
+                    self.discovery.selected = self
+                        .today_selected
+                        .min(self.discovery.results.len().saturating_sub(1));
+                    self.mode = AppMode::PaperDetail;
+                    self.discovery.detail_scroll = 0;
+                } else if self.page == Page::Discover && !self.discovery.results.is_empty() {
                     self.mode = AppMode::PaperDetail;
                     self.discovery.detail_scroll = 0;
                 } else {
