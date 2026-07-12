@@ -18,7 +18,7 @@ pub use app::{
 pub use config::{Config, Paths};
 pub use database::Database;
 pub use downloads::{DownloadEvent, DownloadManager};
-pub use library::{ImportedPdf, LibraryIndexer, LibraryWatcher};
+pub use library::{CollectionDirectory, ImportedPdf, LibraryIndexer, LibraryWatcher};
 pub use models::{
     ActivityItem, BookmarkSummary, CollectionSummary, LibraryPaper, PaperNote, ReadingDay,
     ReadingStatistics, RemotePaper, ResearchDashboard,

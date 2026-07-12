@@ -100,9 +100,13 @@ pub enum AppMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataPrompt {
     /// Target paper identifier.
-    pub paper_id: i64,
+    pub paper_id: Option<i64>,
+    /// Collection identifier when renaming.
+    pub rename_collection_id: Option<i64>,
     /// Editable input value.
     pub value: String,
+    /// Selected existing collection.
+    pub selected: usize,
 }
 
 /// Current state of a remote discovery request.

@@ -14,9 +14,9 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use papr_core::{
-    App, AppMode, ArxivClient, Command, Config, Database, DiscoveryStatus, DownloadEvent,
-    DownloadManager, DownloadStatus, DownloadTask, ImportedPdf, LibraryIndexer, LibraryWatcher,
-    MetadataPrompt, PaperNote, Paths, PluginHost, RemotePaper, Theme,
+    App, AppMode, ArxivClient, CollectionDirectory, Command, Config, Database, DiscoveryStatus,
+    DownloadEvent, DownloadManager, DownloadStatus, DownloadTask, ImportedPdf, LibraryIndexer,
+    LibraryWatcher, MetadataPrompt, PaperNote, Paths, PluginHost, RemotePaper, Theme,
 };
 use tokio::sync::mpsc;
 
@@ -119,12 +119,14 @@ async fn main() -> Result<()> {
     let arxiv = ArxivClient::new().context("failed to initialize arXiv client")?;
     let downloads = DownloadManager::new().context("failed to initialize download manager")?;
     let mut session = TerminalSession::start(config.mouse)?;
+    let primary_library_root = library_roots[0].clone();
     let runtime = Runtime {
         arxiv,
         downloads,
         database,
         download_dir,
         pdf_viewer: config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer),
+        primary_library_root,
         library_roots,
         watch_receiver,
     };
@@ -180,6 +182,8 @@ enum UiAction {
     OpenNote(PaperTarget),
     SaveNote(PaperNote),
     Prompt(PaperTarget),
+    RenameCollection(i64),
+    CreateCollection,
     SubmitPrompt(MetadataPrompt),
     Bookmark(PaperTarget),
     OpenCollection(i64),
@@ -206,6 +210,7 @@ struct Runtime {
     database: Database,
     download_dir: PathBuf,
     pdf_viewer: String,
+    primary_library_root: PathBuf,
     library_roots: Vec<PathBuf>,
     watch_receiver: mpsc::UnboundedReceiver<PathBuf>,
 }
@@ -218,7 +223,10 @@ struct ActionSenders {
 
 #[derive(Debug)]
 enum IndexResponse {
-    Scan(Vec<ImportedPdf>),
+    Scan {
+        pdfs: Vec<ImportedPdf>,
+        directories: Vec<CollectionDirectory>,
+    },
     File(Result<ImportedPdf, String>),
 }
 
@@ -272,8 +280,10 @@ async fn run(
         }
         while let Ok(path) = runtime.watch_receiver.try_recv() {
             let response_sender = senders.index.clone();
+            let roots = runtime.library_roots.clone();
             tokio::task::spawn_blocking(move || {
-                let result = LibraryIndexer::inspect(&path).map_err(|error| error.to_string());
+                let result = LibraryIndexer::inspect_in_roots(&path, &roots)
+                    .map_err(|error| error.to_string());
                 let _ = response_sender.send(IndexResponse::File(result));
             });
         }
@@ -370,21 +380,16 @@ fn apply_ui_action(
         UiAction::SaveNote(note) => runtime.database.save_note(&note)?,
         UiAction::Prompt(target) => {
             let paper_id = resolve_target(target, &runtime.database)?;
-            app.metadata_prompt = Some(MetadataPrompt {
-                paper_id,
-                value: String::new(),
-            });
-            app.mode = AppMode::Prompt;
+            show_collection_prompt(app, Some(paper_id), None);
+        }
+        UiAction::RenameCollection(id) => {
+            show_collection_prompt(app, None, Some(id));
+        }
+        UiAction::CreateCollection => {
+            show_collection_prompt(app, None, None);
         }
         UiAction::SubmitPrompt(prompt) => {
-            runtime
-                .database
-                .add_to_collection(prompt.paper_id, &prompt.value)?;
-            runtime.database.record_activity(
-                "collected",
-                Some(prompt.paper_id),
-                Some(&prompt.value),
-            )?;
+            apply_collection_prompt(runtime, app, &prompt)?;
             refresh_organization(&runtime.database, app)?;
             refresh_dashboard(&runtime.database, app)?;
             app.toast = Some(format!("Saved {}", prompt.value));
@@ -408,6 +413,136 @@ fn apply_ui_action(
         UiAction::OpenCollection(collection_id) => {
             open_collection(&runtime.database, app, collection_id)?;
         }
+    }
+    Ok(())
+}
+
+fn show_collection_prompt(app: &mut App, paper_id: Option<i64>, rename_id: Option<i64>) {
+    app.metadata_prompt = Some(MetadataPrompt {
+        paper_id,
+        rename_collection_id: rename_id,
+        value: String::new(),
+        selected: 0,
+    });
+    app.mode = AppMode::Prompt;
+}
+
+fn apply_collection_prompt(
+    runtime: &mut Runtime,
+    app: &mut App,
+    prompt: &MetadataPrompt,
+) -> Result<()> {
+    let name = prompt.value.trim();
+    validate_collection_name(name)?;
+    if let Some(collection_id) = prompt.rename_collection_id {
+        let collection = app
+            .collections
+            .iter()
+            .find(|item| item.id == collection_id)
+            .context("collection no longer exists")?;
+        let old = collection.folder_path.as_ref().map_or_else(
+            || runtime.primary_library_root.join(&collection.name),
+            PathBuf::from,
+        );
+        let new = old
+            .parent()
+            .unwrap_or(&runtime.primary_library_root)
+            .join(name);
+        std::fs::rename(&old, &new).context("failed to rename collection directory")?;
+        if let Err(error) = runtime
+            .database
+            .rename_collection(collection_id, name, &old, &new)
+        {
+            let _ = std::fs::rename(&new, &old);
+            return Err(error.into());
+        }
+        return Ok(());
+    }
+    if prompt.paper_id.is_none() {
+        if app
+            .collections
+            .iter()
+            .any(|collection| collection.name.eq_ignore_ascii_case(name))
+        {
+            anyhow::bail!("a collection with this name already exists");
+        }
+        let folder = runtime.primary_library_root.join(name);
+        std::fs::create_dir(&folder).context("failed to create collection directory")?;
+        if let Err(error) = runtime.database.create_collection(name, &folder) {
+            let _ = std::fs::remove_dir(&folder);
+            return Err(error.into());
+        }
+        return Ok(());
+    }
+    let paper_id = prompt
+        .paper_id
+        .context("collection assignment has no paper")?;
+    let paper = app
+        .library
+        .papers
+        .iter()
+        .find(|paper| paper.id == paper_id)
+        .context("paper must have a local PDF before collection assignment")?;
+    let source = PathBuf::from(paper.pdf_path.as_ref().context("paper has no local PDF")?);
+    let existing = app
+        .collections
+        .iter()
+        .find(|item| item.name.eq_ignore_ascii_case(name));
+    let (collection_id, folder) = if let Some(collection) = existing {
+        let folder = collection.folder_path.as_ref().map_or_else(
+            || runtime.primary_library_root.join(&collection.name),
+            PathBuf::from,
+        );
+        std::fs::create_dir_all(&folder)?;
+        runtime
+            .database
+            .set_collection_folder(collection.id, &folder)?;
+        (collection.id, folder)
+    } else {
+        let folder = runtime.primary_library_root.join(name);
+        std::fs::create_dir_all(&folder)?;
+        (runtime.database.create_collection(name, &folder)?, folder)
+    };
+    let destination = folder.join(source.file_name().context("PDF path has no filename")?);
+    if source != destination {
+        if destination.exists() {
+            anyhow::bail!("a PDF with this filename already exists in the collection");
+        }
+        move_pdf_file(&source, &destination)?;
+    }
+    if let Err(error) = runtime
+        .database
+        .assign_moved_pdf(paper_id, collection_id, &destination)
+    {
+        if source != destination {
+            let _ = move_pdf_file(&destination, &source);
+        }
+        return Err(error.into());
+    }
+    app.library.papers = runtime.database.library_papers()?;
+    Ok(())
+}
+
+fn move_pdf_file(source: &Path, destination: &Path) -> Result<()> {
+    if let Err(rename_error) = std::fs::rename(source, destination) {
+        std::fs::copy(source, destination).with_context(|| {
+            format!(
+                "failed to move PDF from {} to {}: {rename_error}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+        if let Err(remove_error) = std::fs::remove_file(source) {
+            let _ = std::fs::remove_file(destination);
+            return Err(remove_error.into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_collection_name(name: &str) -> Result<()> {
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
+        anyhow::bail!("collection name must be one safe directory name");
     }
     Ok(())
 }
@@ -529,23 +664,35 @@ fn start_scan(roots: &[PathBuf], sender: &mpsc::UnboundedSender<IndexResponse>, 
     let roots = roots.to_vec();
     let sender = sender.clone();
     tokio::task::spawn_blocking(move || {
-        let _ = sender.send(IndexResponse::Scan(LibraryIndexer::scan(&roots)));
+        let _ = sender.send(IndexResponse::Scan {
+            pdfs: LibraryIndexer::scan(&roots),
+            directories: LibraryIndexer::collection_directories(&roots),
+        });
     });
 }
 
 fn apply_index_response(response: IndexResponse, database: &Database, app: &mut App) -> Result<()> {
     match response {
-        IndexResponse::Scan(pdfs) => {
+        IndexResponse::Scan { pdfs, directories } => {
             let found = pdfs.len();
             let mut imported = 0_usize;
+            for directory in &directories {
+                database.sync_collection_directory(directory)?;
+            }
             for pdf in &pdfs {
                 imported += usize::from(database.import_pdf(pdf)?);
+                if let Some(paper_id) = database.paper_id_for_pdf(pdf)? {
+                    database.sync_pdf_collection(paper_id, pdf)?;
+                }
             }
             app.library.indexing = false;
             app.library.message = Some(format!("Indexed {found} PDFs, imported {imported} new"));
         }
         IndexResponse::File(Ok(pdf)) => {
             let imported = database.import_pdf(&pdf)?;
+            if let Some(paper_id) = database.paper_id_for_pdf(&pdf)? {
+                database.sync_pdf_collection(paper_id, &pdf)?;
+            }
             app.library.message = Some(if imported {
                 format!("Imported {}", pdf.title)
             } else {
@@ -787,6 +934,17 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
             .map(|collection| UiAction::OpenCollection(collection.id));
         return (true, action);
     }
+    if key.code == KeyCode::Char('R') {
+        return (
+            true,
+            app.collections
+                .get(app.collection_selected)
+                .map(|collection| UiAction::RenameCollection(collection.id)),
+        );
+    }
+    if matches!(key.code, KeyCode::Char('c' | 'n')) {
+        return (true, Some(UiAction::CreateCollection));
+    }
     (false, None)
 }
 
@@ -813,9 +971,28 @@ fn handle_modal_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 app.mode = app.modal_return;
             }
             KeyCode::Enter => {
+                if let Some(prompt) = &mut app.metadata_prompt
+                    && prompt.value.trim().is_empty()
+                    && prompt.rename_collection_id.is_none()
+                    && prompt.paper_id.is_some()
+                    && let Some(collection) = app.collections.get(prompt.selected)
+                {
+                    prompt.value.clone_from(&collection.name);
+                }
                 let prompt = app.metadata_prompt.take();
                 app.mode = app.modal_return;
                 return prompt.map(UiAction::SubmitPrompt);
+            }
+            KeyCode::Down => {
+                if let Some(prompt) = &mut app.metadata_prompt {
+                    prompt.selected =
+                        (prompt.selected + 1).min(app.collections.len().saturating_sub(1));
+                }
+            }
+            KeyCode::Up => {
+                if let Some(prompt) = &mut app.metadata_prompt {
+                    prompt.selected = prompt.selected.saturating_sub(1);
+                }
             }
             KeyCode::Backspace => {
                 if let Some(prompt) = &mut app.metadata_prompt {
@@ -1060,6 +1237,7 @@ mod tests {
                 id: 3,
                 name: "Review".into(),
                 paper_count: 1,
+                folder_path: Some("/tmp/Review".into()),
             }],
             ..App::default()
         };

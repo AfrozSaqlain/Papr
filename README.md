@@ -188,15 +188,26 @@ newly imported.
 Every paper can have one Markdown note. Notes are stored in SQLite and saved as
 you type. Preview mode highlights headings, lists, quotations, and code blocks.
 
-Collections are case-insensitive and idempotent, and a paper can belong to
-multiple collections. Use uppercase `B` to toggle a whole-paper bookmark.
-Lowercase `b` remains reserved for citation functionality.
+Collections mirror the directory layout of the configured library. Each
+subdirectory is discovered as a collection, while PDFs stored directly in the
+library root remain unassigned. A paper belongs to one collection at a time.
+Assigning it from **Library** with `s` opens a keyboard picker: select an
+existing collection with `j`/`k`, or type a new name. New collections create a
+matching subdirectory, and reassignment moves the PDF instead of duplicating
+it. Use `R` in the collection list to rename a collection and its directory
+without losing its papers.
+
+Use uppercase `B` to toggle a whole-paper bookmark. Lowercase `b` remains
+reserved for citation functionality.
 
 Open **Collections**, select a collection with `j`/`k`, and press `Enter` to
 browse its papers. The paper list is also keyboard navigable. Press `Enter` or
 `p` to open a paper's local PDF, and press `h` or `Esc` to return to the
 collection list. Papers without a downloaded PDF remain visible and are
 labeled as metadata-only.
+
+In the collection list, press `c` or `n` to create an empty collection and its
+directory. Press `R` to rename the selected collection and directory.
 
 Libraries created by older papr versions are upgraded automatically: legacy
 tags and their paper assignments are copied into same-named collections.

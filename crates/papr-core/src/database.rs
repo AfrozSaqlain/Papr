@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
 use crate::{
-    library::ImportedPdf,
+    library::{CollectionDirectory, ImportedPdf},
     models::{
         ActivityItem, BookmarkSummary, CollectionSummary, DashboardStats, LibraryPaper, PaperNote,
         ReadingDay, ReadingStatistics, RemotePaper, ResearchDashboard,
@@ -25,6 +25,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         5,
         include_str!("../migrations/0005_merge_tags_into_collections.sql"),
+    ),
+    (
+        6,
+        include_str!("../migrations/0006_filesystem_collections.sql"),
     ),
 ];
 
@@ -176,6 +180,21 @@ impl Database {
             ],
         )?;
         Ok(changed > 0)
+    }
+
+    /// Resolve an imported PDF by content hash or current path.
+    ///
+    /// # Errors
+    /// Returns an error when the lookup fails.
+    pub fn paper_id_for_pdf(&self, pdf: &ImportedPdf) -> Result<Option<i64>, DatabaseError> {
+        self.connection
+            .query_row(
+                "SELECT id FROM papers WHERE content_hash = ?1 OR pdf_path = ?2 LIMIT 1",
+                params![pdf.content_hash, pdf.path.to_string_lossy()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     /// List local catalog entries with author display metadata.
@@ -444,7 +463,7 @@ impl Database {
     /// Returns an error when the collection query fails.
     pub fn collections(&self) -> Result<Vec<CollectionSummary>, DatabaseError> {
         let mut statement = self.connection.prepare(
-            "SELECT c.id, c.name, COUNT(cp.paper_id) FROM collections c
+            "SELECT c.id, c.name, COUNT(cp.paper_id), c.folder_path FROM collections c
              LEFT JOIN collection_papers cp ON cp.collection_id = c.id
              GROUP BY c.id ORDER BY c.name COLLATE NOCASE",
         )?;
@@ -453,6 +472,7 @@ impl Database {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 paper_count: row.get(2)?,
+                folder_path: row.get(3)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -490,6 +510,243 @@ impl Database {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Synchronize exclusive collection membership from a PDF's directory.
+    ///
+    /// # Errors
+    /// Returns an error when collection persistence fails.
+    pub fn sync_pdf_collection(
+        &self,
+        paper_id: i64,
+        pdf: &ImportedPdf,
+    ) -> Result<(), DatabaseError> {
+        let Some(relative) = &pdf.relative_directory else {
+            self.connection.execute(
+                "DELETE FROM collection_papers WHERE paper_id = ?1",
+                [paper_id],
+            )?;
+            return Ok(());
+        };
+        let Some(root) = &pdf.library_root else {
+            return Ok(());
+        };
+        let folder = root.join(relative).to_string_lossy().into_owned();
+        let base_name = relative.to_string_lossy().replace('\\', "/");
+        let tx = self.connection.unchecked_transaction()?;
+        let mut collection_id = tx
+            .query_row(
+                "SELECT id FROM collections WHERE folder_path = ?1",
+                [&folder],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if collection_id.is_none() {
+            let logical_collection = tx
+                .query_row(
+                    "SELECT id, folder_path FROM collections WHERE name = ?1 COLLATE NOCASE",
+                    [&base_name],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .optional()?;
+            if let Some((id, None)) = logical_collection {
+                tx.execute(
+                    "UPDATE collections SET folder_path = ?1 WHERE id = ?2",
+                    params![folder, id],
+                )?;
+                collection_id = Some(id);
+            } else {
+                let root_label = root
+                    .file_name()
+                    .and_then(|part| part.to_str())
+                    .unwrap_or("library");
+                let mut candidate = base_name.clone();
+                let mut suffix = 1_u32;
+                while tx
+                    .query_row(
+                        "SELECT id FROM collections WHERE name = ?1 COLLATE NOCASE",
+                        [&candidate],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()?
+                    .is_some()
+                {
+                    candidate = if suffix == 1 {
+                        format!("{base_name} ({root_label})")
+                    } else {
+                        format!("{base_name} ({root_label} {suffix})")
+                    };
+                    suffix += 1;
+                }
+                tx.execute(
+                    "INSERT INTO collections (name, folder_path) VALUES (?1, ?2)",
+                    params![candidate, folder],
+                )?;
+                collection_id = Some(tx.last_insert_rowid());
+            }
+        }
+        let collection_id = collection_id.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        tx.execute(
+            "DELETE FROM collection_papers WHERE paper_id = ?1",
+            [paper_id],
+        )?;
+        tx.execute(
+            "INSERT INTO collection_papers (collection_id, paper_id) VALUES (?1, ?2)",
+            params![collection_id, paper_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Ensure a discovered library subdirectory has a filesystem-backed collection.
+    ///
+    /// # Errors
+    /// Returns an error when collection persistence fails.
+    pub fn sync_collection_directory(
+        &self,
+        directory: &CollectionDirectory,
+    ) -> Result<(), DatabaseError> {
+        let folder = directory
+            .library_root
+            .join(&directory.relative_path)
+            .to_string_lossy()
+            .into_owned();
+        if self
+            .connection
+            .query_row(
+                "SELECT id FROM collections WHERE folder_path = ?1",
+                [&folder],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let base_name = directory.relative_path.to_string_lossy().replace('\\', "/");
+        if let Some(id) = self
+            .connection
+            .query_row(
+                "SELECT id FROM collections
+                 WHERE name = ?1 COLLATE NOCASE AND folder_path IS NULL",
+                [&base_name],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+        {
+            self.connection.execute(
+                "UPDATE collections SET folder_path = ?1 WHERE id = ?2",
+                params![folder, id],
+            )?;
+            return Ok(());
+        }
+        let root_label = directory
+            .library_root
+            .file_name()
+            .and_then(|part| part.to_str())
+            .unwrap_or("library");
+        let mut candidate = base_name.clone();
+        let mut suffix = 1_u32;
+        while self
+            .connection
+            .query_row(
+                "SELECT id FROM collections WHERE name = ?1 COLLATE NOCASE",
+                [&candidate],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some()
+        {
+            candidate = if suffix == 1 {
+                format!("{base_name} ({root_label})")
+            } else {
+                format!("{base_name} ({root_label} {suffix})")
+            };
+            suffix += 1;
+        }
+        self.connection.execute(
+            "INSERT INTO collections (name, folder_path) VALUES (?1, ?2)",
+            params![candidate, folder],
+        )?;
+        Ok(())
+    }
+
+    /// Update a paper path and assign it exclusively to a collection.
+    ///
+    /// # Errors
+    /// Returns an error when the transaction fails.
+    pub fn assign_moved_pdf(
+        &self,
+        paper_id: i64,
+        collection_id: i64,
+        new_path: &Path,
+    ) -> Result<(), DatabaseError> {
+        let tx = self.connection.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE papers SET pdf_path = ?1 WHERE id = ?2",
+            params![new_path.to_string_lossy(), paper_id],
+        )?;
+        tx.execute(
+            "DELETE FROM collection_papers WHERE paper_id = ?1",
+            [paper_id],
+        )?;
+        tx.execute(
+            "INSERT INTO collection_papers (collection_id, paper_id) VALUES (?1, ?2)",
+            params![collection_id, paper_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Create a filesystem-backed collection.
+    ///
+    /// # Errors
+    /// Returns an error when the collection cannot be inserted.
+    pub fn create_collection(&self, name: &str, folder: &Path) -> Result<i64, DatabaseError> {
+        self.connection.execute(
+            "INSERT INTO collections (name, folder_path) VALUES (?1, ?2)",
+            params![name, folder.to_string_lossy()],
+        )?;
+        Ok(self.connection.last_insert_rowid())
+    }
+
+    /// Attach a backing folder to an existing logical collection.
+    ///
+    /// # Errors
+    /// Returns an error when the collection cannot be updated.
+    pub fn set_collection_folder(&self, id: i64, folder: &Path) -> Result<(), DatabaseError> {
+        self.connection.execute(
+            "UPDATE collections SET folder_path = ?1 WHERE id = ?2",
+            params![folder.to_string_lossy(), id],
+        )?;
+        Ok(())
+    }
+
+    /// Rename a filesystem-backed collection and rewrite stored PDF paths.
+    ///
+    /// # Errors
+    /// Returns an error when the transaction fails.
+    pub fn rename_collection(
+        &self,
+        id: i64,
+        name: &str,
+        old: &Path,
+        new: &Path,
+    ) -> Result<(), DatabaseError> {
+        let tx = self.connection.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE collections SET name = ?1, folder_path = ?2 WHERE id = ?3",
+            params![name, new.to_string_lossy(), id],
+        )?;
+        let old = old.to_string_lossy();
+        let new = new.to_string_lossy();
+        tx.execute(
+            "UPDATE papers SET pdf_path = ?1 || substr(pdf_path, length(?2) + 1)
+             WHERE id IN (SELECT paper_id FROM collection_papers WHERE collection_id = ?3)",
+            params![new, old, id],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// List bookmarks newest first.
@@ -736,7 +993,7 @@ mod tests {
 
     use super::Database;
     use crate::{
-        library::ImportedPdf,
+        library::{CollectionDirectory, ImportedPdf},
         models::{PaperNote, RemotePaper},
     };
 
@@ -783,6 +1040,95 @@ mod tests {
         let rows = database.library_papers()?;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].file_size, Some(84));
+        Ok(())
+    }
+
+    #[test]
+    fn directory_sync_creates_exclusive_collections_and_leaves_root_unassigned()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        let root = PathBuf::from("/research/library");
+        let mut pdf = imported_pdf("/research/library/GW/paper.pdf", "layout-hash");
+        pdf.library_root = Some(root.clone());
+        pdf.relative_directory = Some(PathBuf::from("GW"));
+        database.import_pdf(&pdf)?;
+        let paper_id = database
+            .paper_id_for_pdf(&pdf)?
+            .ok_or("imported PDF has no paper id")?;
+        database.sync_pdf_collection(paper_id, &pdf)?;
+        let gw = database.collections()?;
+        assert_eq!(gw.len(), 1);
+        assert_eq!(gw[0].name, "GW");
+        assert_eq!(gw[0].paper_count, 1);
+
+        pdf.path = root.join("ML/paper.pdf");
+        pdf.relative_directory = Some(PathBuf::from("ML"));
+        database.sync_pdf_collection(paper_id, &pdf)?;
+        let collections = database.collections()?;
+        assert_eq!(
+            collections.iter().map(|item| item.paper_count).sum::<u64>(),
+            1
+        );
+        assert_eq!(
+            collections
+                .iter()
+                .find(|item| item.name == "ML")
+                .map(|item| item.paper_count),
+            Some(1)
+        );
+
+        pdf.path = root.join("paper.pdf");
+        pdf.relative_directory = None;
+        database.sync_pdf_collection(paper_id, &pdf)?;
+        assert_eq!(
+            database
+                .collections()?
+                .iter()
+                .map(|item| item.paper_count)
+                .sum::<u64>(),
+            0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn empty_directory_creates_a_collection() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        database.sync_collection_directory(&CollectionDirectory {
+            library_root: PathBuf::from("/research/library"),
+            relative_path: PathBuf::from("Empty Collection"),
+        })?;
+        let collections = database.collections()?;
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].name, "Empty Collection");
+        assert_eq!(collections[0].paper_count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn renaming_collection_updates_folder_and_member_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        let old = PathBuf::from("/library/Old Name");
+        let new = PathBuf::from("/library/New Name");
+        let mut pdf = imported_pdf("/library/Old Name/paper.pdf", "rename-hash");
+        pdf.library_root = Some(PathBuf::from("/library"));
+        pdf.relative_directory = Some(PathBuf::from("Old Name"));
+        database.import_pdf(&pdf)?;
+        let paper_id = database
+            .paper_id_for_pdf(&pdf)?
+            .ok_or("imported PDF has no paper id")?;
+        database.sync_pdf_collection(paper_id, &pdf)?;
+        let collection = database.collections()?.remove(0);
+
+        database.rename_collection(collection.id, "New Name", &old, &new)?;
+        let renamed = database.collections()?.remove(0);
+        assert_eq!(renamed.name, "New Name");
+        assert_eq!(renamed.folder_path.as_deref(), Some("/library/New Name"));
+        assert_eq!(
+            database.library_papers()?[0].pdf_path.as_deref(),
+            Some("/library/New Name/paper.pdf")
+        );
         Ok(())
     }
 
@@ -896,6 +1242,8 @@ mod tests {
             title: "Imported title".into(),
             content_hash: hash.into(),
             file_size: 42,
+            library_root: None,
+            relative_directory: None,
         }
     }
 }

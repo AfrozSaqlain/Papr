@@ -180,7 +180,7 @@ fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Them
     let list = List::new(items)
         .block(
             Block::default()
-                .title(" COLLECTIONS - ENTER TO VIEW PAPERS ")
+                .title(" COLLECTIONS - ENTER VIEW  c NEW  R RENAME ")
                 .borders(Borders::TOP)
                 .border_style(Style::default().fg(theme.border)),
         )
@@ -588,18 +588,54 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let Some(prompt) = &app.metadata_prompt else {
         return;
     };
-    let title = " ADD TO COLLECTION ";
-    let area = centered(60, 3, frame.area());
+    let renaming = prompt.rename_collection_id.is_some();
+    let creating = prompt.paper_id.is_none() && !renaming;
+    let title = if renaming {
+        " RENAME COLLECTION "
+    } else if creating {
+        " CREATE COLLECTION "
+    } else {
+        " CHOOSE OR CREATE COLLECTION "
+    };
+    let area = centered(64, if renaming || creating { 3 } else { 11 }, frame.area());
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(format!("> {}", prompt.value))
-            .style(Style::default().fg(theme.text).bg(theme.surface))
-            .block(
-                Block::default()
-                    .title(title)
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.secondary)),
-            ),
+        Paragraph::new(if renaming || creating {
+            vec![Line::raw(format!("> {}", prompt.value))]
+        } else {
+            let mut lines = vec![
+                Line::raw(format!("New name: {}", prompt.value)),
+                Line::styled(
+                    "Or select an existing collection:",
+                    Style::default().fg(theme.muted),
+                ),
+            ];
+            let start = prompt.selected.saturating_sub(5);
+            lines.extend(app.collections.iter().enumerate().skip(start).take(6).map(
+                |(index, collection)| {
+                    Line::styled(
+                        format!(
+                            "{} {}",
+                            if index == prompt.selected { ">" } else { " " },
+                            collection.name
+                        ),
+                        Style::default().fg(if index == prompt.selected {
+                            theme.accent
+                        } else {
+                            theme.text
+                        }),
+                    )
+                },
+            ));
+            lines
+        })
+        .style(Style::default().fg(theme.text).bg(theme.surface))
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.secondary)),
+        ),
         area,
     );
     let column = u16::try_from(prompt.value.chars().count()).unwrap_or(u16::MAX);
@@ -1344,6 +1380,7 @@ mod tests {
             id: 4,
             name: "Important Papers".into(),
             paper_count: 1,
+            folder_path: Some("/tmp/Important Papers".into()),
         };
         let mut app = App {
             page: Page::Collections,

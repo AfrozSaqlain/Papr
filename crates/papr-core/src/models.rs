@@ -103,6 +103,8 @@ pub struct CollectionSummary {
     pub name: String,
     /// Number of assigned papers.
     pub paper_count: u64,
+    /// Backing directory for filesystem collections.
+    pub folder_path: Option<String>,
 }
 
 /// A bookmarked paper or position.

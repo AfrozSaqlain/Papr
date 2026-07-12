@@ -22,6 +22,19 @@ pub struct ImportedPdf {
     pub content_hash: String,
     /// File size in bytes.
     pub file_size: u64,
+    /// Configured library root containing this file.
+    pub library_root: Option<PathBuf>,
+    /// Directory relative to the library root, excluding the filename.
+    pub relative_directory: Option<PathBuf>,
+}
+
+/// A subdirectory discovered beneath a configured library root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionDirectory {
+    /// Configured library root containing the directory.
+    pub library_root: PathBuf,
+    /// Directory path relative to the library root.
+    pub relative_path: PathBuf,
 }
 
 /// Local library indexing errors.
@@ -48,7 +61,34 @@ impl LibraryIndexer {
             .flat_map(|root| WalkDir::new(root).follow_links(false).into_iter())
             .filter_map(Result::ok)
             .filter(|entry| entry.file_type().is_file() && is_pdf(entry.path()))
-            .filter_map(|entry| Self::inspect(entry.path()).ok())
+            .filter_map(|entry| Self::inspect_in_roots(entry.path(), roots).ok())
+            .collect()
+    }
+
+    /// Discover every subdirectory represented as a filesystem collection.
+    #[must_use]
+    pub fn collection_directories(roots: &[PathBuf]) -> Vec<CollectionDirectory> {
+        roots
+            .iter()
+            .flat_map(|root| {
+                WalkDir::new(root)
+                    .min_depth(1)
+                    .follow_links(false)
+                    .into_iter()
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_type().is_dir())
+                    .filter_map(|entry| {
+                        entry
+                            .path()
+                            .strip_prefix(root)
+                            .ok()
+                            .map(|relative| CollectionDirectory {
+                                library_root: root.clone(),
+                                relative_path: relative.to_path_buf(),
+                            })
+                    })
+                    .collect::<Vec<_>>()
+            })
             .collect()
     }
 
@@ -78,7 +118,30 @@ impl LibraryIndexer {
             title,
             content_hash: format!("{:x}", hasher.finalize()),
             file_size,
+            library_root: None,
+            relative_directory: None,
         })
+    }
+
+    /// Inspect a PDF and classify it relative to the most specific library root.
+    ///
+    /// # Errors
+    /// Returns an error when the PDF cannot be inspected.
+    pub fn inspect_in_roots(path: &Path, roots: &[PathBuf]) -> Result<ImportedPdf, LibraryError> {
+        let mut pdf = Self::inspect(path)?;
+        if let Some(root) = roots
+            .iter()
+            .filter(|root| path.starts_with(root))
+            .max_by_key(|root| root.components().count())
+        {
+            pdf.library_root = Some(root.clone());
+            pdf.relative_directory = path
+                .parent()
+                .and_then(|parent| parent.strip_prefix(root).ok())
+                .filter(|relative| !relative.as_os_str().is_empty())
+                .map(Path::to_path_buf);
+        }
+        Ok(pdf)
     }
 }
 
@@ -127,7 +190,10 @@ fn humanize_filename(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     use super::LibraryIndexer;
 
@@ -147,5 +213,40 @@ mod tests {
     fn missing_roots_produce_empty_scan() {
         let roots = [PathBuf::from("/path/that/does/not/exist/papr")];
         assert!(LibraryIndexer::scan(&roots).is_empty());
+    }
+
+    #[test]
+    fn classifies_root_and_nested_pdfs() -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "papr-library-layout-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let collection = root.join("Gravitational Waves");
+        fs::create_dir_all(&collection)?;
+        let root_pdf = root.join("unassigned.pdf");
+        let nested_pdf = collection.join("assigned.pdf");
+        fs::create_dir_all(root.join("Empty Collection"))?;
+        fs::write(&root_pdf, b"%PDF root")?;
+        fs::write(&nested_pdf, b"%PDF nested")?;
+
+        let root_item = LibraryIndexer::inspect_in_roots(&root_pdf, std::slice::from_ref(&root))?;
+        let nested_item =
+            LibraryIndexer::inspect_in_roots(&nested_pdf, std::slice::from_ref(&root))?;
+        assert_eq!(root_item.library_root.as_deref(), Some(root.as_path()));
+        assert_eq!(root_item.relative_directory, None);
+        assert_eq!(
+            nested_item.relative_directory,
+            Some(PathBuf::from("Gravitational Waves"))
+        );
+        let directories = LibraryIndexer::collection_directories(std::slice::from_ref(&root));
+        assert!(
+            directories
+                .iter()
+                .any(|directory| { directory.relative_path == Path::new("Empty Collection") })
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 }
