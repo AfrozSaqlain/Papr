@@ -3,7 +3,11 @@
 mod terminal;
 mod ui;
 
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    process::{Command as ProcessCommand, Stdio},
+};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -88,6 +92,7 @@ async fn main() -> Result<()> {
         downloads,
         database,
         download_dir,
+        pdf_viewer: config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer),
         library_roots,
         watch_receiver,
     };
@@ -99,6 +104,7 @@ enum UiAction {
     Search(String),
     Download(RemotePaper),
     Reindex,
+    OpenPdf(PathBuf),
     OpenNote(PaperTarget),
     SaveNote(PaperNote),
     Prompt(PaperTarget, PromptKind),
@@ -123,6 +129,7 @@ struct Runtime {
     downloads: DownloadManager,
     database: Database,
     download_dir: PathBuf,
+    pdf_viewer: String,
     library_roots: Vec<PathBuf>,
     watch_receiver: mpsc::UnboundedReceiver<PathBuf>,
 }
@@ -241,6 +248,7 @@ fn apply_ui_action(
             app,
         ),
         UiAction::Reindex => start_scan(&runtime.library_roots, &senders.index, app),
+        UiAction::OpenPdf(path) => open_pdf(&runtime.pdf_viewer, &path, app)?,
         UiAction::OpenNote(target) => {
             let paper_id = resolve_target(target, &runtime.database)?;
             app.note_editor = Some(runtime.database.paper_note(paper_id)?);
@@ -297,6 +305,84 @@ fn refresh_organization(database: &Database, app: &mut App) -> Result<()> {
     app.tags = database.tags()?;
     app.bookmarks = database.bookmarks()?;
     Ok(())
+}
+
+fn default_pdf_viewer() -> String {
+    if cfg!(target_os = "macos") {
+        "open".into()
+    } else if cfg!(target_os = "windows") {
+        "cmd /C start".into()
+    } else {
+        "xdg-open".into()
+    }
+}
+
+fn open_pdf(viewer: &str, path: &Path, app: &mut App) -> Result<()> {
+    if !path.exists() {
+        app.toast = Some(format!("PDF not found: {}", path.display()));
+        return Ok(());
+    }
+
+    let mut argv = parse_command(viewer)?;
+    if argv.is_empty() {
+        argv.push(default_pdf_viewer());
+    }
+    let has_placeholder = argv.iter().any(|arg| arg.contains("{path}"));
+    if has_placeholder {
+        let path_text = path.to_string_lossy();
+        for arg in &mut argv {
+            *arg = arg.replace("{path}", &path_text);
+        }
+    }
+
+    let program = argv.remove(0);
+    let mut command = ProcessCommand::new(&program);
+    command.args(argv);
+    if !has_placeholder {
+        command.arg(path);
+    }
+    
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::null());
+
+    match command.spawn() {
+        Ok(_) => app.toast = Some(format!("Opened {}", path.display())),
+        Err(error) => app.toast = Some(format!("Could not open PDF with {program}: {error}")),
+    }
+    Ok(())
+}
+
+fn parse_command(command: &str) -> Result<Vec<String>> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut chars = command.chars();
+    let mut quote = None;
+    while let Some(character) = chars.next() {
+        match character {
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                } else {
+                    current.push(character);
+                }
+            }
+            '\'' | '"' if quote == Some(character) => quote = None,
+            '\'' | '"' if quote.is_none() => quote = Some(character),
+            character if character.is_whitespace() && quote.is_none() => {
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(character),
+        }
+    }
+    if let Some(character) = quote {
+        anyhow::bail!("unterminated {character} quote in pdf_viewer");
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    Ok(args)
 }
 
 fn start_scan(roots: &[PathBuf], sender: &mpsc::UnboundedSender<IndexResponse>, app: &mut App) {
@@ -491,6 +577,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         return Some(UiAction::Reindex);
     }
     if app.page == papr_core::Page::Library
+        && matches!(key.code, KeyCode::Char('p') | KeyCode::Enter)
+    {
+        return selected_library_pdf(app).map(UiAction::OpenPdf);
+    }
+    if app.page == papr_core::Page::Library
         && let Some(action) = handle_library_metadata_key(app, key)
     {
         return Some(action);
@@ -640,12 +731,20 @@ fn selected_remote_target(app: &App) -> Option<PaperTarget> {
         .map(PaperTarget::Remote)
 }
 
+fn selected_library_pdf(app: &App) -> Option<PathBuf> {
+    app.library
+        .papers
+        .get(app.library.selected)
+        .and_then(|paper| paper.pdf_path.as_ref())
+        .map(PathBuf::from)
+}
+
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use papr_core::{App, AppMode, PaperNote};
+    use papr_core::{App, AppMode, LibraryPaper, Page, PaperNote};
 
-    use super::handle_key;
+    use super::{UiAction, handle_key, parse_command};
 
     #[test]
     fn control_p_opens_palette() {
@@ -706,5 +805,40 @@ mod tests {
             app.note_editor.as_ref().map(|note| note.body.as_str()),
             Some("#")
         );
+    }
+
+    #[test]
+    fn library_enter_opens_selected_pdf() {
+        let mut app = App {
+            page: Page::Library,
+            library: papr_core::LibraryState {
+                papers: vec![LibraryPaper {
+                    id: 7,
+                    title: "Paper".into(),
+                    authors: String::new(),
+                    doi: None,
+                    pdf_path: Some("/tmp/paper.pdf".into()),
+                    file_size: None,
+                    reading_status: "unread".into(),
+                    is_favorite: false,
+                }],
+                ..papr_core::LibraryState::default()
+            },
+            ..App::default()
+        };
+        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(action, Some(UiAction::OpenPdf(path)) if path == std::path::Path::new("/tmp/paper.pdf"))
+        );
+    }
+
+    #[test]
+    fn parses_pdf_viewer_command_with_arguments() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(parse_command("xdg-open")?, vec!["xdg-open"]);
+        assert_eq!(
+            parse_command("'tdf viewer' --flag {path}")?,
+            vec!["tdf viewer", "--flag", "{path}"]
+        );
+        Ok(())
     }
 }
