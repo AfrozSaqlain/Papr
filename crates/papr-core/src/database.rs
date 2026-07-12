@@ -33,7 +33,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         6,
         include_str!("../migrations/0006_filesystem_collections.sql"),
     ),
-    (7, include_str!("../migrations/0007_dashboard_feed_cache.sql")),
+    (
+        7,
+        include_str!("../migrations/0007_dashboard_feed_cache.sql"),
+    ),
 ];
 
 /// Database initialization and query errors.
@@ -1363,6 +1366,41 @@ mod tests {
         assert_eq!(dashboard.recent_activity.len(), 2);
         assert_eq!(dashboard.recent_activity[0].label, "gravity waves");
         assert_eq!(dashboard.recent_activity[1].label, "History paper");
+        Ok(())
+    }
+
+    #[test]
+    fn dashboard_feed_cache_is_scoped_by_date_and_keywords()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        let paper = RemotePaper {
+            id: "https://arxiv.org/abs/2607.00001".into(),
+            title: "Cached daily paper".into(),
+            authors: vec!["Researcher".into()],
+            abstract_text: "Cached abstract".into(),
+            published: Utc::now(),
+            updated: Utc::now(),
+            categories: vec!["astro-ph".into()],
+            pdf_url: None,
+            doi: None,
+            journal_ref: None,
+        };
+        database.save_dashboard_feed_cache("2026-07-13", "gravity", &[paper])?;
+
+        let cached = database
+            .dashboard_feed_cache("2026-07-13", "gravity")?
+            .ok_or("daily cache was not stored")?;
+        assert_eq!(cached[0].title, "Cached daily paper");
+        assert!(
+            database
+                .dashboard_feed_cache("2026-07-14", "gravity")?
+                .is_none()
+        );
+        assert!(
+            database
+                .dashboard_feed_cache("2026-07-13", "different")?
+                .is_none()
+        );
         Ok(())
     }
 

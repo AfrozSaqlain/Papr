@@ -217,6 +217,8 @@ pub struct App {
     pub today_papers: Vec<RemotePaper>,
     /// Selected dashboard paper row.
     pub today_selected: usize,
+    /// Whether dashboard movement and opening target the paper feed instead of the sidebar.
+    pub dashboard_feed_focused: bool,
     /// Loading state for the latest-paper feed.
     pub today_status: DiscoveryStatus,
     /// Command palette query.
@@ -268,6 +270,7 @@ impl Default for App {
             dashboard: ResearchDashboard::default(),
             today_papers: Vec::new(),
             today_selected: 0,
+            dashboard_feed_focused: true,
             today_status: DiscoveryStatus::Idle,
             palette_query: String::new(),
             discovery: DiscoveryState::default(),
@@ -296,7 +299,10 @@ impl App {
     pub fn dispatch(&mut self, command: Command) {
         match command {
             Command::MoveUp => {
-                if self.page == Page::Dashboard {
+                if self.page == Page::Dashboard
+                    && self.dashboard_feed_focused
+                    && !self.today_papers.is_empty()
+                {
                     self.today_selected = self.today_selected.saturating_sub(1);
                 } else if self.page == Page::Discover {
                     self.discovery.selected = self.discovery.selected.saturating_sub(1);
@@ -316,7 +322,10 @@ impl App {
                 }
             }
             Command::MoveDown => {
-                if self.page == Page::Dashboard {
+                if self.page == Page::Dashboard
+                    && self.dashboard_feed_focused
+                    && !self.today_papers.is_empty()
+                {
                     self.today_selected =
                         (self.today_selected + 1).min(self.today_papers.len().saturating_sub(1));
                 } else if self.page == Page::Discover {
@@ -341,7 +350,10 @@ impl App {
                 }
             }
             Command::Open => {
-                if self.page == Page::Dashboard && !self.today_papers.is_empty() {
+                if self.page == Page::Dashboard
+                    && self.dashboard_feed_focused
+                    && !self.today_papers.is_empty()
+                {
                     self.discovery.results.clone_from(&self.today_papers);
                     self.discovery.selected = self
                         .today_selected

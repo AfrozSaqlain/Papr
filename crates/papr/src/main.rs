@@ -195,6 +195,11 @@ enum UiAction {
     OpenCollection(i64),
 }
 
+enum KeyHandling {
+    Ignored,
+    Handled(Option<Box<UiAction>>),
+}
+
 #[derive(Debug)]
 enum PaperTarget {
     Local(i64),
@@ -260,16 +265,36 @@ async fn run(
         today: today_sender,
     };
     let mut pending_downloads = HashMap::<String, RemotePaper>::new();
-    refresh_dashboard_papers(&runtime, &senders, app);
+    refresh_dashboard_papers(&runtime, &senders, app)?;
     start_scan(&runtime.library_roots, &senders.index, app);
+    let mut last_date_check = std::time::Instant::now();
     while !app.should_quit {
-        while let Ok(TodayResponse(result)) = today_receiver.try_recv() {
+        while let Ok(TodayResponse { feed_date, result }) = today_receiver.try_recv() {
+            if feed_date != runtime.dashboard_feed_date {
+                continue;
+            }
             match result {
                 Ok(papers) => {
+                    runtime.database.save_dashboard_feed_cache(
+                        &feed_date,
+                        &runtime.dashboard_keyword_signature,
+                        &papers,
+                    )?;
                     app.today_papers = papers;
+                    app.today_selected = app
+                        .today_selected
+                        .min(app.today_papers.len().saturating_sub(1));
                     app.today_status = DiscoveryStatus::Ready;
                 }
                 Err(error) => app.today_status = DiscoveryStatus::Error(error),
+            }
+        }
+        if last_date_check.elapsed() >= std::time::Duration::from_secs(1) {
+            last_date_check = std::time::Instant::now();
+            let current_date = local_feed_date();
+            if current_date != runtime.dashboard_feed_date {
+                runtime.dashboard_feed_date = current_date;
+                refresh_dashboard_papers(&runtime, &senders, app)?;
             }
         }
         while let Ok(response) = receiver.try_recv() {
@@ -352,11 +377,16 @@ fn apply_ui_action(
                     .map_err(|error| error.to_string());
                 let _ = response_sender.send(SearchResponse { query, result });
             });
-            refresh_dashboard_papers(runtime, senders, app);
         }
         UiAction::OpenPaper(paper) => {
             let paper_id = runtime.database.ensure_remote_paper(&paper)?;
             runtime.database.record_open(paper_id, false)?;
+            if app.page == papr_core::Page::Dashboard {
+                app.discovery.results.clone_from(&app.today_papers);
+                app.discovery.selected = app
+                    .today_selected
+                    .min(app.discovery.results.len().saturating_sub(1));
+            }
             app.mode = AppMode::PaperDetail;
             app.discovery.detail_scroll = 0;
             refresh_dashboard(&runtime.database, app)?;
@@ -578,17 +608,38 @@ fn refresh_organization(database: &Database, app: &mut App) -> Result<()> {
     Ok(())
 }
 
-fn refresh_dashboard_papers(runtime: &Runtime, senders: &ActionSenders, app: &mut App) {
+fn refresh_dashboard_papers(
+    runtime: &Runtime,
+    senders: &ActionSenders,
+    app: &mut App,
+) -> Result<()> {
+    if let Some(papers) = runtime.database.dashboard_feed_cache(
+        &runtime.dashboard_feed_date,
+        &runtime.dashboard_keyword_signature,
+    )? {
+        app.today_papers = papers;
+        app.today_selected = app
+            .today_selected
+            .min(app.today_papers.len().saturating_sub(1));
+        app.today_status = DiscoveryStatus::Ready;
+        return Ok(());
+    }
     app.today_status = DiscoveryStatus::Loading;
     let client = runtime.arxiv.clone();
     let keywords = runtime.dashboard_keywords.clone();
+    let feed_date = runtime.dashboard_feed_date.clone();
     let sender = senders.today.clone();
     tokio::spawn(async move {
         let result = dashboard_papers(client, keywords)
             .await
             .map_err(|error| error.to_string());
-        let _ = sender.send(TodayResponse(result));
+        let _ = sender.send(TodayResponse { feed_date, result });
     });
+    Ok(())
+}
+
+fn local_feed_date() -> String {
+    Local::now().date_naive().format("%Y-%m-%d").to_string()
 }
 
 async fn dashboard_papers(client: ArxivClient, keywords: Vec<String>) -> Result<Vec<RemotePaper>> {
@@ -941,6 +992,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if key.code == KeyCode::Char('r') && app.page == papr_core::Page::Library {
         return Some(UiAction::Reindex);
     }
+    if let KeyHandling::Handled(action) = handle_dashboard_key(app, key) {
+        return action.map(|action| *action);
+    }
     if app.page == papr_core::Page::Collections {
         let (handled, action) = handle_collection_key(app, key);
         if handled {
@@ -976,6 +1030,31 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         app.dispatch(command);
     }
     None
+}
+
+fn handle_dashboard_key(app: &mut App, key: KeyEvent) -> KeyHandling {
+    if app.page != papr_core::Page::Dashboard {
+        return KeyHandling::Ignored;
+    }
+    if key.code == KeyCode::Tab {
+        app.dashboard_feed_focused = !app.dashboard_feed_focused;
+        return KeyHandling::Handled(None);
+    }
+    if app.dashboard_feed_focused
+        && matches!(
+            key.code,
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
+        )
+    {
+        return KeyHandling::Handled(
+            app.today_papers
+                .get(app.today_selected)
+                .cloned()
+                .map(UiAction::OpenPaper)
+                .map(Box::new),
+        );
+    }
+    KeyHandling::Ignored
 }
 
 fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction>) {
@@ -1241,6 +1320,24 @@ mod tests {
         assert!(action.is_none());
         assert_eq!(app.mode, AppMode::Search);
         assert_eq!(app.page, papr_core::Page::Discover);
+    }
+
+    #[test]
+    fn dashboard_navigation_opens_the_selected_paper() {
+        let first = remote_paper("https://arxiv.org/abs/1", "First paper");
+        let second = remote_paper("https://arxiv.org/abs/2", "Selected paper");
+        let mut app = App {
+            page: Page::Dashboard,
+            today_papers: vec![first, second],
+            today_selected: 1,
+            ..App::default()
+        };
+
+        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            action,
+            Some(UiAction::OpenPaper(paper)) if paper.title == "Selected paper"
+        ));
     }
 
     #[test]

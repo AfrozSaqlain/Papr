@@ -217,7 +217,10 @@ tags and their paper assignments are copied into same-named collections.
 The dashboard combines a non-blocking arXiv paper feed with local library,
 queue, download, unread, streak, activity, collection, and storage data. Set
 `dashboard_keywords` to a comma-separated list of research interests to show
-the latest matching recommendations.
+the latest matching recommendations. The feed is cached for the local calendar
+day and refreshes after midnight rather than on every application launch. Use
+`j`/`k` to navigate its papers and `Enter` to open the selected paper page. Each
+feed entry includes its authors and a compact abstract preview.
 
 Opening remote paper details or local PDFs records reading history. Searches,
 downloads, note opens, bookmarks, and collection changes are also

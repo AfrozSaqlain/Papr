@@ -1061,6 +1061,7 @@ fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme)
 }
 
 fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let preview_width = usize::from(area.width.saturating_sub(8)).max(24);
     let today = match &app.today_status {
         DiscoveryStatus::Loading => vec![ListItem::new("Loading dashboard papers...")],
         DiscoveryStatus::Error(_) => vec![ListItem::new("Dashboard papers are unavailable")],
@@ -1070,27 +1071,52 @@ fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
             .iter()
             .take(10)
             .map(|paper| {
-                ListItem::new(Line::styled(
-                    format!(
-                        "{}  {}  {}",
-                        paper.published.format("%Y-%m-%d"),
-                        compact_authors(paper),
-                        paper.title
+                let abstract_preview = compact_text(&paper.abstract_text, preview_width);
+                ListItem::new(vec![
+                    Line::styled(
+                        &paper.title,
+                        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
                     ),
-                    Style::default().fg(theme.text),
-                ))
+                    Line::styled(
+                        format!(
+                            "{}  |  {}",
+                            compact_authors(paper),
+                            paper.published.format("%Y-%m-%d")
+                        ),
+                        Style::default().fg(theme.accent),
+                    ),
+                    Line::styled(abstract_preview, Style::default().fg(theme.muted)),
+                    Line::raw(""),
+                ])
             })
             .collect(),
     };
-    frame.render_widget(
-        List::new(today).block(
+    let list = List::new(today)
+        .block(
             Block::default()
-                .title(" DASHBOARD PAPERS ")
+                .title(" DASHBOARD PAPERS - j/k SELECT  ENTER OPEN  TAB SIDEBAR ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.border)),
-        ),
-        area,
-    );
+        )
+        .highlight_style(Style::default().bg(theme.surface).fg(theme.text))
+        .highlight_symbol("> ");
+    let selected =
+        (app.dashboard_feed_focused && !app.today_papers.is_empty()).then_some(app.today_selected);
+    let mut state = ListState::default().with_selected(selected);
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn compact_text(value: &str, max_chars: usize) -> String {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+    let mut shortened = normalized
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    shortened.push_str("...");
+    shortened
 }
 
 fn render_dashboard_details(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
@@ -1270,6 +1296,25 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
         assert!(rendered.contains("Today in Research"));
+        Ok(())
+    }
+
+    #[test]
+    fn dashboard_feed_renders_title_authors_and_abstract() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let backend = TestBackend::new(110, 32);
+        let mut terminal = Terminal::new(backend)?;
+        let app = App {
+            today_papers: vec![sample_paper()?],
+            today_status: DiscoveryStatus::Ready,
+            ..App::default()
+        };
+        let theme = Theme::load("nord")?;
+        terminal.draw(|frame| render(frame, &app, &theme))?;
+        let rendered = rendered_text(&terminal);
+        assert!(rendered.contains("Terminal Research Systems"));
+        assert!(rendered.contains("Ada Lovelace, Alan Turing"));
+        assert!(rendered.contains("A testable abstract"));
         Ok(())
     }
 
