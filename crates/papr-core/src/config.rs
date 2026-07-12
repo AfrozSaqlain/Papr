@@ -32,6 +32,8 @@ pub struct Paths {
     pub database_file: PathBuf,
     /// Default PDF download directory.
     pub downloads_dir: PathBuf,
+    /// Directory containing external plugin bundles.
+    pub plugins_dir: PathBuf,
 }
 
 impl Paths {
@@ -47,6 +49,7 @@ impl Paths {
             config_file: dirs.config_dir().join("config.toml"),
             database_file: dirs.data_dir().join("papr.db"),
             downloads_dir: dirs.data_dir().join("papers"),
+            plugins_dir: dirs.data_dir().join("plugins"),
         })
     }
 }
@@ -67,6 +70,8 @@ pub struct Config {
     pub download_path: Option<PathBuf>,
     /// Whether mouse event capture is enabled.
     pub mouse: bool,
+    /// Plugin identifiers explicitly allowed to execute.
+    pub enabled_plugins: Vec<String>,
 }
 
 impl Default for Config {
@@ -78,6 +83,7 @@ impl Default for Config {
             library_folders: Vec::new(),
             download_path: None,
             mouse: false,
+            enabled_plugins: Vec::new(),
         }
     }
 }

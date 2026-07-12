@@ -2,8 +2,9 @@
 
 use crate::models::{
     BookmarkSummary, CollectionSummary, DashboardStats, LibraryPaper, PaperNote, RemotePaper,
-    TagSummary,
+    ResearchDashboard, TagSummary,
 };
+use crate::plugins::PluginInfo;
 
 /// Top-level application pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +222,12 @@ pub struct App {
     pub should_quit: bool,
     /// Summary metrics loaded from persistence.
     pub stats: DashboardStats,
+    /// Complete local dashboard snapshot.
+    pub dashboard: ResearchDashboard,
+    /// Latest papers loaded for Today in Research.
+    pub today_papers: Vec<RemotePaper>,
+    /// Loading state for the latest-paper feed.
+    pub today_status: DiscoveryStatus,
     /// Command palette query.
     pub palette_query: String,
     /// Remote paper discovery state.
@@ -247,6 +254,10 @@ pub struct App {
     pub toast: Option<String>,
     /// Mode restored when an editor or prompt closes.
     pub modal_return: AppMode,
+    /// Discovered plugin summaries.
+    pub plugins: Vec<PluginInfo>,
+    /// Number of invalid plugin bundles found at startup.
+    pub plugin_diagnostics: usize,
 }
 
 impl Default for App {
@@ -257,6 +268,9 @@ impl Default for App {
             mode: AppMode::Normal,
             should_quit: false,
             stats: DashboardStats::default(),
+            dashboard: ResearchDashboard::default(),
+            today_papers: Vec::new(),
+            today_status: DiscoveryStatus::Idle,
             palette_query: String::new(),
             discovery: DiscoveryState::default(),
             library: LibraryState::default(),
@@ -270,6 +284,8 @@ impl Default for App {
             bookmarks: Vec::new(),
             toast: None,
             modal_return: AppMode::Normal,
+            plugins: Vec::new(),
+            plugin_diagnostics: 0,
         }
     }
 }

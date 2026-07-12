@@ -9,6 +9,8 @@ use thiserror::Error;
 use crate::models::RemotePaper;
 
 const API_URL: &str = "https://export.arxiv.org/api/query";
+const LATEST_QUERY: &str = "cat:cs.* OR cat:physics.* OR cat:math.* OR cat:stat.* OR \
+    cat:q-bio.* OR cat:astro-ph.* OR cat:cond-mat.* OR cat:gr-qc OR cat:quant-ph";
 
 /// Errors returned while querying or decoding arXiv.
 #[derive(Debug, Error)]
@@ -63,14 +65,33 @@ impl ArxivClient {
     ///
     /// Returns an error when the request fails or Atom content is malformed.
     pub async fn search(&self, query: &str, limit: u16) -> Result<Vec<RemotePaper>, ArxivError> {
+        self.query(&format!("all:{query}"), limit, "relevance")
+            .await
+    }
+
+    /// Load the newest submissions across arXiv for the dashboard.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails or Atom content is malformed.
+    pub async fn latest(&self, limit: u16) -> Result<Vec<RemotePaper>, ArxivError> {
+        self.query(LATEST_QUERY, limit, "submittedDate").await
+    }
+
+    async fn query(
+        &self,
+        search_query: &str,
+        limit: u16,
+        sort_by: &str,
+    ) -> Result<Vec<RemotePaper>, ArxivError> {
         let response = self
             .client
             .get(self.endpoint.clone())
             .query(&[
-                ("search_query", format!("all:{query}")),
+                ("search_query", search_query.to_owned()),
                 ("start", "0".to_owned()),
                 ("max_results", limit.clamp(1, 100).to_string()),
-                ("sortBy", "relevance".to_owned()),
+                ("sortBy", sort_by.to_owned()),
                 ("sortOrder", "descending".to_owned()),
             ])
             .send()

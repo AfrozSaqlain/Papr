@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 const LOGO: &str = "[ P A P R ]";
@@ -126,6 +126,12 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
                 .style(Style::default().fg(theme.muted)),
             inset,
         );
+    } else if app.page == Page::History {
+        render_history(frame, inset, app, theme);
+    } else if app.page == Page::Statistics {
+        render_statistics(frame, inset, app, theme);
+    } else if app.page == Page::Settings {
+        render_settings(frame, inset, app, theme);
     } else {
         let lines = vec![
             Line::styled(
@@ -139,6 +145,223 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
             ),
         ];
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inset);
+    }
+}
+
+fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let rows = Layout::vertical([Constraint::Length(4), Constraint::Min(4)]).split(area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled("Configuration", Style::default().fg(theme.text).add_modifier(Modifier::BOLD)),
+            Line::styled(
+                "Theme, library paths, PDF viewer, and plugin allowlist are loaded from config.toml.",
+                Style::default().fg(theme.muted),
+            ),
+        ]),
+        rows[0],
+    );
+    let items = if app.plugins.is_empty() {
+        vec![ListItem::new("No valid plugins discovered")]
+    } else {
+        app.plugins
+            .iter()
+            .map(|plugin| {
+                let state = if plugin.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
+                ListItem::new(vec![
+                    Line::styled(
+                        format!("{}  v{}", plugin.name, plugin.version),
+                        Style::default().fg(if plugin.enabled {
+                            theme.success
+                        } else {
+                            theme.text
+                        }),
+                    ),
+                    Line::styled(
+                        format!("{}  |  {}  |  {}", plugin.id, state, plugin.description),
+                        Style::default().fg(theme.muted),
+                    ),
+                ])
+            })
+            .collect()
+    };
+    frame.render_widget(
+        List::new(items).block(
+            Block::default()
+                .title(format!(
+                    " PLUGINS  {} valid  {} invalid ",
+                    app.plugins.len(),
+                    app.plugin_diagnostics
+                ))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border)),
+        ),
+        rows[1],
+    );
+}
+
+fn render_history(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let items = app.dashboard.recent_activity.iter().map(|activity| {
+        ListItem::new(vec![
+            Line::styled(
+                &activity.label,
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ),
+            Line::styled(
+                format!(
+                    "{}  {}",
+                    activity_kind(&activity.kind),
+                    activity.occurred_at.format("%Y-%m-%d %H:%M UTC")
+                ),
+                Style::default().fg(theme.muted),
+            ),
+            Line::raw(""),
+        ])
+    });
+    frame.render_widget(
+        List::new(items).block(
+            Block::default()
+                .title(" READING AND RESEARCH ACTIVITY ")
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(theme.border)),
+        ),
+        area,
+    );
+}
+
+fn render_statistics(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let reading = &app.dashboard.reading;
+    let rows = Layout::vertical([
+        Constraint::Length(5),
+        Constraint::Length(5),
+        Constraint::Min(4),
+    ])
+    .spacing(1)
+    .split(area);
+    let top = Layout::horizontal([Constraint::Ratio(1, 4); 4])
+        .spacing(1)
+        .split(rows[0]);
+    let metrics = [
+        (
+            "STREAK",
+            format!("{} days", reading.current_streak),
+            theme.warning,
+        ),
+        (
+            "THIS MONTH",
+            reading.monthly_reading.to_string(),
+            theme.accent,
+        ),
+        (
+            "THIS YEAR",
+            reading.yearly_reading.to_string(),
+            theme.success,
+        ),
+        ("SESSIONS", reading.sessions.to_string(), theme.secondary),
+    ];
+    for (area, (label, value, color)) in top.iter().zip(metrics) {
+        render_metric(frame, *area, label, &value, color, theme);
+    }
+    let middle = Layout::horizontal([Constraint::Ratio(1, 3); 3])
+        .spacing(1)
+        .split(rows[1]);
+    render_metric(
+        frame,
+        middle[0],
+        "MOST ACTIVE DAY",
+        reading.most_active_day.as_deref().unwrap_or("No data"),
+        theme.accent,
+        theme,
+    );
+    render_metric(
+        frame,
+        middle[1],
+        "MOST READ AUTHOR",
+        reading.most_read_author.as_deref().unwrap_or("No data"),
+        theme.secondary,
+        theme,
+    );
+    render_metric(
+        frame,
+        middle[2],
+        "MOST READ JOURNAL",
+        reading.most_read_journal.as_deref().unwrap_or("No data"),
+        theme.success,
+        theme,
+    );
+    let heatmap = reading
+        .heatmap
+        .iter()
+        .map(|day| match day.count {
+            0 => ' ',
+            1 => '░',
+            2..=3 => '▒',
+            4..=6 => '▓',
+            _ => '█',
+        })
+        .collect::<String>();
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(heatmap, Style::default().fg(theme.success)),
+            Line::raw(""),
+            Line::styled(
+                format!(
+                    "Average reading time: {} min",
+                    reading.average_reading_seconds / 60
+                ),
+                Style::default().fg(theme.muted),
+            ),
+        ])
+        .block(
+            Block::default()
+                .title(" 12-WEEK READING ACTIVITY ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border)),
+        ),
+        rows[2],
+    );
+}
+
+fn render_metric(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    value: &str,
+    color: ratatui::style::Color,
+    theme: &Theme,
+) {
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(label, Style::default().fg(theme.muted)),
+            Line::styled(
+                value,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+        ])
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border)),
+        ),
+        area,
+    );
+}
+
+fn activity_kind(kind: &str) -> &str {
+    match kind {
+        "paper_opened" => "Paper opened",
+        "pdf_opened" => "PDF opened",
+        "note_opened" => "Note opened",
+        "search" => "Search",
+        "downloaded" => "Downloaded",
+        "bookmarked" => "Bookmark changed",
+        "tagged" => "Tagged",
+        "collected" => "Added to collection",
+        _ => kind,
     }
 }
 
@@ -660,10 +883,12 @@ fn paper_detail_lines<'a>(paper: &'a RemotePaper, theme: &Theme) -> Vec<Line<'a>
 
 fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     let rows = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Length(5),
-        Constraint::Min(5),
+        Constraint::Length(1),
+        Constraint::Length(4),
+        Constraint::Min(6),
+        Constraint::Length(6),
     ])
+    .spacing(1)
     .split(area);
     frame.render_widget(
         Paragraph::new(Line::styled(
@@ -672,14 +897,19 @@ fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme)
         )),
         rows[0],
     );
-    let cards = Layout::horizontal([Constraint::Ratio(1, 4); 4])
+    let cards = Layout::horizontal([Constraint::Ratio(1, 5); 5])
         .spacing(1)
         .split(rows[1]);
     let data = [
         ("LIBRARY", app.stats.papers, theme.accent),
         ("QUEUE", app.stats.queued, theme.warning),
         ("DOWNLOADED", app.stats.downloaded, theme.success),
-        ("FAVORITES", app.stats.favorites, theme.secondary),
+        ("UNREAD", app.dashboard.unread, theme.secondary),
+        (
+            "STREAK",
+            app.dashboard.reading.current_streak,
+            theme.warning,
+        ),
     ];
     for (area, (label, value, color)) in cards.iter().zip(data) {
         let card = Paragraph::new(vec![
@@ -697,40 +927,101 @@ fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme)
         .alignment(Alignment::Center);
         frame.render_widget(card, *area);
     }
+    render_today_research(frame, rows[2], app, theme);
+    render_dashboard_details(frame, rows[3], app, theme);
+}
+
+fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let today = match &app.today_status {
+        DiscoveryStatus::Loading => vec![ListItem::new("Loading today's arXiv papers...")],
+        DiscoveryStatus::Error(_) => vec![ListItem::new("Today's feed is unavailable")],
+        _ if app.today_papers.is_empty() => vec![ListItem::new("No new papers loaded")],
+        _ => app
+            .today_papers
+            .iter()
+            .take(5)
+            .map(|paper| {
+                ListItem::new(vec![
+                    Line::styled(
+                        &paper.title,
+                        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                    ),
+                    Line::styled(
+                        format!(
+                            "{}  {}",
+                            compact_authors(paper),
+                            paper.published.format("%Y-%m-%d")
+                        ),
+                        Style::default().fg(theme.muted),
+                    ),
+                ])
+            })
+            .collect(),
+    };
+    frame.render_widget(
+        List::new(today).block(
+            Block::default()
+                .title(" TODAY'S NEW PAPERS ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border)),
+        ),
+        area,
+    );
+}
+
+fn render_dashboard_details(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     let lower = Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)])
         .spacing(1)
-        .split(rows[2]);
-    let activity = Paragraph::new(vec![
-        Line::styled("No recent activity", Style::default().fg(theme.text)),
-        Line::styled(
-            "Imported papers and reading sessions will appear here.",
-            Style::default().fg(theme.muted),
-        ),
-    ])
-    .block(
+        .split(area);
+    let activity_lines = app
+        .dashboard
+        .recent_activity
+        .iter()
+        .take(3)
+        .map(|item| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{}  ", activity_kind(&item.kind)),
+                    Style::default().fg(theme.accent),
+                ),
+                Span::styled(&item.label, Style::default().fg(theme.text)),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let activity = Paragraph::new(activity_lines).block(
         Block::default()
             .title(" RECENT ACTIVITY ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme.border)),
     );
     frame.render_widget(activity, lower[0]);
-    let progress_area = lower[1].inner(ratatui::layout::Margin {
-        horizontal: 2,
-        vertical: 2,
-    });
     frame.render_widget(
         Block::default()
-            .title(" WEEKLY GOAL ")
+            .title(" STORAGE ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme.border)),
         lower[1],
     );
+    let storage = lower[1].inner(ratatui::layout::Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
     frame.render_widget(
-        Gauge::default()
-            .ratio(0.0)
-            .label("0 / 5 papers")
-            .gauge_style(Style::default().fg(theme.success).bg(theme.surface)),
-        Rect::new(progress_area.x, progress_area.y, progress_area.width, 1),
+        Paragraph::new(vec![
+            Line::styled(
+                format!("PDFs      {}", format_bytes(app.dashboard.disk_usage)),
+                Style::default().fg(theme.success),
+            ),
+            Line::styled(
+                format!("Database  {}", format_bytes(app.dashboard.database_size)),
+                Style::default().fg(theme.secondary),
+            ),
+            Line::styled(
+                format!("Collections  {}", app.dashboard.collections),
+                Style::default().fg(theme.muted),
+            ),
+        ]),
+        storage,
     );
 }
 
@@ -834,8 +1125,8 @@ fn centered(width: u16, height: u16, area: Rect) -> Rect {
 mod tests {
     use chrono::{TimeZone, Utc};
     use papr_core::{
-        App, AppMode, DiscoveryStatus, DownloadStatus, DownloadTask, LibraryPaper, Page,
-        RemotePaper, Theme,
+        ActivityItem, App, AppMode, DiscoveryStatus, DownloadStatus, DownloadTask, LibraryPaper,
+        Page, RemotePaper, Theme,
     };
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -915,6 +1206,39 @@ mod tests {
         let text = rendered_text(&terminal);
         assert!(text.contains("A Streaming Download"));
         assert!(text.contains("1.0 KiB / 2.0 KiB"));
+        Ok(())
+    }
+
+    #[test]
+    fn history_and_statistics_render() -> Result<(), Box<dyn std::error::Error>> {
+        let backend = TestBackend::new(100, 32);
+        let mut terminal = Terminal::new(backend)?;
+        let timestamp = Utc
+            .with_ymd_and_hms(2026, 7, 13, 10, 0, 0)
+            .single()
+            .ok_or("invalid test date")?;
+        let mut app = App {
+            page: Page::History,
+            ..App::default()
+        };
+        app.dashboard.recent_activity.push(ActivityItem {
+            kind: "pdf_opened".into(),
+            label: "A Recorded Paper".into(),
+            occurred_at: timestamp,
+        });
+        app.dashboard.reading.current_streak = 4;
+        app.dashboard.reading.monthly_reading = 12;
+        app.dashboard.reading.most_active_day = Some("Monday".into());
+        let theme = Theme::load("tokyo-night")?;
+
+        terminal.draw(|frame| render(frame, &app, &theme))?;
+        assert!(rendered_text(&terminal).contains("A Recorded Paper"));
+
+        app.page = Page::Statistics;
+        terminal.draw(|frame| render(frame, &app, &theme))?;
+        let statistics = rendered_text(&terminal);
+        assert!(statistics.contains("4 days"));
+        assert!(statistics.contains("Monday"));
         Ok(())
     }
 

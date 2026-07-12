@@ -130,3 +130,65 @@ pub struct BookmarkSummary {
     /// Optional user label.
     pub label: Option<String>,
 }
+
+/// One human-readable research activity event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityItem {
+    /// Event type stored in the activity log.
+    pub kind: String,
+    /// Related paper title or event detail.
+    pub label: String,
+    /// UTC event timestamp.
+    pub occurred_at: DateTime<Utc>,
+}
+
+/// One day in the reading heatmap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadingDay {
+    /// Calendar date formatted as `YYYY-MM-DD`.
+    pub date: String,
+    /// Papers opened on that date.
+    pub count: u64,
+}
+
+/// Aggregated research and reading statistics.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReadingStatistics {
+    /// Consecutive reading days ending today or yesterday.
+    pub current_streak: u64,
+    /// Papers opened during the current calendar month.
+    pub monthly_reading: u64,
+    /// Papers opened during the current calendar year.
+    pub yearly_reading: u64,
+    /// Total recorded reading sessions.
+    pub sessions: u64,
+    /// Average recorded session duration in seconds.
+    pub average_reading_seconds: u64,
+    /// Weekday with the most reading sessions.
+    pub most_active_day: Option<String>,
+    /// Most frequently opened author.
+    pub most_read_author: Option<String>,
+    /// Most frequently opened journal.
+    pub most_read_journal: Option<String>,
+    /// Recent daily activity used by the heatmap.
+    pub heatmap: Vec<ReadingDay>,
+}
+
+/// Data displayed on the research dashboard.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResearchDashboard {
+    /// Standard library counters.
+    pub counts: DashboardStats,
+    /// Papers that have not been marked read.
+    pub unread: u64,
+    /// Number of user collections.
+    pub collections: u64,
+    /// Total known local PDF bytes.
+    pub disk_usage: u64,
+    /// Approximate live `SQLite` size in bytes.
+    pub database_size: u64,
+    /// Current reading analytics.
+    pub reading: ReadingStatistics,
+    /// Most recent user activity.
+    pub recent_activity: Vec<ActivityItem>,
+}

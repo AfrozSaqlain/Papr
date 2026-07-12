@@ -2,14 +2,15 @@
 
 use std::{fs, path::Path};
 
+use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
 use crate::{
     library::ImportedPdf,
     models::{
-        BookmarkSummary, CollectionSummary, DashboardStats, LibraryPaper, PaperNote, RemotePaper,
-        TagSummary,
+        ActivityItem, BookmarkSummary, CollectionSummary, DashboardStats, LibraryPaper, PaperNote,
+        ReadingDay, ReadingStatistics, RemotePaper, ResearchDashboard, TagSummary,
     },
 };
 
@@ -20,6 +21,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         3,
         include_str!("../migrations/0003_research_organization.sql"),
     ),
+    (4, include_str!("../migrations/0004_activity.sql")),
 ];
 
 /// Database initialization and query errors.
@@ -519,6 +521,217 @@ impl Database {
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+
+    /// Record a paper or PDF open in reading history and recent activity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either history record cannot be inserted.
+    pub fn record_open(&self, paper_id: i64, pdf: bool) -> Result<(), DatabaseError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO reading_history (paper_id) VALUES (?1)",
+            [paper_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO activity_log (kind, paper_id) VALUES (?1, ?2)",
+            params![if pdf { "pdf_opened" } else { "paper_opened" }, paper_id],
+        )?;
+        transaction.execute(
+            "UPDATE papers SET last_opened_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            [paper_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Record a non-reading research activity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the event cannot be inserted.
+    pub fn record_activity(
+        &self,
+        kind: &str,
+        paper_id: Option<i64>,
+        detail: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        self.connection.execute(
+            "INSERT INTO activity_log (kind, paper_id, detail) VALUES (?1, ?2, ?3)",
+            params![kind, paper_id, detail],
+        )?;
+        Ok(())
+    }
+
+    /// Read the full dashboard snapshot in a bounded set of local queries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any aggregate or activity query fails.
+    pub fn research_dashboard(&self) -> Result<ResearchDashboard, DatabaseError> {
+        let counts = self.dashboard_stats()?;
+        let (unread, collections, disk_usage) = self.connection.query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM papers WHERE reading_status != 'read'),
+                (SELECT COUNT(*) FROM collections),
+                (SELECT COALESCE(SUM(file_size), 0) FROM papers)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let page_count: u64 = self
+            .connection
+            .query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let page_size: u64 = self
+            .connection
+            .query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        Ok(ResearchDashboard {
+            counts,
+            unread,
+            collections,
+            disk_usage,
+            database_size: page_count.saturating_mul(page_size),
+            reading: self.reading_statistics()?,
+            recent_activity: self.recent_activity(12)?,
+        })
+    }
+
+    /// Compute persisted reading metrics and an 84-day activity heatmap.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when history aggregates cannot be queried.
+    pub fn reading_statistics(&self) -> Result<ReadingStatistics, DatabaseError> {
+        let now = Utc::now();
+        let (sessions, monthly_reading, yearly_reading, average_reading_seconds) =
+            self.connection.query_row(
+                "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN strftime('%Y-%m', opened_at) = ?1 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN strftime('%Y', opened_at) = ?2 THEN 1 ELSE 0 END), 0),
+                    CAST(COALESCE(AVG(duration_s), 0) AS INTEGER)
+                 FROM reading_history",
+                params![now.format("%Y-%m").to_string(), now.year().to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+        let heatmap = self.reading_heatmap()?;
+        let dates = heatmap
+            .iter()
+            .filter(|day| day.count > 0)
+            .filter_map(|day| NaiveDate::parse_from_str(&day.date, "%Y-%m-%d").ok())
+            .collect::<std::collections::HashSet<_>>();
+        let current_streak = reading_streak(&dates, now.date_naive());
+        let most_active_day = self
+            .connection
+            .query_row(
+                "SELECT strftime('%w', opened_at), COUNT(*) FROM reading_history
+                 GROUP BY strftime('%w', opened_at) ORDER BY COUNT(*) DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|day| weekday_name(&day).map(str::to_owned));
+        let most_read_author = self.top_history_label(
+            "SELECT a.name FROM reading_history h
+             JOIN paper_authors pa ON pa.paper_id = h.paper_id
+             JOIN authors a ON a.id = pa.author_id
+             GROUP BY a.id ORDER BY COUNT(*) DESC, a.name LIMIT 1",
+        )?;
+        let most_read_journal = self.top_history_label(
+            "SELECT p.journal FROM reading_history h JOIN papers p ON p.id = h.paper_id
+             WHERE p.journal IS NOT NULL AND trim(p.journal) != ''
+             GROUP BY p.journal ORDER BY COUNT(*) DESC, p.journal LIMIT 1",
+        )?;
+        Ok(ReadingStatistics {
+            current_streak,
+            monthly_reading,
+            yearly_reading,
+            sessions,
+            average_reading_seconds,
+            most_active_day,
+            most_read_author,
+            most_read_journal,
+            heatmap,
+        })
+    }
+
+    fn reading_heatmap(&self) -> Result<Vec<ReadingDay>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT date(opened_at), COUNT(*) FROM reading_history
+             WHERE opened_at >= datetime('now', '-83 days')
+             GROUP BY date(opened_at) ORDER BY date(opened_at)",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+        })?;
+        let counts = rows.collect::<Result<std::collections::HashMap<_, _>, _>>()?;
+        let today = Utc::now().date_naive();
+        Ok((0_i64..84)
+            .rev()
+            .map(|offset| {
+                let date = today - Duration::days(offset);
+                let date = date.format("%Y-%m-%d").to_string();
+                ReadingDay {
+                    count: counts.get(&date).copied().unwrap_or(0),
+                    date,
+                }
+            })
+            .collect())
+    }
+
+    fn top_history_label(&self, sql: &str) -> Result<Option<String>, DatabaseError> {
+        self.connection
+            .query_row(sql, [], |row| row.get(0))
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Return recent activity for dashboard and history views.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the activity query fails.
+    pub fn recent_activity(&self, limit: u16) -> Result<Vec<ActivityItem>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT a.kind, COALESCE(p.title, a.detail, a.kind), a.occurred_at
+             FROM activity_log a LEFT JOIN papers p ON p.id = a.paper_id
+             ORDER BY a.occurred_at DESC, a.id DESC LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit], |row| {
+            let occurred_at: NaiveDateTime = row.get(2)?;
+            Ok(ActivityItem {
+                kind: row.get(0)?,
+                label: row.get(1)?,
+                occurred_at: occurred_at.and_utc(),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+}
+
+fn reading_streak(dates: &std::collections::HashSet<NaiveDate>, today: NaiveDate) -> u64 {
+    let mut cursor = if dates.contains(&today) {
+        today
+    } else {
+        today - Duration::days(1)
+    };
+    let mut streak = 0_u64;
+    while dates.contains(&cursor) {
+        streak = streak.saturating_add(1);
+        cursor -= Duration::days(1);
+    }
+    streak
+}
+
+fn weekday_name(value: &str) -> Option<&'static str> {
+    match value {
+        "0" => Some("Sunday"),
+        "1" => Some("Monday"),
+        "2" => Some("Tuesday"),
+        "3" => Some("Wednesday"),
+        "4" => Some("Thursday"),
+        "5" => Some("Friday"),
+        "6" => Some("Saturday"),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -637,6 +850,24 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].title, "Canonical title");
         assert_eq!(rows[0].authors, "Researcher One");
+        Ok(())
+    }
+
+    #[test]
+    fn recorded_opens_feed_dashboard_history_and_statistics()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        let paper_id = database.insert_paper("History paper", None)?;
+        database.record_open(paper_id, true)?;
+        database.record_activity("search", None, Some("gravity waves"))?;
+
+        let dashboard = database.research_dashboard()?;
+        assert_eq!(dashboard.reading.sessions, 1);
+        assert_eq!(dashboard.reading.current_streak, 1);
+        assert_eq!(dashboard.reading.heatmap.len(), 84);
+        assert_eq!(dashboard.recent_activity.len(), 2);
+        assert_eq!(dashboard.recent_activity[0].label, "gravity waves");
+        assert_eq!(dashboard.recent_activity[1].label, "History paper");
         Ok(())
     }
 

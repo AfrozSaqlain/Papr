@@ -5,14 +5,15 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/papr-rs/papr"
+license = "MIT"
+repository = "https://github.com/AfrozSaqlain/Papr"
 rust-version = "1.85"
 
 [workspace.dependencies]
 anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
+clap_complete = "4.5"
 crossterm = { version = "0.28", features = ["event-stream"] }
 directories = "6.0"
 futures-util = "0.3"
@@ -22,12 +23,22 @@ ratatui = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "stream"] }
 rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 sha2 = "0.10"
 thiserror = "2.0"
-tokio = { version = "1.0", features = ["fs", "io-util", "macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.0", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.8"
 url = "2.5"
 walkdir = "2.5"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.dist]
+inherits = "release"
+lto = "fat"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

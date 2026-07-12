@@ -7,6 +7,7 @@ pub mod database;
 pub mod downloads;
 pub mod library;
 pub mod models;
+pub mod plugins;
 pub mod theme;
 
 pub use api::arxiv::ArxivClient;
@@ -19,6 +20,11 @@ pub use database::Database;
 pub use downloads::{DownloadEvent, DownloadManager};
 pub use library::{ImportedPdf, LibraryIndexer, LibraryWatcher};
 pub use models::{
-    BookmarkSummary, CollectionSummary, LibraryPaper, PaperNote, RemotePaper, TagSummary,
+    ActivityItem, BookmarkSummary, CollectionSummary, LibraryPaper, PaperNote, ReadingDay,
+    ReadingStatistics, RemotePaper, ResearchDashboard, TagSummary,
+};
+pub use plugins::{
+    PluginAction, PluginCapability, PluginDiagnostic, PluginHost, PluginInfo, PluginManifest,
+    PluginRequest, PluginResponse,
 };
 pub use theme::Theme;

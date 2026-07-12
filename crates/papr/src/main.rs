@@ -10,12 +10,13 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{Shell, generate};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use papr_core::{
     App, AppMode, ArxivClient, Command, Config, Database, DiscoveryStatus, DownloadEvent,
     DownloadManager, DownloadStatus, DownloadTask, ImportedPdf, LibraryIndexer, LibraryWatcher,
-    MetadataPrompt, PaperNote, Paths, PromptKind, RemotePaper, Theme,
+    MetadataPrompt, PaperNote, Paths, PluginHost, PromptKind, RemotePaper, Theme,
 };
 use tokio::sync::mpsc;
 
@@ -34,20 +35,47 @@ enum CliCommand {
     Paths,
     /// Scan configured library folders and update the catalog.
     Index,
+    /// Generate completion definitions for a supported shell.
+    Completions {
+        /// Shell syntax to generate.
+        shell: Shell,
+    },
+    /// List discovered plugins and validation diagnostics.
+    Plugins,
+    /// Invoke an enabled plugin event using the JSON protocol.
+    Plugin {
+        /// Enabled plugin identifier.
+        id: String,
+        /// Event or command name.
+        event: String,
+        /// Execution deadline in seconds.
+        #[arg(long, default_value_t = 10)]
+        timeout: u64,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(CliCommand::Completions { shell }) = &cli.command {
+        generate(*shell, &mut Cli::command(), "papr", &mut std::io::stdout());
+        return Ok(());
+    }
     let paths = Paths::discover().context("failed to resolve papr directories")?;
     if matches!(&cli.command, Some(CliCommand::Paths)) {
         println!("config: {}", paths.config_file.display());
         println!("database: {}", paths.database_file.display());
         println!("downloads: {}", paths.downloads_dir.display());
+        println!("plugins: {}", paths.plugins_dir.display());
         return Ok(());
     }
 
     let config = Config::load_or_create(&paths).context("failed to load configuration")?;
+    let plugin_host = PluginHost::discover(&paths.plugins_dir, &config.enabled_plugins)
+        .context("failed to discover plugins")?;
+    if handle_plugin_cli(cli.command.as_ref(), &plugin_host).await? {
+        return Ok(());
+    }
     let theme = Theme::load(&config.theme).context("failed to load theme")?;
     let database = Database::open(&paths.database_file).context("failed to open database")?;
     if matches!(&cli.command, Some(CliCommand::Index)) {
@@ -61,12 +89,16 @@ async fn main() -> Result<()> {
         println!("indexed: {}, imported: {}", pdfs.len(), imported);
         return Ok(());
     }
+    let dashboard = database
+        .research_dashboard()
+        .context("failed to load research dashboard")?;
     let mut app = App {
-        stats: database
-            .dashboard_stats()
-            .context("failed to load dashboard")?,
+        stats: dashboard.counts,
+        dashboard,
         ..App::default()
     };
+    app.plugins = plugin_host.plugins();
+    app.plugin_diagnostics = plugin_host.diagnostics().len();
     app.library.papers = database
         .library_papers()
         .context("failed to load library")?;
@@ -99,12 +131,52 @@ async fn main() -> Result<()> {
     run(&mut session, &mut app, &theme, runtime).await
 }
 
+async fn handle_plugin_cli(command: Option<&CliCommand>, plugin_host: &PluginHost) -> Result<bool> {
+    if matches!(command, Some(CliCommand::Plugins)) {
+        for plugin in plugin_host.plugins() {
+            println!(
+                "{}\t{}\t{}\t{}",
+                plugin.id,
+                plugin.version,
+                if plugin.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+                plugin.name
+            );
+        }
+        for diagnostic in plugin_host.diagnostics() {
+            eprintln!(
+                "invalid\t{}\t{}",
+                diagnostic.path.display(),
+                diagnostic.message
+            );
+        }
+        return Ok(true);
+    }
+    if let Some(CliCommand::Plugin { id, event, timeout }) = command {
+        let response = plugin_host
+            .invoke(
+                id,
+                &papr_core::PluginRequest::new(event, serde_json::json!({})),
+                std::time::Duration::from_secs(*timeout),
+            )
+            .await
+            .context("plugin invocation failed")?;
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 #[derive(Debug)]
 enum UiAction {
     Search(String),
+    OpenPaper(RemotePaper),
     Download(RemotePaper),
     Reindex,
-    OpenPdf(PathBuf),
+    OpenPdf { paper_id: i64, path: PathBuf },
     OpenNote(PaperTarget),
     SaveNote(PaperNote),
     Prompt(PaperTarget, PromptKind),
@@ -123,6 +195,9 @@ struct SearchResponse {
     query: String,
     result: Result<Vec<RemotePaper>, String>,
 }
+
+#[derive(Debug)]
+struct TodayResponse(Result<Vec<RemotePaper>, String>);
 
 struct Runtime {
     arxiv: ArxivClient,
@@ -155,14 +230,33 @@ async fn run(
     let (sender, mut receiver) = mpsc::unbounded_channel::<SearchResponse>();
     let (index_sender, mut index_receiver) = mpsc::unbounded_channel::<IndexResponse>();
     let (download_sender, mut download_receiver) = mpsc::unbounded_channel::<DownloadEvent>();
+    let (today_sender, mut today_receiver) = mpsc::unbounded_channel::<TodayResponse>();
     let senders = ActionSenders {
         search: sender,
         index: index_sender,
         download: download_sender,
     };
     let mut pending_downloads = HashMap::<String, RemotePaper>::new();
+    app.today_status = DiscoveryStatus::Loading;
+    let today_client = runtime.arxiv.clone();
+    tokio::spawn(async move {
+        let result = today_client
+            .latest(12)
+            .await
+            .map_err(|error| error.to_string());
+        let _ = today_sender.send(TodayResponse(result));
+    });
     start_scan(&runtime.library_roots, &senders.index, app);
     while !app.should_quit {
+        while let Ok(TodayResponse(result)) = today_receiver.try_recv() {
+            match result {
+                Ok(papers) => {
+                    app.today_papers = papers;
+                    app.today_status = DiscoveryStatus::Ready;
+                }
+                Err(error) => app.today_status = DiscoveryStatus::Error(error),
+            }
+        }
         while let Ok(response) = receiver.try_recv() {
             if response.query == app.discovery.query {
                 match response.result {
@@ -228,6 +322,9 @@ fn apply_ui_action(
 ) -> Result<()> {
     match action {
         UiAction::Search(query) => {
+            runtime
+                .database
+                .record_activity("search", None, Some(&query))?;
             app.discovery.status = DiscoveryStatus::Loading;
             let client = runtime.arxiv.clone();
             let response_sender = senders.search.clone();
@@ -239,6 +336,13 @@ fn apply_ui_action(
                 let _ = response_sender.send(SearchResponse { query, result });
             });
         }
+        UiAction::OpenPaper(paper) => {
+            let paper_id = runtime.database.ensure_remote_paper(&paper)?;
+            runtime.database.record_open(paper_id, false)?;
+            app.mode = AppMode::PaperDetail;
+            app.discovery.detail_scroll = 0;
+            refresh_dashboard(&runtime.database, app)?;
+        }
         UiAction::Download(paper) => start_download(
             paper,
             &runtime.download_dir,
@@ -248,9 +352,16 @@ fn apply_ui_action(
             app,
         ),
         UiAction::Reindex => start_scan(&runtime.library_roots, &senders.index, app),
-        UiAction::OpenPdf(path) => open_pdf(&runtime.pdf_viewer, &path, app)?,
+        UiAction::OpenPdf { paper_id, path } => {
+            runtime.database.record_open(paper_id, true)?;
+            open_pdf(&runtime.pdf_viewer, &path, app)?;
+            refresh_dashboard(&runtime.database, app)?;
+        }
         UiAction::OpenNote(target) => {
             let paper_id = resolve_target(target, &runtime.database)?;
+            runtime
+                .database
+                .record_activity("note_opened", Some(paper_id), None)?;
             app.note_editor = Some(runtime.database.paper_note(paper_id)?);
             app.note_preview = false;
             app.mode = AppMode::NoteEdit;
@@ -269,20 +380,37 @@ fn apply_ui_action(
             match prompt.kind {
                 PromptKind::Tag => {
                     runtime.database.add_tag(prompt.paper_id, &prompt.value)?;
+                    runtime.database.record_activity(
+                        "tagged",
+                        Some(prompt.paper_id),
+                        Some(&prompt.value),
+                    )?;
                 }
                 PromptKind::Collection => {
                     runtime
                         .database
                         .add_to_collection(prompt.paper_id, &prompt.value)?;
+                    runtime.database.record_activity(
+                        "collected",
+                        Some(prompt.paper_id),
+                        Some(&prompt.value),
+                    )?;
                 }
             }
             refresh_organization(&runtime.database, app)?;
+            refresh_dashboard(&runtime.database, app)?;
             app.toast = Some(format!("Saved {}", prompt.value));
         }
         UiAction::Bookmark(target) => {
             let paper_id = resolve_target(target, &runtime.database)?;
             let active = runtime.database.toggle_bookmark(paper_id)?;
+            runtime.database.record_activity(
+                "bookmarked",
+                Some(paper_id),
+                Some(if active { "added" } else { "removed" }),
+            )?;
             refresh_organization(&runtime.database, app)?;
+            refresh_dashboard(&runtime.database, app)?;
             app.toast = Some(if active {
                 "Paper bookmarked".into()
             } else {
@@ -304,6 +432,12 @@ fn refresh_organization(database: &Database, app: &mut App) -> Result<()> {
     app.collections = database.collections()?;
     app.tags = database.tags()?;
     app.bookmarks = database.bookmarks()?;
+    Ok(())
+}
+
+fn refresh_dashboard(database: &Database, app: &mut App) -> Result<()> {
+    app.dashboard = database.research_dashboard()?;
+    app.stats = app.dashboard.counts;
     Ok(())
 }
 
@@ -341,7 +475,7 @@ fn open_pdf(viewer: &str, path: &Path, app: &mut App) -> Result<()> {
     if !has_placeholder {
         command.arg(path);
     }
-    
+
     command.stdout(Stdio::null());
     command.stderr(Stdio::null());
 
@@ -420,7 +554,7 @@ fn apply_index_response(response: IndexResponse, database: &Database, app: &mut 
         IndexResponse::File(Err(error)) => app.library.message = Some(error),
     }
     app.library.papers = database.library_papers()?;
-    app.stats = database.dashboard_stats()?;
+    refresh_dashboard(database, app)?;
     Ok(())
 }
 
@@ -496,13 +630,14 @@ fn apply_download_event(
         DownloadEvent::Completed { id, path } => {
             let pdf = LibraryIndexer::inspect(&path).context("failed to index downloaded PDF")?;
             if let Some(paper) = pending.remove(&id) {
-                database.attach_download(&paper, &pdf)?;
+                let paper_id = database.attach_download(&paper, &pdf)?;
+                database.record_activity("downloaded", Some(paper_id), None)?;
             }
             task.downloaded = pdf.file_size;
             task.total = Some(pdf.file_size);
             task.status = DownloadStatus::Completed;
             app.library.papers = database.library_papers()?;
-            app.stats = database.dashboard_stats()?;
+            refresh_dashboard(database, app)?;
             let _ = index_sender.send(IndexResponse::File(Ok(pdf)));
         }
         DownloadEvent::Failed { id, error } => {
@@ -576,10 +711,24 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if key.code == KeyCode::Char('r') && app.page == papr_core::Page::Library {
         return Some(UiAction::Reindex);
     }
+    if app.page == papr_core::Page::Discover
+        && matches!(
+            key.code,
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
+        )
+    {
+        return app
+            .discovery
+            .results
+            .get(app.discovery.selected)
+            .cloned()
+            .map(UiAction::OpenPaper);
+    }
     if app.page == papr_core::Page::Library
         && matches!(key.code, KeyCode::Char('p') | KeyCode::Enter)
     {
-        return selected_library_pdf(app).map(UiAction::OpenPdf);
+        return selected_library_pdf(app)
+            .map(|(paper_id, path)| UiAction::OpenPdf { paper_id, path });
     }
     if app.page == papr_core::Page::Library
         && let Some(action) = handle_library_metadata_key(app, key)
@@ -587,7 +736,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         return Some(action);
     }
 
-    let command = match (key.code, key.modifiers) {
+    if let Some(command) = navigation_command(key) {
+        app.dispatch(command);
+    }
+    None
+}
+
+fn navigation_command(key: KeyEvent) -> Option<Command> {
+    match (key.code, key.modifiers) {
         (KeyCode::Char('p'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(Command::TogglePalette)
         }
@@ -598,11 +754,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         (KeyCode::Char('?'), _) => Some(Command::ToggleHelp),
         (KeyCode::Char('q'), _) => Some(Command::Quit),
         _ => None,
-    };
-    if let Some(command) = command {
-        app.dispatch(command);
     }
-    None
 }
 
 fn handle_modal_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
@@ -731,12 +883,12 @@ fn selected_remote_target(app: &App) -> Option<PaperTarget> {
         .map(PaperTarget::Remote)
 }
 
-fn selected_library_pdf(app: &App) -> Option<PathBuf> {
-    app.library
-        .papers
-        .get(app.library.selected)
-        .and_then(|paper| paper.pdf_path.as_ref())
-        .map(PathBuf::from)
+fn selected_library_pdf(app: &App) -> Option<(i64, PathBuf)> {
+    let paper = app.library.papers.get(app.library.selected)?;
+    paper
+        .pdf_path
+        .as_ref()
+        .map(|path| (paper.id, PathBuf::from(path)))
 }
 
 #[cfg(test)]
@@ -827,9 +979,11 @@ mod tests {
             ..App::default()
         };
         let action = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(
-            matches!(action, Some(UiAction::OpenPdf(path)) if path == std::path::Path::new("/tmp/paper.pdf"))
-        );
+        assert!(matches!(
+            action,
+            Some(UiAction::OpenPdf { paper_id: 7, path })
+                if path == std::path::Path::new("/tmp/paper.pdf")
+        ));
     }
 
     #[test]
