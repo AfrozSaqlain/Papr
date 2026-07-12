@@ -32,5 +32,73 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
 
+## Configuration
+
 Configuration is loaded from the platform configuration directory as
-`papr/config.toml`. Missing configuration is created automatically.
+`papr/config.toml`. Missing configuration is created automatically the first
+time `papr` runs.
+
+Run this command to print the exact paths used on your machine:
+
+```sh
+cargo run --release --bin papr -- paths
+```
+
+The output includes:
+
+- `config`: the TOML configuration file to edit.
+- `database`: the SQLite database file.
+- `downloads`: the default PDF download directory.
+
+On Linux, the config file is usually:
+
+```text
+~/.config/papr/config.toml
+```
+
+On Linux, the default PDF download directory is usually:
+
+```text
+~/.local/share/papr/papers
+```
+
+To change where downloaded PDFs are stored, edit `config.toml` and set
+`download_path`:
+
+```toml
+download_path = "/home/you/Documents/papers"
+```
+
+To scan existing PDF folders as part of the library, add them to
+`library_folders`:
+
+```toml
+library_folders = [
+  "/home/you/Documents/papers",
+  "/home/you/Downloads/research",
+]
+```
+
+An example complete config:
+
+```toml
+theme = "catppuccin"
+startup_page = "dashboard"
+pdf_viewer = "xdg-open"
+library_folders = [
+  "/home/you/Documents/papers",
+]
+download_path = "/home/you/Documents/papers"
+mouse = false
+```
+
+After updating `library_folders`, run the index command to import PDFs without
+opening the TUI:
+
+```sh
+cargo run --release --bin papr -- index
+```
+
+When `download_path` is unset, downloaded PDFs are saved to the default
+`downloads` path printed by `papr paths`. The download directory is also watched
+and indexed automatically while the TUI is running.
