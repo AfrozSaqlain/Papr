@@ -86,6 +86,23 @@ impl ArxivClient {
 struct Feed {
     #[serde(rename = "entry", default)]
     entries: Vec<Entry>,
+    /// Absorb feed-level `<link>` elements so `quick_xml` does not report
+    /// "duplicate field `link`" when the real Atom feed contains them.
+    #[serde(rename = "link", default)]
+    #[allow(dead_code)]
+    _links: Vec<Link>,
+    /// Feed title returned by arXiv (e.g. "`ArXiv` Query: ...").
+    #[serde(default)]
+    #[allow(dead_code)]
+    title: Option<String>,
+    /// Feed identifier.
+    #[serde(default)]
+    #[allow(dead_code)]
+    id: Option<String>,
+    /// Feed-level update timestamp.
+    #[serde(default)]
+    #[allow(dead_code)]
+    updated: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -175,10 +192,15 @@ mod tests {
 
     const FEED: &str = r#"<?xml version="1.0" encoding="utf-8"?>
     <feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+      <link href="http://arxiv.org/api/query?search_query=all:test" rel="self" type="application/atom+xml"/>
+      <title>ArXiv Query: search_query=all:test</title>
+      <id>http://arxiv.org/api/query?search_query=all:test</id>
+      <updated>2025-01-02T00:00:00-05:00</updated>
       <entry><id>http://arxiv.org/abs/2501.00001v1</id><updated>2025-01-02T00:00:00Z</updated>
       <published>2025-01-01T00:00:00Z</published><title>A  Useful
       Paper</title><summary>An abstract.</summary>
       <author><name>Ada Lovelace</name></author><category term="cs.LG"/>
+      <link href="http://arxiv.org/abs/2501.00001v1" rel="alternate" type="text/html"/>
       <link title="pdf" href="https://arxiv.org/pdf/2501.00001" type="application/pdf"/>
       <arxiv:doi>10.1000/example</arxiv:doi><arxiv:journal_ref>Example Journal</arxiv:journal_ref></entry>
     </feed>"#;
@@ -192,6 +214,33 @@ mod tests {
         assert_eq!(papers[0].categories, ["cs.LG"]);
         assert_eq!(papers[0].doi.as_deref(), Some("10.1000/example"));
         assert!(papers[0].pdf_url.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn parses_entry_links_split_by_other_metadata() -> Result<(), Box<dyn std::error::Error>> {
+        let feed = r#"<?xml version="1.0" encoding="utf-8"?>
+        <feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+          <entry>
+            <id>http://arxiv.org/abs/2501.00001v1</id>
+            <updated>2025-01-02T00:00:00Z</updated>
+            <published>2025-01-01T00:00:00Z</published>
+            <title>A Useful Paper</title>
+            <summary>An abstract.</summary>
+            <author><name>Ada Lovelace</name></author>
+            <link href="http://arxiv.org/abs/2501.00001v1" rel="alternate" type="text/html"/>
+            <arxiv:primary_category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+            <category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+            <link title="pdf" href="https://arxiv.org/pdf/2501.00001" type="application/pdf"/>
+          </entry>
+        </feed>"#;
+
+        let papers = parse_feed(feed)?;
+
+        assert_eq!(
+            papers[0].pdf_url.as_deref(),
+            Some("https://arxiv.org/pdf/2501.00001")
+        );
         Ok(())
     }
 
