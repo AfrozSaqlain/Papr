@@ -114,11 +114,6 @@ pub enum PluginAction {
         /// User-facing text.
         message: String,
     },
-    /// Add a tag to the paper in the invocation context.
-    AddTag {
-        /// Tag name.
-        name: String,
-    },
     /// Add the paper in context to a collection.
     AddToCollection {
         /// Collection name.

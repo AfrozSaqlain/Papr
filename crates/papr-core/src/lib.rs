@@ -13,7 +13,7 @@ pub mod theme;
 pub use api::arxiv::ArxivClient;
 pub use app::{
     App, AppMode, Command, DiscoveryStatus, DownloadStatus, DownloadTask, LibraryState,
-    MetadataPrompt, Page, PromptKind,
+    MetadataPrompt, Page,
 };
 pub use config::{Config, Paths};
 pub use database::Database;
@@ -21,7 +21,7 @@ pub use downloads::{DownloadEvent, DownloadManager};
 pub use library::{ImportedPdf, LibraryIndexer, LibraryWatcher};
 pub use models::{
     ActivityItem, BookmarkSummary, CollectionSummary, LibraryPaper, PaperNote, ReadingDay,
-    ReadingStatistics, RemotePaper, ResearchDashboard, TagSummary,
+    ReadingStatistics, RemotePaper, ResearchDashboard,
 };
 pub use plugins::{
     PluginAction, PluginCapability, PluginDiagnostic, PluginHost, PluginInfo, PluginManifest,

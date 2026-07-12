@@ -1,8 +1,7 @@
 //! Ratatui rendering for the application shell.
 
 use papr_core::{
-    App, AppMode, DiscoveryStatus, DownloadStatus, LibraryPaper, Page, PromptKind, RemotePaper,
-    Theme,
+    App, AppMode, DiscoveryStatus, DownloadStatus, LibraryPaper, Page, RemotePaper, Theme,
 };
 use ratatui::{
     Frame,
@@ -118,7 +117,9 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
         render_library(frame, inset, app, theme);
     } else if app.page == Page::Downloads {
         render_downloads(frame, inset, app, theme);
-    } else if matches!(app.page, Page::Collections | Page::Tags | Page::Bookmarks) {
+    } else if app.page == Page::Collections {
+        render_collections(frame, inset, app, theme);
+    } else if app.page == Page::Bookmarks {
         render_organization(frame, inset, app, theme);
     } else if app.page == Page::Notes {
         frame.render_widget(
@@ -146,6 +147,111 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
         ];
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inset);
     }
+}
+
+fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    if let Some(collection) = &app.active_collection {
+        render_collection_papers(frame, area, app, collection, theme);
+        return;
+    }
+    if app.collections.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No collections yet. Select a paper and press s to create one.")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme.muted)),
+            area,
+        );
+        return;
+    }
+    let items = app.collections.iter().map(|collection| {
+        ListItem::new(vec![
+            Line::styled(
+                &collection.name,
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::styled(
+                format!("{} papers", collection.paper_count),
+                Style::default().fg(theme.muted),
+            ),
+        ])
+    });
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(" COLLECTIONS - ENTER TO VIEW PAPERS ")
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(theme.border)),
+        )
+        .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
+        .highlight_symbol("> ");
+    let mut state = ListState::default().with_selected(Some(app.collection_selected));
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_collection_papers(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    collection: &papr_core::CollectionSummary,
+    theme: &Theme,
+) {
+    let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(4)]).split(area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Collections / ", Style::default().fg(theme.muted)),
+            Span::styled(
+                &collection.name,
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "   h/Esc back   Enter/p open PDF",
+                Style::default().fg(theme.muted),
+            ),
+        ])),
+        rows[0],
+    );
+    if app.collection_papers.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No papers are assigned to this collection.")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme.muted)),
+            rows[1],
+        );
+        return;
+    }
+    let items = app.collection_papers.iter().map(|paper| {
+        let availability = if paper.pdf_path.is_some() {
+            "PDF available"
+        } else {
+            "Metadata only"
+        };
+        ListItem::new(vec![
+            Line::styled(
+                &paper.title,
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ),
+            Line::styled(
+                format!("{}  |  {}", library_metadata(paper), availability),
+                Style::default().fg(theme.muted),
+            ),
+            Line::raw(""),
+        ])
+    });
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(format!(" {} PAPERS ", app.collection_papers.len()))
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(theme.border)),
+        )
+        .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
+        .highlight_symbol("> ");
+    let mut state = ListState::default().with_selected(Some(app.collection_paper_selected));
+    frame.render_stateful_widget(list, rows[1], &mut state);
 }
 
 fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
@@ -359,7 +465,7 @@ fn activity_kind(kind: &str) -> &str {
         "search" => "Search",
         "downloaded" => "Downloaded",
         "bookmarked" => "Bookmark changed",
-        "tagged" => "Tagged",
+        "tagged" => "Legacy organization event",
         "collected" => "Added to collection",
         _ => kind,
     }
@@ -367,16 +473,6 @@ fn activity_kind(kind: &str) -> &str {
 
 fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     let items: Vec<ListItem<'_>> = match app.page {
-        Page::Collections => app
-            .collections
-            .iter()
-            .map(|item| ListItem::new(format!("{}  ({} papers)", item.name, item.paper_count)))
-            .collect(),
-        Page::Tags => app
-            .tags
-            .iter()
-            .map(|item| ListItem::new(format!("#{}  ({} papers)", item.name, item.paper_count)))
-            .collect(),
         Page::Bookmarks => app
             .bookmarks
             .iter()
@@ -492,10 +588,7 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let Some(prompt) = &app.metadata_prompt else {
         return;
     };
-    let title = match prompt.kind {
-        PromptKind::Tag => " ADD TAG ",
-        PromptKind::Collection => " ADD TO COLLECTION ",
-    };
+    let title = " ADD TO COLLECTION ";
     let area = centered(60, 3, frame.area());
     frame.render_widget(Clear, area);
     frame.render_widget(
@@ -1086,7 +1179,7 @@ fn render_palette(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
 fn render_help(frame: &mut Frame<'_>, theme: &Theme) {
     let area = centered(64, 18, frame.area());
     frame.render_widget(Clear, area);
-    let help = "j / k      Move selection\nEnter      Open section\nh / l      Back / open\nCtrl+p     Command palette\n/          Search (Milestone 2)\np          Open PDF\nd          Download\nb          Copy BibTeX\nf          Favorite\nn          Notes\nt          Tag\nm          Mark read\nq          Close / quit\n?          Toggle this help";
+    let help = "j / k      Move selection\nEnter      Open selection\nh / l      Back / open\nCtrl+p     Command palette\n/          Search arXiv\np          Open local PDF\nd          Download\nn          Notes\ns          Collection\nB          Bookmark\nq          Close / quit\n?          Toggle this help";
     frame.render_widget(
         Paragraph::new(help)
             .style(Style::default().fg(theme.text))
@@ -1125,8 +1218,8 @@ fn centered(width: u16, height: u16, area: Rect) -> Rect {
 mod tests {
     use chrono::{TimeZone, Utc};
     use papr_core::{
-        ActivityItem, App, AppMode, DiscoveryStatus, DownloadStatus, DownloadTask, LibraryPaper,
-        Page, RemotePaper, Theme,
+        ActivityItem, App, AppMode, CollectionSummary, DiscoveryStatus, DownloadStatus,
+        DownloadTask, LibraryPaper, Page, RemotePaper, Theme,
     };
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -1239,6 +1332,43 @@ mod tests {
         let statistics = rendered_text(&terminal);
         assert!(statistics.contains("4 days"));
         assert!(statistics.contains("Monday"));
+        Ok(())
+    }
+
+    #[test]
+    fn collections_and_their_papers_render_as_selectable_lists()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let backend = TestBackend::new(100, 32);
+        let mut terminal = Terminal::new(backend)?;
+        let collection = CollectionSummary {
+            id: 4,
+            name: "Important Papers".into(),
+            paper_count: 1,
+        };
+        let mut app = App {
+            page: Page::Collections,
+            collections: vec![collection.clone()],
+            ..App::default()
+        };
+        let theme = Theme::load("nord")?;
+        terminal.draw(|frame| render(frame, &app, &theme))?;
+        assert!(rendered_text(&terminal).contains("Important Papers"));
+
+        app.active_collection = Some(collection);
+        app.collection_papers.push(LibraryPaper {
+            id: 8,
+            title: "Paper In Collection".into(),
+            authors: "Researcher".into(),
+            doi: None,
+            pdf_path: Some("/tmp/paper.pdf".into()),
+            file_size: Some(1024),
+            reading_status: "unread".into(),
+            is_favorite: false,
+        });
+        terminal.draw(|frame| render(frame, &app, &theme))?;
+        let rendered = rendered_text(&terminal);
+        assert!(rendered.contains("Paper In Collection"));
+        assert!(rendered.contains("PDF available"));
         Ok(())
     }
 

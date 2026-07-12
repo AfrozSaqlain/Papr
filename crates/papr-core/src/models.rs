@@ -105,17 +105,6 @@ pub struct CollectionSummary {
     pub paper_count: u64,
 }
 
-/// Tag with its current paper count.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TagSummary {
-    /// Stable tag identifier.
-    pub id: i64,
-    /// Unique display name.
-    pub name: String,
-    /// Number of tagged papers.
-    pub paper_count: u64,
-}
-
 /// A bookmarked paper or position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BookmarkSummary {

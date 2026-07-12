@@ -10,7 +10,7 @@ use crate::{
     library::ImportedPdf,
     models::{
         ActivityItem, BookmarkSummary, CollectionSummary, DashboardStats, LibraryPaper, PaperNote,
-        ReadingDay, ReadingStatistics, RemotePaper, ResearchDashboard, TagSummary,
+        ReadingDay, ReadingStatistics, RemotePaper, ResearchDashboard,
     },
 };
 
@@ -22,6 +22,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0003_research_organization.sql"),
     ),
     (4, include_str!("../migrations/0004_activity.sql")),
+    (
+        5,
+        include_str!("../migrations/0005_merge_tags_into_collections.sql"),
+    ),
 ];
 
 /// Database initialization and query errors.
@@ -386,30 +390,6 @@ impl Database {
         Ok(())
     }
 
-    /// Add a normalized tag to a paper, creating it when necessary.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the tag assignment cannot be persisted.
-    pub fn add_tag(&self, paper_id: i64, name: &str) -> Result<(), DatabaseError> {
-        let name = name.trim();
-        if name.is_empty() {
-            return Ok(());
-        }
-        self.connection
-            .execute("INSERT OR IGNORE INTO tags (name) VALUES (?1)", [name])?;
-        let tag_id = self.connection.query_row(
-            "SELECT id FROM tags WHERE name = ?1 COLLATE NOCASE",
-            [name],
-            |row| row.get::<_, i64>(0),
-        )?;
-        self.connection.execute(
-            "INSERT OR IGNORE INTO paper_tags (paper_id, tag_id) VALUES (?1, ?2)",
-            params![paper_id, tag_id],
-        )?;
-        Ok(())
-    }
-
     /// Add a paper to a named collection, creating it when necessary.
     ///
     /// # Errors
@@ -478,22 +458,35 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    /// List tags with paper counts.
+    /// List papers assigned to a collection in newest-first library order.
     ///
     /// # Errors
     ///
-    /// Returns an error when the tag query fails.
-    pub fn tags(&self) -> Result<Vec<TagSummary>, DatabaseError> {
+    /// Returns an error when the collection-paper query fails.
+    pub fn papers_for_collection(
+        &self,
+        collection_id: i64,
+    ) -> Result<Vec<LibraryPaper>, DatabaseError> {
         let mut statement = self.connection.prepare(
-            "SELECT t.id, t.name, COUNT(pt.paper_id) FROM tags t
-             LEFT JOIN paper_tags pt ON pt.tag_id = t.id
-             GROUP BY t.id ORDER BY t.name COLLATE NOCASE",
+            "SELECT p.id, p.title,
+                    COALESCE((SELECT GROUP_CONCAT(a.name, ', ')
+                              FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
+                              WHERE pa.paper_id = p.id ORDER BY pa.position), ''),
+                    p.doi, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
+             FROM collection_papers cp JOIN papers p ON p.id = cp.paper_id
+             WHERE cp.collection_id = ?1 ORDER BY p.created_at DESC, p.id DESC",
         )?;
-        let rows = statement.query_map([], |row| {
-            Ok(TagSummary {
+        let rows = statement.query_map([collection_id], |row| {
+            let file_size: Option<i64> = row.get(5)?;
+            Ok(LibraryPaper {
                 id: row.get(0)?,
-                name: row.get(1)?,
-                paper_count: row.get(2)?,
+                title: row.get(1)?,
+                authors: row.get(2)?,
+                doi: row.get(3)?,
+                pdf_path: row.get(4)?,
+                file_size: file_size.and_then(|size| u64::try_from(size).ok()),
+                reading_status: row.get(6)?,
+                is_favorite: row.get(7)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -739,6 +732,7 @@ mod tests {
     use std::path::PathBuf;
 
     use chrono::{TimeZone, Utc};
+    use rusqlite::params;
 
     use super::Database;
     use crate::{
@@ -793,8 +787,7 @@ mod tests {
     }
 
     #[test]
-    fn notes_tags_collections_and_bookmarks_are_idempotent()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn notes_collections_and_bookmarks_are_idempotent() -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::in_memory()?;
         let paper_id = database.insert_paper("Organized paper", None)?;
         let note = PaperNote {
@@ -808,19 +801,45 @@ mod tests {
         database.save_note(&revised)?;
         assert_eq!(database.paper_note(paper_id)?.body, "# Revised");
 
-        database.add_tag(paper_id, "important")?;
-        database.add_tag(paper_id, "IMPORTANT")?;
         database.add_to_collection(paper_id, "Journal Club")?;
         database.add_to_collection(paper_id, "journal club")?;
-        assert_eq!(database.tags()?.len(), 1);
-        assert_eq!(database.tags()?[0].paper_count, 1);
         assert_eq!(database.collections()?.len(), 1);
         assert_eq!(database.collections()?[0].paper_count, 1);
+        let collection_id = database.collections()?[0].id;
+        let collection_papers = database.papers_for_collection(collection_id)?;
+        assert_eq!(collection_papers.len(), 1);
+        assert_eq!(collection_papers[0].title, "Organized paper");
 
         assert!(database.toggle_bookmark(paper_id)?);
         assert_eq!(database.bookmarks()?.len(), 1);
         assert!(!database.toggle_bookmark(paper_id)?);
         assert!(database.bookmarks()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_tags_are_merged_into_selectable_collections() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let database = Database::in_memory()?;
+        let paper_id = database.insert_paper("Legacy tagged paper", None)?;
+        database
+            .connection
+            .execute("INSERT INTO tags (name) VALUES ('review')", [])?;
+        let tag_id = database.connection.last_insert_rowid();
+        database.connection.execute(
+            "INSERT INTO paper_tags (paper_id, tag_id) VALUES (?1, ?2)",
+            params![paper_id, tag_id],
+        )?;
+        database.connection.execute_batch(include_str!(
+            "../migrations/0005_merge_tags_into_collections.sql"
+        ))?;
+
+        let collections = database.collections()?;
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].name, "review");
+        assert_eq!(collections[0].paper_count, 1);
+        let papers = database.papers_for_collection(collections[0].id)?;
+        assert_eq!(papers[0].title, "Legacy tagged paper");
         Ok(())
     }
 

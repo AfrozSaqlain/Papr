@@ -2,7 +2,7 @@
 
 use crate::models::{
     BookmarkSummary, CollectionSummary, DashboardStats, LibraryPaper, PaperNote, RemotePaper,
-    ResearchDashboard, TagSummary,
+    ResearchDashboard,
 };
 use crate::plugins::PluginInfo;
 
@@ -23,8 +23,6 @@ pub enum Page {
     Bookmarks,
     /// Followed and cataloged authors.
     Authors,
-    /// Paper taxonomy.
-    Tags,
     /// Markdown research notes.
     Notes,
     /// Background transfers.
@@ -41,7 +39,7 @@ pub enum Page {
 
 impl Page {
     /// All pages in sidebar order.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 13] = [
         Self::Dashboard,
         Self::Discover,
         Self::Library,
@@ -49,7 +47,6 @@ impl Page {
         Self::Collections,
         Self::Bookmarks,
         Self::Authors,
-        Self::Tags,
         Self::Notes,
         Self::Downloads,
         Self::History,
@@ -69,7 +66,6 @@ impl Page {
             Self::Collections => "Collections",
             Self::Bookmarks => "Bookmarks",
             Self::Authors => "Authors",
-            Self::Tags => "Tags",
             Self::Notes => "Notes",
             Self::Downloads => "Downloads",
             Self::History => "History",
@@ -96,17 +92,8 @@ pub enum AppMode {
     PaperDetail,
     /// Direct Markdown note editing.
     NoteEdit,
-    /// Single-line tag or collection input.
+    /// Single-line collection input.
     Prompt,
-}
-
-/// Purpose of the active single-line metadata prompt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PromptKind {
-    /// Assign a tag.
-    Tag,
-    /// Add to a collection.
-    Collection,
 }
 
 /// Active metadata input prompt.
@@ -114,8 +101,6 @@ pub enum PromptKind {
 pub struct MetadataPrompt {
     /// Target paper identifier.
     pub paper_id: i64,
-    /// Input purpose.
-    pub kind: PromptKind,
     /// Editable input value.
     pub value: String,
 }
@@ -242,12 +227,18 @@ pub struct App {
     pub note_editor: Option<PaperNote>,
     /// Whether the note overlay shows rendered Markdown instead of source.
     pub note_preview: bool,
-    /// Active tag or collection prompt.
+    /// Active collection prompt.
     pub metadata_prompt: Option<MetadataPrompt>,
     /// Collection summaries.
     pub collections: Vec<CollectionSummary>,
-    /// Tag summaries.
-    pub tags: Vec<TagSummary>,
+    /// Selected collection row.
+    pub collection_selected: usize,
+    /// Collection currently opened for paper browsing.
+    pub active_collection: Option<CollectionSummary>,
+    /// Papers assigned to the active collection.
+    pub collection_papers: Vec<LibraryPaper>,
+    /// Selected paper within the active collection.
+    pub collection_paper_selected: usize,
     /// Bookmark summaries.
     pub bookmarks: Vec<BookmarkSummary>,
     /// Short user-facing operation result.
@@ -280,7 +271,10 @@ impl Default for App {
             note_preview: false,
             metadata_prompt: None,
             collections: Vec::new(),
-            tags: Vec::new(),
+            collection_selected: 0,
+            active_collection: None,
+            collection_papers: Vec::new(),
+            collection_paper_selected: 0,
             bookmarks: Vec::new(),
             toast: None,
             modal_return: AppMode::Normal,
@@ -301,6 +295,13 @@ impl App {
                     self.library.selected = self.library.selected.saturating_sub(1);
                 } else if self.page == Page::Downloads {
                     self.download_selected = self.download_selected.saturating_sub(1);
+                } else if self.page == Page::Collections {
+                    if self.active_collection.is_some() {
+                        self.collection_paper_selected =
+                            self.collection_paper_selected.saturating_sub(1);
+                    } else {
+                        self.collection_selected = self.collection_selected.saturating_sub(1);
+                    }
                 } else {
                     self.sidebar_index = self.sidebar_index.saturating_sub(1);
                 }
@@ -315,6 +316,14 @@ impl App {
                 } else if self.page == Page::Downloads {
                     self.download_selected =
                         (self.download_selected + 1).min(self.downloads.len().saturating_sub(1));
+                } else if self.page == Page::Collections {
+                    if self.active_collection.is_some() {
+                        self.collection_paper_selected = (self.collection_paper_selected + 1)
+                            .min(self.collection_papers.len().saturating_sub(1));
+                    } else {
+                        self.collection_selected = (self.collection_selected + 1)
+                            .min(self.collections.len().saturating_sub(1));
+                    }
                 } else {
                     self.sidebar_index = (self.sidebar_index + 1).min(Page::ALL.len() - 1);
                 }

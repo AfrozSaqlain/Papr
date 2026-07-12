@@ -16,7 +16,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use papr_core::{
     App, AppMode, ArxivClient, Command, Config, Database, DiscoveryStatus, DownloadEvent,
     DownloadManager, DownloadStatus, DownloadTask, ImportedPdf, LibraryIndexer, LibraryWatcher,
-    MetadataPrompt, PaperNote, Paths, PluginHost, PromptKind, RemotePaper, Theme,
+    MetadataPrompt, PaperNote, Paths, PluginHost, RemotePaper, Theme,
 };
 use tokio::sync::mpsc;
 
@@ -179,9 +179,10 @@ enum UiAction {
     OpenPdf { paper_id: i64, path: PathBuf },
     OpenNote(PaperTarget),
     SaveNote(PaperNote),
-    Prompt(PaperTarget, PromptKind),
+    Prompt(PaperTarget),
     SubmitPrompt(MetadataPrompt),
     Bookmark(PaperTarget),
+    OpenCollection(i64),
 }
 
 #[derive(Debug)]
@@ -367,36 +368,23 @@ fn apply_ui_action(
             app.mode = AppMode::NoteEdit;
         }
         UiAction::SaveNote(note) => runtime.database.save_note(&note)?,
-        UiAction::Prompt(target, kind) => {
+        UiAction::Prompt(target) => {
             let paper_id = resolve_target(target, &runtime.database)?;
             app.metadata_prompt = Some(MetadataPrompt {
                 paper_id,
-                kind,
                 value: String::new(),
             });
             app.mode = AppMode::Prompt;
         }
         UiAction::SubmitPrompt(prompt) => {
-            match prompt.kind {
-                PromptKind::Tag => {
-                    runtime.database.add_tag(prompt.paper_id, &prompt.value)?;
-                    runtime.database.record_activity(
-                        "tagged",
-                        Some(prompt.paper_id),
-                        Some(&prompt.value),
-                    )?;
-                }
-                PromptKind::Collection => {
-                    runtime
-                        .database
-                        .add_to_collection(prompt.paper_id, &prompt.value)?;
-                    runtime.database.record_activity(
-                        "collected",
-                        Some(prompt.paper_id),
-                        Some(&prompt.value),
-                    )?;
-                }
-            }
+            runtime
+                .database
+                .add_to_collection(prompt.paper_id, &prompt.value)?;
+            runtime.database.record_activity(
+                "collected",
+                Some(prompt.paper_id),
+                Some(&prompt.value),
+            )?;
             refresh_organization(&runtime.database, app)?;
             refresh_dashboard(&runtime.database, app)?;
             app.toast = Some(format!("Saved {}", prompt.value));
@@ -417,7 +405,21 @@ fn apply_ui_action(
                 "Bookmark removed".into()
             });
         }
+        UiAction::OpenCollection(collection_id) => {
+            open_collection(&runtime.database, app, collection_id)?;
+        }
     }
+    Ok(())
+}
+
+fn open_collection(database: &Database, app: &mut App, collection_id: i64) -> Result<()> {
+    app.active_collection = app
+        .collections
+        .iter()
+        .find(|collection| collection.id == collection_id)
+        .cloned();
+    app.collection_papers = database.papers_for_collection(collection_id)?;
+    app.collection_paper_selected = 0;
     Ok(())
 }
 
@@ -430,7 +432,6 @@ fn resolve_target(target: PaperTarget, database: &Database) -> Result<i64> {
 
 fn refresh_organization(database: &Database, app: &mut App) -> Result<()> {
     app.collections = database.collections()?;
-    app.tags = database.tags()?;
     app.bookmarks = database.bookmarks()?;
     Ok(())
 }
@@ -711,6 +712,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if key.code == KeyCode::Char('r') && app.page == papr_core::Page::Library {
         return Some(UiAction::Reindex);
     }
+    if app.page == papr_core::Page::Collections {
+        let (handled, action) = handle_collection_key(app, key);
+        if handled {
+            return action;
+        }
+    }
     if app.page == papr_core::Page::Discover
         && matches!(
             key.code,
@@ -740,6 +747,47 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         app.dispatch(command);
     }
     None
+}
+
+fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction>) {
+    if app.active_collection.is_some() {
+        match key.code {
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => {
+                app.active_collection = None;
+                app.collection_papers.clear();
+                app.collection_paper_selected = 0;
+                return (true, None);
+            }
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l' | 'p') => {
+                let Some(paper) = app.collection_papers.get(app.collection_paper_selected) else {
+                    return (true, None);
+                };
+                let Some(path) = &paper.pdf_path else {
+                    app.toast = Some("This paper has no local PDF to open".into());
+                    return (true, None);
+                };
+                return (
+                    true,
+                    Some(UiAction::OpenPdf {
+                        paper_id: paper.id,
+                        path: PathBuf::from(path),
+                    }),
+                );
+            }
+            _ => return (false, None),
+        }
+    }
+    if matches!(
+        key.code,
+        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
+    ) {
+        let action = app
+            .collections
+            .get(app.collection_selected)
+            .map(|collection| UiAction::OpenCollection(collection.id));
+        return (true, action);
+    }
+    (false, None)
 }
 
 fn navigation_command(key: KeyEvent) -> Option<Command> {
@@ -843,13 +891,12 @@ fn handle_paper_detail_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 .cloned()
                 .map(UiAction::Download);
         }
-        KeyCode::Char('n' | 't' | 's') => {
+        KeyCode::Char('n' | 's') => {
             app.modal_return = AppMode::PaperDetail;
             let target = selected_remote_target(app)?;
             return Some(match key.code {
                 KeyCode::Char('n') => UiAction::OpenNote(target),
-                KeyCode::Char('t') => UiAction::Prompt(target, PromptKind::Tag),
-                _ => UiAction::Prompt(target, PromptKind::Collection),
+                _ => UiAction::Prompt(target),
             });
         }
         KeyCode::Char('B') => return selected_remote_target(app).map(UiAction::Bookmark),
@@ -867,8 +914,7 @@ fn handle_library_metadata_key(app: &mut App, key: KeyEvent) -> Option<UiAction>
     app.modal_return = AppMode::Normal;
     match key.code {
         KeyCode::Char('n') => Some(UiAction::OpenNote(target)),
-        KeyCode::Char('t') => Some(UiAction::Prompt(target, PromptKind::Tag)),
-        KeyCode::Char('s') => Some(UiAction::Prompt(target, PromptKind::Collection)),
+        KeyCode::Char('s') => Some(UiAction::Prompt(target)),
         KeyCode::Char('B') => Some(UiAction::Bookmark(target)),
         _ => None,
     }
@@ -894,7 +940,7 @@ fn selected_library_pdf(app: &App) -> Option<(i64, PathBuf)> {
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use papr_core::{App, AppMode, LibraryPaper, Page, PaperNote};
+    use papr_core::{App, AppMode, CollectionSummary, LibraryPaper, Page, PaperNote};
 
     use super::{UiAction, handle_key, parse_command};
 
@@ -994,5 +1040,40 @@ mod tests {
             vec!["tdf viewer", "--flag", "{path}"]
         );
         Ok(())
+    }
+
+    #[test]
+    fn collections_open_then_open_the_selected_paper_pdf() {
+        let paper = LibraryPaper {
+            id: 9,
+            title: "Collected paper".into(),
+            authors: String::new(),
+            doi: None,
+            pdf_path: Some("/tmp/collected.pdf".into()),
+            file_size: None,
+            reading_status: "unread".into(),
+            is_favorite: false,
+        };
+        let mut app = App {
+            page: Page::Collections,
+            collections: vec![CollectionSummary {
+                id: 3,
+                name: "Review".into(),
+                paper_count: 1,
+            }],
+            ..App::default()
+        };
+        let open_collection =
+            handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(open_collection, Some(UiAction::OpenCollection(3))));
+
+        app.active_collection = app.collections.first().cloned();
+        app.collection_papers.push(paper);
+        let open_pdf = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            open_pdf,
+            Some(UiAction::OpenPdf { paper_id: 9, path })
+                if path == std::path::Path::new("/tmp/collected.pdf")
+        ));
     }
 }

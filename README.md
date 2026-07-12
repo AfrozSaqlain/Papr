@@ -2,7 +2,7 @@
 
 **papr** is a keyboard-first terminal workspace for discovering, collecting,
 reading, and organizing academic papers. It combines arXiv discovery, a local
-PDF library, Markdown notes, collections, tags, bookmarks, downloads, reading
+PDF library, Markdown notes, collections, bookmarks, downloads, reading
 history, and research statistics in one responsive TUI.
 
 The application is written in Rust using Ratatui, Tokio, Reqwest, and SQLite.
@@ -18,7 +18,7 @@ features.
 - Detect duplicate PDFs using SHA-256 content hashes.
 - Open local PDFs with the operating system viewer or a configured command.
 - Maintain one autosaving Markdown note per paper with a styled preview.
-- Organize papers with tags, collections, and bookmarks.
+- Organize papers with collections and bookmarks.
 - Track paper and PDF activity in a persistent reading history.
 - View reading streaks, monthly and yearly totals, storage usage, and an
   activity heatmap.
@@ -68,8 +68,7 @@ cargo run --release --bin papr
 5. Press `d` to download the paper.
 6. Open **Library** from the sidebar and press `Enter` or `p` on a downloaded
    PDF to launch the configured viewer.
-7. Press `n`, `t`, `s`, or `B` on a paper to add notes, tags, collections, or
-   a bookmark.
+7. Press `n`, `s`, or `B` on a paper to add notes, collections, or a bookmark.
 
 ## Interface
 
@@ -79,10 +78,9 @@ cargo run --release --bin papr
 | Discover | arXiv search and paper details |
 | Library | Imported and downloaded local papers |
 | Reading Queue | Reserved reading-priority workspace |
-| Collections | Papers grouped into playlist-style collections |
+| Collections | Selectable paper groups with drill-down browsing |
 | Bookmarks | Bookmarked papers and positions |
 | Authors | Reserved author workspace |
-| Tags | Tag index and paper counts |
 | Notes | Entry point for paper-linked Markdown notes |
 | Downloads | Active, completed, and failed PDF transfers |
 | History | Chronological research and reading activity |
@@ -113,7 +111,6 @@ cargo run --release --bin papr
 | `j` / `k` | Scroll paper details |
 | `d` | Download the PDF |
 | `n` | Open the paper's Markdown note |
-| `t` | Assign a tag |
 | `s` | Add the paper to a collection |
 | `B` | Toggle the paper bookmark |
 | `r` | Repeat the current arXiv search |
@@ -126,7 +123,6 @@ cargo run --release --bin papr
 | `Enter` / `p` | Open the selected local PDF |
 | `r` | Rescan configured library folders |
 | `n` | Edit the paper note |
-| `t` | Assign a tag |
 | `s` | Add to a collection |
 | `B` | Toggle bookmark |
 
@@ -178,9 +174,18 @@ newly imported.
 Every paper can have one Markdown note. Notes are stored in SQLite and saved as
 you type. Preview mode highlights headings, lists, quotations, and code blocks.
 
-Tags and collections are case-insensitive and idempotent. A paper can belong to
-multiple collections and have multiple tags. Use uppercase `B` to toggle a
-whole-paper bookmark. Lowercase `b` remains reserved for citation functionality.
+Collections are case-insensitive and idempotent, and a paper can belong to
+multiple collections. Use uppercase `B` to toggle a whole-paper bookmark.
+Lowercase `b` remains reserved for citation functionality.
+
+Open **Collections**, select a collection with `j`/`k`, and press `Enter` to
+browse its papers. The paper list is also keyboard navigable. Press `Enter` or
+`p` to open a paper's local PDF, and press `h` or `Esc` to return to the
+collection list. Papers without a downloaded PDF remain visible and are
+labeled as metadata-only.
+
+Libraries created by older papr versions are upgraded automatically: legacy
+tags and their paper assignments are copied into same-named collections.
 
 ## Dashboard, History, and Statistics
 
@@ -188,7 +193,7 @@ The dashboard combines a non-blocking latest-paper feed with local library,
 queue, download, unread, streak, activity, collection, and storage data.
 
 Opening remote paper details or local PDFs records reading history. Searches,
-downloads, note opens, bookmarks, tags, and collection changes are also
+downloads, note opens, bookmarks, and collection changes are also
 recorded as research activity.
 
 Statistics include the current streak, monthly and yearly reading totals,

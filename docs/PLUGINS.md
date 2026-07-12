@@ -41,7 +41,7 @@ Response:
     {"actions":[{"type":"notify","message":"Command completed"}]}
 
 Supported capabilities are metadata-provider, commands, activity-events, and
-read-paper-metadata. Supported response actions are notify, add_tag, and
+read-paper-metadata. Supported response actions are notify and
 add_to_collection.
 
 Plugins must treat requests as independent and should finish quickly. The host
