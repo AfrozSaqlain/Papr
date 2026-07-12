@@ -59,7 +59,7 @@ impl ArxivClient {
         Ok(client)
     }
 
-    /// Search author, title, and abstract fields using safe phrase matching.
+    /// Search arXiv using word-based matching.
     ///
     /// The optional prefixes `author:`, `title:`, `abstract:`, and `category:`
     /// restrict a query to one arXiv field.
@@ -68,10 +68,11 @@ impl ArxivClient {
     ///
     /// Returns an error when the request fails or Atom content is malformed.
     pub async fn search(&self, query: &str, limit: u16) -> Result<Vec<RemotePaper>, ArxivError> {
-        let papers = self
+        let mut papers = self
             .query(&build_search_query(query), limit, "relevance")
             .await?;
-        Ok(prefer_author_and_title_matches(query, papers))
+        rank_by_query_relevance(query, &mut papers);
+        Ok(papers)
     }
 
     /// Load the newest submissions across arXiv for the dashboard.
@@ -233,51 +234,152 @@ fn build_search_query(input: &str) -> String {
     if input.starts_with("10.") {
         return format!("all:\"{}\"", escape_phrase(input));
     }
-    let phrase = escape_phrase(input);
-    format!("(au:\"{phrase}\" OR ti:\"{phrase}\" OR abs:\"{phrase}\")")
+    word_query("all", input)
 }
 
-fn prefer_author_and_title_matches(input: &str, papers: Vec<RemotePaper>) -> Vec<RemotePaper> {
-    let phrase = input.trim().to_lowercase();
-    if phrase.is_empty()
-        || input.contains(':')
-        || looks_like_category(input.trim())
-        || input.trim().starts_with("10.")
-    {
-        return papers;
+fn rank_by_query_relevance(input: &str, papers: &mut [RemotePaper]) {
+    let search = QueryTerms::from_input(input);
+    if search.terms.is_empty() || search.is_category || search.is_doi {
+        return;
     }
-    let has_primary_match = papers.iter().any(|paper| {
-        paper.title.to_lowercase().contains(&phrase)
-            || paper
-                .authors
-                .iter()
-                .any(|author| author.to_lowercase().contains(&phrase))
+    papers.sort_by(|left, right| {
+        score_paper(&search, right)
+            .cmp(&score_paper(&search, left))
+            .then_with(|| right.published.cmp(&left.published))
     });
-    if !has_primary_match {
-        return papers;
-    }
-    papers
-        .into_iter()
-        .filter(|paper| {
-            paper.title.to_lowercase().contains(&phrase)
-                || paper
-                    .authors
-                    .iter()
-                    .any(|author| author.to_lowercase().contains(&phrase))
-        })
-        .collect()
+}
+
+fn score_paper(search: &QueryTerms, paper: &RemotePaper) -> usize {
+    let title = paper.title.to_lowercase();
+    let authors = paper.authors.join(" ").to_lowercase();
+    let abstract_text = paper.abstract_text.to_lowercase();
+    let categories = paper.categories.join(" ").to_lowercase();
+    let all_text = format!("{title} {authors} {abstract_text} {categories}");
+
+    let title_matches = search
+        .terms
+        .iter()
+        .filter(|term| title.contains(term.as_str()))
+        .count();
+    let author_matches = search
+        .terms
+        .iter()
+        .filter(|term| authors.contains(term.as_str()))
+        .count();
+    let abstract_matches = search
+        .terms
+        .iter()
+        .filter(|term| abstract_text.contains(term.as_str()))
+        .count();
+    let category_matches = search
+        .terms
+        .iter()
+        .filter(|term| categories.contains(term.as_str()))
+        .count();
+
+    let all_terms_in_title = title_matches == search.terms.len();
+    let all_terms_in_authors = author_matches == search.terms.len();
+    let all_terms_anywhere = search
+        .terms
+        .iter()
+        .all(|term| all_text.contains(term.as_str()));
+    let phrase_in_title = search
+        .phrase
+        .as_deref()
+        .is_some_and(|phrase| title.contains(phrase));
+    let phrase_in_authors = search
+        .phrase
+        .as_deref()
+        .is_some_and(|phrase| authors.contains(phrase));
+    let phrase_in_abstract = search
+        .phrase
+        .as_deref()
+        .is_some_and(|phrase| abstract_text.contains(phrase));
+
+    usize::from(phrase_in_authors) * 1_000
+        + usize::from(phrase_in_title) * 900
+        + usize::from(all_terms_in_authors) * 650
+        + usize::from(all_terms_in_title) * 600
+        + usize::from(all_terms_anywhere) * 250
+        + usize::from(phrase_in_abstract) * 75
+        + author_matches * 40
+        + title_matches * 35
+        + abstract_matches * 12
+        + category_matches * 8
 }
 
 fn field_query(field: &str, value: &str) -> String {
     if field == "cat" && looks_like_category(value) {
         format!("cat:{value}")
     } else {
-        format!("{field}:\"{}\"", escape_phrase(value))
+        word_query(field, value)
     }
+}
+
+fn word_query(field: &str, value: &str) -> String {
+    let terms = tokenize_search_terms(value);
+    if terms.is_empty() {
+        return format!("{field}:\"{}\"", escape_phrase(value.trim()));
+    }
+    terms
+        .into_iter()
+        .map(|term| format!("{field}:\"{}\"", escape_phrase(&term)))
+        .collect::<Vec<_>>()
+        .join(" AND ")
 }
 
 fn escape_phrase(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[derive(Debug)]
+struct QueryTerms {
+    terms: Vec<String>,
+    phrase: Option<String>,
+    is_category: bool,
+    is_doi: bool,
+}
+
+impl QueryTerms {
+    fn from_input(input: &str) -> Self {
+        let input = input.trim();
+        let query_text = input
+            .split_once(':')
+            .and_then(|(prefix, value)| {
+                matches!(
+                    prefix.trim().to_ascii_lowercase().as_str(),
+                    "author" | "au" | "title" | "ti" | "abstract" | "abs"
+                )
+                .then_some(value.trim())
+            })
+            .unwrap_or(input);
+        let terms = tokenize_search_terms(query_text)
+            .into_iter()
+            .map(|term| term.to_lowercase())
+            .collect::<Vec<_>>();
+        Self {
+            phrase: (terms.len() > 1).then(|| terms.join(" ")),
+            terms,
+            is_category: looks_like_category(input)
+                || input.split_once(':').is_some_and(|(prefix, value)| {
+                    matches!(
+                        prefix.trim().to_ascii_lowercase().as_str(),
+                        "category" | "cat"
+                    ) && looks_like_category(value.trim())
+                }),
+            is_doi: input.starts_with("10."),
+        }
+    }
+}
+
+fn tokenize_search_terms(value: &str) -> Vec<String> {
+    value
+        .split(|character: char| {
+            !character.is_alphanumeric() && character != '-' && character != '.'
+        })
+        .filter(|term| !term.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 fn looks_like_category(value: &str) -> bool {
@@ -291,7 +393,7 @@ fn looks_like_category(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArxivClient, build_search_query, parse_feed, prefer_author_and_title_matches};
+    use super::{ArxivClient, build_search_query, parse_feed, rank_by_query_relevance};
 
     const FEED: &str = r#"<?xml version="1.0" encoding="utf-8"?>
     <feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
@@ -353,10 +455,14 @@ mod tests {
     }
 
     #[test]
-    fn multiword_search_is_a_quoted_field_query() {
+    fn multiword_search_matches_all_words_across_arxiv_fields() {
         assert_eq!(
             build_search_query("Prayush Kumar"),
-            "(au:\"Prayush Kumar\" OR ti:\"Prayush Kumar\" OR abs:\"Prayush Kumar\")"
+            "all:\"Prayush\" AND all:\"Kumar\""
+        );
+        assert_eq!(
+            build_search_query("machine learning in gravitational waves"),
+            "all:\"machine\" AND all:\"learning\" AND all:\"in\" AND all:\"gravitational\" AND all:\"waves\""
         );
     }
 
@@ -364,26 +470,26 @@ mod tests {
     fn explicit_fields_and_categories_are_preserved() {
         assert_eq!(
             build_search_query("author: Prayush Kumar"),
-            "au:\"Prayush Kumar\""
+            "au:\"Prayush\" AND au:\"Kumar\""
         );
         assert_eq!(
             build_search_query("title: gravitational waves"),
-            "ti:\"gravitational waves\""
+            "ti:\"gravitational\" AND ti:\"waves\""
         );
         assert_eq!(build_search_query("category: gr-qc"), "cat:gr-qc");
         assert_eq!(build_search_query("cs.LG"), "cat:cs.LG");
     }
 
     #[test]
-    fn query_syntax_is_escaped_inside_phrases() {
+    fn query_syntax_is_tokenized_before_building_arxiv_query() {
         assert_eq!(
             build_search_query("title: waves\" OR all:*"),
-            "ti:\"waves\\\" OR all:*\""
+            "ti:\"waves\" AND ti:\"OR\" AND ti:\"all\""
         );
     }
 
     #[test]
-    fn author_matches_exclude_abstract_only_false_positives()
+    fn relevance_ranking_boosts_title_and_author_matches_without_filtering()
     -> Result<(), Box<dyn std::error::Error>> {
         let template = parse_feed(FEED)?
             .into_iter()
@@ -392,15 +498,21 @@ mod tests {
         let mut author_match = template.clone();
         author_match.title = "Gravitational-wave inference".into();
         author_match.authors = vec!["Prayush Kumar".into()];
+        let mut title_match = template.clone();
+        title_match.title = "Machine learning for gravitational waves".into();
+        title_match.authors = vec!["Another Researcher".into()];
         let mut abstract_only = template;
         abstract_only.title = "Cyber bullying detection".into();
         abstract_only.authors = vec!["Another Researcher".into()];
-        abstract_only.abstract_text = "We compare with work by Prayush Kumar.".into();
+        abstract_only.abstract_text =
+            "We compare with work by Prayush Kumar on gravitational waves.".into();
 
-        let filtered =
-            prefer_author_and_title_matches("Prayush Kumar", vec![abstract_only, author_match]);
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].authors, ["Prayush Kumar"]);
+        let mut papers = vec![abstract_only, title_match, author_match];
+        rank_by_query_relevance("Prayush Kumar", &mut papers);
+
+        assert_eq!(papers.len(), 3);
+        assert_eq!(papers[0].authors, ["Prayush Kumar"]);
+        assert_eq!(papers[1].title, "Cyber bullying detection");
         Ok(())
     }
 }

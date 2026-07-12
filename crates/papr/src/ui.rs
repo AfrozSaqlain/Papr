@@ -740,7 +740,7 @@ fn format_decimal_bytes(bytes: u64, unit: u64, suffix: &str) -> String {
 fn render_discover(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(4)]).split(area);
     let query = if app.discovery.query.is_empty() {
-        "Search phrase | author: name | title: phrase | category: gr-qc"
+        "Search words | author: name | title: words | category: gr-qc"
     } else {
         &app.discovery.query
     };
