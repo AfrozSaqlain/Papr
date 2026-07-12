@@ -188,7 +188,7 @@ pub enum Command {
     MoveDown,
     /// Activate selected sidebar page.
     Open,
-    /// Return to the dashboard.
+    /// Return focus to the navigation pane.
     Back,
     /// Show command lookup.
     TogglePalette,
@@ -205,6 +205,8 @@ pub struct App {
     pub page: Page,
     /// Selected sidebar row.
     pub sidebar_index: usize,
+    /// Whether keyboard input targets section content instead of the navigation pane.
+    pub content_focused: bool,
     /// Current modal input mode.
     pub mode: AppMode,
     /// Whether the event loop should stop.
@@ -217,8 +219,6 @@ pub struct App {
     pub today_papers: Vec<RemotePaper>,
     /// Selected dashboard paper row.
     pub today_selected: usize,
-    /// Whether dashboard movement and opening target the paper feed instead of the sidebar.
-    pub dashboard_feed_focused: bool,
     /// Loading state for the latest-paper feed.
     pub today_status: DiscoveryStatus,
     /// Command palette query.
@@ -249,6 +249,8 @@ pub struct App {
     pub collection_paper_selected: usize,
     /// Bookmark summaries.
     pub bookmarks: Vec<BookmarkSummary>,
+    /// Selected bookmarked PDF row.
+    pub bookmark_selected: usize,
     /// Short user-facing operation result.
     pub toast: Option<String>,
     /// Mode restored when an editor or prompt closes.
@@ -264,13 +266,13 @@ impl Default for App {
         Self {
             page: Page::Dashboard,
             sidebar_index: 0,
+            content_focused: false,
             mode: AppMode::Normal,
             should_quit: false,
             stats: DashboardStats::default(),
             dashboard: ResearchDashboard::default(),
             today_papers: Vec::new(),
             today_selected: 0,
-            dashboard_feed_focused: true,
             today_status: DiscoveryStatus::Idle,
             palette_query: String::new(),
             discovery: DiscoveryState::default(),
@@ -286,6 +288,7 @@ impl Default for App {
             collection_papers: Vec::new(),
             collection_paper_selected: 0,
             bookmarks: Vec::new(),
+            bookmark_selected: 0,
             toast: None,
             modal_return: AppMode::Normal,
             plugins: Vec::new(),
@@ -299,10 +302,9 @@ impl App {
     pub fn dispatch(&mut self, command: Command) {
         match command {
             Command::MoveUp => {
-                if self.page == Page::Dashboard
-                    && self.dashboard_feed_focused
-                    && !self.today_papers.is_empty()
-                {
+                if !self.content_focused {
+                    self.sidebar_index = self.sidebar_index.saturating_sub(1);
+                } else if self.page == Page::Dashboard && !self.today_papers.is_empty() {
                     self.today_selected = self.today_selected.saturating_sub(1);
                 } else if self.page == Page::Discover {
                     self.discovery.selected = self.discovery.selected.saturating_sub(1);
@@ -317,15 +319,15 @@ impl App {
                     } else {
                         self.collection_selected = self.collection_selected.saturating_sub(1);
                     }
-                } else {
-                    self.sidebar_index = self.sidebar_index.saturating_sub(1);
+                } else if self.page == Page::Bookmarks {
+                    self.bookmark_selected = self.bookmark_selected.saturating_sub(1);
                 }
             }
             Command::MoveDown => {
-                if self.page == Page::Dashboard
-                    && self.dashboard_feed_focused
-                    && !self.today_papers.is_empty()
-                {
+                if !self.content_focused {
+                    self.sidebar_index =
+                        (self.sidebar_index + 1).min(Page::ALL.len().saturating_sub(1));
+                } else if self.page == Page::Dashboard && !self.today_papers.is_empty() {
                     self.today_selected =
                         (self.today_selected + 1).min(self.today_papers.len().saturating_sub(1));
                 } else if self.page == Page::Discover {
@@ -345,15 +347,16 @@ impl App {
                         self.collection_selected = (self.collection_selected + 1)
                             .min(self.collections.len().saturating_sub(1));
                     }
-                } else {
-                    self.sidebar_index = (self.sidebar_index + 1).min(Page::ALL.len() - 1);
+                } else if self.page == Page::Bookmarks {
+                    self.bookmark_selected =
+                        (self.bookmark_selected + 1).min(self.bookmarks.len().saturating_sub(1));
                 }
             }
             Command::Open => {
-                if self.page == Page::Dashboard
-                    && self.dashboard_feed_focused
-                    && !self.today_papers.is_empty()
-                {
+                if !self.content_focused {
+                    self.page = Page::ALL[self.sidebar_index];
+                    self.content_focused = true;
+                } else if self.page == Page::Dashboard && !self.today_papers.is_empty() {
                     self.discovery.results.clone_from(&self.today_papers);
                     self.discovery.selected = self
                         .today_selected
@@ -363,17 +366,13 @@ impl App {
                 } else if self.page == Page::Discover && !self.discovery.results.is_empty() {
                     self.mode = AppMode::PaperDetail;
                     self.discovery.detail_scroll = 0;
-                } else {
-                    self.page = Page::ALL[self.sidebar_index];
                 }
             }
             Command::Back => {
                 if self.mode == AppMode::PaperDetail {
                     self.mode = AppMode::Normal;
-                } else if self.page != Page::Dashboard {
-                    self.page = Page::Dashboard;
-                    self.sidebar_index = 0;
                 }
+                self.content_focused = false;
             }
             Command::TogglePalette => {
                 self.mode = if self.mode == AppMode::CommandPalette {

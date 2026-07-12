@@ -182,6 +182,7 @@ async fn handle_plugin_cli(command: Option<&CliCommand>, plugin_host: &PluginHos
 enum UiAction {
     Search(String),
     OpenPaper(RemotePaper),
+    OpenBrowser(String),
     Download(RemotePaper),
     Reindex,
     OpenPdf { paper_id: i64, path: PathBuf },
@@ -391,6 +392,7 @@ fn apply_ui_action(
             app.discovery.detail_scroll = 0;
             refresh_dashboard(&runtime.database, app)?;
         }
+        UiAction::OpenBrowser(url) => open_browser(&url, app),
         UiAction::Download(paper) => start_download(
             paper,
             &runtime.download_dir,
@@ -605,6 +607,9 @@ fn resolve_target(target: PaperTarget, database: &Database) -> Result<i64> {
 fn refresh_organization(database: &Database, app: &mut App) -> Result<()> {
     app.collections = database.collections()?;
     app.bookmarks = database.bookmarks()?;
+    app.bookmark_selected = app
+        .bookmark_selected
+        .min(app.bookmarks.len().saturating_sub(1));
     Ok(())
 }
 
@@ -750,6 +755,27 @@ fn open_pdf(viewer: &str, path: &Path, app: &mut App) -> Result<()> {
         Err(error) => app.toast = Some(format!("Could not open PDF with {program}: {error}")),
     }
     Ok(())
+}
+
+fn open_browser(url: &str, app: &mut App) {
+    let mut command = if cfg!(target_os = "macos") {
+        let mut command = ProcessCommand::new("open");
+        command.arg(url);
+        command
+    } else if cfg!(target_os = "windows") {
+        let mut command = ProcessCommand::new("cmd");
+        command.args(["/C", "start", "", url]);
+        command
+    } else {
+        let mut command = ProcessCommand::new("xdg-open");
+        command.arg(url);
+        command
+    };
+    command.stdout(Stdio::null()).stderr(Stdio::null());
+    app.toast = Some(match command.spawn() {
+        Ok(_) => "Opened paper in browser".into(),
+        Err(error) => format!("Could not open browser: {error}"),
+    });
 }
 
 fn parse_command(command: &str) -> Result<Vec<String>> {
@@ -953,23 +979,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         return handle_modal_key(app, key);
     }
     if app.mode == AppMode::Search {
-        match key.code {
-            KeyCode::Esc => app.mode = AppMode::Normal,
-            KeyCode::Enter if !app.discovery.query.trim().is_empty() => {
-                let query = app.discovery.query.trim().to_owned();
-                app.discovery.query.clone_from(&query);
-                app.mode = AppMode::Normal;
-                return Some(UiAction::Search(query));
-            }
-            KeyCode::Backspace => {
-                app.discovery.query.pop();
-            }
-            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.discovery.query.push(character);
-            }
-            _ => {}
-        }
-        return None;
+        return handle_search_key(app, key);
     }
     if app.mode == AppMode::PaperDetail {
         return handle_paper_detail_key(app, key);
@@ -978,7 +988,18 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if key.code == KeyCode::Char('/') {
         app.page = papr_core::Page::Discover;
         app.sidebar_index = 1;
+        app.content_focused = true;
         app.mode = AppMode::Search;
+        return None;
+    }
+    if key.code == KeyCode::Left {
+        app.dispatch(Command::Back);
+        return None;
+    }
+    if !app.content_focused {
+        if let Some(command) = navigation_command(key) {
+            app.dispatch(command);
+        }
         return None;
     }
     if key.code == KeyCode::Char('r')
@@ -1001,6 +1022,16 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             return action;
         }
     }
+    if let Some(action) = bookmark_action(app, key) {
+        return Some(action);
+    }
+    if app.page == papr_core::Page::Discover && key.code == KeyCode::Char('o') {
+        return app
+            .discovery
+            .results
+            .get(app.discovery.selected)
+            .map(|paper| UiAction::OpenBrowser(paper.id.clone()));
+    }
     if app.page == papr_core::Page::Discover
         && matches!(
             key.code,
@@ -1014,15 +1045,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             .cloned()
             .map(UiAction::OpenPaper);
     }
-    if app.page == papr_core::Page::Library
-        && matches!(key.code, KeyCode::Char('p') | KeyCode::Enter)
-    {
-        return selected_library_pdf(app)
-            .map(|(paper_id, path)| UiAction::OpenPdf { paper_id, path });
-    }
-    if app.page == papr_core::Page::Library
-        && let Some(action) = handle_library_metadata_key(app, key)
-    {
+    if let Some(action) = library_action(app, key) {
         return Some(action);
     }
 
@@ -1032,20 +1055,68 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     None
 }
 
+fn handle_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    match key.code {
+        KeyCode::Esc => app.mode = AppMode::Normal,
+        KeyCode::Enter if !app.discovery.query.trim().is_empty() => {
+            let query = app.discovery.query.trim().to_owned();
+            app.discovery.query.clone_from(&query);
+            app.mode = AppMode::Normal;
+            return Some(UiAction::Search(query));
+        }
+        KeyCode::Backspace => {
+            app.discovery.query.pop();
+        }
+        KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.discovery.query.push(character);
+        }
+        _ => {}
+    }
+    None
+}
+
+fn bookmark_action(app: &App, key: KeyEvent) -> Option<UiAction> {
+    if app.page != papr_core::Page::Bookmarks {
+        return None;
+    }
+    let bookmark = app.bookmarks.get(app.bookmark_selected)?;
+    match key.code {
+        KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(bookmark.paper_id))),
+        KeyCode::Enter | KeyCode::Char('p') => Some(UiAction::OpenPdf {
+            paper_id: bookmark.paper_id,
+            path: PathBuf::from(&bookmark.pdf_path),
+        }),
+        _ => None,
+    }
+}
+
+fn library_action(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    if app.page != papr_core::Page::Library {
+        return None;
+    }
+    if matches!(key.code, KeyCode::Char('p') | KeyCode::Enter) {
+        return selected_library_pdf(app)
+            .map(|(paper_id, path)| UiAction::OpenPdf { paper_id, path });
+    }
+    handle_library_metadata_key(app, key)
+}
+
 fn handle_dashboard_key(app: &mut App, key: KeyEvent) -> KeyHandling {
     if app.page != papr_core::Page::Dashboard {
         return KeyHandling::Ignored;
     }
-    if key.code == KeyCode::Tab {
-        app.dashboard_feed_focused = !app.dashboard_feed_focused;
-        return KeyHandling::Handled(None);
+    if key.code == KeyCode::Char('o') {
+        return KeyHandling::Handled(
+            app.today_papers
+                .get(app.today_selected)
+                .map(|paper| UiAction::OpenBrowser(paper.id.clone()))
+                .map(Box::new),
+        );
     }
-    if app.dashboard_feed_focused
-        && matches!(
-            key.code,
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
-        )
-    {
+    if matches!(
+        key.code,
+        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
+    ) {
         return KeyHandling::Handled(
             app.today_papers
                 .get(app.today_selected)
@@ -1060,7 +1131,7 @@ fn handle_dashboard_key(app: &mut App, key: KeyEvent) -> KeyHandling {
 fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction>) {
     if app.active_collection.is_some() {
         match key.code {
-            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => {
+            KeyCode::Esc | KeyCode::Char('h') => {
                 app.active_collection = None;
                 app.collection_papers.clear();
                 app.collection_paper_selected = 0;
@@ -1080,6 +1151,14 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
                         paper_id: paper.id,
                         path: PathBuf::from(path),
                     }),
+                );
+            }
+            KeyCode::Char('B') => {
+                return (
+                    true,
+                    app.collection_papers
+                        .get(app.collection_paper_selected)
+                        .map(|paper| UiAction::Bookmark(PaperTarget::Local(paper.id))),
                 );
             }
             _ => return (false, None),
@@ -1229,6 +1308,13 @@ fn handle_paper_detail_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 .cloned()
                 .map(UiAction::Download);
         }
+        KeyCode::Char('o') => {
+            return app
+                .discovery
+                .results
+                .get(app.discovery.selected)
+                .map(|paper| UiAction::OpenBrowser(paper.id.clone()));
+        }
         KeyCode::Char('n' | 's') => {
             app.modal_return = AppMode::PaperDetail;
             let target = selected_remote_target(app)?;
@@ -1279,7 +1365,10 @@ fn selected_library_pdf(app: &App) -> Option<(i64, PathBuf)> {
 mod tests {
     use chrono::{TimeZone, Utc};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use papr_core::{App, AppMode, CollectionSummary, LibraryPaper, Page, PaperNote, RemotePaper};
+    use papr_core::{
+        App, AppMode, BookmarkSummary, CollectionSummary, LibraryPaper, Page, PaperNote,
+        RemotePaper,
+    };
 
     use super::{UiAction, diverse_latest_papers, handle_key, parse_command};
 
@@ -1328,6 +1417,7 @@ mod tests {
         let second = remote_paper("https://arxiv.org/abs/2", "Selected paper");
         let mut app = App {
             page: Page::Dashboard,
+            content_focused: true,
             today_papers: vec![first, second],
             today_selected: 1,
             ..App::default()
@@ -1337,6 +1427,70 @@ mod tests {
         assert!(matches!(
             action,
             Some(UiAction::OpenPaper(paper)) if paper.title == "Selected paper"
+        ));
+    }
+
+    #[test]
+    fn enter_and_right_open_every_navigation_section() {
+        for (index, page) in Page::ALL.into_iter().enumerate() {
+            for key in [KeyCode::Enter, KeyCode::Right] {
+                let mut app = App {
+                    sidebar_index: index,
+                    ..App::default()
+                };
+                let action = handle_key(&mut app, KeyEvent::new(key, KeyModifiers::NONE));
+                assert!(action.is_none());
+                assert_eq!(app.page, page);
+                assert!(app.content_focused);
+            }
+        }
+    }
+
+    #[test]
+    fn left_returns_to_navigation_without_changing_selection() {
+        for (index, page) in Page::ALL.into_iter().enumerate() {
+            let mut app = App {
+                page,
+                sidebar_index: index,
+                content_focused: true,
+                ..App::default()
+            };
+            let action = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+            assert!(action.is_none());
+            assert_eq!(app.page, page);
+            assert_eq!(app.sidebar_index, index);
+            assert!(!app.content_focused);
+        }
+    }
+
+    #[test]
+    fn browser_shortcut_uses_selected_dashboard_and_search_urls() {
+        let dashboard_paper = remote_paper("https://arxiv.org/abs/dashboard", "Dashboard");
+        let search_paper = remote_paper("https://arxiv.org/abs/search", "Search");
+        let mut app = App {
+            page: Page::Dashboard,
+            content_focused: true,
+            today_papers: vec![dashboard_paper],
+            ..App::default()
+        };
+        let dashboard = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+        );
+        assert!(matches!(
+            dashboard,
+            Some(UiAction::OpenBrowser(url)) if url.ends_with("/dashboard")
+        ));
+
+        app.page = Page::Discover;
+        app.discovery.results = vec![search_paper];
+        let search = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+        );
+        assert!(matches!(
+            search,
+            Some(UiAction::OpenBrowser(url)) if url.ends_with("/search")
         ));
     }
 
@@ -1366,6 +1520,7 @@ mod tests {
     fn library_enter_opens_selected_pdf() {
         let mut app = App {
             page: Page::Library,
+            content_focused: true,
             library: papr_core::LibraryState {
                 papers: vec![LibraryPaper {
                     id: 7,
@@ -1413,6 +1568,7 @@ mod tests {
         };
         let mut app = App {
             page: Page::Collections,
+            content_focused: true,
             collections: vec![CollectionSummary {
                 id: 3,
                 name: "Review".into(),
@@ -1432,6 +1588,90 @@ mod tests {
             open_pdf,
             Some(UiAction::OpenPdf { paper_id: 9, path })
                 if path == std::path::Path::new("/tmp/collected.pdf")
+        ));
+    }
+
+    #[test]
+    fn library_and_collection_papers_toggle_bookmarks() {
+        let paper = LibraryPaper {
+            id: 19,
+            title: "Bookmark me".into(),
+            authors: "Researcher".into(),
+            doi: None,
+            pdf_path: Some("/tmp/bookmark.pdf".into()),
+            file_size: None,
+            reading_status: "unread".into(),
+            is_favorite: false,
+        };
+        let mut app = App {
+            page: Page::Library,
+            content_focused: true,
+            library: papr_core::LibraryState {
+                papers: vec![paper.clone()],
+                ..papr_core::LibraryState::default()
+            },
+            ..App::default()
+        };
+        let library_action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('B'), KeyModifiers::NONE),
+        );
+        assert!(matches!(
+            library_action,
+            Some(UiAction::Bookmark(super::PaperTarget::Local(19)))
+        ));
+
+        app.page = Page::Collections;
+        app.active_collection = Some(CollectionSummary {
+            id: 2,
+            name: "Reading".into(),
+            paper_count: 1,
+            folder_path: Some("/tmp/Reading".into()),
+        });
+        app.collection_papers.push(paper);
+        let collection_action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('B'), KeyModifiers::NONE),
+        );
+        assert!(matches!(
+            collection_action,
+            Some(UiAction::Bookmark(super::PaperTarget::Local(19)))
+        ));
+    }
+
+    #[test]
+    fn bookmarks_can_be_opened_and_removed() {
+        let bookmark = BookmarkSummary {
+            id: 4,
+            paper_id: 23,
+            paper_title: "Saved PDF".into(),
+            authors: "Researcher".into(),
+            year: Some("2026".into()),
+            journal: Some("Journal".into()),
+            doi: None,
+            pdf_path: "/tmp/saved.pdf".into(),
+            page: None,
+            label: None,
+        };
+        let mut app = App {
+            page: Page::Bookmarks,
+            content_focused: true,
+            bookmarks: vec![bookmark],
+            ..App::default()
+        };
+        let open = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            open,
+            Some(UiAction::OpenPdf { paper_id: 23, path })
+                if path == std::path::Path::new("/tmp/saved.pdf")
+        ));
+        let remove = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('B'), KeyModifiers::NONE),
+        );
+        assert!(matches!(
+            remove,
+            Some(UiAction::Bookmark(super::PaperTarget::Local(23)))
         ));
     }
 

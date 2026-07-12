@@ -91,12 +91,14 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
                 .border_style(Style::default().fg(theme.border)),
         )
         .style(Style::default().fg(theme.muted))
-        .highlight_style(
+        .highlight_style(if app.content_focused {
+            Style::default().fg(theme.text).bg(theme.surface)
+        } else {
             Style::default()
                 .fg(theme.background)
                 .bg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )
+                .add_modifier(Modifier::BOLD)
+        })
         .highlight_symbol("›");
     let mut state = ListState::default().with_selected(Some(app.sidebar_index));
     frame.render_stateful_widget(list, area, &mut state);
@@ -477,10 +479,32 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &The
             .bookmarks
             .iter()
             .map(|item| {
-                let position = item
-                    .page
-                    .map_or_else(String::new, |page| format!("  page {page}"));
-                ListItem::new(format!("{}{}", item.paper_title, position))
+                let mut metadata = Vec::new();
+                if !item.authors.is_empty() {
+                    metadata.push(item.authors.clone());
+                }
+                if let Some(year) = &item.year {
+                    metadata.push(year.clone());
+                }
+                if let Some(journal) = &item.journal {
+                    metadata.push(journal.clone());
+                } else if let Some(doi) = &item.doi {
+                    metadata.push(format!("DOI {doi}"));
+                }
+                if let Some(page) = item.page {
+                    metadata.push(format!("page {page}"));
+                }
+                if metadata.is_empty() {
+                    metadata.push("Local PDF".into());
+                }
+                ListItem::new(vec![
+                    Line::styled(
+                        &item.paper_title,
+                        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                    ),
+                    Line::styled(metadata.join("  |  "), Style::default().fg(theme.muted)),
+                    Line::raw(""),
+                ])
             })
             .collect(),
         _ => Vec::new(),
@@ -493,17 +517,18 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &The
             area,
         );
     } else {
-        frame.render_widget(
-            List::new(items)
-                .block(
-                    Block::default()
-                        .title(format!(" {} ", app.page.title().to_ascii_uppercase()))
-                        .borders(Borders::TOP)
-                        .border_style(Style::default().fg(theme.border)),
-                )
-                .style(Style::default().fg(theme.text)),
-            area,
-        );
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .title(" BOOKMARKS - j/k SELECT  ENTER/p OPEN  B REMOVE ")
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(theme.border)),
+            )
+            .style(Style::default().fg(theme.text))
+            .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
+            .highlight_symbol("> ");
+        let mut state = ListState::default().with_selected(Some(app.bookmark_selected));
+        frame.render_stateful_widget(list, area, &mut state);
     }
 }
 
@@ -1094,14 +1119,14 @@ fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
     let list = List::new(today)
         .block(
             Block::default()
-                .title(" DASHBOARD PAPERS - j/k SELECT  ENTER OPEN  TAB SIDEBAR ")
+                .title(" DASHBOARD PAPERS - j/k SELECT  ENTER OPEN  o BROWSER ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.border)),
         )
         .highlight_style(Style::default().bg(theme.surface).fg(theme.text))
         .highlight_symbol("> ");
     let selected =
-        (app.dashboard_feed_focused && !app.today_papers.is_empty()).then_some(app.today_selected);
+        (app.content_focused && !app.today_papers.is_empty()).then_some(app.today_selected);
     let mut state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(list, area, &mut state);
 }
@@ -1236,7 +1261,7 @@ fn render_palette(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
 fn render_help(frame: &mut Frame<'_>, theme: &Theme) {
     let area = centered(64, 18, frame.area());
     frame.render_widget(Clear, area);
-    let help = "j / k      Move selection\nEnter      Open selection\nh / l      Back / open\nCtrl+p     Command palette\n/          Search arXiv\np          Open local PDF\nd          Download\nn          Notes\ns          Collection\nB          Bookmark\nq          Close / quit\n?          Toggle this help";
+    let help = "j / k      Move selection\nEnter/Right Open selection\nLeft       Focus navigation\nh / l      Back / open\nCtrl+p     Command palette\n/          Search arXiv\no          Open paper webpage\np          Open local PDF\nd          Download\nn          Notes\ns          Collection\nB          Bookmark\nq          Close / quit\n?          Toggle this help";
     frame.render_widget(
         Paragraph::new(help)
             .style(Style::default().fg(theme.text))
@@ -1275,8 +1300,8 @@ fn centered(width: u16, height: u16, area: Rect) -> Rect {
 mod tests {
     use chrono::{TimeZone, Utc};
     use papr_core::{
-        ActivityItem, App, AppMode, CollectionSummary, DiscoveryStatus, DownloadStatus,
-        DownloadTask, LibraryPaper, Page, RemotePaper, Theme,
+        ActivityItem, App, AppMode, BookmarkSummary, CollectionSummary, DiscoveryStatus,
+        DownloadStatus, DownloadTask, LibraryPaper, Page, RemotePaper, Theme,
     };
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -1446,6 +1471,36 @@ mod tests {
         let rendered = rendered_text(&terminal);
         assert!(rendered.contains("Paper In Collection"));
         assert!(rendered.contains("PDF available"));
+        Ok(())
+    }
+
+    #[test]
+    fn bookmarks_render_pdf_metadata() -> Result<(), Box<dyn std::error::Error>> {
+        let backend = TestBackend::new(100, 28);
+        let mut terminal = Terminal::new(backend)?;
+        let app = App {
+            page: Page::Bookmarks,
+            bookmarks: vec![BookmarkSummary {
+                id: 1,
+                paper_id: 8,
+                paper_title: "Bookmarked Research".into(),
+                authors: "Ada Lovelace, Alan Turing".into(),
+                year: Some("2026".into()),
+                journal: Some("Terminal Studies".into()),
+                doi: None,
+                pdf_path: "/tmp/paper.pdf".into(),
+                page: None,
+                label: None,
+            }],
+            ..App::default()
+        };
+        let theme = Theme::load("nord")?;
+        terminal.draw(|frame| render(frame, &app, &theme))?;
+        let rendered = rendered_text(&terminal);
+        assert!(rendered.contains("Bookmarked Research"));
+        assert!(rendered.contains("Ada Lovelace, Alan Turing"));
+        assert!(rendered.contains("2026"));
+        assert!(rendered.contains("Terminal Studies"));
         Ok(())
     }
 

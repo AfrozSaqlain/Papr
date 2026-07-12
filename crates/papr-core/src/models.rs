@@ -116,6 +116,16 @@ pub struct BookmarkSummary {
     pub paper_id: i64,
     /// Paper title.
     pub paper_title: String,
+    /// Comma-separated paper authors when available.
+    pub authors: String,
+    /// Publication year when known.
+    pub year: Option<String>,
+    /// Journal or venue when known.
+    pub journal: Option<String>,
+    /// Digital object identifier when known.
+    pub doi: Option<String>,
+    /// Local PDF path used to open the bookmarked paper.
+    pub pdf_path: String,
     /// Optional bookmarked PDF page.
     pub page: Option<u32>,
     /// Optional user label.

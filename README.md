@@ -97,7 +97,8 @@ cargo run --release --bin papr
 | `j` / `Down` | Move down |
 | `k` / `Up` | Move up |
 | `Enter` / `l` / `Right` | Open the selected item or section |
-| `h` / `Left` | Return to the dashboard or previous view |
+| `Left` | Return focus to navigation and preserve its selected section |
+| `h` | Return from the current nested view |
 | `/` | Open arXiv search |
 | `Ctrl+P` | Open the command palette |
 | `?` | Toggle keyboard help |
@@ -110,6 +111,7 @@ cargo run --release --bin papr
 | `Enter` | Open the selected paper page |
 | `j` / `k` | Scroll paper details |
 | `d` | Download the PDF |
+| `o` | Open the paper webpage in the default browser |
 | `n` | Open the paper's Markdown note |
 | `s` | Add the paper to a collection |
 | `B` | Toggle the paper bookmark |
@@ -125,6 +127,14 @@ cargo run --release --bin papr
 | `n` | Edit the paper note |
 | `s` | Add to a collection |
 | `B` | Toggle bookmark |
+
+### Collections and bookmarks
+
+Inside an opened collection, use `j`/`k` to select a PDF, `Enter` or `p` to
+open it, and `B` to toggle its bookmark. The **Bookmarks** tab lists bookmarked
+local PDFs with available author, publication, and venue metadata. Use `j`/`k`
+to navigate, `Enter` or `p` to open the selected PDF, and `B` to remove it from
+bookmarks.
 
 ### Markdown notes
 

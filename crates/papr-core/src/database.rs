@@ -835,17 +835,29 @@ impl Database {
     /// Returns an error when the bookmark query fails.
     pub fn bookmarks(&self) -> Result<Vec<BookmarkSummary>, DatabaseError> {
         let mut statement = self.connection.prepare(
-            "SELECT b.id, b.paper_id, p.title, b.page, b.label FROM bookmarks b
-             JOIN papers p ON p.id = b.paper_id ORDER BY b.created_at DESC, b.id DESC",
+            "SELECT b.id, b.paper_id, p.title,
+                    COALESCE((SELECT GROUP_CONCAT(a.name, ', ')
+                              FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
+                              WHERE pa.paper_id = p.id ORDER BY pa.position), ''),
+                    substr(p.published_at, 1, 4), p.journal, p.doi, p.pdf_path,
+                    b.page, b.label
+             FROM bookmarks b JOIN papers p ON p.id = b.paper_id
+             WHERE p.pdf_path IS NOT NULL
+             ORDER BY b.created_at DESC, b.id DESC",
         )?;
         let rows = statement.query_map([], |row| {
-            let page: Option<i64> = row.get(3)?;
+            let page: Option<i64> = row.get(8)?;
             Ok(BookmarkSummary {
                 id: row.get(0)?,
                 paper_id: row.get(1)?,
                 paper_title: row.get(2)?,
+                authors: row.get(3)?,
+                year: row.get(4)?,
+                journal: row.get(5)?,
+                doi: row.get(6)?,
+                pdf_path: row.get(7)?,
                 page: page.and_then(|value| u32::try_from(value).ok()),
-                label: row.get(4)?,
+                label: row.get(9)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -1289,6 +1301,10 @@ mod tests {
         assert_eq!(collection_papers.len(), 1);
         assert_eq!(collection_papers[0].title, "Organized paper");
 
+        database.connection.execute(
+            "UPDATE papers SET pdf_path = '/tmp/organized.pdf' WHERE id = ?1",
+            [paper_id],
+        )?;
         assert!(database.toggle_bookmark(paper_id)?);
         assert_eq!(database.bookmarks()?.len(), 1);
         assert!(!database.toggle_bookmark(paper_id)?);
