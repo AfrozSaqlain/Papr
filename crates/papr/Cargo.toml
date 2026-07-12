@@ -1,0 +1,22 @@
+[package]
+name = "papr"
+description = "A keyboard-first terminal workspace for academic papers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+papr-core = { path = "../papr-core" }
+ratatui.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+
+[lints]
+workspace = true
