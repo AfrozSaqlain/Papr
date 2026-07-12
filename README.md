@@ -141,6 +141,20 @@ cargo run --release --bin papr
 Press `/` from anywhere to focus the arXiv search field. Searches run
 asynchronously, so terminal input and rendering remain responsive.
 
+Multi-word input is treated as a phrase rather than unrelated terms. When
+author or title matches exist, abstract-only matches are omitted to reduce
+irrelevant results. Use a field prefix when the intended field is known:
+
+```text
+author: Prayush Kumar
+title: gravitational wave inference
+abstract: neutron star equation of state
+category: gr-qc
+```
+
+Bare arXiv category codes such as `cs.LG` and `gr-qc` are detected
+automatically.
+
 Results show the title, publication date, authors, and primary category. Paper
 pages include the title, authors, dates, categories, abstract, DOI, journal
 reference, and arXiv/PDF resource URLs when available.

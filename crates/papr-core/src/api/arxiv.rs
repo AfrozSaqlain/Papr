@@ -59,14 +59,19 @@ impl ArxivClient {
         Ok(client)
     }
 
-    /// Search all indexed arXiv fields, ordered by relevance.
+    /// Search author, title, and abstract fields using safe phrase matching.
+    ///
+    /// The optional prefixes `author:`, `title:`, `abstract:`, and `category:`
+    /// restrict a query to one arXiv field.
     ///
     /// # Errors
     ///
     /// Returns an error when the request fails or Atom content is malformed.
     pub async fn search(&self, query: &str, limit: u16) -> Result<Vec<RemotePaper>, ArxivError> {
-        self.query(&format!("all:{query}"), limit, "relevance")
-            .await
+        let papers = self
+            .query(&build_search_query(query), limit, "relevance")
+            .await?;
+        Ok(prefer_author_and_title_matches(query, papers))
     }
 
     /// Load the newest submissions across arXiv for the dashboard.
@@ -207,9 +212,86 @@ fn normalize(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn build_search_query(input: &str) -> String {
+    let input = input.trim();
+    if let Some((prefix, value)) = input.split_once(':') {
+        let value = value.trim();
+        let field = match prefix.trim().to_ascii_lowercase().as_str() {
+            "author" | "au" => Some("au"),
+            "title" | "ti" => Some("ti"),
+            "abstract" | "abs" => Some("abs"),
+            "category" | "cat" => Some("cat"),
+            _ => None,
+        };
+        if let Some(field) = field {
+            return field_query(field, value);
+        }
+    }
+    if looks_like_category(input) {
+        return format!("cat:{input}");
+    }
+    if input.starts_with("10.") {
+        return format!("all:\"{}\"", escape_phrase(input));
+    }
+    let phrase = escape_phrase(input);
+    format!("(au:\"{phrase}\" OR ti:\"{phrase}\" OR abs:\"{phrase}\")")
+}
+
+fn prefer_author_and_title_matches(input: &str, papers: Vec<RemotePaper>) -> Vec<RemotePaper> {
+    let phrase = input.trim().to_lowercase();
+    if phrase.is_empty()
+        || input.contains(':')
+        || looks_like_category(input.trim())
+        || input.trim().starts_with("10.")
+    {
+        return papers;
+    }
+    let has_primary_match = papers.iter().any(|paper| {
+        paper.title.to_lowercase().contains(&phrase)
+            || paper
+                .authors
+                .iter()
+                .any(|author| author.to_lowercase().contains(&phrase))
+    });
+    if !has_primary_match {
+        return papers;
+    }
+    papers
+        .into_iter()
+        .filter(|paper| {
+            paper.title.to_lowercase().contains(&phrase)
+                || paper
+                    .authors
+                    .iter()
+                    .any(|author| author.to_lowercase().contains(&phrase))
+        })
+        .collect()
+}
+
+fn field_query(field: &str, value: &str) -> String {
+    if field == "cat" && looks_like_category(value) {
+        format!("cat:{value}")
+    } else {
+        format!("{field}:\"{}\"", escape_phrase(value))
+    }
+}
+
+fn escape_phrase(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn looks_like_category(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains(char::is_whitespace)
+        && value.contains(['.', '-'])
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-'))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ArxivClient, parse_feed};
+    use super::{ArxivClient, build_search_query, parse_feed, prefer_author_and_title_matches};
 
     const FEED: &str = r#"<?xml version="1.0" encoding="utf-8"?>
     <feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
@@ -268,5 +350,57 @@ mod tests {
     #[test]
     fn test_endpoint_constructor_rejects_bad_url() {
         assert!(ArxivClient::with_endpoint("not a url").is_err());
+    }
+
+    #[test]
+    fn multiword_search_is_a_quoted_field_query() {
+        assert_eq!(
+            build_search_query("Prayush Kumar"),
+            "(au:\"Prayush Kumar\" OR ti:\"Prayush Kumar\" OR abs:\"Prayush Kumar\")"
+        );
+    }
+
+    #[test]
+    fn explicit_fields_and_categories_are_preserved() {
+        assert_eq!(
+            build_search_query("author: Prayush Kumar"),
+            "au:\"Prayush Kumar\""
+        );
+        assert_eq!(
+            build_search_query("title: gravitational waves"),
+            "ti:\"gravitational waves\""
+        );
+        assert_eq!(build_search_query("category: gr-qc"), "cat:gr-qc");
+        assert_eq!(build_search_query("cs.LG"), "cat:cs.LG");
+    }
+
+    #[test]
+    fn query_syntax_is_escaped_inside_phrases() {
+        assert_eq!(
+            build_search_query("title: waves\" OR all:*"),
+            "ti:\"waves\\\" OR all:*\""
+        );
+    }
+
+    #[test]
+    fn author_matches_exclude_abstract_only_false_positives()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let template = parse_feed(FEED)?
+            .into_iter()
+            .next()
+            .ok_or("fixture did not contain a paper")?;
+        let mut author_match = template.clone();
+        author_match.title = "Gravitational-wave inference".into();
+        author_match.authors = vec!["Prayush Kumar".into()];
+        let mut abstract_only = template;
+        abstract_only.title = "Cyber bullying detection".into();
+        abstract_only.authors = vec!["Another Researcher".into()];
+        abstract_only.abstract_text = "We compare with work by Prayush Kumar.".into();
+
+        let filtered =
+            prefer_author_and_title_matches("Prayush Kumar", vec![abstract_only, author_match]);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].authors, ["Prayush Kumar"]);
+        Ok(())
     }
 }
