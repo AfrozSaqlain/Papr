@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Utc};
+use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime};
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
@@ -987,7 +987,7 @@ impl Database {
     /// # Errors
     ///
     /// Returns an error when either history record cannot be inserted.
-    pub fn record_open(&self, paper_id: i64, pdf: bool) -> Result<(), DatabaseError> {
+    pub fn record_open(&self, paper_id: i64, pdf: bool) -> Result<i64, DatabaseError> {
         let transaction = self.connection.unchecked_transaction()?;
         transaction.execute(
             "INSERT INTO reading_history (paper_id) VALUES (?1)",
@@ -1008,7 +1008,25 @@ impl Database {
                 [paper_id],
             )?;
         }
+        let session_id = transaction.last_insert_rowid();
         transaction.commit()?;
+        Ok(session_id)
+    }
+
+    /// Record the duration of a reading session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the history record cannot be updated.
+    pub fn record_reading_duration(
+        &self,
+        session_id: i64,
+        duration_s: u64,
+    ) -> Result<(), DatabaseError> {
+        self.connection.execute(
+            "UPDATE reading_history SET duration_s = ?1 WHERE id = ?2",
+            params![duration_s, session_id],
+        )?;
         Ok(())
     }
 
@@ -1069,12 +1087,12 @@ impl Database {
     ///
     /// Returns an error when history aggregates cannot be queried.
     pub fn reading_statistics(&self) -> Result<ReadingStatistics, DatabaseError> {
-        let now = Utc::now();
+        let now = chrono::Local::now();
         let (sessions, monthly_reading, yearly_reading, average_reading_seconds) =
             self.connection.query_row(
                 "SELECT COUNT(*),
-                    COALESCE(SUM(CASE WHEN strftime('%Y-%m', opened_at) = ?1 THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN strftime('%Y', opened_at) = ?2 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN strftime('%Y-%m', opened_at, 'localtime') = ?1 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN strftime('%Y', opened_at, 'localtime') = ?2 THEN 1 ELSE 0 END), 0),
                     CAST(COALESCE(AVG(duration_s), 0) AS INTEGER)
                  FROM reading_history",
                 params![now.format("%Y-%m").to_string(), now.year().to_string()],
@@ -1090,8 +1108,8 @@ impl Database {
         let most_active_day = self
             .connection
             .query_row(
-                "SELECT strftime('%w', opened_at), COUNT(*) FROM reading_history
-                 GROUP BY strftime('%w', opened_at) ORDER BY COUNT(*) DESC LIMIT 1",
+                "SELECT strftime('%w', opened_at, 'localtime'), COUNT(*) FROM reading_history
+                 GROUP BY strftime('%w', opened_at, 'localtime') ORDER BY COUNT(*) DESC LIMIT 1",
                 [],
                 |row| row.get::<_, String>(0),
             )
@@ -1123,15 +1141,15 @@ impl Database {
 
     fn reading_heatmap(&self) -> Result<Vec<ReadingDay>, DatabaseError> {
         let mut statement = self.connection.prepare(
-            "SELECT date(opened_at), COUNT(*) FROM reading_history
-             WHERE opened_at >= datetime('now', '-83 days')
-             GROUP BY date(opened_at) ORDER BY date(opened_at)",
+            "SELECT date(opened_at, 'localtime'), COUNT(*) FROM reading_history
+             WHERE date(opened_at, 'localtime') >= date('now', 'localtime', '-83 days')
+             GROUP BY date(opened_at, 'localtime') ORDER BY date(opened_at, 'localtime')",
         )?;
         let rows = statement.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
         })?;
         let counts = rows.collect::<Result<std::collections::HashMap<_, _>, _>>()?;
-        let today = Utc::now().date_naive();
+        let today = chrono::Local::now().date_naive();
         Ok((0_i64..84)
             .rev()
             .map(|offset| {

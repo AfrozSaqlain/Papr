@@ -262,6 +262,12 @@ struct ActionSenders {
     index: mpsc::UnboundedSender<IndexResponse>,
     download: mpsc::UnboundedSender<DownloadEvent>,
     today: mpsc::UnboundedSender<TodayResponse>,
+    app_events: mpsc::UnboundedSender<AppEvent>,
+}
+
+#[derive(Debug)]
+enum AppEvent {
+    ReadingSessionCompleted { session_id: i64, duration_s: u64 },
 }
 
 #[derive(Debug)]
@@ -283,11 +289,13 @@ async fn run(
     let (index_sender, mut index_receiver) = mpsc::unbounded_channel::<IndexResponse>();
     let (download_sender, mut download_receiver) = mpsc::unbounded_channel::<DownloadEvent>();
     let (today_sender, mut today_receiver) = mpsc::unbounded_channel::<TodayResponse>();
+    let (app_events_sender, mut app_events_receiver) = mpsc::unbounded_channel::<AppEvent>();
     let senders = ActionSenders {
         search: sender,
         index: index_sender,
         download: download_sender,
         today: today_sender,
+        app_events: app_events_sender,
     };
     let mut pending_downloads = HashMap::<String, RemotePaper>::new();
     refresh_dashboard_papers(&runtime, &senders, app)?;
@@ -348,6 +356,14 @@ async fn run(
                 app,
                 &senders.index,
             )?;
+        }
+        while let Ok(event) = app_events_receiver.try_recv() {
+            match event {
+                AppEvent::ReadingSessionCompleted { session_id, duration_s } => {
+                    runtime.database.record_reading_duration(session_id, duration_s)?;
+                    refresh_dashboard(&mut runtime, app)?;
+                }
+            }
         }
         session
             .terminal_mut()
@@ -421,8 +437,14 @@ fn apply_ui_action(
         ),
         UiAction::Reindex => start_runtime_scan(runtime, senders, app),
         UiAction::OpenPdf { paper_id, path } => {
-            runtime.database.record_open(paper_id, true)?;
-            open_pdf(&runtime.pdf_viewer, &path, app)?;
+            let session_id = runtime.database.record_open(paper_id, true)?;
+            open_pdf(
+                &runtime.pdf_viewer,
+                &path,
+                app,
+                Some(session_id),
+                Some(senders.app_events.clone()),
+            )?;
             refresh_dashboard(runtime, app)?;
         }
         UiAction::OpenNote(target) => {
@@ -494,7 +516,7 @@ fn apply_ui_action(
         }
         UiAction::OpenDownload(id) => {
             let path = runtime.download_dir.join(format!("{id}.pdf"));
-            open_pdf(&runtime.pdf_viewer, &path, app)?;
+            open_pdf(&runtime.pdf_viewer, &path, app, None, None)?;
         }
     }
     Ok(())
@@ -875,7 +897,13 @@ fn default_pdf_viewer() -> String {
     }
 }
 
-fn open_pdf(viewer: &str, path: &Path, app: &mut App) -> Result<()> {
+fn open_pdf(
+    viewer: &str,
+    path: &Path,
+    app: &mut App,
+    session_id: Option<i64>,
+    event_sender: Option<mpsc::UnboundedSender<AppEvent>>,
+) -> Result<()> {
     if !path.exists() {
         app.toast = Some(format!("PDF not found: {}", path.display()));
         return Ok(());
@@ -894,7 +922,7 @@ fn open_pdf(viewer: &str, path: &Path, app: &mut App) -> Result<()> {
     }
 
     let program = argv.remove(0);
-    let mut command = ProcessCommand::new(&program);
+    let mut command = tokio::process::Command::new(&program);
     command.args(argv);
     if !has_placeholder {
         command.arg(path);
@@ -904,7 +932,20 @@ fn open_pdf(viewer: &str, path: &Path, app: &mut App) -> Result<()> {
     command.stderr(Stdio::null());
 
     match command.spawn() {
-        Ok(_) => app.toast = Some(format!("Opened {}", path.display())),
+        Ok(mut child) => {
+            app.toast = Some(format!("Opened {}", path.display()));
+            if let (Some(session_id), Some(sender)) = (session_id, event_sender) {
+                let start = std::time::Instant::now();
+                tokio::spawn(async move {
+                    let _ = child.wait().await;
+                    let duration_s = start.elapsed().as_secs();
+                    let _ = sender.send(AppEvent::ReadingSessionCompleted {
+                        session_id,
+                        duration_s,
+                    });
+                });
+            }
+        }
         Err(error) => app.toast = Some(format!("Could not open PDF with {program}: {error}")),
     }
     Ok(())
