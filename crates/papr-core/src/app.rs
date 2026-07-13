@@ -103,6 +103,8 @@ pub struct MetadataPrompt {
     pub paper_id: Option<i64>,
     /// Collection identifier when renaming.
     pub rename_collection_id: Option<i64>,
+    /// Paper identifier when renaming a PDF.
+    pub rename_paper_id: Option<i64>,
     /// Editable input value.
     pub value: String,
     /// Selected existing collection.

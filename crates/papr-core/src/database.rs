@@ -838,6 +838,22 @@ impl Database {
         Ok(())
     }
 
+    /// Update a paper's path after renaming it on the filesystem.
+    ///
+    /// # Errors
+    /// Returns an error when the database cannot be updated.
+    pub fn rename_pdf(
+        &self,
+        paper_id: i64,
+        new_path: &Path,
+    ) -> Result<(), DatabaseError> {
+        self.connection.execute(
+            "UPDATE papers SET pdf_path = ?1 WHERE id = ?2",
+            params![new_path.to_string_lossy(), paper_id],
+        )?;
+        Ok(())
+    }
+
     /// Create a filesystem-backed collection.
     ///
     /// # Errors

@@ -622,19 +622,22 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let Some(prompt) = &app.metadata_prompt else {
         return;
     };
+    let renaming_pdf = prompt.rename_paper_id.is_some();
     let renaming = prompt.rename_collection_id.is_some();
-    let creating = prompt.paper_id.is_none() && !renaming;
-    let title = if renaming {
+    let creating = prompt.paper_id.is_none() && !renaming && !renaming_pdf;
+    let title = if renaming_pdf {
+        " RENAME PDF "
+    } else if renaming {
         " RENAME COLLECTION "
     } else if creating {
         " CREATE COLLECTION "
     } else {
         " CHOOSE OR CREATE COLLECTION "
     };
-    let area = centered(64, if renaming || creating { 3 } else { 11 }, frame.area());
+    let area = centered(64, if renaming || creating || renaming_pdf { 3 } else { 11 }, frame.area());
     frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(if renaming || creating {
+        Paragraph::new(if renaming || creating || renaming_pdf {
             vec![Line::raw(format!("> {}", prompt.value))]
         } else {
             let mut lines = vec![

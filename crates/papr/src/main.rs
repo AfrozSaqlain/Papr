@@ -213,6 +213,7 @@ enum UiAction {
     Bookmark(PaperTarget),
     OpenCollection(i64),
     OpenDownload(String),
+    RenamePdf(i64),
 }
 
 enum KeyHandling {
@@ -437,7 +438,24 @@ fn apply_ui_action(
             show_collection_prompt(app, Some(paper_id), None);
         }
         UiAction::RenameCollection(id) => {
-            show_collection_prompt(app, None, Some(id));
+            app.metadata_prompt = Some(MetadataPrompt {
+                paper_id: None,
+                rename_collection_id: Some(id),
+                rename_paper_id: None,
+                value: String::new(),
+                selected: 0,
+            });
+            app.mode = AppMode::Prompt;
+        }
+        UiAction::RenamePdf(id) => {
+            app.metadata_prompt = Some(MetadataPrompt {
+                paper_id: None,
+                rename_collection_id: None,
+                rename_paper_id: Some(id),
+                value: String::new(),
+                selected: 0,
+            });
+            app.mode = AppMode::Prompt;
         }
         UiAction::CreateCollection => {
             show_collection_prompt(app, None, None);
@@ -479,6 +497,7 @@ fn show_collection_prompt(app: &mut App, paper_id: Option<i64>, rename_id: Optio
     app.metadata_prompt = Some(MetadataPrompt {
         paper_id,
         rename_collection_id: rename_id,
+        rename_paper_id: None,
         value: String::new(),
         selected: 0,
     });
@@ -491,6 +510,35 @@ fn apply_collection_prompt(
     prompt: &MetadataPrompt,
 ) -> Result<()> {
     let name = prompt.value.trim();
+    if name.is_empty() { return Ok(()); }
+    
+    if let Some(paper_id) = prompt.rename_paper_id {
+        if name.contains(['/', '\\']) {
+            anyhow::bail!("filename must not contain path separators");
+        }
+        let mut new_name = name.to_string();
+        if !new_name.to_lowercase().ends_with(".pdf") {
+            new_name.push_str(".pdf");
+        }
+        
+        let paper = app.library.papers.iter().find(|p| p.id == paper_id)
+            .context("paper not found")?;
+        let source = PathBuf::from(paper.pdf_path.as_ref().context("paper has no local PDF")?);
+        let destination = source.with_file_name(&new_name);
+        
+        if source != destination {
+            if destination.exists() {
+                anyhow::bail!("a file with this name already exists");
+            }
+            move_pdf_file(&source, &destination)?;
+            runtime.database.rename_pdf(paper_id, &destination)?;
+            refresh_library(runtime, app)?;
+            refresh_organization(&runtime.database, app)?;
+            refresh_dashboard(runtime, app)?;
+        }
+        return Ok(());
+    }
+
     validate_collection_name(name)?;
     if let Some(collection_id) = prompt.rename_collection_id {
         let collection = app
@@ -1259,6 +1307,7 @@ fn bookmark_action(app: &App, key: KeyEvent) -> Option<UiAction> {
             paper_id: bookmark.paper_id,
             path: PathBuf::from(&bookmark.pdf_path),
         }),
+        KeyCode::Char('R') => Some(UiAction::RenamePdf(bookmark.paper_id)),
         _ => None,
     }
 }
@@ -1274,6 +1323,18 @@ fn handle_downloads_key(app: &App, key: KeyEvent) -> Option<UiAction> {
         if let Some(task) = app.downloads.get(app.download_selected) {
             if matches!(task.status, DownloadStatus::Completed) {
                 return Some(UiAction::OpenDownload(task.id.clone()));
+            }
+        }
+    }
+    if key.code == KeyCode::Char('R') {
+        if let Some(task) = app.downloads.get(app.download_selected) {
+            if matches!(task.status, DownloadStatus::Completed) {
+                let suffix = format!("{}.pdf", task.id);
+                if let Some(paper) = app.library.papers.iter().find(|p| {
+                    p.pdf_path.as_ref().map_or(false, |path| path.ends_with(&suffix))
+                }) {
+                    return Some(UiAction::RenamePdf(paper.id));
+                }
             }
         }
     }
@@ -1348,6 +1409,14 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
                     app.collection_papers
                         .get(app.collection_paper_selected)
                         .map(|paper| UiAction::Bookmark(PaperTarget::Local(paper.id))),
+                );
+            }
+            KeyCode::Char('R') => {
+                return (
+                    true,
+                    app.collection_papers
+                        .get(app.collection_paper_selected)
+                        .map(|paper| UiAction::RenamePdf(paper.id)),
                 );
             }
             _ => return (false, None),
@@ -1529,6 +1598,13 @@ fn handle_library_metadata_key(app: &mut App, key: KeyEvent) -> Option<UiAction>
         KeyCode::Char('n') => Some(UiAction::OpenNote(target)),
         KeyCode::Char('s') => Some(UiAction::Prompt(target)),
         KeyCode::Char('B') => Some(UiAction::Bookmark(target)),
+        KeyCode::Char('R') => {
+            if let PaperTarget::Local(id) = target {
+                Some(UiAction::RenamePdf(id))
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
