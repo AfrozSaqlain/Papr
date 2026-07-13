@@ -113,8 +113,8 @@ async fn main() -> Result<()> {
         .context("failed to load library")?;
     refresh_organization(&database, &mut app)?;
     let (watch_sender, watch_receiver) = mpsc::unbounded_channel();
-    let _watcher = LibraryWatcher::start(&library_roots, move |path| {
-        let _ = watch_sender.send(path);
+    let _watcher = LibraryWatcher::start(&library_roots, move || {
+        let _ = watch_sender.send(());
     })
     .context("failed to watch library folders")?;
 
@@ -233,7 +233,7 @@ struct Runtime {
     dashboard_keywords: Vec<String>,
     dashboard_keyword_signature: String,
     dashboard_feed_date: String,
-    watch_receiver: mpsc::UnboundedReceiver<PathBuf>,
+    watch_receiver: mpsc::UnboundedReceiver<()>,
 }
 
 struct ActionSenders {
@@ -313,14 +313,8 @@ async fn run(
                 }
             }
         }
-        while let Ok(path) = runtime.watch_receiver.try_recv() {
-            let response_sender = senders.index.clone();
-            let roots = runtime.library_roots.clone();
-            tokio::task::spawn_blocking(move || {
-                let result = LibraryIndexer::inspect_in_roots(&path, &roots)
-                    .map_err(|error| error.to_string());
-                let _ = response_sender.send(IndexResponse::File(result));
-            });
+        while runtime.watch_receiver.try_recv().is_ok() {
+            start_runtime_scan(&runtime, &senders, app);
         }
         while let Ok(response) = index_receiver.try_recv() {
             apply_index_response(response, &runtime, app)?;

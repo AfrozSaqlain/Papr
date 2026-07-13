@@ -166,42 +166,15 @@ impl Database {
     ///
     /// Returns an error when the record cannot be inserted or queried.
     pub fn import_pdf(&self, pdf: &ImportedPdf) -> Result<bool, DatabaseError> {
-        let duplicate = self
-            .connection
-            .query_row(
-                "SELECT id, pdf_path FROM papers WHERE content_hash = ?1 LIMIT 1",
-                [&pdf.content_hash],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
-            )
-            .optional()?;
-        if let Some((paper_id, stored_path)) = duplicate {
-            let moved = stored_path.as_deref().is_some_and(|stored_path| {
-                stored_path != pdf.path.to_string_lossy() && !Path::new(stored_path).is_file()
-            });
-            if moved {
-                self.connection.execute(
-                    "UPDATE papers SET title = ?1, pdf_path = ?2, file_size = ?3,
-                     indexed_at = CURRENT_TIMESTAMP WHERE id = ?4",
-                    params![
-                        pdf.title,
-                        pdf.path.to_string_lossy(),
-                        i64::try_from(pdf.file_size).unwrap_or(i64::MAX),
-                        paper_id
-                    ],
-                )?;
-            }
-            return Ok(false);
-        }
         let changed = self.connection.execute(
-            "INSERT INTO papers (title, pdf_path, content_hash, file_size, indexed_at)
-             VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+            "INSERT INTO papers (title, pdf_path, file_size, indexed_at)
+             VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
              ON CONFLICT(pdf_path) DO UPDATE SET title = excluded.title,
-                 content_hash = excluded.content_hash, file_size = excluded.file_size,
+                 file_size = excluded.file_size,
                  indexed_at = CURRENT_TIMESTAMP",
             params![
                 pdf.title,
                 pdf.path.to_string_lossy(),
-                pdf.content_hash,
                 i64::try_from(pdf.file_size).unwrap_or(i64::MAX)
             ],
         )?;
@@ -215,8 +188,8 @@ impl Database {
     pub fn paper_id_for_pdf(&self, pdf: &ImportedPdf) -> Result<Option<i64>, DatabaseError> {
         self.connection
             .query_row(
-                "SELECT id FROM papers WHERE content_hash = ?1 OR pdf_path = ?2 LIMIT 1",
-                params![pdf.content_hash, pdf.path.to_string_lossy()],
+                "SELECT id FROM papers WHERE pdf_path = ?1 LIMIT 1",
+                params![pdf.path.to_string_lossy()],
                 |row| row.get(0),
             )
             .optional()
@@ -336,12 +309,11 @@ impl Database {
         let existing = transaction
             .query_row(
                 "SELECT id FROM papers
-                 WHERE arxiv_id = ?1 OR content_hash = ?2 OR (?3 IS NOT NULL AND doi = ?3)
-                    OR pdf_path = ?4
+                 WHERE arxiv_id = ?1 OR (?2 IS NOT NULL AND doi = ?2)
+                    OR pdf_path = ?3
                  ORDER BY CASE WHEN arxiv_id = ?1 THEN 0 ELSE 1 END LIMIT 1",
                 params![
                     paper.id,
-                    pdf.content_hash,
                     paper.doi,
                     pdf.path.to_string_lossy()
                 ],
@@ -352,8 +324,8 @@ impl Database {
         let paper_id = if let Some(paper_id) = existing {
             transaction.execute(
                 "UPDATE papers SET title = ?1, abstract = ?2, doi = ?3, arxiv_id = ?4,
-                    published_at = ?5, updated_at = ?6, pdf_path = ?7, content_hash = ?8,
-                    file_size = ?9, indexed_at = CURRENT_TIMESTAMP WHERE id = ?10",
+                    published_at = ?5, updated_at = ?6, pdf_path = ?7,
+                    file_size = ?8, indexed_at = CURRENT_TIMESTAMP WHERE id = ?9",
                 params![
                     paper.title,
                     paper.abstract_text,
@@ -362,7 +334,6 @@ impl Database {
                     paper.published.to_rfc3339(),
                     paper.updated.to_rfc3339(),
                     pdf.path.to_string_lossy(),
-                    pdf.content_hash,
                     file_size,
                     paper_id
                 ],
@@ -372,8 +343,8 @@ impl Database {
             transaction.execute(
                 "INSERT INTO papers
                     (title, abstract, doi, arxiv_id, published_at, updated_at, pdf_path,
-                     content_hash, file_size, indexed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, CURRENT_TIMESTAMP)",
+                     file_size, indexed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP)",
                 params![
                     paper.title,
                     paper.abstract_text,
@@ -382,7 +353,6 @@ impl Database {
                     paper.published.to_rfc3339(),
                     paper.updated.to_rfc3339(),
                     pdf.path.to_string_lossy(),
-                    pdf.content_hash,
                     file_size
                 ],
             )?;
@@ -1229,17 +1199,6 @@ mod tests {
     }
 
     #[test]
-    fn content_hash_prevents_duplicate_imports() -> Result<(), Box<dyn std::error::Error>> {
-        let database = Database::in_memory()?;
-        let first = imported_pdf("first.pdf", "same-hash");
-        let duplicate = imported_pdf("copy.pdf", "same-hash");
-        assert!(database.import_pdf(&first)?);
-        assert!(!database.import_pdf(&duplicate)?);
-        assert_eq!(database.library_papers()?.len(), 1);
-        Ok(())
-    }
-
-    #[test]
     fn remote_only_papers_do_not_appear_in_library() -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::in_memory()?;
         let timestamp = Utc
@@ -1278,8 +1237,8 @@ mod tests {
         let inside_path_string = inside_path.to_string_lossy().into_owned();
         let outside_path_string = outside_path.to_string_lossy().into_owned();
 
-        database.import_pdf(&imported_pdf(&inside_path_string, "inside-hash"))?;
-        database.import_pdf(&imported_pdf(&outside_path_string, "outside-hash"))?;
+        database.import_pdf(&imported_pdf(&inside_path_string))?;
+        database.import_pdf(&imported_pdf(&outside_path_string))?;
 
         let rows = database.library_papers_in_roots(std::slice::from_ref(&root))?;
 
@@ -1296,8 +1255,8 @@ mod tests {
     #[test]
     fn changed_file_at_same_path_refreshes_index() -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::in_memory()?;
-        let original = imported_pdf("paper.pdf", "old-hash");
-        let mut replacement = imported_pdf("paper.pdf", "new-hash");
+        let original = imported_pdf("paper.pdf");
+        let mut replacement = imported_pdf("paper.pdf");
         replacement.file_size = 84;
         database.import_pdf(&original)?;
         assert!(database.import_pdf(&replacement)?);
@@ -1308,41 +1267,11 @@ mod tests {
     }
 
     #[test]
-    fn moved_pdf_updates_the_existing_catalog_path() -> Result<(), Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!(
-            "papr-moved-pdf-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let old_folder = root.join("Old");
-        let new_folder = root.join("New");
-        fs::create_dir_all(&old_folder)?;
-        fs::create_dir_all(&new_folder)?;
-        let old_path = old_folder.join("paper.pdf");
-        let new_path = new_folder.join("paper.pdf");
-        fs::write(&old_path, b"%PDF moved")?;
-        let database = Database::in_memory()?;
-        let old_pdf = LibraryIndexer::inspect(&old_path)?;
-        database.import_pdf(&old_pdf)?;
-
-        fs::rename(&old_path, &new_path)?;
-        let new_pdf = LibraryIndexer::inspect(&new_path)?;
-        assert!(!database.import_pdf(&new_pdf)?);
-        assert_eq!(
-            database.library_papers()?[0].pdf_path.as_deref(),
-            new_path.to_str()
-        );
-
-        fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[test]
     fn directory_sync_creates_exclusive_collections_and_leaves_root_unassigned()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::in_memory()?;
         let root = PathBuf::from("/research/library");
-        let mut pdf = imported_pdf("/research/library/GW/paper.pdf", "layout-hash");
+        let mut pdf = imported_pdf("/research/library/GW/paper.pdf");
         pdf.library_root = Some(root.clone());
         pdf.relative_directory = Some(PathBuf::from("GW"));
         database.import_pdf(&pdf)?;
@@ -1463,7 +1392,7 @@ mod tests {
         let database = Database::in_memory()?;
         let old = PathBuf::from("/library/Old Name");
         let new = PathBuf::from("/library/New Name");
-        let mut pdf = imported_pdf("/library/Old Name/paper.pdf", "rename-hash");
+        let mut pdf = imported_pdf("/library/Old Name/paper.pdf");
         pdf.library_root = Some(PathBuf::from("/library"));
         pdf.relative_directory = Some(PathBuf::from("Old Name"));
         database.import_pdf(&pdf)?;
@@ -1551,7 +1480,7 @@ mod tests {
     #[test]
     fn download_enriches_matching_local_pdf() -> Result<(), Box<dyn std::error::Error>> {
         let mut database = Database::in_memory()?;
-        let pdf = imported_pdf("paper.pdf", "download-hash");
+        let pdf = imported_pdf("paper.pdf");
         database.import_pdf(&pdf)?;
         let timestamp = Utc
             .with_ymd_and_hms(2026, 2, 1, 0, 0, 0)
@@ -1630,11 +1559,11 @@ mod tests {
         Ok(())
     }
 
-    fn imported_pdf(path: &str, hash: &str) -> ImportedPdf {
+    fn imported_pdf(path: &str) -> ImportedPdf {
         ImportedPdf {
             path: PathBuf::from(path),
             title: "Imported title".into(),
-            content_hash: hash.into(),
+            
             file_size: 42,
             library_root: None,
             relative_directory: None,

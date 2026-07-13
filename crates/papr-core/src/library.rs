@@ -2,12 +2,12 @@
 
 use std::{
     fs::File,
-    io::{self, Read},
+    io::{self},
     path::{Path, PathBuf},
 };
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use sha2::{Digest, Sha256};
+
 use thiserror::Error;
 use walkdir::WalkDir;
 
@@ -19,7 +19,7 @@ pub struct ImportedPdf {
     /// Human-readable title inferred from the filename.
     pub title: String,
     /// SHA-256 content digest used for duplicate detection.
-    pub content_hash: String,
+    
     /// File size in bytes.
     pub file_size: u64,
     /// Configured library root containing this file.
@@ -98,17 +98,8 @@ impl LibraryIndexer {
     ///
     /// Returns an error when the file metadata or contents cannot be read.
     pub fn inspect(path: &Path) -> Result<ImportedPdf, LibraryError> {
-        let mut file = File::open(path)?;
+        let file = File::open(path)?;
         let file_size = file.metadata()?.len();
-        let mut hasher = Sha256::new();
-        let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
         let title = path
             .file_stem()
             .and_then(|name| name.to_str())
@@ -116,7 +107,6 @@ impl LibraryIndexer {
         Ok(ImportedPdf {
             path: path.to_path_buf(),
             title,
-            content_hash: format!("{:x}", hasher.finalize()),
             file_size,
             library_root: None,
             relative_directory: None,
@@ -156,16 +146,14 @@ impl LibraryWatcher {
     /// # Errors
     ///
     /// Returns an error if the platform watcher cannot start or watch a root.
-    pub fn start<F>(roots: &[PathBuf], mut on_pdf: F) -> Result<Self, LibraryError>
+    pub fn start<F>(roots: &[PathBuf], mut on_event: F) -> Result<Self, LibraryError>
     where
-        F: FnMut(PathBuf) + Send + 'static,
+        F: FnMut() + Send + 'static,
     {
         let mut watcher =
             notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-                if let Ok(event) = result {
-                    for path in event.paths.into_iter().filter(|path| is_pdf(path)) {
-                        on_pdf(path);
-                    }
+                if result.is_ok() {
+                    on_event();
                 }
             })?;
         for root in roots.iter().filter(|root| root.exists()) {
@@ -204,7 +192,6 @@ mod tests {
         let imported = LibraryIndexer::inspect(&path)?;
         assert_eq!(imported.file_size, 13);
         assert!(imported.title.starts_with("papr index"));
-        assert_eq!(imported.content_hash.len(), 64);
         fs::remove_file(path)?;
         Ok(())
     }
