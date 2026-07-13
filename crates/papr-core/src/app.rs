@@ -329,6 +329,7 @@ impl App {
             Command::MoveUp => {
                 if !self.content_focused {
                     self.sidebar_index = self.sidebar_index.saturating_sub(1);
+                    self.page = Page::ALL[self.sidebar_index];
                 } else if self.page == Page::Dashboard && !self.today_papers.is_empty() {
                     self.today_selected = self.today_selected.saturating_sub(1);
                 } else if self.page == Page::Discover {
@@ -352,6 +353,7 @@ impl App {
                 if !self.content_focused {
                     self.sidebar_index =
                         (self.sidebar_index + 1).min(Page::ALL.len().saturating_sub(1));
+                    self.page = Page::ALL[self.sidebar_index];
                 } else if self.page == Page::Dashboard && !self.today_papers.is_empty() {
                     self.today_selected =
                         (self.today_selected + 1).min(self.today_papers.len().saturating_sub(1));
