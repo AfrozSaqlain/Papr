@@ -92,6 +92,8 @@ pub struct PaperNote {
     pub title: String,
     /// Markdown source.
     pub body: String,
+    /// Cursor position in the body.
+    pub cursor: usize,
 }
 
 /// Named paper collection with its current item count.

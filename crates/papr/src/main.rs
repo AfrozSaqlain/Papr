@@ -111,7 +111,9 @@ async fn main() -> Result<()> {
         .count() as u64;
     dashboard.disk_usage = LibraryIndexer::pdf_storage_size(&collection_roots);
     dashboard.downloads_size = LibraryIndexer::pdf_storage_size(&[download_dir.clone()]);
-    dashboard.database_size = std::fs::metadata(&paths.database_file).map(|m| m.len()).unwrap_or(0);
+    dashboard.database_size = std::fs::metadata(&paths.database_file)
+        .map(|m| m.len())
+        .unwrap_or(0);
 
     let mut app = App {
         stats: dashboard.counts,
@@ -443,6 +445,7 @@ fn apply_ui_action(
                 rename_collection_id: Some(id),
                 rename_paper_id: None,
                 value: String::new(),
+                cursor: 0,
                 selected: 0,
             });
             app.mode = AppMode::Prompt;
@@ -453,6 +456,7 @@ fn apply_ui_action(
                 rename_collection_id: None,
                 rename_paper_id: Some(id),
                 value: String::new(),
+                cursor: 0,
                 selected: 0,
             });
             app.mode = AppMode::Prompt;
@@ -499,6 +503,7 @@ fn show_collection_prompt(app: &mut App, paper_id: Option<i64>, rename_id: Optio
         rename_collection_id: rename_id,
         rename_paper_id: None,
         value: String::new(),
+        cursor: 0,
         selected: 0,
     });
     app.mode = AppMode::Prompt;
@@ -510,8 +515,10 @@ fn apply_collection_prompt(
     prompt: &MetadataPrompt,
 ) -> Result<()> {
     let name = prompt.value.trim();
-    if name.is_empty() { return Ok(()); }
-    
+    if name.is_empty() {
+        return Ok(());
+    }
+
     if let Some(paper_id) = prompt.rename_paper_id {
         if name.contains(['/', '\\']) {
             anyhow::bail!("filename must not contain path separators");
@@ -520,12 +527,16 @@ fn apply_collection_prompt(
         if !new_name.to_lowercase().ends_with(".pdf") {
             new_name.push_str(".pdf");
         }
-        
-        let paper = app.library.papers.iter().find(|p| p.id == paper_id)
+
+        let paper = app
+            .library
+            .papers
+            .iter()
+            .find(|p| p.id == paper_id)
             .context("paper not found")?;
         let source = PathBuf::from(paper.pdf_path.as_ref().context("paper has no local PDF")?);
         let destination = source.with_file_name(&new_name);
-        
+
         if source != destination {
             if destination.exists() {
                 anyhow::bail!("a file with this name already exists");
@@ -836,8 +847,11 @@ fn refresh_dashboard(runtime: &Runtime, app: &mut App) -> Result<()> {
         .filter(|p| p.reading_status == "read")
         .count() as u64;
     app.dashboard.disk_usage = LibraryIndexer::pdf_storage_size(&runtime.collection_roots);
-    app.dashboard.downloads_size = LibraryIndexer::pdf_storage_size(&[runtime.download_dir.clone()]);
-    app.dashboard.database_size = std::fs::metadata(&runtime.database_file).map(|m| m.len()).unwrap_or(0);
+    app.dashboard.downloads_size =
+        LibraryIndexer::pdf_storage_size(&[runtime.download_dir.clone()]);
+    app.dashboard.database_size = std::fs::metadata(&runtime.database_file)
+        .map(|m| m.len())
+        .unwrap_or(0);
     app.stats = app.dashboard.counts;
     Ok(())
 }
@@ -1170,13 +1184,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.mode == AppMode::CommandPalette {
         match key.code {
             KeyCode::Esc => app.dispatch(Command::TogglePalette),
-            KeyCode::Backspace => {
-                app.palette_query.pop();
+            _ => {
+                edit_text(&mut app.palette_query, &mut app.palette_cursor, key);
             }
-            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.palette_query.push(character);
-            }
-            _ => {}
         }
         return None;
     }
@@ -1202,6 +1212,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         app.sidebar_index = 1;
         app.content_focused = true;
         app.mode = AppMode::Search;
+        app.discovery.query_cursor = app.discovery.query.len();
         return None;
     }
     if !app.content_focused {
@@ -1285,13 +1296,13 @@ fn handle_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             app.mode = AppMode::Normal;
             return Some(UiAction::Search(query));
         }
-        KeyCode::Backspace => {
-            app.discovery.query.pop();
+        _ => {
+            edit_text(
+                &mut app.discovery.query,
+                &mut app.discovery.query_cursor,
+                key,
+            );
         }
-        KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.discovery.query.push(character);
-        }
-        _ => {}
     }
     None
 }
@@ -1331,7 +1342,9 @@ fn handle_downloads_key(app: &App, key: KeyEvent) -> Option<UiAction> {
             if matches!(task.status, DownloadStatus::Completed) {
                 let suffix = format!("{}.pdf", task.id);
                 if let Some(paper) = app.library.papers.iter().find(|p| {
-                    p.pdf_path.as_ref().map_or(false, |path| path.ends_with(&suffix))
+                    p.pdf_path
+                        .as_ref()
+                        .map_or(false, |path| path.ends_with(&suffix))
                 }) {
                     return Some(UiAction::RenamePdf(paper.id));
                 }
@@ -1461,6 +1474,54 @@ fn navigation_command(key: KeyEvent) -> Option<Command> {
     }
 }
 
+fn edit_text(text: &mut String, cursor: &mut usize, key: KeyEvent) -> bool {
+    let mut changed = false;
+    match key.code {
+        KeyCode::Left => {
+            if *cursor > 0 {
+                let mut prev = *cursor - 1;
+                while prev > 0 && !text.is_char_boundary(prev) {
+                    prev -= 1;
+                }
+                *cursor = prev;
+            }
+        }
+        KeyCode::Right => {
+            if *cursor < text.len() {
+                let mut next = *cursor + 1;
+                while next < text.len() && !text.is_char_boundary(next) {
+                    next += 1;
+                }
+                *cursor = next;
+            }
+        }
+        KeyCode::Backspace => {
+            if *cursor > 0 {
+                let mut prev = *cursor - 1;
+                while prev > 0 && !text.is_char_boundary(prev) {
+                    prev -= 1;
+                }
+                text.remove(prev);
+                *cursor = prev;
+                changed = true;
+            }
+        }
+        KeyCode::Delete => {
+            if *cursor < text.len() {
+                text.remove(*cursor);
+                changed = true;
+            }
+        }
+        KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            text.insert(*cursor, character);
+            *cursor += character.len_utf8();
+            changed = true;
+        }
+        _ => {}
+    }
+    changed
+}
+
 fn handle_modal_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.mode == AppMode::Prompt {
         match key.code {
@@ -1492,17 +1553,11 @@ fn handle_modal_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                     prompt.selected = prompt.selected.saturating_sub(1);
                 }
             }
-            KeyCode::Backspace => {
+            _ => {
                 if let Some(prompt) = &mut app.metadata_prompt {
-                    prompt.value.pop();
+                    edit_text(&mut prompt.value, &mut prompt.cursor, key);
                 }
             }
-            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(prompt) = &mut app.metadata_prompt {
-                    prompt.value.push(character);
-                }
-            }
-            _ => {}
         }
         return None;
     }
@@ -1523,25 +1578,18 @@ fn handle_modal_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             app.mode = app.modal_return;
             return app.note_editor.clone().map(UiAction::SaveNote);
         }
-        KeyCode::Backspace => {
-            if let Some(note) = &mut app.note_editor {
-                note.body.pop();
-                changed = true;
-            }
-        }
         KeyCode::Enter => {
             if let Some(note) = &mut app.note_editor {
-                note.body.push('\n');
+                note.body.insert(note.cursor, '\n');
+                note.cursor += 1;
                 changed = true;
             }
         }
-        KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+        _ => {
             if let Some(note) = &mut app.note_editor {
-                note.body.push(character);
-                changed = true;
+                changed = edit_text(&mut note.body, &mut note.cursor, key);
             }
         }
-        _ => {}
     }
     changed
         .then(|| app.note_editor.clone())
@@ -1824,6 +1872,7 @@ mod tests {
                 paper_id: 7,
                 title: String::new(),
                 body: String::new(),
+                cursor: 0,
             }),
             ..App::default()
         };

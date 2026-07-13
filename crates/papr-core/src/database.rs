@@ -440,10 +440,15 @@ impl Database {
                 "SELECT title, body FROM notes WHERE paper_id = ?1",
                 [paper_id],
                 |row| {
+                    let title: Option<String> = row.get(0)?;
+                    let body: Option<String> = row.get(1)?;
+                    let body_str = body.unwrap_or_default();
+                    let cursor = body_str.len();
                     Ok(PaperNote {
                         paper_id,
-                        title: row.get(0)?,
-                        body: row.get(1)?,
+                        title: title.unwrap_or_default(),
+                        body: body_str,
+                        cursor,
                     })
                 },
             )
@@ -452,6 +457,7 @@ impl Database {
                 paper_id,
                 title: String::new(),
                 body: String::new(),
+                cursor: 0,
             }))
     }
 
@@ -842,11 +848,7 @@ impl Database {
     ///
     /// # Errors
     /// Returns an error when the database cannot be updated.
-    pub fn rename_pdf(
-        &self,
-        paper_id: i64,
-        new_path: &Path,
-    ) -> Result<(), DatabaseError> {
+    pub fn rename_pdf(&self, paper_id: i64, new_path: &Path) -> Result<(), DatabaseError> {
         self.connection.execute(
             "UPDATE papers SET pdf_path = ?1 WHERE id = ?2",
             params![new_path.to_string_lossy(), paper_id],
@@ -1442,8 +1444,9 @@ mod tests {
         let paper_id = database.insert_paper("Organized paper", None)?;
         let note = PaperNote {
             paper_id,
-            title: "Reading notes".into(),
-            body: "# First pass".into(),
+            title: "Test Note".to_owned(),
+            body: "This is a test note body.".to_owned(),
+            cursor: 0,
         };
         database.save_note(&note)?;
         let mut revised = note;

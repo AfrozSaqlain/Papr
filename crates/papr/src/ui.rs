@@ -573,9 +573,17 @@ fn render_note_editor(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     if app.note_preview {
         return;
     }
-    let column = u16::try_from(body.lines().last().map_or(0, |line| line.chars().count()))
-        .unwrap_or(u16::MAX);
-    let row = u16::try_from(body.lines().count().saturating_sub(1)).unwrap_or(u16::MAX);
+    let text_before_cursor = &body[..app.note_editor.as_ref().unwrap().cursor];
+    let row = u16::try_from(text_before_cursor.split('\n').count().saturating_sub(1)).unwrap_or(0);
+    let column = u16::try_from(
+        text_before_cursor
+            .split('\n')
+            .last()
+            .unwrap_or("")
+            .chars()
+            .count(),
+    )
+    .unwrap_or(0);
     let cursor_x = area.x.saturating_add(1).saturating_add(column);
     let cursor_y = area.y.saturating_add(1).saturating_add(row);
     frame.set_cursor_position((
@@ -634,7 +642,15 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     } else {
         " CHOOSE OR CREATE COLLECTION "
     };
-    let area = centered(64, if renaming || creating || renaming_pdf { 3 } else { 11 }, frame.area());
+    let area = centered(
+        64,
+        if renaming || creating || renaming_pdf {
+            3
+        } else {
+            11
+        },
+        frame.area(),
+    );
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(if renaming || creating || renaming_pdf {
@@ -675,7 +691,7 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         ),
         area,
     );
-    let column = u16::try_from(prompt.value.chars().count()).unwrap_or(u16::MAX);
+    let column = u16::try_from(prompt.value[..prompt.cursor].chars().count()).unwrap_or(u16::MAX);
     frame.set_cursor_position((
         area.x.saturating_add(3).saturating_add(column),
         area.y.saturating_add(1),
@@ -844,6 +860,19 @@ fn render_discover(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
             ),
         rows[0],
     );
+
+    if app.mode == AppMode::Search {
+        let cursor_offset = u16::try_from(
+            app.discovery.query[..app.discovery.query_cursor]
+                .chars()
+                .count(),
+        )
+        .unwrap_or(0);
+        frame.set_cursor_position((
+            rows[0].x.saturating_add(3).saturating_add(cursor_offset),
+            rows[0].y.saturating_add(1),
+        ));
+    }
 
     match &app.discovery.status {
         DiscoveryStatus::Idle => render_discover_empty(frame, rows[1], theme),
@@ -1284,6 +1313,12 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         ),
         area,
     );
+    let cursor_offset =
+        u16::try_from(app.palette_query[..app.palette_cursor].chars().count()).unwrap_or(0);
+    frame.set_cursor_position((
+        area.x.saturating_add(3).saturating_add(cursor_offset),
+        area.y.saturating_add(1),
+    ));
 }
 
 fn render_help(frame: &mut Frame<'_>, theme: &Theme) {

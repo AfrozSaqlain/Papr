@@ -107,6 +107,8 @@ pub struct MetadataPrompt {
     pub rename_paper_id: Option<i64>,
     /// Editable input value.
     pub value: String,
+    /// Cursor position in the input value.
+    pub cursor: usize,
     /// Selected existing collection.
     pub selected: usize,
 }
@@ -130,6 +132,8 @@ pub enum DiscoveryStatus {
 pub struct DiscoveryState {
     /// Query currently shown in the search field.
     pub query: String,
+    /// Cursor position in the query field.
+    pub query_cursor: usize,
     /// Papers returned by the most recent request.
     pub results: Vec<RemotePaper>,
     /// Selected result row.
@@ -233,6 +237,8 @@ pub struct App {
     pub today_status: DiscoveryStatus,
     /// Command palette query.
     pub palette_query: String,
+    /// Command palette cursor.
+    pub palette_cursor: usize,
     /// Remote paper discovery state.
     pub discovery: DiscoveryState,
     /// Local paper catalog state.
@@ -297,6 +303,7 @@ impl Default for App {
             today_scroll: 0,
             today_status: DiscoveryStatus::Idle,
             palette_query: String::new(),
+            palette_cursor: 0,
             discovery: DiscoveryState::default(),
             library: LibraryState::default(),
             downloads: Vec::new(),
@@ -411,6 +418,7 @@ impl App {
                     AppMode::CommandPalette
                 };
                 self.palette_query.clear();
+                self.palette_cursor = 0;
             }
             Command::ToggleHelp => {
                 self.mode = if self.mode == AppMode::Help {
