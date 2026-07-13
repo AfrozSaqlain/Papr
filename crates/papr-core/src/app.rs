@@ -396,8 +396,9 @@ impl App {
             Command::Back => {
                 if self.mode == AppMode::PaperDetail {
                     self.mode = AppMode::Normal;
+                } else {
+                    self.content_focused = false;
                 }
-                self.content_focused = false;
             }
             Command::TogglePalette => {
                 self.mode = if self.mode == AppMode::CommandPalette {
