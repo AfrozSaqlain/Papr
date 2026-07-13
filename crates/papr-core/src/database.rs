@@ -312,11 +312,7 @@ impl Database {
                  WHERE arxiv_id = ?1 OR (?2 IS NOT NULL AND doi = ?2)
                     OR pdf_path = ?3
                  ORDER BY CASE WHEN arxiv_id = ?1 THEN 0 ELSE 1 END LIMIT 1",
-                params![
-                    paper.id,
-                    paper.doi,
-                    pdf.path.to_string_lossy()
-                ],
+                params![paper.id, paper.doi, pdf.path.to_string_lossy()],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?;
@@ -1563,7 +1559,7 @@ mod tests {
         ImportedPdf {
             path: PathBuf::from(path),
             title: "Imported title".into(),
-            
+
             file_size: 42,
             library_root: None,
             relative_directory: None,

@@ -19,7 +19,7 @@ pub struct ImportedPdf {
     /// Human-readable title inferred from the filename.
     pub title: String,
     /// SHA-256 content digest used for duplicate detection.
-    
+
     /// File size in bytes.
     pub file_size: u64,
     /// Configured library root containing this file.
