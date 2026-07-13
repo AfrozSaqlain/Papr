@@ -104,25 +104,7 @@ async fn main() -> Result<()> {
     let download_dir = config.download_path.clone().unwrap_or(paths.downloads_dir);
     std::fs::create_dir_all(&download_dir).context("failed to create download directory")?;
 
-    if let Ok(entries) = std::fs::read_dir(&download_dir) {
-        let mut existing_files: Vec<_> = entries
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "pdf"))
-            .collect();
-        existing_files.sort_by_key(|e| std::cmp::Reverse(e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH)));
-        for entry in existing_files {
-            let size = entry.metadata().ok().map(|m| m.len()).unwrap_or(0);
-            let title = entry.file_name().to_string_lossy().into_owned();
-            let id = title.strip_suffix(".pdf").unwrap_or(&title).to_owned();
-            app.downloads.push(DownloadTask {
-                id,
-                title,
-                downloaded: size,
-                total: Some(size),
-                status: DownloadStatus::Completed,
-            });
-        }
-    }
+    discover_local_downloads(&mut app, &download_dir);
 
     let collection_roots = config.library_folders.clone();
     let mut library_roots = collection_roots.clone();
@@ -991,6 +973,34 @@ fn sync_pdf_collection_membership(
     Ok(())
 }
 
+fn discover_local_downloads(app: &mut App, download_dir: &std::path::Path) {
+    if let Ok(entries) = std::fs::read_dir(download_dir) {
+        let mut existing_files: Vec<_> = entries
+            .filter_map(std::result::Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "pdf"))
+            .collect();
+        existing_files.sort_by_key(|e| {
+            std::cmp::Reverse(
+                e.metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            )
+        });
+        for entry in existing_files {
+            let size = entry.metadata().ok().map_or(0, |m| m.len());
+            let title = entry.file_name().to_string_lossy().into_owned();
+            let id = title.strip_suffix(".pdf").unwrap_or(&title).to_owned();
+            app.downloads.push(DownloadTask {
+                id,
+                title,
+                downloaded: size,
+                total: Some(size),
+                status: DownloadStatus::Completed,
+            });
+        }
+    }
+}
+
 fn start_download(
     paper: RemotePaper,
     directory: &std::path::Path,
@@ -1170,14 +1180,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             .cloned()
             .map(UiAction::OpenPaper);
     }
-    if app.page == papr_core::Page::Downloads {
-        if matches!(key.code, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) {
-            if let Some(task) = app.downloads.get(app.download_selected) {
-                if matches!(task.status, DownloadStatus::Completed) {
-                    return Some(UiAction::OpenDownload(task.id.clone()));
-                }
-            }
-        }
+    if let Some(action) = handle_downloads_key(app, key) {
+        return Some(action);
     }
 
     if let Some(action) = library_action(app, key) {
@@ -1232,6 +1236,23 @@ fn bookmark_action(app: &App, key: KeyEvent) -> Option<UiAction> {
         }),
         _ => None,
     }
+}
+
+fn handle_downloads_key(app: &App, key: KeyEvent) -> Option<UiAction> {
+    if app.page != papr_core::Page::Downloads {
+        return None;
+    }
+    if matches!(
+        key.code,
+        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
+    ) {
+        if let Some(task) = app.downloads.get(app.download_selected) {
+            if matches!(task.status, DownloadStatus::Completed) {
+                return Some(UiAction::OpenDownload(task.id.clone()));
+            }
+        }
+    }
+    None
 }
 
 fn library_action(app: &mut App, key: KeyEvent) -> Option<UiAction> {
