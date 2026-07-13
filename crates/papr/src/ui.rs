@@ -14,7 +14,7 @@ use ratatui::{
 const LOGO: &str = "[ P A P R ]";
 
 /// Render the complete application for the current state.
-pub fn render(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
+pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let area = frame.area();
     frame.render_widget(
         Block::default().style(Style::default().bg(theme.background)),
@@ -52,7 +52,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     }
 }
 
-fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+fn render_header(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let title = Line::from(vec![
         Span::styled(
             LOGO,
@@ -79,7 +79,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     );
 }
 
-fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let items = Page::ALL
         .iter()
         .map(|page| ListItem::new(format!("  {}", page.title())));
@@ -100,11 +100,12 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
                 .add_modifier(Modifier::BOLD)
         })
         .highlight_symbol("›");
-    let mut state = ListState::default().with_selected(Some(app.sidebar_index));
+    let mut state = ListState::default().with_selected(Some(app.sidebar_index)).with_offset(app.sidebar_scroll);
     frame.render_stateful_widget(list, area, &mut state);
+    app.sidebar_scroll = state.offset();
 }
 
-fn render_content(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+fn render_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let inset = Rect::new(
         area.x + 2,
         area.y + 1,
@@ -151,9 +152,9 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     }
 }
 
-fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    if let Some(collection) = &app.active_collection {
-        render_collection_papers(frame, area, app, collection, theme);
+fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+    if app.active_collection.is_some() {
+        render_collection_papers(frame, area, app, theme);
         return;
     }
     if app.collections.is_empty() {
@@ -188,17 +189,18 @@ fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Them
         )
         .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
         .highlight_symbol("> ");
-    let mut state = ListState::default().with_selected(Some(app.collection_selected));
+    let mut state = ListState::default().with_selected(Some(app.collection_selected)).with_offset(app.collection_scroll);
     frame.render_stateful_widget(list, area, &mut state);
+    app.collection_scroll = state.offset();
 }
 
 fn render_collection_papers(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
-    collection: &papr_core::CollectionSummary,
+    app: &mut App,
     theme: &Theme,
 ) {
+    let collection = app.active_collection.as_ref().unwrap();
     let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(4)]).split(area);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -252,11 +254,12 @@ fn render_collection_papers(
         )
         .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
         .highlight_symbol("> ");
-    let mut state = ListState::default().with_selected(Some(app.collection_paper_selected));
+    let mut state = ListState::default().with_selected(Some(app.collection_paper_selected)).with_offset(app.collection_paper_scroll);
     frame.render_stateful_widget(list, rows[1], &mut state);
+    app.collection_paper_scroll = state.offset();
 }
 
-fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let rows = Layout::vertical([Constraint::Length(4), Constraint::Min(4)]).split(area);
     frame.render_widget(
         Paragraph::new(vec![
@@ -311,7 +314,7 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) 
     );
 }
 
-fn render_history(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+fn render_history(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let items = app.dashboard.recent_activity.iter().map(|activity| {
         ListItem::new(vec![
             Line::styled(
@@ -340,7 +343,7 @@ fn render_history(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     );
 }
 
-fn render_statistics(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+fn render_statistics(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let reading = &app.dashboard.reading;
     let rows = Layout::vertical([
         Constraint::Length(5),
@@ -473,7 +476,7 @@ fn activity_kind(kind: &str) -> &str {
     }
 }
 
-fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let items: Vec<ListItem<'_>> = match app.page {
         Page::Bookmarks => app
             .bookmarks
@@ -527,12 +530,13 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &The
             .style(Style::default().fg(theme.text))
             .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
             .highlight_symbol("> ");
-        let mut state = ListState::default().with_selected(Some(app.bookmark_selected));
+        let mut state = ListState::default().with_selected(Some(app.bookmark_selected)).with_offset(app.bookmark_scroll);
         frame.render_stateful_widget(list, area, &mut state);
+        app.bookmark_scroll = state.offset();
     }
 }
 
-fn render_note_editor(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
+fn render_note_editor(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let area = centered(82, 24, frame.area());
     frame.render_widget(Clear, area);
     let body = app
@@ -609,7 +613,7 @@ fn markdown_preview<'a>(body: &'a str, theme: &Theme) -> Vec<Line<'a>> {
         .collect()
 }
 
-fn render_metadata_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
+fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let Some(prompt) = &app.metadata_prompt else {
         return;
     };
@@ -670,7 +674,7 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     ));
 }
 
-fn render_library(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+fn render_library(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(4)]).split(area);
     let message = app
         .library
@@ -713,8 +717,9 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
         )
         .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
         .highlight_symbol("> ");
-    let mut state = ListState::default().with_selected(Some(app.library.selected));
+    let mut state = ListState::default().with_selected(Some(app.library.selected)).with_offset(app.library.scroll);
     frame.render_stateful_widget(list, rows[1], &mut state);
+    app.library.scroll = state.offset();
 }
 
 fn library_metadata(paper: &LibraryPaper) -> String {
@@ -729,7 +734,7 @@ fn library_metadata(paper: &LibraryPaper) -> String {
     format!("{authors}  |  {}  |  {size}", paper.reading_status)
 }
 
-fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     if app.downloads.is_empty() {
         frame.render_widget(
             Paragraph::new("No downloads yet. Press d on an arXiv paper to start one.")
@@ -776,8 +781,9 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme)
         )
         .highlight_style(Style::default().bg(theme.surface))
         .highlight_symbol("> ");
-    let mut state = ListState::default().with_selected(Some(app.download_selected));
+    let mut state = ListState::default().with_selected(Some(app.download_selected)).with_offset(app.download_scroll);
     frame.render_stateful_widget(list, area, &mut state);
+    app.download_scroll = state.offset();
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -798,7 +804,7 @@ fn format_decimal_bytes(bytes: u64, unit: u64, suffix: &str) -> String {
     format!("{whole}.{decimal} {suffix}")
 }
 
-fn render_discover(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+fn render_discover(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(4)]).split(area);
     let query = if app.discovery.query.is_empty() {
         "Search words | author: name | title: words | category: gr-qc"
@@ -881,7 +887,7 @@ fn render_discover_empty(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     );
 }
 
-fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let items = app.discovery.results.iter().map(|paper| {
         let meta = format!(
             "{}  |  {}  |  {}",
@@ -910,8 +916,9 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
         )
         .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
         .highlight_symbol("> ");
-    let mut state = ListState::default().with_selected(Some(app.discovery.selected));
+    let mut state = ListState::default().with_selected(Some(app.discovery.selected)).with_offset(app.discovery.scroll);
     frame.render_stateful_widget(list, area, &mut state);
+    app.discovery.scroll = state.offset();
 }
 
 fn compact_authors(paper: &RemotePaper) -> String {
@@ -923,7 +930,7 @@ fn compact_authors(paper: &RemotePaper) -> String {
     }
 }
 
-fn render_paper_detail(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
+fn render_paper_detail(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let Some(paper) = app.discovery.results.get(app.discovery.selected) else {
         return;
     };
@@ -1035,7 +1042,7 @@ fn paper_detail_lines<'a>(paper: &'a RemotePaper, theme: &Theme) -> Vec<Line<'a>
     ]
 }
 
-fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(4),
@@ -1085,7 +1092,7 @@ fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme)
     render_dashboard_details(frame, rows[3], app, theme);
 }
 
-fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let preview_width = usize::from(area.width.saturating_sub(8)).max(24);
     let today = match &app.today_status {
         DiscoveryStatus::Loading => vec![ListItem::new("Loading dashboard papers...")],
@@ -1127,8 +1134,9 @@ fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &T
         .highlight_symbol("> ");
     let selected =
         (app.content_focused && !app.today_papers.is_empty()).then_some(app.today_selected);
-    let mut state = ListState::default().with_selected(selected);
+    let mut state = ListState::default().with_selected(selected).with_offset(app.today_scroll);
     frame.render_stateful_widget(list, area, &mut state);
+    app.today_scroll = state.offset();
 }
 
 fn compact_text(value: &str, max_chars: usize) -> String {
@@ -1144,7 +1152,7 @@ fn compact_text(value: &str, max_chars: usize) -> String {
     shortened
 }
 
-fn render_dashboard_details(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+fn render_dashboard_details(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let lower = Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)])
         .spacing(1)
         .split(area);
@@ -1200,7 +1208,7 @@ fn render_dashboard_details(frame: &mut Frame<'_>, area: Rect, app: &App, theme:
     );
 }
 
-fn render_status(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+fn render_status(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let line = Line::from(vec![
         Span::styled(
             " j/k ",
@@ -1231,7 +1239,7 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     }
 }
 
-fn render_palette(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
+fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let area = centered(64, 9, frame.area());
     frame.render_widget(Clear, area);
     let query = if app.palette_query.is_empty() {
@@ -1311,9 +1319,9 @@ mod tests {
     fn dashboard_renders_at_minimum_size() -> Result<(), Box<dyn std::error::Error>> {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend)?;
-        let app = App::default();
+        let mut app = App::default();
         let theme = Theme::load("catppuccin")?;
-        terminal.draw(|frame| render(frame, &app, &theme))?;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
         let buffer = terminal.backend().buffer();
         let rendered = buffer
             .content
@@ -1329,13 +1337,13 @@ mod tests {
     {
         let backend = TestBackend::new(110, 32);
         let mut terminal = Terminal::new(backend)?;
-        let app = App {
+        let mut app = App {
             today_papers: vec![sample_paper()?],
             today_status: DiscoveryStatus::Ready,
             ..App::default()
         };
         let theme = Theme::load("nord")?;
-        terminal.draw(|frame| render(frame, &app, &theme))?;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
         let rendered = rendered_text(&terminal);
         assert!(rendered.contains("Terminal Research Systems"));
         assert!(rendered.contains("Ada Lovelace, Alan Turing"));
@@ -1355,11 +1363,11 @@ mod tests {
         app.discovery.results.push(sample_paper()?);
         let theme = Theme::load("nord")?;
 
-        terminal.draw(|frame| render(frame, &app, &theme))?;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
         assert!(rendered_text(&terminal).contains("Terminal Research Systems"));
 
         app.mode = AppMode::PaperDetail;
-        terminal.draw(|frame| render(frame, &app, &theme))?;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
         let detail = rendered_text(&terminal);
         assert!(detail.contains("ABSTRACT"));
         assert!(detail.contains("10.1000/papr"));
@@ -1385,7 +1393,7 @@ mod tests {
             is_favorite: false,
         });
         let theme = Theme::load("gruvbox")?;
-        terminal.draw(|frame| render(frame, &app, &theme))?;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
         assert!(rendered_text(&terminal).contains("A Local Research Paper"));
 
         app.page = Page::Downloads;
@@ -1396,7 +1404,7 @@ mod tests {
             total: Some(2048),
             status: DownloadStatus::Running,
         });
-        terminal.draw(|frame| render(frame, &app, &theme))?;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
         let text = rendered_text(&terminal);
         assert!(text.contains("A Streaming Download"));
         assert!(text.contains("1.0 KiB / 2.0 KiB"));
@@ -1425,11 +1433,11 @@ mod tests {
         app.dashboard.reading.most_active_day = Some("Monday".into());
         let theme = Theme::load("tokyo-night")?;
 
-        terminal.draw(|frame| render(frame, &app, &theme))?;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
         assert!(rendered_text(&terminal).contains("A Recorded Paper"));
 
         app.page = Page::Statistics;
-        terminal.draw(|frame| render(frame, &app, &theme))?;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
         let statistics = rendered_text(&terminal);
         assert!(statistics.contains("4 days"));
         assert!(statistics.contains("Monday"));
@@ -1453,7 +1461,7 @@ mod tests {
             ..App::default()
         };
         let theme = Theme::load("nord")?;
-        terminal.draw(|frame| render(frame, &app, &theme))?;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
         assert!(rendered_text(&terminal).contains("Important Papers"));
 
         app.active_collection = Some(collection);
@@ -1467,7 +1475,7 @@ mod tests {
             reading_status: "unread".into(),
             is_favorite: false,
         });
-        terminal.draw(|frame| render(frame, &app, &theme))?;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
         let rendered = rendered_text(&terminal);
         assert!(rendered.contains("Paper In Collection"));
         assert!(rendered.contains("PDF available"));
@@ -1478,7 +1486,7 @@ mod tests {
     fn bookmarks_render_pdf_metadata() -> Result<(), Box<dyn std::error::Error>> {
         let backend = TestBackend::new(100, 28);
         let mut terminal = Terminal::new(backend)?;
-        let app = App {
+        let mut app = App {
             page: Page::Bookmarks,
             bookmarks: vec![BookmarkSummary {
                 id: 1,
@@ -1495,7 +1503,7 @@ mod tests {
             ..App::default()
         };
         let theme = Theme::load("nord")?;
-        terminal.draw(|frame| render(frame, &app, &theme))?;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
         let rendered = rendered_text(&terminal);
         assert!(rendered.contains("Bookmarked Research"));
         assert!(rendered.contains("Ada Lovelace, Alan Turing"));

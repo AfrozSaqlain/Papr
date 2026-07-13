@@ -132,6 +132,8 @@ pub struct DiscoveryState {
     pub results: Vec<RemotePaper>,
     /// Selected result row.
     pub selected: usize,
+    /// Vertical list scroll offset.
+    pub scroll: usize,
     /// Network request state.
     pub status: DiscoveryStatus,
     /// Vertical detail-page scroll offset.
@@ -145,6 +147,8 @@ pub struct LibraryState {
     pub papers: Vec<LibraryPaper>,
     /// Selected library row.
     pub selected: usize,
+    /// Vertical list scroll offset.
+    pub scroll: usize,
     /// Whether a background filesystem scan is active.
     pub indexing: bool,
     /// Last indexing summary or failure.
@@ -205,6 +209,8 @@ pub struct App {
     pub page: Page,
     /// Selected sidebar row.
     pub sidebar_index: usize,
+    /// Vertical list scroll offset for the sidebar.
+    pub sidebar_scroll: usize,
     /// Whether keyboard input targets section content instead of the navigation pane.
     pub content_focused: bool,
     /// Current modal input mode.
@@ -219,6 +225,8 @@ pub struct App {
     pub today_papers: Vec<RemotePaper>,
     /// Selected dashboard paper row.
     pub today_selected: usize,
+    /// Vertical list scroll offset for the dashboard feed.
+    pub today_scroll: usize,
     /// Loading state for the latest-paper feed.
     pub today_status: DiscoveryStatus,
     /// Command palette query.
@@ -231,6 +239,8 @@ pub struct App {
     pub downloads: Vec<DownloadTask>,
     /// Selected transfer row.
     pub download_selected: usize,
+    /// Vertical list scroll offset for active downloads.
+    pub download_scroll: usize,
     /// Currently edited note.
     pub note_editor: Option<PaperNote>,
     /// Whether the note overlay shows rendered Markdown instead of source.
@@ -241,18 +251,24 @@ pub struct App {
     pub collections: Vec<CollectionSummary>,
     /// Selected collection row.
     pub collection_selected: usize,
+    /// Vertical list scroll offset for the collections list.
+    pub collection_scroll: usize,
     /// Collection currently opened for paper browsing.
     pub active_collection: Option<CollectionSummary>,
     /// Papers assigned to the active collection.
     pub collection_papers: Vec<LibraryPaper>,
     /// Selected paper within the active collection.
     pub collection_paper_selected: usize,
+    /// Vertical list scroll offset for papers within a collection.
+    pub collection_paper_scroll: usize,
     /// Most recently opened collection, used to restore its paper cursor.
     pub last_opened_collection_id: Option<i64>,
     /// Bookmark summaries.
     pub bookmarks: Vec<BookmarkSummary>,
     /// Selected bookmarked PDF row.
     pub bookmark_selected: usize,
+    /// Vertical list scroll offset for bookmarks.
+    pub bookmark_scroll: usize,
     /// Short user-facing operation result.
     pub toast: Option<String>,
     /// Mode restored when an editor or prompt closes.
@@ -268,6 +284,7 @@ impl Default for App {
         Self {
             page: Page::Dashboard,
             sidebar_index: 0,
+            sidebar_scroll: 0,
             content_focused: false,
             mode: AppMode::Normal,
             should_quit: false,
@@ -275,23 +292,28 @@ impl Default for App {
             dashboard: ResearchDashboard::default(),
             today_papers: Vec::new(),
             today_selected: 0,
+            today_scroll: 0,
             today_status: DiscoveryStatus::Idle,
             palette_query: String::new(),
             discovery: DiscoveryState::default(),
             library: LibraryState::default(),
             downloads: Vec::new(),
             download_selected: 0,
+            download_scroll: 0,
             note_editor: None,
             note_preview: false,
             metadata_prompt: None,
             collections: Vec::new(),
             collection_selected: 0,
+            collection_scroll: 0,
             active_collection: None,
             collection_papers: Vec::new(),
             collection_paper_selected: 0,
+            collection_paper_scroll: 0,
             last_opened_collection_id: None,
             bookmarks: Vec::new(),
             bookmark_selected: 0,
+            bookmark_scroll: 0,
             toast: None,
             modal_return: AppMode::Normal,
             plugins: Vec::new(),
