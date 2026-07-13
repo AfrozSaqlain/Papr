@@ -103,7 +103,8 @@ async fn main() -> Result<()> {
 
     let download_dir = config.download_path.clone().unwrap_or(paths.downloads_dir);
     std::fs::create_dir_all(&download_dir).context("failed to create download directory")?;
-    let mut library_roots = config.library_folders.clone();
+    let collection_roots = config.library_folders.clone();
+    let mut library_roots = collection_roots.clone();
     if !library_roots.contains(&download_dir) {
         library_roots.push(download_dir.clone());
     }
@@ -131,6 +132,7 @@ async fn main() -> Result<()> {
         pdf_viewer: config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer),
         primary_library_root,
         library_roots,
+        collection_roots,
         dashboard_keywords,
         dashboard_keyword_signature,
         dashboard_feed_date: local_feed_date(),
@@ -227,6 +229,7 @@ struct Runtime {
     pdf_viewer: String,
     primary_library_root: PathBuf,
     library_roots: Vec<PathBuf>,
+    collection_roots: Vec<PathBuf>,
     dashboard_keywords: Vec<String>,
     dashboard_keyword_signature: String,
     dashboard_feed_date: String,
@@ -267,7 +270,7 @@ async fn run(
     };
     let mut pending_downloads = HashMap::<String, RemotePaper>::new();
     refresh_dashboard_papers(&runtime, &senders, app)?;
-    start_scan(&runtime.library_roots, &senders.index, app);
+    start_runtime_scan(&runtime, &senders, app);
     let mut last_date_check = std::time::Instant::now();
     while !app.should_quit {
         while let Ok(TodayResponse { feed_date, result }) = today_receiver.try_recv() {
@@ -401,7 +404,7 @@ fn apply_ui_action(
             pending_downloads,
             app,
         ),
-        UiAction::Reindex => start_scan(&runtime.library_roots, &senders.index, app),
+        UiAction::Reindex => start_runtime_scan(runtime, senders, app),
         UiAction::OpenPdf { paper_id, path } => {
             runtime.database.record_open(paper_id, true)?;
             open_pdf(&runtime.pdf_viewer, &path, app)?;
@@ -495,6 +498,14 @@ fn apply_collection_prompt(
             let _ = std::fs::rename(&new, &old);
             return Err(error.into());
         }
+        let directories = LibraryIndexer::collection_directories(&runtime.collection_roots);
+        for directory in &directories {
+            runtime.database.sync_collection_directory(directory)?;
+        }
+        runtime
+            .database
+            .reconcile_collections(&runtime.collection_roots, &directories)?;
+        refresh_renamed_collection(&runtime.database, app, collection_id)?;
         return Ok(());
     }
     if prompt.paper_id.is_none() {
@@ -562,6 +573,33 @@ fn apply_collection_prompt(
     Ok(())
 }
 
+fn refresh_renamed_collection(
+    database: &Database,
+    app: &mut App,
+    collection_id: i64,
+) -> Result<()> {
+    app.collections = database.collections()?;
+    app.collection_selected = app
+        .collections
+        .iter()
+        .position(|collection| collection.id == collection_id)
+        .unwrap_or_else(|| app.collections.len().saturating_sub(1));
+    if app.last_opened_collection_id == Some(collection_id) {
+        app.collection_papers = database.papers_for_collection(collection_id)?;
+        app.collection_paper_selected = app
+            .collection_paper_selected
+            .min(app.collection_papers.len().saturating_sub(1));
+    }
+    if app.active_collection.as_ref().map(|item| item.id) == Some(collection_id) {
+        app.active_collection = app
+            .collections
+            .iter()
+            .find(|collection| collection.id == collection_id)
+            .cloned();
+    }
+    Ok(())
+}
+
 fn move_pdf_file(source: &Path, destination: &Path) -> Result<()> {
     if let Err(rename_error) = std::fs::rename(source, destination) {
         std::fs::copy(source, destination).with_context(|| {
@@ -613,6 +651,16 @@ fn resolve_target(target: PaperTarget, database: &Database) -> Result<i64> {
 
 fn refresh_organization(database: &Database, app: &mut App) -> Result<()> {
     app.collections = database.collections()?;
+    app.collection_selected = app
+        .collection_selected
+        .min(app.collections.len().saturating_sub(1));
+    if let Some(active) = &app.active_collection {
+        app.active_collection = app
+            .collections
+            .iter()
+            .find(|collection| collection.id == active.id)
+            .cloned();
+    }
     app.bookmarks = database.bookmarks()?;
     app.bookmark_selected = app
         .bookmark_selected
@@ -818,20 +866,35 @@ fn parse_command(command: &str) -> Result<Vec<String>> {
     Ok(args)
 }
 
-fn start_scan(roots: &[PathBuf], sender: &mpsc::UnboundedSender<IndexResponse>, app: &mut App) {
+fn start_scan(
+    pdf_roots: &[PathBuf],
+    collection_roots: &[PathBuf],
+    sender: &mpsc::UnboundedSender<IndexResponse>,
+    app: &mut App,
+) {
     if app.library.indexing {
         return;
     }
     app.library.indexing = true;
     app.library.message = Some("Indexing library folders...".into());
-    let roots = roots.to_vec();
+    let pdf_roots = pdf_roots.to_vec();
+    let collection_roots = collection_roots.to_vec();
     let sender = sender.clone();
     tokio::task::spawn_blocking(move || {
         let _ = sender.send(IndexResponse::Scan {
-            pdfs: LibraryIndexer::scan(&roots),
-            directories: LibraryIndexer::collection_directories(&roots),
+            pdfs: LibraryIndexer::scan(&pdf_roots),
+            directories: LibraryIndexer::collection_directories(&collection_roots),
         });
     });
+}
+
+fn start_runtime_scan(runtime: &Runtime, senders: &ActionSenders, app: &mut App) {
+    start_scan(
+        &runtime.library_roots,
+        &runtime.collection_roots,
+        &senders.index,
+        app,
+    );
 }
 
 fn apply_index_response(response: IndexResponse, runtime: &Runtime, app: &mut App) -> Result<()> {
@@ -846,16 +909,27 @@ fn apply_index_response(response: IndexResponse, runtime: &Runtime, app: &mut Ap
             for pdf in &pdfs {
                 imported += usize::from(database.import_pdf(pdf)?);
                 if let Some(paper_id) = database.paper_id_for_pdf(pdf)? {
-                    database.sync_pdf_collection(paper_id, pdf)?;
+                    sync_pdf_collection_membership(
+                        database,
+                        paper_id,
+                        pdf,
+                        &runtime.collection_roots,
+                    )?;
                 }
             }
+            database.reconcile_collections(&runtime.collection_roots, &directories)?;
             app.library.indexing = false;
             app.library.message = Some(format!("Indexed {found} PDFs, imported {imported} new"));
         }
         IndexResponse::File(Ok(pdf)) => {
             let imported = database.import_pdf(&pdf)?;
             if let Some(paper_id) = database.paper_id_for_pdf(&pdf)? {
-                database.sync_pdf_collection(paper_id, &pdf)?;
+                sync_pdf_collection_membership(
+                    database,
+                    paper_id,
+                    &pdf,
+                    &runtime.collection_roots,
+                )?;
             }
             app.library.message = Some(if imported {
                 format!("Imported {}", pdf.title)
@@ -866,7 +940,34 @@ fn apply_index_response(response: IndexResponse, runtime: &Runtime, app: &mut Ap
         IndexResponse::File(Err(error)) => app.library.message = Some(error),
     }
     refresh_library(runtime, app)?;
+    refresh_organization(database, app)?;
     refresh_dashboard(database, app)?;
+    Ok(())
+}
+
+fn sync_pdf_collection_membership(
+    database: &Database,
+    paper_id: i64,
+    pdf: &ImportedPdf,
+    roots: &[PathBuf],
+) -> Result<()> {
+    let Some(root) = roots
+        .iter()
+        .filter(|root| pdf.path.starts_with(root))
+        .max_by_key(|root| root.components().count())
+    else {
+        database.clear_collection_membership(paper_id)?;
+        return Ok(());
+    };
+    let mut classified = pdf.clone();
+    classified.library_root = Some(root.clone());
+    classified.relative_directory = pdf
+        .path
+        .parent()
+        .and_then(|parent| parent.strip_prefix(root).ok())
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .map(Path::to_path_buf);
+    database.sync_pdf_collection(paper_id, &classified)?;
     Ok(())
 }
 

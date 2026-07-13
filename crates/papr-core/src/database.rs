@@ -1,6 +1,7 @@
 //! `SQLite` persistence and schema migrations.
 
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -165,15 +166,30 @@ impl Database {
     ///
     /// Returns an error when the record cannot be inserted or queried.
     pub fn import_pdf(&self, pdf: &ImportedPdf) -> Result<bool, DatabaseError> {
-        let duplicate_id = self
+        let duplicate = self
             .connection
             .query_row(
-                "SELECT id FROM papers WHERE content_hash = ?1 LIMIT 1",
+                "SELECT id, pdf_path FROM papers WHERE content_hash = ?1 LIMIT 1",
                 [&pdf.content_hash],
-                |row| row.get::<_, i64>(0),
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
             )
             .optional()?;
-        if duplicate_id.is_some() {
+        if let Some((paper_id, stored_path)) = duplicate {
+            let moved = stored_path.as_deref().is_some_and(|stored_path| {
+                stored_path != pdf.path.to_string_lossy() && !Path::new(stored_path).is_file()
+            });
+            if moved {
+                self.connection.execute(
+                    "UPDATE papers SET title = ?1, pdf_path = ?2, file_size = ?3,
+                     indexed_at = CURRENT_TIMESTAMP WHERE id = ?4",
+                    params![
+                        pdf.title,
+                        pdf.path.to_string_lossy(),
+                        i64::try_from(pdf.file_size).unwrap_or(i64::MAX),
+                        paper_id
+                    ],
+                )?;
+            }
             return Ok(false);
         }
         let changed = self.connection.execute(
@@ -750,6 +766,85 @@ impl Database {
         Ok(())
     }
 
+    /// Reconcile filesystem-backed collections with a complete library scan.
+    ///
+    /// Removes collections whose directories no longer exist in the configured
+    /// library roots and drops memberships for missing, root-level, or external PDFs.
+    ///
+    /// # Errors
+    /// Returns an error when reconciliation queries cannot be completed.
+    pub fn reconcile_collections(
+        &self,
+        roots: &[PathBuf],
+        directories: &[CollectionDirectory],
+    ) -> Result<(), DatabaseError> {
+        let discovered = directories
+            .iter()
+            .map(|directory| directory.library_root.join(&directory.relative_path))
+            .collect::<HashSet<_>>();
+        let tx = self.connection.unchecked_transaction()?;
+        tx.execute("DELETE FROM collections WHERE folder_path IS NULL", [])?;
+        let backed_collections = {
+            let mut statement = tx
+                .prepare("SELECT id, folder_path FROM collections WHERE folder_path IS NOT NULL")?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        PathBuf::from(row.get::<_, String>(1)?),
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (id, folder) in backed_collections {
+            let inside_library = roots.iter().any(|root| folder.starts_with(root));
+            if !inside_library || !discovered.contains(&folder) {
+                tx.execute("DELETE FROM collections WHERE id = ?1", [id])?;
+            }
+        }
+
+        let memberships = {
+            let mut statement = tx.prepare(
+                "SELECT cp.paper_id, p.pdf_path FROM collection_papers cp
+                 JOIN papers p ON p.id = cp.paper_id",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (paper_id, path) in memberships {
+            let valid = path.as_deref().is_some_and(|path| {
+                let path = Path::new(path);
+                path.is_file()
+                    && roots.iter().any(|root| {
+                        path.starts_with(root) && path.parent().is_some_and(|parent| parent != root)
+                    })
+            });
+            if !valid {
+                tx.execute(
+                    "DELETE FROM collection_papers WHERE paper_id = ?1",
+                    [paper_id],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Remove a paper from every collection.
+    ///
+    /// # Errors
+    /// Returns an error when the membership cannot be deleted.
+    pub fn clear_collection_membership(&self, paper_id: i64) -> Result<(), DatabaseError> {
+        self.connection.execute(
+            "DELETE FROM collection_papers WHERE paper_id = ?1",
+            [paper_id],
+        )?;
+        Ok(())
+    }
+
     /// Update a paper path and assign it exclusively to a collection.
     ///
     /// # Errors
@@ -813,6 +908,30 @@ impl Database {
         new: &Path,
     ) -> Result<(), DatabaseError> {
         let tx = self.connection.unchecked_transaction()?;
+        let conflicts = {
+            let mut statement = tx.prepare(
+                "SELECT id FROM collections
+                 WHERE id != ?1 AND (folder_path = ?2 OR name = ?3 COLLATE NOCASE)",
+            )?;
+            statement
+                .query_map(params![id, new.to_string_lossy(), name], |row| {
+                    row.get::<_, i64>(0)
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for conflict_id in conflicts {
+            tx.execute(
+                "DELETE FROM collection_papers
+                 WHERE collection_id = ?1 AND paper_id IN
+                     (SELECT paper_id FROM collection_papers WHERE collection_id = ?2)",
+                params![conflict_id, id],
+            )?;
+            tx.execute(
+                "UPDATE collection_papers SET collection_id = ?1 WHERE collection_id = ?2",
+                params![id, conflict_id],
+            )?;
+            tx.execute("DELETE FROM collections WHERE id = ?1", [conflict_id])?;
+        }
         tx.execute(
             "UPDATE collections SET name = ?1, folder_path = ?2 WHERE id = ?3",
             params![name, new.to_string_lossy(), id],
@@ -1084,7 +1203,7 @@ mod tests {
 
     use super::Database;
     use crate::{
-        library::{CollectionDirectory, ImportedPdf},
+        library::{CollectionDirectory, ImportedPdf, LibraryIndexer},
         models::{PaperNote, RemotePaper},
     };
 
@@ -1189,6 +1308,36 @@ mod tests {
     }
 
     #[test]
+    fn moved_pdf_updates_the_existing_catalog_path() -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "papr-moved-pdf-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let old_folder = root.join("Old");
+        let new_folder = root.join("New");
+        fs::create_dir_all(&old_folder)?;
+        fs::create_dir_all(&new_folder)?;
+        let old_path = old_folder.join("paper.pdf");
+        let new_path = new_folder.join("paper.pdf");
+        fs::write(&old_path, b"%PDF moved")?;
+        let database = Database::in_memory()?;
+        let old_pdf = LibraryIndexer::inspect(&old_path)?;
+        database.import_pdf(&old_pdf)?;
+
+        fs::rename(&old_path, &new_path)?;
+        let new_pdf = LibraryIndexer::inspect(&new_path)?;
+        assert!(!database.import_pdf(&new_pdf)?);
+        assert_eq!(
+            database.library_papers()?[0].pdf_path.as_deref(),
+            new_path.to_str()
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn directory_sync_creates_exclusive_collections_and_leaves_root_unassigned()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::in_memory()?;
@@ -1251,6 +1400,64 @@ mod tests {
     }
 
     #[test]
+    fn reconciliation_tracks_filesystem_changes_and_excludes_external_pdfs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let base = std::env::temp_dir().join(format!(
+            "papr-reconcile-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let root = base.join("library");
+        let old_folder = root.join("Old");
+        let external_folder = base.join("external");
+        fs::create_dir_all(&old_folder)?;
+        fs::create_dir_all(&external_folder)?;
+        let inside_path = old_folder.join("inside.pdf");
+        let external_path = external_folder.join("external.pdf");
+        fs::write(&inside_path, b"%PDF inside")?;
+        fs::write(&external_path, b"%PDF external")?;
+
+        let database = Database::in_memory()?;
+        let inside = LibraryIndexer::inspect_in_roots(&inside_path, std::slice::from_ref(&root))?;
+        let external = LibraryIndexer::inspect_in_roots(
+            &external_path,
+            std::slice::from_ref(&external_folder),
+        )?;
+        for pdf in [&inside, &external] {
+            database.import_pdf(pdf)?;
+            let paper_id = database
+                .paper_id_for_pdf(pdf)?
+                .ok_or("imported PDF has no paper id")?;
+            database.sync_pdf_collection(paper_id, pdf)?;
+        }
+        let directories = LibraryIndexer::collection_directories(std::slice::from_ref(&root));
+        database.reconcile_collections(std::slice::from_ref(&root), &directories)?;
+        let collections = database.collections()?;
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].name, "Old");
+        assert_eq!(collections[0].paper_count, 1);
+
+        fs::remove_file(&inside_path)?;
+        database.reconcile_collections(std::slice::from_ref(&root), &directories)?;
+        assert_eq!(database.collections()?[0].paper_count, 0);
+
+        let renamed_folder = root.join("Renamed");
+        fs::rename(&old_folder, &renamed_folder)?;
+        let renamed_directories =
+            LibraryIndexer::collection_directories(std::slice::from_ref(&root));
+        for directory in &renamed_directories {
+            database.sync_collection_directory(directory)?;
+        }
+        database.reconcile_collections(std::slice::from_ref(&root), &renamed_directories)?;
+        let collections = database.collections()?;
+        assert_eq!(collections.len(), 1);
+        assert_eq!(collections[0].name, "Renamed");
+
+        fs::remove_dir_all(base)?;
+        Ok(())
+    }
+
+    #[test]
     fn renaming_collection_updates_folder_and_member_paths()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::in_memory()?;
@@ -1265,9 +1472,12 @@ mod tests {
             .ok_or("imported PDF has no paper id")?;
         database.sync_pdf_collection(paper_id, &pdf)?;
         let collection = database.collections()?.remove(0);
+        let _watcher_created_duplicate = database.create_collection("New Name", &new)?;
 
         database.rename_collection(collection.id, "New Name", &old, &new)?;
-        let renamed = database.collections()?.remove(0);
+        let mut collections = database.collections()?;
+        assert_eq!(collections.len(), 1);
+        let renamed = collections.remove(0);
         assert_eq!(renamed.name, "New Name");
         assert_eq!(renamed.folder_path.as_deref(), Some("/library/New Name"));
         assert_eq!(
