@@ -103,6 +103,27 @@ async fn main() -> Result<()> {
 
     let download_dir = config.download_path.clone().unwrap_or(paths.downloads_dir);
     std::fs::create_dir_all(&download_dir).context("failed to create download directory")?;
+
+    if let Ok(entries) = std::fs::read_dir(&download_dir) {
+        let mut existing_files: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "pdf"))
+            .collect();
+        existing_files.sort_by_key(|e| std::cmp::Reverse(e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH)));
+        for entry in existing_files {
+            let size = entry.metadata().ok().map(|m| m.len()).unwrap_or(0);
+            let title = entry.file_name().to_string_lossy().into_owned();
+            let id = title.strip_suffix(".pdf").unwrap_or(&title).to_owned();
+            app.downloads.push(DownloadTask {
+                id,
+                title,
+                downloaded: size,
+                total: Some(size),
+                status: DownloadStatus::Completed,
+            });
+        }
+    }
+
     let collection_roots = config.library_folders.clone();
     let mut library_roots = collection_roots.clone();
     if !library_roots.contains(&download_dir) {
@@ -196,6 +217,7 @@ enum UiAction {
     SubmitPrompt(MetadataPrompt),
     Bookmark(PaperTarget),
     OpenCollection(i64),
+    OpenDownload(String),
 }
 
 enum KeyHandling {
@@ -448,6 +470,10 @@ fn apply_ui_action(
         }
         UiAction::OpenCollection(collection_id) => {
             open_collection(&runtime.database, app, collection_id)?;
+        }
+        UiAction::OpenDownload(id) => {
+            let path = runtime.download_dir.join(format!("{id}.pdf"));
+            open_pdf(&runtime.pdf_viewer, &path, app)?;
         }
     }
     Ok(())
@@ -1144,6 +1170,16 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             .cloned()
             .map(UiAction::OpenPaper);
     }
+    if app.page == papr_core::Page::Downloads {
+        if matches!(key.code, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) {
+            if let Some(task) = app.downloads.get(app.download_selected) {
+                if matches!(task.status, DownloadStatus::Completed) {
+                    return Some(UiAction::OpenDownload(task.id.clone()));
+                }
+            }
+        }
+    }
+
     if let Some(action) = library_action(app, key) {
         return Some(action);
     }
