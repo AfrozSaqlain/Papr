@@ -817,6 +817,22 @@ impl Database {
         Ok(())
     }
 
+    /// Retrieve the name of the collection a paper belongs to.
+    ///
+    /// # Errors
+    /// Returns an error when the database query fails.
+    pub fn paper_collection_name(&self, paper_id: i64) -> Result<Option<String>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT c.name FROM collections c JOIN collection_papers cp ON c.id = cp.collection_id WHERE cp.paper_id = ?1",
+        )?;
+        let mut rows = statement.query([paper_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Update a paper path and assign it exclusively to a collection.
     ///
     /// # Errors

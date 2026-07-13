@@ -667,16 +667,27 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let chunks = chunk_string(&text, 62);
     let text_lines = if chunks.is_empty() { 1 } else { chunks.len() as u16 };
 
+    let has_current = prompt.current_collection.is_some() && !renaming && !creating && !renaming_pdf;
+    let extra_rows = if has_current { 2 } else { 0 };
+
     let height = if renaming || creating || renaming_pdf {
         text_lines.max(1) + 2
     } else {
-        text_lines.max(1) + 10
+        text_lines.max(1) + 10 + extra_rows
     };
 
     let area = centered(64, height, frame.area());
     frame.render_widget(Clear, area);
 
     let mut lines = Vec::new();
+    if has_current {
+        lines.push(Line::styled(
+            format!("Current collection: {}", prompt.current_collection.as_ref().unwrap()),
+            Style::default().fg(theme.muted),
+        ));
+        lines.push(Line::raw(""));
+    }
+
     for chunk in &chunks {
         lines.push(Line::raw(chunk.clone()));
     }
@@ -722,7 +733,7 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
 
     let prefix_len = prefix.chars().count();
     let cursor_idx = prefix_len + prompt.value[..prompt.cursor].chars().count();
-    let cursor_row = u16::try_from(cursor_idx / 62).unwrap_or(0);
+    let cursor_row = u16::try_from(cursor_idx / 62).unwrap_or(0) + extra_rows;
     let cursor_col = u16::try_from(cursor_idx % 62).unwrap_or(0);
 
     frame.set_cursor_position((

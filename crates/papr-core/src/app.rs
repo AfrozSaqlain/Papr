@@ -111,6 +111,8 @@ pub struct MetadataPrompt {
     pub cursor: usize,
     /// Selected existing collection.
     pub selected: usize,
+    /// Current collection name, if assigning a paper already in a collection.
+    pub current_collection: Option<String>,
 }
 
 /// Current state of a remote discovery request.

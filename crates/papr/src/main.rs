@@ -437,7 +437,8 @@ fn apply_ui_action(
         UiAction::SaveNote(note) => runtime.database.save_note(&note)?,
         UiAction::Prompt(target) => {
             let paper_id = resolve_target(target, &runtime.database)?;
-            show_collection_prompt(app, Some(paper_id), None);
+            let current = runtime.database.paper_collection_name(paper_id)?;
+            show_collection_prompt(app, Some(paper_id), None, current);
         }
         UiAction::RenameCollection(id) => {
             app.metadata_prompt = Some(MetadataPrompt {
@@ -447,6 +448,7 @@ fn apply_ui_action(
                 value: String::new(),
                 cursor: 0,
                 selected: 0,
+                current_collection: None,
             });
             app.mode = AppMode::Prompt;
         }
@@ -458,11 +460,12 @@ fn apply_ui_action(
                 value: String::new(),
                 cursor: 0,
                 selected: 0,
+                current_collection: None,
             });
             app.mode = AppMode::Prompt;
         }
         UiAction::CreateCollection => {
-            show_collection_prompt(app, None, None);
+            show_collection_prompt(app, None, None, None);
         }
         UiAction::SubmitPrompt(prompt) => {
             apply_collection_prompt(runtime, app, &prompt)?;
@@ -497,7 +500,12 @@ fn apply_ui_action(
     Ok(())
 }
 
-fn show_collection_prompt(app: &mut App, paper_id: Option<i64>, rename_id: Option<i64>) {
+fn show_collection_prompt(
+    app: &mut App,
+    paper_id: Option<i64>,
+    rename_id: Option<i64>,
+    current_collection: Option<String>,
+) {
     app.metadata_prompt = Some(MetadataPrompt {
         paper_id,
         rename_collection_id: rename_id,
@@ -505,6 +513,7 @@ fn show_collection_prompt(app: &mut App, paper_id: Option<i64>, rename_id: Optio
         value: String::new(),
         cursor: 0,
         selected: 0,
+        current_collection,
     });
     app.mode = AppMode::Prompt;
 }
@@ -1318,6 +1327,7 @@ fn bookmark_action(app: &App, key: KeyEvent) -> Option<UiAction> {
             paper_id: bookmark.paper_id,
             path: PathBuf::from(&bookmark.pdf_path),
         }),
+        KeyCode::Char('s') => Some(UiAction::Prompt(PaperTarget::Local(bookmark.paper_id))),
         KeyCode::Char('R') => Some(UiAction::RenamePdf(bookmark.paper_id)),
         _ => None,
     }
@@ -1337,7 +1347,7 @@ fn handle_downloads_key(app: &App, key: KeyEvent) -> Option<UiAction> {
             }
         }
     }
-    if key.code == KeyCode::Char('R') {
+    if matches!(key.code, KeyCode::Char('R') | KeyCode::Char('s')) {
         if let Some(task) = app.downloads.get(app.download_selected) {
             if matches!(task.status, DownloadStatus::Completed) {
                 let suffix = format!("{}.pdf", task.id);
@@ -1346,7 +1356,11 @@ fn handle_downloads_key(app: &App, key: KeyEvent) -> Option<UiAction> {
                         .as_ref()
                         .map_or(false, |path| path.ends_with(&suffix))
                 }) {
-                    return Some(UiAction::RenamePdf(paper.id));
+                    return match key.code {
+                        KeyCode::Char('R') => Some(UiAction::RenamePdf(paper.id)),
+                        KeyCode::Char('s') => Some(UiAction::Prompt(PaperTarget::Local(paper.id))),
+                        _ => None,
+                    };
                 }
             }
         }
@@ -1430,6 +1444,14 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
                     app.collection_papers
                         .get(app.collection_paper_selected)
                         .map(|paper| UiAction::RenamePdf(paper.id)),
+                );
+            }
+            KeyCode::Char('s') => {
+                return (
+                    true,
+                    app.collection_papers
+                        .get(app.collection_paper_selected)
+                        .map(|paper| UiAction::Prompt(PaperTarget::Local(paper.id))),
                 );
             }
             _ => return (false, None),
