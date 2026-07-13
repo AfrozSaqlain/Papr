@@ -214,6 +214,7 @@ enum UiAction {
     SubmitPrompt(MetadataPrompt),
     Bookmark(PaperTarget),
     OpenCollection(i64),
+    OpenAuthor(i64),
     OpenDownload(String),
     RenamePdf(i64),
 }
@@ -514,6 +515,9 @@ fn apply_ui_action(
         UiAction::OpenCollection(collection_id) => {
             open_collection(&runtime.database, app, collection_id)?;
         }
+        UiAction::OpenAuthor(author_id) => {
+            open_author(&runtime.database, app, author_id)?;
+        }
         UiAction::OpenDownload(id) => {
             let path = runtime.download_dir.join(format!("{id}.pdf"));
             open_pdf(&runtime.pdf_viewer, &path, app, None, None)?;
@@ -748,6 +752,24 @@ fn open_collection(database: &Database, app: &mut App, collection_id: i64) -> Re
     Ok(())
 }
 
+fn open_author(database: &Database, app: &mut App, author_id: i64) -> Result<()> {
+    let restore_selection = app.last_opened_author_id == Some(author_id);
+    app.active_author = app
+        .authors
+        .iter()
+        .find(|author| author.id == author_id)
+        .cloned();
+    app.author_papers = database.author_papers(author_id)?;
+    app.author_paper_selected = if restore_selection {
+        app.author_paper_selected
+            .min(app.author_papers.len().saturating_sub(1))
+    } else {
+        0
+    };
+    app.last_opened_author_id = Some(author_id);
+    Ok(())
+}
+
 fn resolve_target(target: PaperTarget, database: &Database) -> Result<i64> {
     match target {
         PaperTarget::Local(id) => Ok(id),
@@ -771,6 +793,11 @@ fn refresh_organization(database: &Database, app: &mut App) -> Result<()> {
     app.bookmark_selected = app
         .bookmark_selected
         .min(app.bookmarks.len().saturating_sub(1));
+    app.authors = database.authors()?;
+    app.author_selected = app.author_selected.min(app.authors.len().saturating_sub(1));
+    if let Some(active) = &app.active_author {
+        app.active_author = app.authors.iter().find(|a| a.id == active.id).cloned();
+    }
     Ok(())
 }
 
@@ -1291,6 +1318,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             return action;
         }
     }
+    if app.page == papr_core::Page::Authors {
+        let (handled, action) = handle_author_key(app, key);
+        if handled {
+            return action;
+        }
+    }
     if let Some(action) = bookmark_action(app, key) {
         return Some(action);
     }
@@ -1518,6 +1551,78 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
     }
     if matches!(key.code, KeyCode::Char('c' | 'n')) {
         return (true, Some(UiAction::CreateCollection));
+    }
+    (false, None)
+}
+
+fn handle_author_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction>) {
+    if app.active_author.is_some() {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('h') => {
+                app.active_author = None;
+                app.author_papers.clear();
+                return (true, None);
+            }
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l' | 'p') => {
+                let Some(paper) = app.author_papers.get(app.author_paper_selected) else {
+                    return (true, None);
+                };
+                let Some(path) = &paper.pdf_path else {
+                    app.toast = Some("This paper has no local PDF to open".into());
+                    return (true, None);
+                };
+                return (
+                    true,
+                    Some(UiAction::OpenPdf {
+                        paper_id: paper.id,
+                        path: PathBuf::from(path),
+                    }),
+                );
+            }
+            KeyCode::Char('B') => {
+                return (
+                    true,
+                    app.author_papers
+                        .get(app.author_paper_selected)
+                        .map(|paper| UiAction::Bookmark(PaperTarget::Local(paper.id))),
+                );
+            }
+            KeyCode::Char('R') => {
+                return (
+                    true,
+                    app.author_papers
+                        .get(app.author_paper_selected)
+                        .map(|paper| UiAction::RenamePdf(paper.id)),
+                );
+            }
+            KeyCode::Char('s') => {
+                return (
+                    true,
+                    app.author_papers
+                        .get(app.author_paper_selected)
+                        .map(|paper| UiAction::Prompt(PaperTarget::Local(paper.id))),
+                );
+            }
+            KeyCode::Char('n') => {
+                return (
+                    true,
+                    app.author_papers
+                        .get(app.author_paper_selected)
+                        .map(|paper| UiAction::OpenNote(PaperTarget::Local(paper.id))),
+                );
+            }
+            _ => return (false, None),
+        }
+    }
+    if matches!(
+        key.code,
+        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
+    ) {
+        let action = app
+            .authors
+            .get(app.author_selected)
+            .map(|author| UiAction::OpenAuthor(author.id));
+        return (true, action);
     }
     (false, None)
 }

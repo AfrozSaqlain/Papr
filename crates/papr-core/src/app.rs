@@ -1,7 +1,7 @@
 //! Application state machine and navigation commands.
 
 use crate::models::{
-    BookmarkSummary, CollectionSummary, DashboardStats, LibraryPaper, PaperNote, RemotePaper,
+    AuthorSummary, BookmarkSummary, CollectionSummary, DashboardStats, LibraryPaper, PaperNote, RemotePaper,
     ResearchDashboard,
 };
 use crate::plugins::PluginInfo;
@@ -279,6 +279,22 @@ pub struct App {
     pub bookmark_selected: usize,
     /// Vertical list scroll offset for bookmarks.
     pub bookmark_scroll: usize,
+    /// Authors.
+    pub authors: Vec<AuthorSummary>,
+    /// Selected author row.
+    pub author_selected: usize,
+    /// Vertical list scroll offset for the authors list.
+    pub author_scroll: usize,
+    /// Author currently opened for paper browsing.
+    pub active_author: Option<AuthorSummary>,
+    /// Papers assigned to the active author.
+    pub author_papers: Vec<LibraryPaper>,
+    /// Selected paper within the active author.
+    pub author_paper_selected: usize,
+    /// Vertical list scroll offset for papers within an author.
+    pub author_paper_scroll: usize,
+    /// Most recently opened author, used to restore its paper cursor.
+    pub last_opened_author_id: Option<i64>,
     /// Short user-facing operation result.
     pub toast: Option<String>,
     /// Mode restored when an editor or prompt closes.
@@ -325,6 +341,14 @@ impl Default for App {
             bookmarks: Vec::new(),
             bookmark_selected: 0,
             bookmark_scroll: 0,
+            authors: Vec::new(),
+            author_selected: 0,
+            author_scroll: 0,
+            active_author: None,
+            author_papers: Vec::new(),
+            author_paper_selected: 0,
+            author_paper_scroll: 0,
+            last_opened_author_id: None,
             toast: None,
             modal_return: AppMode::Normal,
             plugins: Vec::new(),
@@ -356,6 +380,12 @@ impl App {
                     } else {
                         self.collection_selected = self.collection_selected.saturating_sub(1);
                     }
+                } else if self.page == Page::Authors {
+                    if self.active_author.is_some() {
+                        self.author_paper_selected = self.author_paper_selected.saturating_sub(1);
+                    } else {
+                        self.author_selected = self.author_selected.saturating_sub(1);
+                    }
                 } else if self.page == Page::Bookmarks {
                     self.bookmark_selected = self.bookmark_selected.saturating_sub(1);
                 }
@@ -384,6 +414,14 @@ impl App {
                     } else {
                         self.collection_selected = (self.collection_selected + 1)
                             .min(self.collections.len().saturating_sub(1));
+                    }
+                } else if self.page == Page::Authors {
+                    if self.active_author.is_some() {
+                        self.author_paper_selected = (self.author_paper_selected + 1)
+                            .min(self.author_papers.len().saturating_sub(1));
+                    } else {
+                        self.author_selected = (self.author_selected + 1)
+                            .min(self.authors.len().saturating_sub(1));
                     }
                 } else if self.page == Page::Bookmarks {
                     self.bookmark_selected =

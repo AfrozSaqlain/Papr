@@ -124,6 +124,8 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         render_downloads(frame, inset, app, theme);
     } else if app.page == Page::Collections {
         render_collections(frame, inset, app, theme);
+    } else if app.page == Page::Authors {
+        render_authors(frame, inset, app, theme);
     } else if app.page == Page::Bookmarks {
         render_organization(frame, inset, app, theme);
     } else if app.page == Page::Notes {
@@ -260,6 +262,114 @@ fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
         .with_offset(app.collection_paper_scroll);
     frame.render_stateful_widget(list, rows[1], &mut state);
     app.collection_paper_scroll = state.offset();
+}
+
+fn render_authors(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+    if app.active_author.is_some() {
+        render_author_papers(frame, area, app, theme);
+        return;
+    }
+    if app.authors.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No authors found in your library.")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme.muted)),
+            area,
+        );
+        return;
+    }
+    let items = app.authors.iter().map(|author| {
+        ListItem::new(vec![
+            Line::styled(
+                &author.name,
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::styled(
+                format!("{} papers", author.paper_count),
+                Style::default().fg(theme.muted),
+            ),
+        ])
+    });
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(" AUTHORS - ENTER VIEW ")
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(theme.border)),
+        )
+        .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
+        .highlight_symbol("> ");
+    let mut state = ListState::default()
+        .with_selected(Some(app.author_selected))
+        .with_offset(app.author_scroll);
+    frame.render_stateful_widget(list, area, &mut state);
+    app.author_scroll = state.offset();
+}
+
+fn render_author_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+    let Some(author) = app.active_author.as_ref() else {
+        return;
+    };
+    let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(4)]).split(area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Authors / ", Style::default().fg(theme.muted)),
+            Span::styled(
+                &author.name,
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "   h/Esc back   Enter/p open PDF",
+                Style::default().fg(theme.muted),
+            ),
+        ])),
+        rows[0],
+    );
+    if app.author_papers.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No papers found for this author.")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme.muted)),
+            rows[1],
+        );
+        return;
+    }
+    let items = app.author_papers.iter().map(|paper| {
+        let availability = if paper.pdf_path.is_some() {
+            "PDF available"
+        } else {
+            "Metadata only"
+        };
+        ListItem::new(vec![
+            Line::styled(
+                &paper.title,
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ),
+            Line::styled(
+                format!("{}  |  {}", library_metadata(paper), availability),
+                Style::default().fg(theme.muted),
+            ),
+            Line::raw(""),
+        ])
+    });
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(format!(" {} PAPERS ", app.author_papers.len()))
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(theme.border)),
+        )
+        .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
+        .highlight_symbol("> ");
+    let mut state = ListState::default()
+        .with_selected(Some(app.author_paper_selected))
+        .with_offset(app.author_paper_scroll);
+    frame.render_stateful_widget(list, rows[1], &mut state);
+    app.author_paper_scroll = state.offset();
 }
 
 fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {

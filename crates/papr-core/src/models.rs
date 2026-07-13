@@ -109,6 +109,17 @@ pub struct CollectionSummary {
     pub folder_path: Option<String>,
 }
 
+/// Summary of an author and their library presence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorSummary {
+    /// Stable author identifier.
+    pub id: i64,
+    /// Author name.
+    pub name: String,
+    /// Number of papers in the library by this author.
+    pub paper_count: u64,
+}
+
 /// A bookmarked paper or position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BookmarkSummary {

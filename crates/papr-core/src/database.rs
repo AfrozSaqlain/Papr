@@ -13,7 +13,7 @@ use thiserror::Error;
 use crate::{
     library::{CollectionDirectory, ImportedPdf},
     models::{
-        ActivityItem, BookmarkSummary, CollectionSummary, DashboardStats, LibraryPaper, PaperNote,
+        ActivityItem, AuthorSummary, BookmarkSummary, CollectionSummary, DashboardStats, LibraryPaper, PaperNote,
         ReadingDay, ReadingStatistics, RemotePaper, ResearchDashboard,
     },
 };
@@ -1187,6 +1187,63 @@ impl Database {
                 kind: row.get(0)?,
                 label: row.get(1)?,
                 occurred_at: occurred_at.and_utc(),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// List all authors associated with local PDFs (using the first 5 authors per paper).
+    ///
+    /// # Errors
+    /// Returns an error when the query fails.
+    pub fn authors(&self) -> Result<Vec<AuthorSummary>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT a.id, a.name, COUNT(DISTINCT p.id) as paper_count
+             FROM authors a
+             JOIN paper_authors pa ON pa.author_id = a.id AND pa.position < 5
+             JOIN papers p ON p.id = pa.paper_id AND p.pdf_path IS NOT NULL
+             GROUP BY a.id
+             ORDER BY paper_count DESC, a.name ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(AuthorSummary {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                paper_count: row.get::<_, i64>(2)? as u64,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// List all local papers associated with a specific author (using the first 5 authors per paper).
+    ///
+    /// # Errors
+    /// Returns an error when the query fails.
+    pub fn author_papers(&self, author_id: i64) -> Result<Vec<LibraryPaper>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT p.id, p.title,
+                    COALESCE((SELECT GROUP_CONCAT(a.name, ', ')
+                              FROM paper_authors pa2 JOIN authors a ON a.id = pa2.author_id
+                              WHERE pa2.paper_id = p.id ORDER BY pa2.position), ''),
+                    p.doi, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
+             FROM papers p
+             JOIN paper_authors pa ON pa.paper_id = p.id
+             WHERE p.pdf_path IS NOT NULL
+               AND pa.author_id = ?1
+               AND pa.position < 5
+             ORDER BY p.created_at DESC, p.id DESC",
+        )?;
+        let rows = statement.query_map([author_id], |row| {
+            let file_size: Option<i64> = row.get(5)?;
+            Ok(LibraryPaper {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                authors: row.get(2)?,
+                doi: row.get(3)?,
+                pdf_path: row.get(4)?,
+                file_size: file_size.and_then(|size| u64::try_from(size).ok()),
+                reading_status: row.get(6)?,
+                is_favorite: row.get(7)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
