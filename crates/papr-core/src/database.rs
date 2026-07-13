@@ -963,10 +963,17 @@ impl Database {
             "INSERT INTO activity_log (kind, paper_id) VALUES (?1, ?2)",
             params![if pdf { "pdf_opened" } else { "paper_opened" }, paper_id],
         )?;
-        transaction.execute(
-            "UPDATE papers SET last_opened_at = CURRENT_TIMESTAMP WHERE id = ?1",
-            [paper_id],
-        )?;
+        if pdf {
+            transaction.execute(
+                "UPDATE papers SET last_opened_at = CURRENT_TIMESTAMP, reading_status = 'read' WHERE id = ?1",
+                [paper_id],
+            )?;
+        } else {
+            transaction.execute(
+                "UPDATE papers SET last_opened_at = CURRENT_TIMESTAMP WHERE id = ?1",
+                [paper_id],
+            )?;
+        }
         transaction.commit()?;
         Ok(())
     }
@@ -996,9 +1003,9 @@ impl Database {
     /// Returns an error when any aggregate or activity query fails.
     pub fn research_dashboard(&self) -> Result<ResearchDashboard, DatabaseError> {
         let counts = self.dashboard_stats()?;
-        let (unread, collections, disk_usage) = self.connection.query_row(
+        let (read, collections, disk_usage) = self.connection.query_row(
             "SELECT
-                (SELECT COUNT(*) FROM papers WHERE reading_status != 'read'),
+                (SELECT COUNT(*) FROM papers WHERE reading_status = 'read'),
                 (SELECT COUNT(*) FROM collections),
                 (SELECT COALESCE(SUM(file_size), 0) FROM papers)",
             [],
@@ -1012,9 +1019,10 @@ impl Database {
             .query_row("PRAGMA page_size", [], |row| row.get(0))?;
         Ok(ResearchDashboard {
             counts,
-            unread,
+            read,
             collections,
             disk_usage,
+            downloads_size: 0,
             database_size: page_count.saturating_mul(page_size),
             reading: self.reading_statistics()?,
             recent_activity: self.recent_activity(12)?,

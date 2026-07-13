@@ -65,6 +65,29 @@ impl LibraryIndexer {
             .collect()
     }
 
+    /// Recursively count readable PDF files in configured roots.
+    #[must_use]
+    pub fn count_pdfs(roots: &[PathBuf]) -> u64 {
+        roots
+            .iter()
+            .flat_map(|root| WalkDir::new(root).follow_links(false).into_iter())
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file() && is_pdf(entry.path()))
+            .count() as u64
+    }
+
+    /// Recursively calculate total size of readable PDF files in configured roots.
+    #[must_use]
+    pub fn pdf_storage_size(roots: &[PathBuf]) -> u64 {
+        roots
+            .iter()
+            .flat_map(|root| WalkDir::new(root).follow_links(false).into_iter())
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file() && is_pdf(entry.path()))
+            .map(|entry| entry.metadata().map(|m| m.len()).unwrap_or(0))
+            .sum()
+    }
+
     /// Discover every subdirectory represented as a filesystem collection.
     #[must_use]
     pub fn collection_directories(roots: &[PathBuf]) -> Vec<CollectionDirectory> {
@@ -152,8 +175,10 @@ impl LibraryWatcher {
     {
         let mut watcher =
             notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-                if result.is_ok() {
-                    on_event();
+                if let Ok(event) = result {
+                    if !matches!(event.kind, notify::EventKind::Access(_)) {
+                        on_event();
+                    }
                 }
             })?;
         for root in roots.iter().filter(|root| root.exists()) {

@@ -1076,7 +1076,7 @@ fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
         ("LIBRARY", app.stats.papers, theme.accent),
         ("QUEUE", app.stats.queued, theme.warning),
         ("DOWNLOADED", app.stats.downloaded, theme.success),
-        ("UNREAD", app.dashboard.unread, theme.secondary),
+        ("READ", app.dashboard.read, theme.secondary),
         (
             "STREAK",
             app.dashboard.reading.current_streak,
@@ -1211,6 +1211,10 @@ fn render_dashboard_details(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
             Line::styled(
                 format!("Database  {}", format_bytes(app.dashboard.database_size)),
                 Style::default().fg(theme.secondary),
+            ),
+            Line::styled(
+                format!("Downloads {}", format_bytes(app.dashboard.downloads_size)),
+                Style::default().fg(theme.accent),
             ),
             Line::styled(
                 format!("Collections  {}", app.dashboard.collections),

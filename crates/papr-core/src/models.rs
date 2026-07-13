@@ -181,12 +181,14 @@ pub struct ResearchDashboard {
     /// Standard library counters.
     pub counts: DashboardStats,
     /// Papers that have not been marked read.
-    pub unread: u64,
+    pub read: u64,
     /// Number of user collections.
     pub collections: u64,
     /// Total known local PDF bytes.
     pub disk_usage: u64,
-    /// Approximate live `SQLite` size in bytes.
+    /// Total bytes of downloads.
+    pub downloads_size: u64,
+    /// Current internal database file size in bytes.
     pub database_size: u64,
     /// Current reading analytics.
     pub reading: ReadingStatistics,

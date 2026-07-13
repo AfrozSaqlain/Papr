@@ -90,9 +90,29 @@ async fn main() -> Result<()> {
         println!("indexed: {}, imported: {}", pdfs.len(), imported);
         return Ok(());
     }
-    let dashboard = database
+    let download_dir = config.download_path.clone().unwrap_or(paths.downloads_dir);
+    std::fs::create_dir_all(&download_dir).context("failed to create download directory")?;
+
+    let collection_roots = config.library_folders.clone();
+    let mut library_roots = collection_roots.clone();
+    if !library_roots.contains(&download_dir) {
+        library_roots.push(download_dir.clone());
+    }
+
+    let mut dashboard = database
         .research_dashboard()
         .context("failed to load research dashboard")?;
+    dashboard.counts.papers = LibraryIndexer::count_pdfs(&collection_roots);
+    dashboard.counts.downloaded = LibraryIndexer::count_pdfs(&[download_dir.clone()]);
+    dashboard.read = database
+        .library_papers_in_roots(&library_roots)?
+        .into_iter()
+        .filter(|p| p.reading_status == "read")
+        .count() as u64;
+    dashboard.disk_usage = LibraryIndexer::pdf_storage_size(&collection_roots);
+    dashboard.downloads_size = LibraryIndexer::pdf_storage_size(&[download_dir.clone()]);
+    dashboard.database_size = std::fs::metadata(&paths.database_file).map(|m| m.len()).unwrap_or(0);
+
     let mut app = App {
         stats: dashboard.counts,
         dashboard,
@@ -101,16 +121,8 @@ async fn main() -> Result<()> {
     app.plugins = plugin_host.plugins();
     app.plugin_diagnostics = plugin_host.diagnostics().len();
 
-    let download_dir = config.download_path.clone().unwrap_or(paths.downloads_dir);
-    std::fs::create_dir_all(&download_dir).context("failed to create download directory")?;
-
     discover_local_downloads(&mut app, &download_dir);
 
-    let collection_roots = config.library_folders.clone();
-    let mut library_roots = collection_roots.clone();
-    if !library_roots.contains(&download_dir) {
-        library_roots.push(download_dir.clone());
-    }
     app.library.papers = database
         .library_papers_in_roots(&library_roots)
         .context("failed to load library")?;
@@ -131,6 +143,7 @@ async fn main() -> Result<()> {
         arxiv,
         downloads,
         database,
+        database_file: paths.database_file.clone(),
         download_dir,
         pdf_viewer: config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer),
         primary_library_root,
@@ -229,6 +242,7 @@ struct Runtime {
     arxiv: ArxivClient,
     downloads: DownloadManager,
     database: Database,
+    database_file: PathBuf,
     download_dir: PathBuf,
     pdf_viewer: String,
     primary_library_root: PathBuf,
@@ -391,7 +405,7 @@ fn apply_ui_action(
             }
             app.mode = AppMode::PaperDetail;
             app.discovery.detail_scroll = 0;
-            refresh_dashboard(&runtime.database, app)?;
+            refresh_dashboard(runtime, app)?;
         }
         UiAction::OpenBrowser(url) => open_browser(&url, app),
         UiAction::Download(paper) => start_download(
@@ -406,7 +420,7 @@ fn apply_ui_action(
         UiAction::OpenPdf { paper_id, path } => {
             runtime.database.record_open(paper_id, true)?;
             open_pdf(&runtime.pdf_viewer, &path, app)?;
-            refresh_dashboard(&runtime.database, app)?;
+            refresh_dashboard(runtime, app)?;
         }
         UiAction::OpenNote(target) => {
             let paper_id = resolve_target(target, &runtime.database)?;
@@ -431,7 +445,7 @@ fn apply_ui_action(
         UiAction::SubmitPrompt(prompt) => {
             apply_collection_prompt(runtime, app, &prompt)?;
             refresh_organization(&runtime.database, app)?;
-            refresh_dashboard(&runtime.database, app)?;
+            refresh_dashboard(runtime, app)?;
             app.toast = Some(format!("Saved {}", prompt.value));
         }
         UiAction::Bookmark(target) => {
@@ -443,7 +457,7 @@ fn apply_ui_action(
                 Some(if active { "added" } else { "removed" }),
             )?;
             refresh_organization(&runtime.database, app)?;
-            refresh_dashboard(&runtime.database, app)?;
+            refresh_dashboard(runtime, app)?;
             app.toast = Some(if active {
                 "Paper bookmarked".into()
             } else {
@@ -763,8 +777,19 @@ fn refresh_library(runtime: &Runtime, app: &mut App) -> Result<()> {
     Ok(())
 }
 
-fn refresh_dashboard(database: &Database, app: &mut App) -> Result<()> {
-    app.dashboard = database.research_dashboard()?;
+fn refresh_dashboard(runtime: &Runtime, app: &mut App) -> Result<()> {
+    app.dashboard = runtime.database.research_dashboard()?;
+    app.dashboard.counts.papers = LibraryIndexer::count_pdfs(&runtime.collection_roots);
+    app.dashboard.counts.downloaded = LibraryIndexer::count_pdfs(&[runtime.download_dir.clone()]);
+    app.dashboard.read = runtime
+        .database
+        .library_papers_in_roots(&runtime.library_roots)?
+        .into_iter()
+        .filter(|p| p.reading_status == "read")
+        .count() as u64;
+    app.dashboard.disk_usage = LibraryIndexer::pdf_storage_size(&runtime.collection_roots);
+    app.dashboard.downloads_size = LibraryIndexer::pdf_storage_size(&[runtime.download_dir.clone()]);
+    app.dashboard.database_size = std::fs::metadata(&runtime.database_file).map(|m| m.len()).unwrap_or(0);
     app.stats = app.dashboard.counts;
     Ok(())
 }
@@ -943,7 +968,7 @@ fn apply_index_response(response: IndexResponse, runtime: &Runtime, app: &mut Ap
     }
     refresh_library(runtime, app)?;
     refresh_organization(database, app)?;
-    refresh_dashboard(database, app)?;
+    refresh_dashboard(runtime, app)?;
     Ok(())
 }
 
@@ -1082,7 +1107,7 @@ fn apply_download_event(
             task.total = Some(pdf.file_size);
             task.status = DownloadStatus::Completed;
             refresh_library(runtime, app)?;
-            refresh_dashboard(&runtime.database, app)?;
+            refresh_dashboard(runtime, app)?;
             let _ = index_sender.send(IndexResponse::File(Ok(pdf)));
         }
         DownloadEvent::Failed { id, error } => {
