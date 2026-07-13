@@ -100,7 +100,9 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
                 .add_modifier(Modifier::BOLD)
         })
         .highlight_symbol("›");
-    let mut state = ListState::default().with_selected(Some(app.sidebar_index)).with_offset(app.sidebar_scroll);
+    let mut state = ListState::default()
+        .with_selected(Some(app.sidebar_index))
+        .with_offset(app.sidebar_scroll);
     frame.render_stateful_widget(list, area, &mut state);
     app.sidebar_scroll = state.offset();
 }
@@ -189,18 +191,17 @@ fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
         )
         .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
         .highlight_symbol("> ");
-    let mut state = ListState::default().with_selected(Some(app.collection_selected)).with_offset(app.collection_scroll);
+    let mut state = ListState::default()
+        .with_selected(Some(app.collection_selected))
+        .with_offset(app.collection_scroll);
     frame.render_stateful_widget(list, area, &mut state);
     app.collection_scroll = state.offset();
 }
 
-fn render_collection_papers(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    app: &mut App,
-    theme: &Theme,
-) {
-    let collection = app.active_collection.as_ref().unwrap();
+fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+    let Some(collection) = app.active_collection.as_ref() else {
+        return;
+    };
     let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(4)]).split(area);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -254,7 +255,9 @@ fn render_collection_papers(
         )
         .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
         .highlight_symbol("> ");
-    let mut state = ListState::default().with_selected(Some(app.collection_paper_selected)).with_offset(app.collection_paper_scroll);
+    let mut state = ListState::default()
+        .with_selected(Some(app.collection_paper_selected))
+        .with_offset(app.collection_paper_scroll);
     frame.render_stateful_widget(list, rows[1], &mut state);
     app.collection_paper_scroll = state.offset();
 }
@@ -530,7 +533,9 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
             .style(Style::default().fg(theme.text))
             .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
             .highlight_symbol("> ");
-        let mut state = ListState::default().with_selected(Some(app.bookmark_selected)).with_offset(app.bookmark_scroll);
+        let mut state = ListState::default()
+            .with_selected(Some(app.bookmark_selected))
+            .with_offset(app.bookmark_scroll);
         frame.render_stateful_widget(list, area, &mut state);
         app.bookmark_scroll = state.offset();
     }
@@ -717,7 +722,9 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         )
         .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
         .highlight_symbol("> ");
-    let mut state = ListState::default().with_selected(Some(app.library.selected)).with_offset(app.library.scroll);
+    let mut state = ListState::default()
+        .with_selected(Some(app.library.selected))
+        .with_offset(app.library.scroll);
     frame.render_stateful_widget(list, rows[1], &mut state);
     app.library.scroll = state.offset();
 }
@@ -781,7 +788,9 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
         )
         .highlight_style(Style::default().bg(theme.surface))
         .highlight_symbol("> ");
-    let mut state = ListState::default().with_selected(Some(app.download_selected)).with_offset(app.download_scroll);
+    let mut state = ListState::default()
+        .with_selected(Some(app.download_selected))
+        .with_offset(app.download_scroll);
     frame.render_stateful_widget(list, area, &mut state);
     app.download_scroll = state.offset();
 }
@@ -916,7 +925,9 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
         )
         .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
         .highlight_symbol("> ");
-    let mut state = ListState::default().with_selected(Some(app.discovery.selected)).with_offset(app.discovery.scroll);
+    let mut state = ListState::default()
+        .with_selected(Some(app.discovery.selected))
+        .with_offset(app.discovery.scroll);
     frame.render_stateful_widget(list, area, &mut state);
     app.discovery.scroll = state.offset();
 }
@@ -1134,7 +1145,9 @@ fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
         .highlight_symbol("> ");
     let selected =
         (app.content_focused && !app.today_papers.is_empty()).then_some(app.today_selected);
-    let mut state = ListState::default().with_selected(selected).with_offset(app.today_scroll);
+    let mut state = ListState::default()
+        .with_selected(selected)
+        .with_offset(app.today_scroll);
     frame.render_stateful_widget(list, area, &mut state);
     app.today_scroll = state.offset();
 }
