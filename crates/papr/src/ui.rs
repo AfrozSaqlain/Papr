@@ -626,6 +626,22 @@ fn markdown_preview<'a>(body: &'a str, theme: &Theme) -> Vec<Line<'a>> {
         .collect()
 }
 
+fn chunk_string(s: &str, size: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current_chunk = String::new();
+    for c in s.chars() {
+        if current_chunk.chars().count() == size {
+            chunks.push(current_chunk);
+            current_chunk = String::new();
+        }
+        current_chunk.push(c);
+    }
+    if !current_chunk.is_empty() || chunks.is_empty() {
+        chunks.push(current_chunk);
+    }
+    chunks
+}
+
 fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let Some(prompt) = &app.metadata_prompt else {
         return;
@@ -642,59 +658,76 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     } else {
         " CHOOSE OR CREATE COLLECTION "
     };
-    let area = centered(
-        64,
-        if renaming || creating || renaming_pdf {
-            3
-        } else {
-            11
-        },
-        frame.area(),
-    );
+    let prefix = if renaming || creating || renaming_pdf {
+        "> "
+    } else {
+        "New name: "
+    };
+    let text = format!("{}{}", prefix, prompt.value);
+    let chunks = chunk_string(&text, 62);
+    let text_lines = if chunks.is_empty() { 1 } else { chunks.len() as u16 };
+
+    let height = if renaming || creating || renaming_pdf {
+        text_lines.max(1) + 2
+    } else {
+        text_lines.max(1) + 10
+    };
+
+    let area = centered(64, height, frame.area());
     frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(if renaming || creating || renaming_pdf {
-            vec![Line::raw(format!("> {}", prompt.value))]
-        } else {
-            let mut lines = vec![
-                Line::raw(format!("New name: {}", prompt.value)),
+
+    let mut lines = Vec::new();
+    for chunk in &chunks {
+        lines.push(Line::raw(chunk.clone()));
+    }
+    if chunks.is_empty() {
+        lines.push(Line::raw(prefix));
+    }
+
+    if !renaming && !creating && !renaming_pdf {
+        lines.push(Line::styled(
+            "Or select an existing collection:",
+            Style::default().fg(theme.muted),
+        ));
+        let start = prompt.selected.saturating_sub(5);
+        lines.extend(app.collections.iter().enumerate().skip(start).take(6).map(
+            |(index, collection)| {
                 Line::styled(
-                    "Or select an existing collection:",
-                    Style::default().fg(theme.muted),
-                ),
-            ];
-            let start = prompt.selected.saturating_sub(5);
-            lines.extend(app.collections.iter().enumerate().skip(start).take(6).map(
-                |(index, collection)| {
-                    Line::styled(
-                        format!(
-                            "{} {}",
-                            if index == prompt.selected { ">" } else { " " },
-                            collection.name
-                        ),
-                        Style::default().fg(if index == prompt.selected {
-                            theme.accent
-                        } else {
-                            theme.text
-                        }),
-                    )
-                },
-            ));
-            lines
-        })
-        .style(Style::default().fg(theme.text).bg(theme.surface))
-        .block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.secondary)),
-        ),
+                    format!(
+                        "{} {}",
+                        if index == prompt.selected { ">" } else { " " },
+                        collection.name
+                    ),
+                    Style::default().fg(if index == prompt.selected {
+                        theme.accent
+                    } else {
+                        theme.text
+                    }),
+                )
+            },
+        ));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().fg(theme.text).bg(theme.surface))
+            .block(
+                Block::default()
+                    .title(title)
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.secondary)),
+            ),
         area,
     );
-    let column = u16::try_from(prompt.value[..prompt.cursor].chars().count()).unwrap_or(u16::MAX);
+
+    let prefix_len = prefix.chars().count();
+    let cursor_idx = prefix_len + prompt.value[..prompt.cursor].chars().count();
+    let cursor_row = u16::try_from(cursor_idx / 62).unwrap_or(0);
+    let cursor_col = u16::try_from(cursor_idx % 62).unwrap_or(0);
+
     frame.set_cursor_position((
-        area.x.saturating_add(3).saturating_add(column),
-        area.y.saturating_add(1),
+        area.x.saturating_add(1).saturating_add(cursor_col),
+        area.y.saturating_add(1).saturating_add(cursor_row),
     ));
 }
 
