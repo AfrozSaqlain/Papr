@@ -587,13 +587,20 @@ fn validate_collection_name(name: &str) -> Result<()> {
 }
 
 fn open_collection(database: &Database, app: &mut App, collection_id: i64) -> Result<()> {
+    let restore_selection = app.last_opened_collection_id == Some(collection_id);
     app.active_collection = app
         .collections
         .iter()
         .find(|collection| collection.id == collection_id)
         .cloned();
     app.collection_papers = database.papers_for_collection(collection_id)?;
-    app.collection_paper_selected = 0;
+    app.collection_paper_selected = if restore_selection {
+        app.collection_paper_selected
+            .min(app.collection_papers.len().saturating_sub(1))
+    } else {
+        0
+    };
+    app.last_opened_collection_id = Some(collection_id);
     Ok(())
 }
 
@@ -981,6 +988,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.mode == AppMode::Search {
         return handle_search_key(app, key);
     }
+    let key = normalize_panel_navigation(key);
     if app.mode == AppMode::PaperDetail {
         return handle_paper_detail_key(app, key);
     }
@@ -990,10 +998,6 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         app.sidebar_index = 1;
         app.content_focused = true;
         app.mode = AppMode::Search;
-        return None;
-    }
-    if key.code == KeyCode::Left {
-        app.dispatch(Command::Back);
         return None;
     }
     if !app.content_focused {
@@ -1053,6 +1057,15 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         app.dispatch(command);
     }
     None
+}
+
+fn normalize_panel_navigation(mut key: KeyEvent) -> KeyEvent {
+    key.code = match key.code {
+        KeyCode::Left => KeyCode::Char('h'),
+        KeyCode::Right => KeyCode::Char('l'),
+        code => code,
+    };
+    key
 }
 
 fn handle_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
@@ -1134,7 +1147,6 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
             KeyCode::Esc | KeyCode::Char('h') => {
                 app.active_collection = None;
                 app.collection_papers.clear();
-                app.collection_paper_selected = 0;
                 return (true, None);
             }
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l' | 'p') => {
@@ -1460,6 +1472,63 @@ mod tests {
             assert_eq!(app.page, page);
             assert_eq!(app.sidebar_index, index);
             assert!(!app.content_focused);
+        }
+    }
+
+    #[test]
+    fn arrow_and_vim_panel_navigation_preserve_the_same_selection() {
+        for (back, open) in [
+            (KeyCode::Char('h'), KeyCode::Char('l')),
+            (KeyCode::Left, KeyCode::Right),
+        ] {
+            let mut app = App {
+                page: Page::Library,
+                sidebar_index: 2,
+                content_focused: true,
+                library: papr_core::LibraryState {
+                    selected: 7,
+                    ..papr_core::LibraryState::default()
+                },
+                ..App::default()
+            };
+            let _ = handle_key(&mut app, KeyEvent::new(back, KeyModifiers::NONE));
+            assert!(!app.content_focused);
+            assert_eq!(app.sidebar_index, 2);
+            assert_eq!(app.library.selected, 7);
+
+            let _ = handle_key(&mut app, KeyEvent::new(open, KeyModifiers::NONE));
+            assert!(app.content_focused);
+            assert_eq!(app.page, Page::Library);
+            assert_eq!(app.sidebar_index, 2);
+            assert_eq!(app.library.selected, 7);
+        }
+    }
+
+    #[test]
+    fn left_and_h_preserve_the_nested_collection_cursor() {
+        for back in [KeyCode::Char('h'), KeyCode::Left] {
+            let mut app = App {
+                page: Page::Collections,
+                sidebar_index: 4,
+                content_focused: true,
+                collection_selected: 3,
+                active_collection: Some(CollectionSummary {
+                    id: 9,
+                    name: "Selected collection".into(),
+                    paper_count: 2,
+                    folder_path: Some("/tmp/Selected collection".into()),
+                }),
+                collection_paper_selected: 1,
+                last_opened_collection_id: Some(9),
+                ..App::default()
+            };
+            let action = handle_key(&mut app, KeyEvent::new(back, KeyModifiers::NONE));
+            assert!(action.is_none());
+            assert!(app.active_collection.is_none());
+            assert_eq!(app.collection_selected, 3);
+            assert_eq!(app.collection_paper_selected, 1);
+            assert_eq!(app.last_opened_collection_id, Some(9));
+            assert!(app.content_focused);
         }
     }
 

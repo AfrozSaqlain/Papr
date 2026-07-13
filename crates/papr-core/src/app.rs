@@ -247,6 +247,8 @@ pub struct App {
     pub collection_papers: Vec<LibraryPaper>,
     /// Selected paper within the active collection.
     pub collection_paper_selected: usize,
+    /// Most recently opened collection, used to restore its paper cursor.
+    pub last_opened_collection_id: Option<i64>,
     /// Bookmark summaries.
     pub bookmarks: Vec<BookmarkSummary>,
     /// Selected bookmarked PDF row.
@@ -287,6 +289,7 @@ impl Default for App {
             active_collection: None,
             collection_papers: Vec::new(),
             collection_paper_selected: 0,
+            last_opened_collection_id: None,
             bookmarks: Vec::new(),
             bookmark_selected: 0,
             toast: None,
