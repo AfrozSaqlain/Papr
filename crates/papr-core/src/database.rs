@@ -538,13 +538,59 @@ impl Database {
     ///
     /// Returns an error when the note cannot be persisted.
     pub fn save_note(&self, note: &PaperNote) -> Result<(), DatabaseError> {
-        self.connection.execute(
-            "INSERT INTO notes (paper_id, title, body) VALUES (?1, ?2, ?3)
-             ON CONFLICT(paper_id) DO UPDATE SET title = excluded.title,
-                 body = excluded.body, updated_at = CURRENT_TIMESTAMP",
-            params![note.paper_id, note.title, note.body],
-        )?;
+        if note.body.trim().is_empty() {
+            self.connection.execute(
+                "DELETE FROM notes WHERE paper_id = ?1",
+                [note.paper_id],
+            )?;
+        } else {
+            self.connection.execute(
+                "INSERT INTO notes (paper_id, title, body) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(paper_id) DO UPDATE SET title = excluded.title,
+                     body = excluded.body, updated_at = CURRENT_TIMESTAMP",
+                params![note.paper_id, note.title, note.body],
+            )?;
+        }
         Ok(())
+    }
+
+    /// List all local papers that have associated notes (and are valid in the library roots).
+    pub fn papers_with_notes(&self, roots: &[PathBuf]) -> Result<Vec<LibraryPaper>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT p.id, p.title,
+                    COALESCE((SELECT GROUP_CONCAT(a.name, ', ')
+                              FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
+                              WHERE pa.paper_id = p.id ORDER BY pa.position), ''),
+                    p.doi, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
+             FROM notes n JOIN papers p ON p.id = n.paper_id
+             WHERE p.pdf_path IS NOT NULL
+             ORDER BY n.updated_at DESC, n.id DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let file_size: Option<i64> = row.get(5)?;
+            Ok(LibraryPaper {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                authors: row.get(2)?,
+                doi: row.get(3)?,
+                pdf_path: row.get(4)?,
+                file_size: file_size.and_then(|size| u64::try_from(size).ok()),
+                reading_status: row.get(6)?,
+                is_favorite: row.get(7)?,
+            })
+        })?;
+        let mut papers = Vec::new();
+        for paper in rows {
+            let paper = paper?;
+            let valid = paper.pdf_path.as_deref().is_some_and(|path| {
+                let path = Path::new(path);
+                path.is_file() && roots.iter().any(|root| path.starts_with(root))
+            });
+            if valid {
+                papers.push(paper);
+            }
+        }
+        Ok(papers)
     }
 
     /// Add a paper to a named collection, creating it when necessary.
@@ -2129,6 +2175,85 @@ mod tests {
         let different_root = root.join("other_dir");
         let bookmarks = database.bookmarks(&[different_root.clone()])?;
         assert!(bookmarks.is_empty());
+
+        // Clean up
+        let _ = fs::remove_file(&pdf_path);
+        let _ = fs::remove_dir(&root);
+
+        Ok(())
+    }
+
+    #[test]
+    fn notes_stay_synchronized_with_filesystem_and_autodelete() -> Result<(), Box<dyn std::error::Error>> {
+        let mut database = Database::in_memory()?;
+        let root = std::env::temp_dir().join(format!("papr-notes-sync-{}-{}", std::process::id(), Utc::now().timestamp_micros()));
+        fs::create_dir_all(&root)?;
+        let pdf_path = root.join("test_noted_paper.pdf");
+        fs::write(&pdf_path, "%PDF-1.4 test")?;
+
+        let timestamp = Utc::now();
+        let paper = RemotePaper {
+            id: "https://arxiv.org/abs/2602.00005".into(),
+            title: "Test Noted Paper".into(),
+            authors: vec!["Bob Specialist".into()],
+            abstract_text: "Testing notes list synchronization.".into(),
+            published: timestamp,
+            updated: timestamp,
+            categories: vec!["cs.SE".into()],
+            pdf_url: None,
+            doi: None,
+            journal_ref: None,
+        };
+
+        let pdf = ImportedPdf {
+            path: pdf_path.clone(),
+            title: "Test Noted Paper".into(),
+            file_size: 14,
+            library_root: Some(root.clone()),
+            relative_directory: None,
+        };
+
+        let paper_id = database.attach_download(&paper, &pdf)?;
+
+        // Save a non-empty note
+        let note = PaperNote {
+            paper_id,
+            title: "Summary".into(),
+            body: "This is a great paper.".into(),
+            cursor: 22,
+        };
+        database.save_note(&note)?;
+
+        // Case 1: Valid roots, file exists -> Paper should be returned in papers_with_notes
+        let papers = database.papers_with_notes(&[root.clone()])?;
+        assert_eq!(papers.len(), 1);
+        assert_eq!(papers[0].title, "Test Noted Paper");
+
+        // Case 2: Save empty/whitespace note -> Note should be deleted and paper removed from list
+        let empty_note = PaperNote {
+            paper_id,
+            title: "".into(),
+            body: "   \n  ".into(),
+            cursor: 0,
+        };
+        database.save_note(&empty_note)?;
+        let papers = database.papers_with_notes(&[root.clone()])?;
+        assert!(papers.is_empty());
+
+        // Re-save non-empty note to test filesystem validation
+        database.save_note(&note)?;
+        assert_eq!(database.papers_with_notes(&[root.clone()])?.len(), 1);
+
+        // Case 3: File is missing -> Paper should NOT be returned
+        fs::remove_file(&pdf_path)?;
+        let papers = database.papers_with_notes(&[root.clone()])?;
+        assert!(papers.is_empty());
+
+        // Case 4: File re-created but wrong/different roots -> Paper should NOT be returned
+        fs::write(&pdf_path, "%PDF-1.4 test")?;
+        let different_root = root.join("other_dir");
+        let papers = database.papers_with_notes(&[different_root.clone()])?;
+        assert!(papers.is_empty());
 
         // Clean up
         let _ = fs::remove_file(&pdf_path);

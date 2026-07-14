@@ -939,6 +939,10 @@ fn refresh_organization(database: &Database, library_roots: &[PathBuf], app: &mu
             app.author_paper_selected = 0;
         }
     }
+    app.notes_papers = database.papers_with_notes(library_roots)?;
+    app.notes_selected = app
+        .notes_selected
+        .min(app.notes_papers.len().saturating_sub(1));
     Ok(())
 }
 
@@ -1617,6 +1621,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if let Some(action) = bookmark_action(app, key) {
         return Some(action);
     }
+    if let Some(action) = handle_notes_key(app, key) {
+        return Some(action);
+    }
     if app.page == papr_core::Page::Discover && key.code == KeyCode::Char('o') {
         return app
             .discovery
@@ -1742,12 +1749,40 @@ fn bookmark_action(app: &App, key: KeyEvent) -> Option<UiAction> {
             paper_id: bookmark.paper_id,
             path: PathBuf::from(&bookmark.pdf_path),
         }),
+        KeyCode::Char('n') => Some(UiAction::OpenNote(PaperTarget::Local(bookmark.paper_id))),
         KeyCode::Char('s') => Some(UiAction::Prompt(PaperTarget::Local(bookmark.paper_id))),
         KeyCode::Char('R') => Some(UiAction::RenamePdf(bookmark.paper_id)),
         KeyCode::Char('x') => Some(UiAction::ConfirmDeletePaper {
             paper_id: bookmark.paper_id,
             title: bookmark.paper_title.clone(),
             path: Some(PathBuf::from(&bookmark.pdf_path)),
+        }),
+        _ => None,
+    }
+}
+
+fn handle_notes_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    if app.page != papr_core::Page::Notes {
+        return None;
+    }
+    let paper = *app.filtered_notes_papers().get(app.notes_selected)?;
+    match key.code {
+        KeyCode::Char('n') | KeyCode::Enter => Some(UiAction::OpenNote(PaperTarget::Local(paper.id))),
+        KeyCode::Char('p') => {
+            let path = paper.pdf_path.clone().map(PathBuf::from)?;
+            Some(UiAction::OpenPdf {
+                paper_id: paper.id,
+                path,
+            })
+        }
+        KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(paper.id))),
+        KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(paper.id))),
+        KeyCode::Char('s') => Some(UiAction::Prompt(PaperTarget::Local(paper.id))),
+        KeyCode::Char('R') => Some(UiAction::RenamePdf(paper.id)),
+        KeyCode::Char('x') => Some(UiAction::ConfirmDeletePaper {
+            paper_id: paper.id,
+            title: paper.title.clone(),
+            path: paper.pdf_path.as_ref().map(PathBuf::from),
         }),
         _ => None,
     }
@@ -1904,6 +1939,14 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
                         .map(|&paper| UiAction::Prompt(PaperTarget::Local(paper.id))),
                 );
             }
+            KeyCode::Char('n') => {
+                return (
+                    true,
+                    app.filtered_collection_papers()
+                        .get(app.collection_paper_selected)
+                        .map(|&paper| UiAction::OpenNote(PaperTarget::Local(paper.id))),
+                );
+            }
             KeyCode::Char('x') => {
                 return (
                     true,
@@ -1966,6 +2009,9 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
                 }
                 if key.code == KeyCode::Char('s') {
                     return (true, Some(UiAction::Prompt(PaperTarget::Local(paper.id))));
+                }
+                if key.code == KeyCode::Char('n') {
+                    return (true, Some(UiAction::OpenNote(PaperTarget::Local(paper.id))));
                 }
                 if key.code == KeyCode::Char('x') {
                     return (
@@ -2132,6 +2178,40 @@ fn edit_text(text: &mut String, cursor: &mut usize, key: KeyEvent) -> bool {
             if *cursor < text.len() {
                 text.remove(*cursor);
                 changed = true;
+            }
+        }
+        KeyCode::Up => {
+            if *cursor > 0 {
+                let current_line_start = text[..*cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                let col = *cursor - current_line_start;
+                if current_line_start > 0 {
+                    let prev_line_search = &text[..current_line_start - 1];
+                    let prev_line_start = prev_line_search.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                    let prev_line_len = (current_line_start - 1) - prev_line_start;
+                    let mut target = prev_line_start + col.min(prev_line_len);
+                    while target > prev_line_start && !text.is_char_boundary(target) {
+                        target -= 1;
+                    }
+                    *cursor = target;
+                }
+            }
+        }
+        KeyCode::Down => {
+            if *cursor < text.len() {
+                let current_line_start = text[..*cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                let col = *cursor - current_line_start;
+                if let Some(current_line_end) = text[*cursor..].find('\n').map(|idx| *cursor + idx) {
+                    let next_line_start = current_line_end + 1;
+                    if next_line_start <= text.len() {
+                        let next_line_end = text[next_line_start..].find('\n').map(|idx| next_line_start + idx).unwrap_or(text.len());
+                        let next_line_len = next_line_end - next_line_start;
+                        let mut target = next_line_start + col.min(next_line_len);
+                        while target > next_line_start && !text.is_char_boundary(target) {
+                            target -= 1;
+                        }
+                        *cursor = target;
+                    }
+                }
             }
         }
         KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {

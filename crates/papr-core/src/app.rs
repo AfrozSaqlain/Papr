@@ -355,6 +355,12 @@ pub struct App {
     pub plugin_diagnostics: usize,
     /// Whether background arXiv metadata enrichment is in progress.
     pub enrichment_pending: bool,
+    /// Papers with associated notes.
+    pub notes_papers: Vec<LibraryPaper>,
+    /// Selected paper with notes.
+    pub notes_selected: usize,
+    /// Vertical scroll offset for notes papers.
+    pub notes_scroll: usize,
 }
 
 impl Default for App {
@@ -410,6 +416,9 @@ impl Default for App {
             plugins: Vec::new(),
             plugin_diagnostics: 0,
             enrichment_pending: false,
+            notes_papers: Vec::new(),
+            notes_selected: 0,
+            notes_scroll: 0,
         }
     }
 }
@@ -503,6 +512,14 @@ impl App {
             .filter(|b| Self::matches_query(&self.workspace_query, &b.paper_title, &b.authors))
             .collect()
     }
+
+    /// Get the notes papers filtered by the workspace search query.
+    pub fn filtered_notes_papers(&self) -> Vec<&LibraryPaper> {
+        self.notes_papers
+            .iter()
+            .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors))
+            .collect()
+    }
     /// Apply a semantic command to the state machine.
     pub fn dispatch(&mut self, command: Command) {
         match command {
@@ -560,6 +577,12 @@ impl App {
                     } else {
                         self.bookmark_selected -= 1;
                     }
+                } else if self.page == Page::Notes {
+                    if self.notes_selected == 0 {
+                        self.mode = AppMode::WorkspaceSearch;
+                    } else {
+                        self.notes_selected -= 1;
+                    }
                 }
             }
             Command::MoveDown => {
@@ -598,6 +621,9 @@ impl App {
                 } else if self.page == Page::Bookmarks {
                     self.bookmark_selected =
                         (self.bookmark_selected + 1).min(self.filtered_bookmarks().len().saturating_sub(1));
+                } else if self.page == Page::Notes {
+                    self.notes_selected =
+                        (self.notes_selected + 1).min(self.filtered_notes_papers().len().saturating_sub(1));
                 }
             }
             Command::Open => {

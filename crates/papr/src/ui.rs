@@ -137,14 +137,8 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         render_collections(frame, workspace_area, app, theme);
     } else if app.page == Page::Authors {
         render_authors(frame, workspace_area, app, theme);
-    } else if app.page == Page::Bookmarks {
+    } else if app.page == Page::Bookmarks || app.page == Page::Notes {
         render_organization(frame, workspace_area, app, theme);
-    } else if app.page == Page::Notes {
-        frame.render_widget(
-            Paragraph::new("Select a paper in Library or Discover and press n to edit its note.")
-                .style(Style::default().fg(theme.muted)),
-            inset,
-        );
     } else if app.page == Page::History {
         render_history(frame, inset, app, theme);
     } else if app.page == Page::Statistics {
@@ -691,6 +685,20 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
                 ])
             })
             .collect(),
+        Page::Notes => app
+            .filtered_notes_papers()
+            .iter()
+            .map(|paper| {
+                ListItem::new(vec![
+                    Line::styled(
+                        &paper.title,
+                        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                    ),
+                    Line::styled(library_metadata(paper), Style::default().fg(theme.muted)),
+                    Line::raw(""),
+                ])
+            })
+            .collect(),
         _ => Vec::new(),
     };
     if items.is_empty() {
@@ -701,10 +709,23 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
             area,
         );
     } else {
+        let (title, selected_idx, scroll_idx) = match app.page {
+            Page::Bookmarks => (
+                " BOOKMARKS - j/k SELECT  ENTER/p OPEN  B REMOVE ",
+                app.bookmark_selected,
+                app.bookmark_scroll,
+            ),
+            Page::Notes => (
+                " NOTES - j/k SELECT  ENTER/n EDIT  x DELETE ",
+                app.notes_selected,
+                app.notes_scroll,
+            ),
+            _ => ("", 0, 0),
+        };
         let list = List::new(items)
             .block(
                 Block::default()
-                    .title(" BOOKMARKS - j/k SELECT  ENTER/p OPEN  B REMOVE ")
+                    .title(title)
                     .borders(Borders::TOP)
                     .border_style(Style::default().fg(theme.border)),
             )
@@ -712,10 +733,14 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
             .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
             .highlight_symbol("> ");
         let mut state = ListState::default()
-            .with_selected(Some(app.bookmark_selected))
-            .with_offset(app.bookmark_scroll);
+            .with_selected(Some(selected_idx))
+            .with_offset(scroll_idx);
         frame.render_stateful_widget(list, area, &mut state);
-        app.bookmark_scroll = state.offset();
+        match app.page {
+            Page::Bookmarks => app.bookmark_scroll = state.offset(),
+            Page::Notes => app.notes_scroll = state.offset(),
+            _ => {}
+        }
     }
 }
 
@@ -729,7 +754,7 @@ fn render_note_editor(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let content = if app.note_preview {
         markdown_preview(body, theme)
     } else {
-        vec![Line::raw(body)]
+        body.split('\n').map(|l| Line::raw(l.to_string())).collect()
     };
     let title = if app.note_preview {
         " MARKDOWN PREVIEW - TAB TO EDIT "
@@ -770,38 +795,250 @@ fn render_note_editor(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     ));
 }
 
-fn markdown_preview<'a>(body: &'a str, theme: &Theme) -> Vec<Line<'a>> {
-    body.lines()
-        .map(|line| {
-            if line.starts_with('#') {
-                Line::styled(
-                    line.trim_start_matches('#').trim(),
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else if line.starts_with(char::from(96)) || line.starts_with("    ") {
-                Line::styled(line, Style::default().fg(theme.success).bg(theme.surface))
-            } else if line.starts_with("- ") || line.starts_with("* ") {
-                Line::from(vec![
-                    Span::styled("* ", Style::default().fg(theme.secondary)),
-                    Span::styled(&line[2..], Style::default().fg(theme.text)),
-                ])
-            } else if let Some(quote) = line.strip_prefix("> ") {
-                Line::from(vec![
-                    Span::styled("| ", Style::default().fg(theme.warning)),
-                    Span::styled(
-                        quote,
-                        Style::default()
-                            .fg(theme.muted)
-                            .add_modifier(Modifier::ITALIC),
-                    ),
-                ])
-            } else {
-                Line::styled(line, Style::default().fg(theme.text))
+fn parse_inline<'a>(mut text: &'a str, theme: &Theme) -> Vec<Span<'a>> {
+    let mut spans = Vec::new();
+    while !text.is_empty() {
+        let math_idx = text.find('$');
+        let code_idx = text.find('`');
+        let bold_idx = text.find("**");
+        let italic_idx = text.find('*');
+        let link_idx = text.find('[');
+        
+        let mut first: Option<(usize, &str)> = None;
+        if let Some(idx) = math_idx {
+            if first.map_or(true, |(i, _)| idx < i) {
+                first = Some((idx, "$"));
             }
-        })
-        .collect()
+        }
+        if let Some(idx) = code_idx {
+            if first.map_or(true, |(i, _)| idx < i) {
+                first = Some((idx, "`"));
+            }
+        }
+        if let Some(idx) = bold_idx {
+            if first.map_or(true, |(i, _)| idx < i) {
+                first = Some((idx, "**"));
+            }
+        }
+        if let Some(idx) = italic_idx {
+            if first.map_or(true, |(i, _)| idx < i) {
+                if bold_idx == Some(idx) {
+                    first = Some((idx, "**"));
+                } else {
+                    first = Some((idx, "*"));
+                }
+            }
+        }
+        if let Some(idx) = link_idx {
+            if first.map_or(true, |(i, _)| idx < i) {
+                first = Some((idx, "["));
+            }
+        }
+        
+        if let Some((idx, marker)) = first {
+            if idx > 0 {
+                spans.push(Span::styled(&text[..idx], Style::default().fg(theme.text)));
+            }
+            let rest = &text[idx + marker.len()..];
+            match marker {
+                "$" => {
+                    if let Some(close_idx) = rest.find('$') {
+                        let math_text = &rest[..close_idx];
+                        spans.push(Span::styled(
+                            math_text,
+                            Style::default().fg(theme.warning).add_modifier(Modifier::ITALIC)
+                        ));
+                        text = &rest[close_idx + 1..];
+                    } else {
+                        spans.push(Span::styled(marker, Style::default().fg(theme.text)));
+                        text = rest;
+                    }
+                }
+                "`" => {
+                    if let Some(close_idx) = rest.find('`') {
+                        let code_text = &rest[..close_idx];
+                        spans.push(Span::styled(
+                            code_text,
+                            Style::default().fg(theme.success).bg(theme.surface)
+                        ));
+                        text = &rest[close_idx + 1..];
+                    } else {
+                        spans.push(Span::styled(marker, Style::default().fg(theme.text)));
+                        text = rest;
+                    }
+                }
+                "**" => {
+                    if let Some(close_idx) = rest.find("**") {
+                        let bold_text = &rest[..close_idx];
+                        spans.push(Span::styled(
+                            bold_text,
+                            Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
+                        ));
+                        text = &rest[close_idx + 2..];
+                    } else {
+                        spans.push(Span::styled(marker, Style::default().fg(theme.text)));
+                        text = rest;
+                    }
+                }
+                "*" => {
+                    if let Some(close_idx) = rest.find('*') {
+                        let italic_text = &rest[..close_idx];
+                        spans.push(Span::styled(
+                            italic_text,
+                            Style::default().fg(theme.text).add_modifier(Modifier::ITALIC)
+                        ));
+                        text = &rest[close_idx + 1..];
+                    } else {
+                        spans.push(Span::styled(marker, Style::default().fg(theme.text)));
+                        text = rest;
+                    }
+                }
+                "[" => {
+                    if let Some(close_text_idx) = rest.find(']') {
+                        let link_text = &rest[..close_text_idx];
+                        let after_text = &rest[close_text_idx + 1..];
+                        if after_text.starts_with('(') {
+                            if let Some(close_url_idx) = after_text.find(')') {
+                                let url = &after_text[1..close_url_idx];
+                                spans.push(Span::styled(
+                                    link_text,
+                                    Style::default().fg(theme.accent).add_modifier(Modifier::UNDERLINED)
+                                ));
+                                spans.push(Span::styled(
+                                    format!(" ({})", url),
+                                    Style::default().fg(theme.muted)
+                                ));
+                                text = &after_text[close_url_idx + 1..];
+                                continue;
+                            }
+                        }
+                    }
+                    spans.push(Span::styled(marker, Style::default().fg(theme.text)));
+                    text = rest;
+                }
+                _ => {
+                    text = rest;
+                }
+            }
+        } else {
+            spans.push(Span::styled(text, Style::default().fg(theme.text)));
+            break;
+        }
+    }
+    spans
+}
+
+fn markdown_preview<'a>(body: &'a str, theme: &Theme) -> Vec<Line<'a>> {
+    let mut lines = Vec::new();
+    let mut in_code_block = false;
+    let mut in_math_block = false;
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            lines.push(Line::styled(
+                "── Code Block ──────────────────────────────────",
+                Style::default().fg(theme.muted),
+            ));
+            continue;
+        }
+        if in_code_block {
+            lines.push(Line::styled(
+                line,
+                Style::default().fg(theme.success).bg(theme.surface),
+            ));
+            continue;
+        }
+        if trimmed.starts_with("$$") {
+            in_math_block = !in_math_block;
+            lines.push(Line::styled(
+                "── Display Math ─────────────────────────────────",
+                Style::default().fg(theme.muted),
+            ));
+            continue;
+        }
+        if in_math_block {
+            lines.push(Line::styled(
+                line,
+                Style::default().fg(theme.warning).add_modifier(Modifier::ITALIC),
+            ));
+            continue;
+        }
+        if let Some(h) = line.strip_prefix("# ") {
+            lines.push(Line::styled(
+                format!("# {}", h.trim()),
+                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            ));
+            continue;
+        }
+        if let Some(h) = line.strip_prefix("## ") {
+            lines.push(Line::styled(
+                format!("## {}", h.trim()),
+                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            ));
+            continue;
+        }
+        if let Some(h) = line.strip_prefix("### ") {
+            lines.push(Line::styled(
+                format!("### {}", h.trim()),
+                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            ));
+            continue;
+        }
+        if let Some(quote) = line.strip_prefix("> ") {
+            let mut spans = vec![Span::styled("│ ", Style::default().fg(theme.warning))];
+            spans.extend(parse_inline(quote, theme));
+            lines.push(Line::from(spans));
+            continue;
+        }
+        if let Some(item) = line.strip_prefix("- ") {
+            let mut spans = vec![Span::styled("• ", Style::default().fg(theme.secondary))];
+            spans.extend(parse_inline(item, theme));
+            lines.push(Line::from(spans));
+            continue;
+        }
+        if let Some(item) = line.strip_prefix("* ") {
+            let mut spans = vec![Span::styled("• ", Style::default().fg(theme.secondary))];
+            spans.extend(parse_inline(item, theme));
+            lines.push(Line::from(spans));
+            continue;
+        }
+        let mut is_ordered_list = false;
+        if let Some(dot_idx) = trimmed.find(". ") {
+            if trimmed[..dot_idx].chars().all(|c| c.is_ascii_digit()) {
+                is_ordered_list = true;
+            }
+        }
+        if is_ordered_list {
+            let dot_idx = trimmed.find(". ").unwrap();
+            let prefix = &trimmed[..dot_idx + 2];
+            let rest = &trimmed[dot_idx + 2..];
+            let mut spans = vec![Span::styled(prefix, Style::default().fg(theme.secondary))];
+            spans.extend(parse_inline(rest, theme));
+            lines.push(Line::from(spans));
+            continue;
+        }
+        if trimmed.starts_with('|') && trimmed.ends_with('|') {
+            let parts: Vec<&str> = trimmed.split('|').collect();
+            let mut spans = Vec::new();
+            for (i, part) in parts.iter().enumerate() {
+                if i > 0 && i < parts.len() - 1 {
+                    spans.push(Span::styled("│", Style::default().fg(theme.accent)));
+                    let text = part.trim();
+                    if text.chars().all(|c| c == '-' || c == ':') && !text.is_empty() {
+                        spans.push(Span::styled(part.to_string(), Style::default().fg(theme.muted)));
+                    } else {
+                        spans.extend(parse_inline(part, theme));
+                    }
+                }
+            }
+            spans.push(Span::styled("│", Style::default().fg(theme.accent)));
+            lines.push(Line::from(spans));
+            continue;
+        }
+        lines.push(Line::from(parse_inline(line, theme)));
+    }
+    lines
 }
 
 fn chunk_string(s: &str, size: usize) -> Vec<String> {
