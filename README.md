@@ -88,7 +88,7 @@ papr paths
 Below is a complete configuration structure:
 
 ```toml
-theme = "catppuccin"
+theme = "catppuccin-mocha"
 startup_page = "dashboard"
 pdf_viewer = "zathura"  # Custom PDF viewer command
 
@@ -123,12 +123,21 @@ Papr supports both built-in themes and custom user-defined themes via TOML confi
 
 The following theme presets are compiled directly into the application binary:
 
-* `catppuccin` (default)
+* `catppuccin-mocha` (default; alias `catppuccin` for backward compatibility)
+* `catppuccin-macchiato`
+* `catppuccin-frappe`
+* `catppuccin-latte`
 * `tokyo-night` (or `tokyonight`)
 * `gruvbox`
 * `nord`
 * `dracula`
 * `light`
+* `rose-pink-dark` (or `rose-pine-dark` / `rose-pink` for backward compatibility)
+* `rose-pink-light` (or `rose-pine-light`)
+* `everforest`
+* `kanagawa`
+* `one-dark` (or `onedark`)
+* `cyberpunk`
 
 To use a built-in theme, set the `theme` option in your `config.toml` to the corresponding name:
 ```toml

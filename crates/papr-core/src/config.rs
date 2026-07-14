@@ -79,7 +79,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            theme: "catppuccin".into(),
+            theme: "catppuccin-mocha".into(),
             startup_page: "dashboard".into(),
             pdf_viewer: None,
             library_folders: Vec::new(),

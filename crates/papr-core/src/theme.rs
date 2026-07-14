@@ -131,9 +131,21 @@ fn parse_color(value: &str) -> Result<Color, ThemeError> {
 
 fn builtin(name: &str) -> Option<ThemeSpec> {
     let colors = match name.to_ascii_lowercase().as_str() {
-        "catppuccin" => (
+        "catppuccin" | "catppuccin-mocha" | "catppuccinmocha" => (
             "1e1e2e", "313244", "cdd6f4", "7f849c", "89b4fa", "cba6f7", "a6e3a1", "f9e2af",
             "f38ba8", "45475a",
+        ),
+        "catppuccin-macchiato" | "catppuccinmacchiato" => (
+            "24273a", "363a4f", "cad3f5", "8087a2", "8aadf4", "c6a0f6", "a6da95", "eed49f",
+            "ed8796", "494d64",
+        ),
+        "catppuccin-frappe" | "catppuccinfrappe" => (
+            "303446", "414559", "c6d0f5", "838ba7", "8caaee", "ca9ee6", "a6d189", "e5c890",
+            "e78284", "51576d",
+        ),
+        "catppuccin-latte" | "catppuccinlatte" => (
+            "eff1f5", "ccd0da", "4c4f69", "8c8fa1", "1e66f5", "8839ef", "40a02b", "df8e1d",
+            "d20f39", "bcc0cc",
         ),
         "tokyo-night" | "tokyonight" => (
             "1a1b26", "24283b", "c0caf5", "565f89", "7aa2f7", "bb9af7", "9ece6a", "e0af68",
@@ -154,6 +166,30 @@ fn builtin(name: &str) -> Option<ThemeSpec> {
         "light" => (
             "f7f7f5", "ffffff", "202124", "6b7280", "2563eb", "7c3aed", "15803d", "a16207",
             "b91c1c", "d1d5db",
+        ),
+        "rose-pink" | "rosepink" | "rose-pink-dark" | "rosepinkdark" | "rose-pine-dark" | "rosepinedark" => (
+            "241b1d", "2d2224", "f5e6e8", "a38f92", "ffb3c1", "e0b1cb", "b7e4c7", "fcd5a1",
+            "ff85a1", "3d2d30",
+        ),
+        "rose-pink-light" | "rosepinklight" | "rose-pine-light" | "rosepinelight" => (
+            "faebed", "ffffff", "3c2a2e", "8a7074", "d96a80", "9c528b", "388e3c", "f57c00",
+            "d32f2f", "e8d0d4",
+        ),
+        "everforest" => (
+            "2d353b", "343f44", "d3c6aa", "859289", "a7c080", "7fbbb3", "a7c080", "dbbc7f",
+            "e67e80", "475258",
+        ),
+        "kanagawa" => (
+            "1f1f28", "2a2a37", "dcd7ba", "727169", "e6c384", "7e9cd8", "76946a", "ff9e3b",
+            "c3404b", "363646",
+        ),
+        "one-dark" | "onedark" => (
+            "282c34", "21252b", "abb2bf", "5c6370", "61afef", "c678dd", "98c379", "d19a66",
+            "e06c75", "3e4452",
+        ),
+        "cyberpunk" => (
+            "0f0f1a", "1a1a2e", "ffffff", "707080", "00ffff", "ff007f", "39ff14", "ffb300",
+            "ff3333", "2a2a40",
         ),
         _ => return None,
     };
@@ -181,12 +217,21 @@ mod tests {
     #[test]
     fn loads_every_builtin_theme() -> Result<(), Box<dyn std::error::Error>> {
         for name in [
-            "catppuccin",
+            "catppuccin-mocha",
+            "catppuccin-macchiato",
+            "catppuccin-frappe",
+            "catppuccin-latte",
             "tokyo-night",
             "gruvbox",
             "nord",
             "dracula",
             "light",
+            "rose-pink-dark",
+            "rose-pink-light",
+            "everforest",
+            "kanagawa",
+            "one-dark",
+            "cyberpunk",
         ] {
             let theme = Theme::load(name)?;
             assert_ne!(theme.text, theme.background);
