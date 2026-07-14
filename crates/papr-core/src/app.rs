@@ -1,8 +1,8 @@
 //! Application state machine and navigation commands.
 
 use crate::models::{
-    AuthorSummary, BookmarkSummary, CollectionSummary, DashboardStats, LibraryPaper, PaperNote, RemotePaper,
-    ResearchDashboard,
+    AuthorSummary, BookmarkSummary, CollectionSummary, DashboardStats, LibraryPaper, PaperNote,
+    RemotePaper, ResearchDashboard,
 };
 use crate::plugins::PluginInfo;
 
@@ -187,6 +187,10 @@ pub struct DownloadTask {
     pub downloaded: u64,
     /// Expected response size when supplied by the server.
     pub total: Option<u64>,
+    /// Associated database paper ID, if attached.
+    pub paper_id: Option<i64>,
+    /// Final or current PDF path on disk.
+    pub pdf_path: Option<String>,
     /// Current transfer state.
     pub status: DownloadStatus,
 }
@@ -423,8 +427,8 @@ impl App {
                         self.author_paper_selected = (self.author_paper_selected + 1)
                             .min(self.author_papers.len().saturating_sub(1));
                     } else {
-                        self.author_selected = (self.author_selected + 1)
-                            .min(self.authors.len().saturating_sub(1));
+                        self.author_selected =
+                            (self.author_selected + 1).min(self.authors.len().saturating_sub(1));
                     }
                 } else if self.page == Page::Bookmarks {
                     self.bookmark_selected =

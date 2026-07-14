@@ -13,8 +13,8 @@ use thiserror::Error;
 use crate::{
     library::{CollectionDirectory, ImportedPdf},
     models::{
-        ActivityItem, AuthorSummary, BookmarkSummary, CollectionSummary, DashboardStats, LibraryPaper, PaperNote,
-        ReadingDay, ReadingStatistics, RemotePaper, ResearchDashboard,
+        ActivityItem, AuthorSummary, BookmarkSummary, CollectionSummary, DashboardStats,
+        LibraryPaper, PaperNote, ReadingDay, ReadingStatistics, RemotePaper, ResearchDashboard,
     },
 };
 
@@ -1282,7 +1282,9 @@ impl Database {
     ///
     /// # Errors
     /// Returns an error when the query fails.
-    pub fn papers_needing_enrichment(&self) -> Result<Vec<(i64, Option<String>, Option<String>)>, DatabaseError> {
+    pub fn papers_needing_enrichment(
+        &self,
+    ) -> Result<Vec<(i64, Option<String>, Option<String>)>, DatabaseError> {
         let mut statement = self.connection.prepare(
             "SELECT p.id, p.arxiv_id, p.pdf_path
              FROM papers p

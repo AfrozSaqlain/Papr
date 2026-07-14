@@ -102,14 +102,20 @@ async fn main() -> Result<()> {
     let mut dashboard = database
         .research_dashboard()
         .context("failed to load research dashboard")?;
-    dashboard.counts.papers = LibraryIndexer::count_pdfs(&collection_roots);
+    let mut all_roots = library_roots.clone();
+    for root in &collection_roots {
+        if !all_roots.contains(root) {
+            all_roots.push(root.clone());
+        }
+    }
+    dashboard.counts.papers = LibraryIndexer::count_pdfs(&all_roots);
     dashboard.counts.downloaded = LibraryIndexer::count_pdfs(&[download_dir.clone()]);
     dashboard.read = database
         .library_papers_in_roots(&library_roots)?
         .into_iter()
         .filter(|p| p.reading_status == "read")
         .count() as u64;
-    dashboard.disk_usage = LibraryIndexer::pdf_storage_size(&collection_roots);
+    dashboard.disk_usage = LibraryIndexer::pdf_storage_size(&all_roots);
     dashboard.downloads_size = LibraryIndexer::pdf_storage_size(&[download_dir.clone()]);
     dashboard.database_size = std::fs::metadata(&paths.database_file)
         .map(|m| m.len())
@@ -300,7 +306,8 @@ async fn run(
     let (download_sender, mut download_receiver) = mpsc::unbounded_channel::<DownloadEvent>();
     let (today_sender, mut today_receiver) = mpsc::unbounded_channel::<TodayResponse>();
     let (app_events_sender, mut app_events_receiver) = mpsc::unbounded_channel::<AppEvent>();
-    let (enrichment_sender, mut enrichment_receiver) = mpsc::unbounded_channel::<MetadataEnrichment>();
+    let (enrichment_sender, mut enrichment_receiver) =
+        mpsc::unbounded_channel::<MetadataEnrichment>();
     let senders = ActionSenders {
         search: sender,
         index: index_sender,
@@ -384,8 +391,13 @@ async fn run(
         }
         while let Ok(event) = app_events_receiver.try_recv() {
             match event {
-                AppEvent::ReadingSessionCompleted { session_id, duration_s } => {
-                    runtime.database.record_reading_duration(session_id, duration_s)?;
+                AppEvent::ReadingSessionCompleted {
+                    session_id,
+                    duration_s,
+                } => {
+                    runtime
+                        .database
+                        .record_reading_duration(session_id, duration_s)?;
                     refresh_dashboard(&mut runtime, app)?;
                 }
             }
@@ -543,7 +555,23 @@ fn apply_ui_action(
             open_author(&runtime.database, app, author_id)?;
         }
         UiAction::OpenDownload(id) => {
-            let path = runtime.download_dir.join(format!("{id}.pdf"));
+            let task = app.downloads.iter().find(|t| t.id == id);
+            let mut path = None;
+            if let Some(task) = task {
+                if let Some(paper_id) = task.paper_id {
+                    if let Some(paper) = app.library.papers.iter().find(|p| p.id == paper_id) {
+                        if let Some(pdf_path) = &paper.pdf_path {
+                            path = Some(PathBuf::from(pdf_path));
+                        }
+                    }
+                }
+                if path.is_none() {
+                    if let Some(pdf_path) = &task.pdf_path {
+                        path = Some(PathBuf::from(pdf_path));
+                    }
+                }
+            }
+            let path = path.unwrap_or_else(|| runtime.download_dir.join(format!("{id}.pdf")));
             open_pdf(&runtime.pdf_viewer, &path, app, None, None)?;
         }
     }
@@ -920,7 +948,13 @@ fn refresh_library(runtime: &Runtime, app: &mut App) -> Result<()> {
 
 fn refresh_dashboard(runtime: &Runtime, app: &mut App) -> Result<()> {
     app.dashboard = runtime.database.research_dashboard()?;
-    app.dashboard.counts.papers = LibraryIndexer::count_pdfs(&runtime.collection_roots);
+    let mut all_roots = runtime.library_roots.clone();
+    for root in &runtime.collection_roots {
+        if !all_roots.contains(root) {
+            all_roots.push(root.clone());
+        }
+    }
+    app.dashboard.counts.papers = LibraryIndexer::count_pdfs(&all_roots);
     app.dashboard.counts.downloaded = LibraryIndexer::count_pdfs(&[runtime.download_dir.clone()]);
     app.dashboard.read = runtime
         .database
@@ -928,7 +962,7 @@ fn refresh_dashboard(runtime: &Runtime, app: &mut App) -> Result<()> {
         .into_iter()
         .filter(|p| p.reading_status == "read")
         .count() as u64;
-    app.dashboard.disk_usage = LibraryIndexer::pdf_storage_size(&runtime.collection_roots);
+    app.dashboard.disk_usage = LibraryIndexer::pdf_storage_size(&all_roots);
     app.dashboard.downloads_size =
         LibraryIndexer::pdf_storage_size(&[runtime.download_dir.clone()]);
     app.dashboard.database_size = std::fs::metadata(&runtime.database_file)
@@ -1078,6 +1112,96 @@ fn start_scan(
     });
 }
 
+fn spawn_enrichment_if_needed(
+    runtime: &mut Runtime,
+    senders: &ActionSenders,
+    app: &mut App,
+) -> Result<()> {
+    let papers = runtime.database.papers_needing_enrichment()?;
+    if !papers.is_empty() {
+        let arxiv_client = runtime.arxiv.clone();
+        let crossref_client = runtime.crossref.clone();
+        let enrichment_tx = senders.enrichment.clone();
+        let count = papers.len();
+        app.enrichment_pending = true;
+        tokio::spawn(async move {
+            let mut enriched = 0usize;
+            for (i, (paper_id, mut candidate_arxiv, pdf_path)) in papers.into_iter().enumerate() {
+                let mut candidate_doi = None;
+
+                if candidate_arxiv.is_none() {
+                    if let Some(path) = pdf_path {
+                        if let Ok(output) = tokio::process::Command::new("pdftotext")
+                            .args(["-l", "2", &path, "-"])
+                            .output()
+                            .await
+                        {
+                            if output.status.success() {
+                                let text = String::from_utf8_lossy(&output.stdout);
+                                let lower_text = text.to_lowercase();
+
+                                if let Some(idx) = lower_text.find("arxiv:") {
+                                    let substr = &text[idx + 6..];
+                                    let end = substr
+                                        .find(|c: char| !c.is_ascii_digit() && c != '.')
+                                        .unwrap_or(substr.len());
+                                    let id = &substr[..end];
+                                    if id.len() >= 7 {
+                                        candidate_arxiv = Some(id.to_string());
+                                    }
+                                } else if let Some(idx) = lower_text.find("10.") {
+                                    let substr = &text[idx..];
+                                    let end = substr
+                                        .find(|c: char| c.is_whitespace() || c == '\n')
+                                        .unwrap_or(substr.len());
+                                    let id = &substr[..end];
+                                    if id.len() >= 5 {
+                                        candidate_doi = Some(id.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some(arxiv_id) = candidate_arxiv {
+                    if i > 0 {
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    }
+                    match arxiv_client.get_by_id(&arxiv_id).await {
+                        Ok(Some(paper)) => {
+                            enriched += 1;
+                            let _ = enrichment_tx.send(MetadataEnrichment { paper_id, paper });
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            eprintln!("arXiv enrichment failed for {arxiv_id}: {e}");
+                        }
+                    }
+                } else if let Some(doi) = candidate_doi {
+                    if i > 0 {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await; // Crossref rate limit is friendlier
+                    }
+                    match crossref_client.get_by_doi(&doi).await {
+                        Ok(Some(paper)) => {
+                            enriched += 1;
+                            let _ = enrichment_tx.send(MetadataEnrichment { paper_id, paper });
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            eprintln!("Crossref enrichment failed for {doi}: {e}");
+                        }
+                    }
+                }
+            }
+            if enriched > 0 {
+                eprintln!("Enriched {enriched}/{count} papers with metadata");
+            }
+        });
+    }
+    Ok(())
+}
+
 fn start_runtime_scan(runtime: &Runtime, senders: &ActionSenders, app: &mut App) {
     start_scan(
         &runtime.library_roots,
@@ -1111,92 +1235,13 @@ fn apply_index_response(
                     )?;
                 }
             }
-            runtime.database.reconcile_collections(&runtime.collection_roots, &directories)?;
+            runtime
+                .database
+                .reconcile_collections(&runtime.collection_roots, &directories)?;
             app.library.indexing = false;
             app.library.message = Some(format!("Indexed {found} PDFs, imported {imported} new"));
 
-            let papers = runtime.database.papers_needing_enrichment()?;
-            if !papers.is_empty() {
-                let arxiv_client = runtime.arxiv.clone();
-                let crossref_client = runtime.crossref.clone();
-                let enrichment_tx = senders.enrichment.clone();
-                let count = papers.len();
-                app.enrichment_pending = true;
-                tokio::spawn(async move {
-                    let mut enriched = 0usize;
-                    for (i, (paper_id, mut candidate_arxiv, pdf_path)) in papers.into_iter().enumerate() {
-                        let mut candidate_doi = None;
-
-                        if candidate_arxiv.is_none() {
-                            if let Some(path) = pdf_path {
-                                if let Ok(output) = tokio::process::Command::new("pdftotext")
-                                    .args(["-l", "2", &path, "-"])
-                                    .output()
-                                    .await
-                                {
-                                    if output.status.success() {
-                                        let text = String::from_utf8_lossy(&output.stdout);
-                                        let lower_text = text.to_lowercase();
-                                        
-                                        if let Some(idx) = lower_text.find("arxiv:") {
-                                            let substr = &text[idx + 6..];
-                                            let end = substr
-                                                .find(|c: char| !c.is_ascii_digit() && c != '.')
-                                                .unwrap_or(substr.len());
-                                            let id = &substr[..end];
-                                            if id.len() >= 7 {
-                                                candidate_arxiv = Some(id.to_string());
-                                            }
-                                        } else if let Some(idx) = lower_text.find("10.") {
-                                            let substr = &text[idx..];
-                                            let end = substr
-                                                .find(|c: char| c.is_whitespace())
-                                                .unwrap_or(substr.len());
-                                            let id = &substr[..end];
-                                            if id.len() >= 8 {
-                                                candidate_doi = Some(id.to_string());
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        if let Some(arxiv_id) = candidate_arxiv {
-                            if i > 0 {
-                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                            }
-                            match arxiv_client.get_by_id(&arxiv_id).await {
-                                Ok(Some(paper)) => {
-                                    enriched += 1;
-                                    let _ = enrichment_tx.send(MetadataEnrichment { paper_id, paper });
-                                }
-                                Ok(None) => {}
-                                Err(e) => {
-                                    eprintln!("arXiv enrichment failed for {arxiv_id}: {e}");
-                                }
-                            }
-                        } else if let Some(doi) = candidate_doi {
-                            if i > 0 {
-                                tokio::time::sleep(std::time::Duration::from_secs(1)).await; // Crossref rate limit is friendlier
-                            }
-                            match crossref_client.get_by_doi(&doi).await {
-                                Ok(Some(paper)) => {
-                                    enriched += 1;
-                                    let _ = enrichment_tx.send(MetadataEnrichment { paper_id, paper });
-                                }
-                                Ok(None) => {}
-                                Err(e) => {
-                                    eprintln!("Crossref enrichment failed for {doi}: {e}");
-                                }
-                            }
-                        }
-                    }
-                    if enriched > 0 {
-                        eprintln!("Enriched {enriched}/{count} papers with metadata");
-                    }
-                });
-            }
+            spawn_enrichment_if_needed(runtime, senders, app)?;
         }
         IndexResponse::File(Ok(pdf)) => {
             let imported = runtime.database.import_pdf(&pdf)?;
@@ -1213,6 +1258,7 @@ fn apply_index_response(
             } else {
                 "Ignored duplicate PDF".into()
             });
+            spawn_enrichment_if_needed(runtime, senders, app)?;
         }
         IndexResponse::File(Err(error)) => app.library.message = Some(error),
     }
@@ -1270,6 +1316,8 @@ fn discover_local_downloads(app: &mut App, download_dir: &std::path::Path) {
                 title,
                 downloaded: size,
                 total: Some(size),
+                paper_id: None,
+                pdf_path: Some(entry.path().to_string_lossy().into_owned()),
                 status: DownloadStatus::Completed,
             });
         }
@@ -1304,6 +1352,8 @@ fn start_download(
         title: paper.title,
         downloaded: 0,
         total: None,
+        paper_id: None,
+        pdf_path: None,
         status: DownloadStatus::Starting,
     });
     let manager = manager.clone();
@@ -1352,7 +1402,9 @@ fn apply_download_event(
                 runtime
                     .database
                     .record_activity("downloaded", Some(paper_id), None)?;
+                task.paper_id = Some(paper_id);
             }
+            task.pdf_path = Some(pdf.path.to_string_lossy().to_string());
             task.downloaded = pdf.file_size;
             task.total = Some(pdf.file_size);
             task.status = DownloadStatus::Completed;
@@ -1535,15 +1587,10 @@ fn handle_downloads_key(app: &App, key: KeyEvent) -> Option<UiAction> {
     if matches!(key.code, KeyCode::Char('R') | KeyCode::Char('s')) {
         if let Some(task) = app.downloads.get(app.download_selected) {
             if matches!(task.status, DownloadStatus::Completed) {
-                let suffix = format!("{}.pdf", task.id);
-                if let Some(paper) = app.library.papers.iter().find(|p| {
-                    p.pdf_path
-                        .as_ref()
-                        .map_or(false, |path| path.ends_with(&suffix))
-                }) {
+                if let Some(paper_id) = task.paper_id {
                     return match key.code {
-                        KeyCode::Char('R') => Some(UiAction::RenamePdf(paper.id)),
-                        KeyCode::Char('s') => Some(UiAction::Prompt(PaperTarget::Local(paper.id))),
+                        KeyCode::Char('R') => Some(UiAction::RenamePdf(paper_id)),
+                        KeyCode::Char('s') => Some(UiAction::Prompt(PaperTarget::Local(paper_id))),
                         _ => None,
                     };
                 }

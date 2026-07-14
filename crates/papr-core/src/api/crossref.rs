@@ -1,9 +1,9 @@
 //! Crossref API client for fetching paper metadata by DOI.
 
 use crate::models::RemotePaper;
+use chrono::{NaiveDate, TimeZone, Utc};
 use reqwest::{Client, Url};
 use serde::Deserialize;
-use chrono::{Utc, TimeZone, NaiveDate};
 
 /// Represents an error returned by the Crossref API.
 #[derive(Debug, thiserror::Error)]
@@ -44,7 +44,10 @@ impl CrossrefClient {
     /// # Errors
     /// Returns an error when the request fails or JSON content is malformed.
     pub async fn get_by_doi(&self, doi: &str) -> Result<Option<RemotePaper>, CrossrefError> {
-        let url = self.endpoint.join(doi).map_err(|_| CrossrefError::NotFound)?;
+        let url = self
+            .endpoint
+            .join(doi)
+            .map_err(|_| CrossrefError::NotFound)?;
         let response = self.client.get(url).send().await?;
         if response.status() == 404 {
             return Ok(None);
@@ -85,20 +88,32 @@ impl CrossrefClient {
         let res: CrossrefResponse = serde_json::from_slice(&body)?;
         let work = res.message;
 
-        let title = work.title.and_then(|mut t| t.pop()).unwrap_or_else(|| "Unknown Title".to_string());
-        
-        let authors = work.author.unwrap_or_default().into_iter().filter_map(|a| {
-            match (a.given, a.family) {
+        let title = work
+            .title
+            .and_then(|mut t| t.pop())
+            .unwrap_or_else(|| "Unknown Title".to_string());
+
+        let authors = work
+            .author
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|a| match (a.given, a.family) {
                 (Some(g), Some(f)) => Some(format!("{} {}", g, f)),
                 (None, Some(f)) => Some(f),
                 (Some(g), None) => Some(g),
                 _ => None,
-            }
-        }).collect();
+            })
+            .collect();
 
         // Abstract from crossref often has JATS XML tags like <jats:p>. We should clean them.
         let raw_abs = work.abstract_text.unwrap_or_default();
-        let abstract_text = raw_abs.replace("<jats:p>", "").replace("</jats:p>", "\n").replace("<jats:sec>", "").replace("</jats:sec>", "").trim().to_string();
+        let abstract_text = raw_abs
+            .replace("<jats:p>", "")
+            .replace("</jats:p>", "\n")
+            .replace("<jats:sec>", "")
+            .replace("</jats:sec>", "")
+            .trim()
+            .to_string();
 
         let mut date = Utc::now();
         if let Some(cd) = work.published.or(work.created).or(work.deposited) {

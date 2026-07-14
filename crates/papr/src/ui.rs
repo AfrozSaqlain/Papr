@@ -775,9 +775,14 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     };
     let text = format!("{}{}", prefix, prompt.value);
     let chunks = chunk_string(&text, 62);
-    let text_lines = if chunks.is_empty() { 1 } else { chunks.len() as u16 };
+    let text_lines = if chunks.is_empty() {
+        1
+    } else {
+        chunks.len() as u16
+    };
 
-    let has_current = prompt.current_collection.is_some() && !renaming && !creating && !renaming_pdf;
+    let has_current =
+        prompt.current_collection.is_some() && !renaming && !creating && !renaming_pdf;
     let extra_rows = if has_current { 2 } else { 0 };
 
     let height = if renaming || creating || renaming_pdf {
@@ -792,7 +797,10 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let mut lines = Vec::new();
     if has_current {
         lines.push(Line::styled(
-            format!("Current collection: {}", prompt.current_collection.as_ref().unwrap()),
+            format!(
+                "Current collection: {}",
+                prompt.current_collection.as_ref().unwrap()
+            ),
             Style::default().fg(theme.muted),
         ));
         lines.push(Line::raw(""));
@@ -943,11 +951,36 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
             DownloadStatus::Completed => ("Completed".to_owned(), theme.success),
             DownloadStatus::Failed(error) => (format!("Failed: {error}"), theme.error),
         };
+
+        let title = if let Some(paper_id) = download.paper_id {
+            app.library
+                .papers
+                .iter()
+                .find(|p| p.id == paper_id)
+                .map(|p| p.title.clone())
+                .unwrap_or_else(|| download.title.clone())
+        } else {
+            download.title.clone()
+        };
+
+        let path = if let Some(paper_id) = download.paper_id {
+            app.library
+                .papers
+                .iter()
+                .find(|p| p.id == paper_id)
+                .and_then(|p| p.pdf_path.clone())
+        } else {
+            download.pdf_path.clone()
+        };
+
+        let path_str = path.unwrap_or_else(|| "Unknown path".to_owned());
+
         ListItem::new(vec![
             Line::styled(
-                &download.title,
+                title,
                 Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
             ),
+            Line::styled(path_str, Style::default().fg(theme.muted)),
             Line::styled(label, Style::default().fg(color)),
             Line::raw(""),
         ])
