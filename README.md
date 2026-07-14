@@ -115,6 +115,49 @@ pdf_viewer = "zathura --fork {path}"
 ```
 If `{path}` is omitted, the PDF file path is automatically appended as the final argument.
 
+### Themes
+
+Papr supports both built-in themes and custom user-defined themes via TOML configuration.
+
+#### Built-in Themes
+
+The following theme presets are compiled directly into the application binary:
+
+* `catppuccin` (default)
+* `tokyo-night` (or `tokyonight`)
+* `gruvbox`
+* `nord`
+* `dracula`
+* `light`
+
+To use a built-in theme, set the `theme` option in your `config.toml` to the corresponding name:
+```toml
+theme = "gruvbox"
+```
+
+#### Custom Themes
+
+You can define your own theme or adapt a color scheme by creating a custom TOML file. Save it anywhere (for example, at `~/.config/papr/my-theme.toml`) and define the following hex color keys:
+
+```toml
+name = "My Custom Theme"
+background = "#1e1e2e"
+surface = "#313244"
+text = "#cdd6f4"
+muted = "#7f849c"
+accent = "#89b4fa"
+secondary = "#cba6f7"
+success = "#a6e3a1"
+warning = "#f9e2af"
+error = "#f38ba8"
+border = "#45475a"
+```
+
+To apply it, configure the `theme` option in your `config.toml` with the absolute path to your theme file:
+```toml
+theme = "/home/user/.config/papr/my-theme.toml"
+```
+
 ---
 
 ## Quick Start
