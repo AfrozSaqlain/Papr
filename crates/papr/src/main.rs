@@ -143,6 +143,7 @@ async fn main() -> Result<()> {
     let dashboard_keyword_signature = dashboard_keywords.join(",");
     let runtime = Runtime {
         arxiv,
+        crossref: papr_core::api::crossref::CrossrefClient::new(),
         downloads,
         database,
         database_file: paths.database_file.clone(),
@@ -244,6 +245,7 @@ struct TodayResponse {
 
 struct Runtime {
     arxiv: ArxivClient,
+    crossref: papr_core::api::crossref::CrossrefClient,
     downloads: DownloadManager,
     database: Database,
     database_file: PathBuf,
@@ -358,14 +360,18 @@ async fn run(
         while let Ok(response) = index_receiver.try_recv() {
             apply_index_response(response, &mut runtime, &senders, app)?;
         }
+        let mut enriched_any = false;
         while let Ok(MetadataEnrichment { paper_id, paper }) = enrichment_receiver.try_recv() {
             runtime.database.apply_arxiv_metadata(paper_id, &paper)?;
+            enriched_any = true;
         }
-        if enrichment_receiver.is_empty() && app.enrichment_pending {
-            app.enrichment_pending = false;
+        if enriched_any {
             refresh_library(&runtime, app)?;
             refresh_organization(&runtime.database, app)?;
             refresh_dashboard(&mut runtime, app)?;
+        }
+        if enrichment_receiver.is_empty() && app.enrichment_pending {
+            app.enrichment_pending = false;
         }
         while let Ok(event) = download_receiver.try_recv() {
             apply_download_event(
@@ -1111,29 +1117,83 @@ fn apply_index_response(
 
             let papers = runtime.database.papers_needing_enrichment()?;
             if !papers.is_empty() {
-                let client = runtime.arxiv.clone();
+                let arxiv_client = runtime.arxiv.clone();
+                let crossref_client = runtime.crossref.clone();
                 let enrichment_tx = senders.enrichment.clone();
                 let count = papers.len();
                 app.enrichment_pending = true;
                 tokio::spawn(async move {
                     let mut enriched = 0usize;
-                    for (i, (paper_id, arxiv_id)) in papers.into_iter().enumerate() {
-                        if i > 0 {
-                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                        }
-                        match client.get_by_id(&arxiv_id).await {
-                            Ok(Some(paper)) => {
-                                enriched += 1;
-                                let _ = enrichment_tx.send(MetadataEnrichment { paper_id, paper });
+                    for (i, (paper_id, mut candidate_arxiv, pdf_path)) in papers.into_iter().enumerate() {
+                        let mut candidate_doi = None;
+
+                        if candidate_arxiv.is_none() {
+                            if let Some(path) = pdf_path {
+                                if let Ok(output) = tokio::process::Command::new("pdftotext")
+                                    .args(["-l", "2", &path, "-"])
+                                    .output()
+                                    .await
+                                {
+                                    if output.status.success() {
+                                        let text = String::from_utf8_lossy(&output.stdout);
+                                        let lower_text = text.to_lowercase();
+                                        
+                                        if let Some(idx) = lower_text.find("arxiv:") {
+                                            let substr = &text[idx + 6..];
+                                            let end = substr
+                                                .find(|c: char| !c.is_ascii_digit() && c != '.')
+                                                .unwrap_or(substr.len());
+                                            let id = &substr[..end];
+                                            if id.len() >= 7 {
+                                                candidate_arxiv = Some(id.to_string());
+                                            }
+                                        } else if let Some(idx) = lower_text.find("10.") {
+                                            let substr = &text[idx..];
+                                            let end = substr
+                                                .find(|c: char| c.is_whitespace())
+                                                .unwrap_or(substr.len());
+                                            let id = &substr[..end];
+                                            if id.len() >= 8 {
+                                                candidate_doi = Some(id.to_string());
+                                            }
+                                        }
+                                    }
+                                }
                             }
-                            Ok(None) => {}
-                            Err(e) => {
-                                eprintln!("arXiv enrichment failed for {arxiv_id}: {e}");
+                        }
+
+                        if let Some(arxiv_id) = candidate_arxiv {
+                            if i > 0 {
+                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                            }
+                            match arxiv_client.get_by_id(&arxiv_id).await {
+                                Ok(Some(paper)) => {
+                                    enriched += 1;
+                                    let _ = enrichment_tx.send(MetadataEnrichment { paper_id, paper });
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    eprintln!("arXiv enrichment failed for {arxiv_id}: {e}");
+                                }
+                            }
+                        } else if let Some(doi) = candidate_doi {
+                            if i > 0 {
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await; // Crossref rate limit is friendlier
+                            }
+                            match crossref_client.get_by_doi(&doi).await {
+                                Ok(Some(paper)) => {
+                                    enriched += 1;
+                                    let _ = enrichment_tx.send(MetadataEnrichment { paper_id, paper });
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    eprintln!("Crossref enrichment failed for {doi}: {e}");
+                                }
                             }
                         }
                     }
                     if enriched > 0 {
-                        eprintln!("Enriched {enriched}/{count} papers with arXiv metadata");
+                        eprintln!("Enriched {enriched}/{count} papers with metadata");
                     }
                 });
             }

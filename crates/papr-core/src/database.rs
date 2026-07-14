@@ -1282,7 +1282,7 @@ impl Database {
     ///
     /// # Errors
     /// Returns an error when the query fails.
-    pub fn papers_needing_enrichment(&self) -> Result<Vec<(i64, String)>, DatabaseError> {
+    pub fn papers_needing_enrichment(&self) -> Result<Vec<(i64, Option<String>, Option<String>)>, DatabaseError> {
         let mut statement = self.connection.prepare(
             "SELECT p.id, p.arxiv_id, p.pdf_path
              FROM papers p
@@ -1303,11 +1303,15 @@ impl Database {
             if let Some(aid) = arxiv_id.filter(|s| !s.is_empty()) {
                 let bare = aid.rsplit('/').next().unwrap_or(&aid);
                 let bare = strip_arxiv_version(bare);
-                result.push((id, bare.to_owned()));
-            } else if let Some(path) = pdf_path {
-                if let Some(extracted) = extract_arxiv_id(&path) {
-                    result.push((id, extracted));
+                result.push((id, Some(bare.to_owned()), pdf_path));
+            } else if let Some(path) = &pdf_path {
+                if let Some(extracted) = extract_arxiv_id(path) {
+                    result.push((id, Some(extracted), pdf_path));
+                } else {
+                    result.push((id, None, pdf_path));
                 }
+            } else {
+                result.push((id, None, pdf_path));
             }
         }
         Ok(result)
