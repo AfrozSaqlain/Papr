@@ -1635,6 +1635,8 @@ mod tests {
             title: "A Streaming Download".into(),
             downloaded: 1024,
             total: Some(2048),
+            paper_id: None,
+            pdf_path: None,
             status: DownloadStatus::Running,
         });
         terminal.draw(|frame| render(frame, &mut app, &theme))?;

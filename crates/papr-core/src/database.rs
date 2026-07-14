@@ -306,18 +306,25 @@ impl Database {
         pdf: &ImportedPdf,
     ) -> Result<i64, DatabaseError> {
         let transaction = self.connection.transaction()?;
-        let existing = transaction
-            .query_row(
+        let matching_ids: Vec<i64> = {
+            let mut stmt = transaction.prepare(
                 "SELECT id FROM papers
                  WHERE arxiv_id = ?1 OR (?2 IS NOT NULL AND doi = ?2)
                     OR pdf_path = ?3
-                 ORDER BY CASE WHEN arxiv_id = ?1 THEN 0 ELSE 1 END LIMIT 1",
-                params![paper.id, paper.doi, pdf.path.to_string_lossy()],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
+                 ORDER BY CASE WHEN arxiv_id = ?1 THEN 0 ELSE 1 END"
+            )?;
+            let rows = stmt.query_map(params![paper.id, paper.doi, pdf.path.to_string_lossy()], |row| row.get(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
         let file_size = i64::try_from(pdf.file_size).unwrap_or(i64::MAX);
-        let paper_id = if let Some(paper_id) = existing {
+        let paper_id = if let Some(paper_id) = matching_ids.first().copied() {
+            for id in matching_ids.into_iter().skip(1) {
+                transaction.execute("DELETE FROM paper_authors WHERE paper_id = ?1", [id]).ok();
+                transaction.execute("DELETE FROM collection_papers WHERE paper_id = ?1", [id]).ok();
+                transaction.execute("DELETE FROM papers WHERE id = ?1", [id])?;
+            }
+
             transaction.execute(
                 "UPDATE papers SET title = ?1, abstract = ?2, doi = ?3, arxiv_id = ?4,
                     published_at = ?5, updated_at = ?6, pdf_path = ?7,
@@ -1329,21 +1336,72 @@ impl Database {
         paper: &RemotePaper,
     ) -> Result<(), DatabaseError> {
         let transaction = self.connection.transaction()?;
-        transaction.execute(
-            "UPDATE papers SET title = ?1, abstract = ?2, arxiv_id = ?3,
-             doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6
-             WHERE id = ?7",
-            params![
-                paper.title,
-                paper.abstract_text,
-                paper.id,
-                paper.doi,
-                paper.published.to_rfc3339(),
-                paper.updated.to_rfc3339(),
+        let existing_id: Option<i64> = transaction.query_row(
+            "SELECT id FROM papers WHERE arxiv_id = ?1 LIMIT 1",
+            params![paper.id],
+            |row| row.get(0)
+        ).optional()?;
+
+        let target_id = if let Some(existing) = existing_id {
+            if existing != paper_id {
+                let (pdf_path, file_size): (Option<String>, Option<i64>) = transaction.query_row(
+                    "SELECT pdf_path, file_size FROM papers WHERE id = ?1",
+                    params![paper_id],
+                    |row| Ok((row.get(0)?, row.get(1)?))
+                ).optional()?.unwrap_or((None, None));
+
+                transaction.execute("DELETE FROM paper_authors WHERE paper_id = ?1", params![paper_id]).ok();
+                transaction.execute("DELETE FROM collection_papers WHERE paper_id = ?1", params![paper_id]).ok();
+                transaction.execute("DELETE FROM papers WHERE id = ?1", params![paper_id])?;
+
+                if let Some(path) = pdf_path {
+                    transaction.execute(
+                        "UPDATE papers SET pdf_path = ?1, file_size = COALESCE(?2, file_size),
+                         title = ?3, abstract = ?4, doi = COALESCE(?5, doi),
+                         published_at = ?6, updated_at = ?7
+                         WHERE id = ?8",
+                        params![
+                            path, file_size, paper.title, paper.abstract_text, paper.doi,
+                            paper.published.to_rfc3339(), paper.updated.to_rfc3339(), existing
+                        ]
+                    )?;
+                } else {
+                    transaction.execute(
+                        "UPDATE papers SET title = ?1, abstract = ?2,
+                         doi = COALESCE(?3, doi), published_at = ?4, updated_at = ?5
+                         WHERE id = ?6",
+                        params![
+                            paper.title, paper.abstract_text, paper.doi,
+                            paper.published.to_rfc3339(), paper.updated.to_rfc3339(), existing
+                        ]
+                    )?;
+                }
+                existing
+            } else {
+                transaction.execute(
+                    "UPDATE papers SET title = ?1, abstract = ?2, arxiv_id = ?3,
+                     doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6
+                     WHERE id = ?7",
+                    params![
+                        paper.title, paper.abstract_text, paper.id, paper.doi,
+                        paper.published.to_rfc3339(), paper.updated.to_rfc3339(), paper_id
+                    ],
+                )?;
                 paper_id
-            ],
-        )?;
-        transaction.execute("DELETE FROM paper_authors WHERE paper_id = ?1", [paper_id])?;
+            }
+        } else {
+            transaction.execute(
+                "UPDATE papers SET title = ?1, abstract = ?2, arxiv_id = ?3,
+                 doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6
+                 WHERE id = ?7",
+                params![
+                    paper.title, paper.abstract_text, paper.id, paper.doi,
+                    paper.published.to_rfc3339(), paper.updated.to_rfc3339(), paper_id
+                ],
+            )?;
+            paper_id
+        };
+        transaction.execute("DELETE FROM paper_authors WHERE paper_id = ?1", [target_id])?;
         for (position, author) in paper.authors.iter().enumerate() {
             let author_id = if let Some(id) = transaction
                 .query_row(
@@ -1361,7 +1419,7 @@ impl Database {
             transaction.execute(
                 "INSERT INTO paper_authors (paper_id, author_id, position) VALUES (?1, ?2, ?3)",
                 params![
-                    paper_id,
+                    target_id,
                     author_id,
                     i64::try_from(position).unwrap_or(i64::MAX)
                 ],

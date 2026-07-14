@@ -1338,12 +1338,26 @@ fn start_download(
     if pending.contains_key(&paper.id) {
         return;
     }
-    let filename = paper
-        .id
-        .rsplit('/')
-        .next()
-        .unwrap_or("paper")
-        .replace(['/', '\\'], "_");
+    let sanitized_title: String = paper
+        .title
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            '\n' | '\r' | '\t' => ' ',
+            c => c,
+        })
+        .collect();
+    let sanitized_title = sanitized_title.trim();
+    let filename = if sanitized_title.is_empty() {
+        paper
+            .id
+            .rsplit('/')
+            .next()
+            .unwrap_or("paper")
+            .replace(['/', '\\'], "_")
+    } else {
+        sanitized_title.to_string()
+    };
     let destination = directory.join(format!("{filename}.pdf"));
     let id = paper.id.clone();
     pending.insert(id.clone(), paper.clone());
