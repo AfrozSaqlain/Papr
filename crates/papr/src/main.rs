@@ -497,7 +497,10 @@ fn apply_ui_action(
             app.note_preview = false;
             app.mode = AppMode::NoteEdit;
         }
-        UiAction::SaveNote(note) => runtime.database.save_note(&note)?,
+        UiAction::SaveNote(note) => {
+            runtime.database.save_note(&note)?;
+            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
+        }
         UiAction::Prompt(target) => {
             let paper_id = resolve_target(target, &mut runtime.database)?;
             let current = runtime.database.paper_collection_name(paper_id)?;
