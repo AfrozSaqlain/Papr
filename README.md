@@ -167,6 +167,8 @@ To apply it, configure the `theme` option in your `config.toml` with the absolut
 theme = "/home/user/.config/papr/my-theme.toml"
 ```
 
+You can also edit your configuration file directly from Papr's settings tab using built-in editor. The saved changes will take effect immediately.
+
 ## Plugins
 
 Papr supports **versioned, process-isolated plugins** that allow users to extend the application without modifying its source code. Plugins can be written in **any programming language** (Python, Rust, Node.js, Bash, etc.) as long as they communicate with Papr using **JSON over standard input (`stdin`) and standard output (`stdout`)**.
@@ -379,6 +381,7 @@ This architecture makes plugins:
 | `Enter` / `l` / `Right` | Open the selected item, section, or paper |
 | `Left` | Return focus to the sidebar navigation |
 | `h` | Go back to the previous screen or list |
+| `u` | Set the current state of the paper as unread |
 | `/` | Start a new arXiv search |
 | `Ctrl+P` | Open the command palette |
 | `?` | Toggle the help helper screen |
