@@ -167,6 +167,175 @@ To apply it, configure the `theme` option in your `config.toml` with the absolut
 theme = "/home/user/.config/papr/my-theme.toml"
 ```
 
+## Plugins
+
+Papr supports **versioned, process-isolated plugins** that allow users to extend the application without modifying its source code. Plugins can be written in **any programming language** (Python, Rust, Node.js, Bash, etc.) as long as they communicate with Papr using **JSON over standard input (`stdin`) and standard output (`stdout`)**.
+
+Each plugin runs as an independent process, providing strong isolation while keeping the plugin API simple, language agnostic, and easy to debug.
+
+### Plugin Capabilities
+
+A plugin requests access to specific integration surfaces through its `plugin.toml` manifest.
+
+| Capability            | Description                                                                           |
+| --------------------- | ------------------------------------------------------------------------------------- |
+| `metadata-provider`   | Contribute scholarly metadata providers (e.g., querying custom library repositories). |
+| `commands`            | Register custom commands that appear in the Command Palette (`Ctrl+P`).               |
+| `activity-events`     | Listen to lifecycle events such as when a paper is opened, imported, or deleted.      |
+| `read-paper-metadata` | Read the metadata of the currently focused paper.                                     |
+
+A plugin only has access to the capabilities it explicitly requests.
+
+### Plugin Actions
+
+When invoked, Papr sends the plugin a JSON request describing the event and any available context. The plugin processes the request and returns a JSON response containing actions for Papr to execute.
+
+Currently supported actions include:
+
+| Action              | Description                                         |
+| ------------------- | --------------------------------------------------- |
+| `notify`            | Display a non-blocking notification toast.          |
+| `add_to_collection` | Automatically assign a paper to a named collection. |
+
+This request-response model keeps plugins simple while allowing the core application to remain in control.
+
+### Example Plugins
+
+#### Auto Tagger (Python)
+
+Automatically categorizes newly added papers into collections based on title or abstract keywords.
+
+**Capabilities**
+
+* `activity-events`
+* `read-paper-metadata`
+
+#### Slack Notifier (Shell Script / cURL)
+
+Sends a Slack webhook notification whenever you open or finish reading a paper.
+
+**Capabilities**
+
+* `activity-events`
+* `read-paper-metadata`
+
+### Writing a Plugin
+
+This example demonstrates how to create the **Auto Tagger** plugin in Python.
+
+#### Step 1 — Create the Plugin Directory
+
+Papr searches for plugins inside its platform-specific data directory. On Linux:
+
+```bash
+mkdir -p ~/.local/share/papr/plugins/auto-tagger
+cd ~/.local/share/papr/plugins/auto-tagger
+```
+
+#### Step 2 — Create the Manifest
+
+Create a file named `plugin.toml`.
+
+```toml
+id = "auto-tagger"
+name = "Auto Tagger"
+version = "1.0.0"
+api_version = 1
+
+description = "Automatically categorizes papers into collections based on keyword rules"
+
+executable = "tagger.py"
+
+capabilities = [
+    "activity-events",
+    "read-paper-metadata"
+]
+```
+
+The manifest tells Papr how to launch the plugin and which capabilities it requires.
+
+#### Step 3 — Write the Plugin
+
+Create `tagger.py`.
+
+```python
+#!/usr/bin/env python3
+
+import json
+import sys
+
+
+def main():
+    try:
+        request = json.load(sys.stdin)
+    except Exception:
+        sys.exit(1)
+
+    response = {"actions": []}
+
+    if request.get("event") == "paper_opened":
+        paper = request.get("context", {}).get("paper", {})
+        title = paper.get("title", "").lower()
+
+        if "neural network" in title or "deep learning" in title:
+            response["actions"].append({
+                "type": "add_to_collection",
+                "name": "Machine Learning"
+            })
+
+            response["actions"].append({
+                "type": "notify",
+                "message": f"Added '{paper.get('title')[:30]}...' to Machine Learning"
+            })
+
+    print(json.dumps(response))
+
+
+if __name__ == "__main__":
+    main()
+```
+
+Make the script executable.
+
+```bash
+chmod +x tagger.py
+```
+
+#### Step 4 — Enable the Plugin
+
+Open the **Settings** workspace.
+
+Press **Right Arrow** or **Enter** to focus the embedded configuration editor, then press `i` to enter Insert mode. Add the plugin identifier to the `enabled_plugins` array:
+
+```toml
+enabled_plugins = ["auto-tagger"]
+```
+
+Press `Esc`, type `:w`, and press `Enter` to save the configuration. The plugin will be discovered and loaded immediately without restarting Papr.
+
+### Plugin Directory Layout
+
+```text
+~/.local/share/papr/plugins/
+└── auto-tagger/
+    ├── plugin.toml
+    └── tagger.py
+```
+
+### Communication Model
+
+Plugins communicate exclusively through JSON over `stdin` and `stdout`.
+
+For every invocation, Papr sends a JSON request describing the event and any available context. The plugin processes the request and returns a JSON response containing one or more actions for Papr to execute.
+
+This architecture makes plugins:
+
+* Language independent
+* Process isolated
+* Easy to develop and debug
+* Safe to distribute independently of the core application
+
+
 ---
 
 ## Quick Start
