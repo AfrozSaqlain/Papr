@@ -1296,7 +1296,7 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
                 theme.accent,
             ),
             DownloadStatus::Completed => ("Completed".to_owned(), theme.success),
-            DownloadStatus::Failed(error) => (format!("Failed: {error}"), theme.error),
+            DownloadStatus::Failed(_) => ("Failed".to_owned(), theme.error),
         };
 
         let paper = if let Some(paper_id) = download.paper_id {
@@ -1409,12 +1409,10 @@ fn render_discover(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
                 rows[1],
             );
         }
-        DiscoveryStatus::Error(error) => {
+        DiscoveryStatus::Error(_) => {
             frame.render_widget(
                 Paragraph::new(vec![
                     Line::styled("Search failed", Style::default().fg(theme.error)),
-                    Line::raw(""),
-                    Line::styled(error, Style::default().fg(theme.muted)),
                     Line::raw(""),
                     Line::styled("Press r to retry", Style::default().fg(theme.text)),
                 ])
@@ -1455,7 +1453,16 @@ fn render_discover_empty(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
 
 fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let items = app.discovery.results.iter().map(|paper| {
-        let meta = format!(
+        let local_status = app.library.papers.iter().find(|p| {
+            if let (Some(ldoi), Some(rdoi)) = (&p.doi, &paper.doi) {
+                if ldoi == rdoi {
+                    return true;
+                }
+            }
+            p.title.to_lowercase() == paper.title.to_lowercase()
+        }).map(|p| p.reading_status.as_str());
+
+        let mut meta = format!(
             "{}  |  {}  |  {}",
             paper.published.format("%Y-%m-%d"),
             compact_authors(paper),
@@ -1464,6 +1471,11 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
                 .first()
                 .map_or("uncategorized", String::as_str)
         );
+        if let Some(status) = local_status {
+            meta.push_str("  |  ");
+            meta.push_str(status);
+        }
+
         ListItem::new(vec![
             Line::styled(
                 &paper.title,
@@ -1672,17 +1684,32 @@ fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
             .take(10)
             .map(|paper| {
                 let abstract_preview = compact_text(&paper.abstract_text, preview_width);
+                let local_status = app.library.papers.iter().find(|p| {
+                    if let (Some(ldoi), Some(rdoi)) = (&p.doi, &paper.doi) {
+                        if ldoi == rdoi {
+                            return true;
+                        }
+                    }
+                    p.title.to_lowercase() == paper.title.to_lowercase()
+                }).map(|p| p.reading_status.as_str());
+
+                let mut meta_str = format!(
+                    "{}  |  {}",
+                    compact_authors(paper),
+                    paper.published.format("%Y-%m-%d")
+                );
+                if let Some(status) = local_status {
+                    meta_str.push_str("  |  ");
+                    meta_str.push_str(status);
+                }
+
                 ListItem::new(vec![
                     Line::styled(
                         &paper.title,
                         Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
                     ),
                     Line::styled(
-                        format!(
-                            "{}  |  {}",
-                            compact_authors(paper),
-                            paper.published.format("%Y-%m-%d")
-                        ),
+                        meta_str,
                         Style::default().fg(theme.accent),
                     ),
                     Line::styled(abstract_preview, Style::default().fg(theme.muted)),

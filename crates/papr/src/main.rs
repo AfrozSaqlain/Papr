@@ -465,6 +465,8 @@ fn apply_ui_action(
             }
             app.mode = AppMode::PaperDetail;
             app.discovery.detail_scroll = 0;
+            refresh_library(runtime, app)?;
+            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
             refresh_dashboard(runtime, app)?;
         }
         UiAction::OpenBrowser(url) => open_browser(&url, app),
@@ -486,6 +488,8 @@ fn apply_ui_action(
                 Some(session_id),
                 Some(senders.app_events.clone()),
             )?;
+            refresh_library(runtime, app)?;
+            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
             refresh_dashboard(runtime, app)?;
         }
         UiAction::OpenNote(target) => {
@@ -1350,7 +1354,9 @@ fn apply_index_response(
             });
             spawn_enrichment_if_needed(runtime, senders, app)?;
         }
-        IndexResponse::File(Err(error)) => app.library.message = Some(error),
+        IndexResponse::File(Err(error)) => {
+            eprintln!("Library indexing error: {error}");
+        }
     }
     refresh_library(runtime, app)?;
     refresh_organization(&runtime.database, &runtime.library_roots, app)?;
