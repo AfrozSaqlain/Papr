@@ -1057,7 +1057,7 @@ impl Database {
     /// # Errors
     ///
     /// Returns an error when the bookmark query fails.
-    pub fn bookmarks(&self) -> Result<Vec<BookmarkSummary>, DatabaseError> {
+    pub fn bookmarks(&self, roots: &[PathBuf]) -> Result<Vec<BookmarkSummary>, DatabaseError> {
         let mut statement = self.connection.prepare(
             "SELECT b.id, b.paper_id, p.title,
                     COALESCE((SELECT GROUP_CONCAT(a.name, ', ')
@@ -1084,7 +1084,18 @@ impl Database {
                 label: row.get(9)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let mut bookmarks = Vec::new();
+        for bookmark in rows {
+            let bookmark = bookmark?;
+            let valid = {
+                let path = Path::new(&bookmark.pdf_path);
+                path.is_file() && roots.iter().any(|root| path.starts_with(root))
+            };
+            if valid {
+                bookmarks.push(bookmark);
+            }
+        }
+        Ok(bookmarks)
     }
 
     /// Record a paper or PDF open in reading history and recent activity.
@@ -1884,14 +1895,17 @@ mod tests {
         assert_eq!(collection_papers.len(), 1);
         assert_eq!(collection_papers[0].title, "Organized paper");
 
+        fs::write("/tmp/organized.pdf", "%PDF-1.4 test")?;
         database.connection.execute(
             "UPDATE papers SET pdf_path = '/tmp/organized.pdf' WHERE id = ?1",
             [paper_id],
         )?;
         assert!(database.toggle_bookmark(paper_id)?);
-        assert_eq!(database.bookmarks()?.len(), 1);
+        let roots = vec![PathBuf::from("/tmp")];
+        assert_eq!(database.bookmarks(&roots)?.len(), 1);
         assert!(!database.toggle_bookmark(paper_id)?);
-        assert!(database.bookmarks()?.is_empty());
+        assert!(database.bookmarks(&roots)?.is_empty());
+        let _ = fs::remove_file("/tmp/organized.pdf");
         Ok(())
     }
 
@@ -2059,6 +2073,62 @@ mod tests {
         assert!(authors.is_empty());
         let papers = database.author_papers(1, &[different_root.clone()])?;
         assert!(papers.is_empty());
+
+        // Clean up
+        let _ = fs::remove_file(&pdf_path);
+        let _ = fs::remove_dir(&root);
+
+        Ok(())
+    }
+
+    #[test]
+    fn bookmarks_stay_synchronized_with_filesystem() -> Result<(), Box<dyn std::error::Error>> {
+        let mut database = Database::in_memory()?;
+        let root = std::env::temp_dir().join(format!("papr-bookmarks-sync-{}-{}", std::process::id(), Utc::now().timestamp_micros()));
+        fs::create_dir_all(&root)?;
+        let pdf_path = root.join("test_bookmarked_paper.pdf");
+        fs::write(&pdf_path, "%PDF-1.4 test")?;
+
+        let timestamp = Utc::now();
+        let paper = RemotePaper {
+            id: "https://arxiv.org/abs/2602.00004".into(),
+            title: "Test Bookmarked Paper".into(),
+            authors: vec!["Alice Specialist".into()],
+            abstract_text: "Testing bookmarks list synchronization.".into(),
+            published: timestamp,
+            updated: timestamp,
+            categories: vec!["cs.SE".into()],
+            pdf_url: None,
+            doi: None,
+            journal_ref: None,
+        };
+
+        let pdf = ImportedPdf {
+            path: pdf_path.clone(),
+            title: "Test Bookmarked Paper".into(),
+            file_size: 14,
+            library_root: Some(root.clone()),
+            relative_directory: None,
+        };
+
+        let paper_id = database.attach_download(&paper, &pdf)?;
+        assert!(database.toggle_bookmark(paper_id)?);
+
+        // Case 1: Valid roots, file exists -> Bookmark should be returned
+        let bookmarks = database.bookmarks(&[root.clone()])?;
+        assert_eq!(bookmarks.len(), 1);
+        assert_eq!(bookmarks[0].paper_title, "Test Bookmarked Paper");
+
+        // Case 2: File is missing -> Bookmark should NOT be returned
+        fs::remove_file(&pdf_path)?;
+        let bookmarks = database.bookmarks(&[root.clone()])?;
+        assert!(bookmarks.is_empty());
+
+        // Case 3: Re-create file but query with wrong/different roots -> Bookmark should NOT be returned
+        fs::write(&pdf_path, "%PDF-1.4 test")?;
+        let different_root = root.join("other_dir");
+        let bookmarks = database.bookmarks(&[different_root.clone()])?;
+        assert!(bookmarks.is_empty());
 
         // Clean up
         let _ = fs::remove_file(&pdf_path);

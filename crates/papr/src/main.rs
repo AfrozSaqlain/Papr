@@ -921,7 +921,7 @@ fn refresh_organization(database: &Database, library_roots: &[PathBuf], app: &mu
             .collection_paper_selected
             .min(app.collection_papers.len().saturating_sub(1));
     }
-    app.bookmarks = database.bookmarks()?;
+    app.bookmarks = database.bookmarks(library_roots)?;
     app.bookmark_selected = app
         .bookmark_selected
         .min(app.bookmarks.len().saturating_sub(1));
