@@ -81,8 +81,16 @@ async fn main() -> Result<()> {
     let theme = Theme::load(&config.theme).context("failed to load theme")?;
     let database = Database::open(&paths.database_file).context("failed to open database")?;
     if matches!(&cli.command, Some(CliCommand::Index)) {
+        let download_dir = config.download_path.clone().unwrap_or(paths.downloads_dir);
         let mut roots = config.library_folders.clone();
-        roots.push(config.download_path.clone().unwrap_or(paths.downloads_dir));
+        let download_inside = roots.iter().any(|root| {
+            let root_canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+            let dl_canon = std::fs::canonicalize(&download_dir).unwrap_or_else(|_| download_dir.clone());
+            dl_canon.starts_with(&root_canon)
+        });
+        if !download_inside {
+            roots.push(download_dir);
+        }
         let pdfs = LibraryIndexer::scan(&roots);
         let mut imported = 0_usize;
         for pdf in &pdfs {
@@ -96,7 +104,12 @@ async fn main() -> Result<()> {
 
     let collection_roots = config.library_folders.clone();
     let mut library_roots = collection_roots.clone();
-    if !library_roots.contains(&download_dir) {
+    let download_inside = collection_roots.iter().any(|root| {
+        let root_canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+        let dl_canon = std::fs::canonicalize(&download_dir).unwrap_or_else(|_| download_dir.clone());
+        dl_canon.starts_with(&root_canon)
+    });
+    if !download_inside {
         library_roots.push(download_dir.clone());
     }
 

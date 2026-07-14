@@ -56,11 +56,16 @@ impl LibraryIndexer {
     /// Recursively scan configured roots and collect readable PDF metadata.
     #[must_use]
     pub fn scan(roots: &[PathBuf]) -> Vec<ImportedPdf> {
+        let mut seen = std::collections::HashSet::new();
         roots
             .iter()
             .flat_map(|root| WalkDir::new(root).follow_links(false).into_iter())
             .filter_map(Result::ok)
             .filter(|entry| entry.file_type().is_file() && is_pdf(entry.path()))
+            .filter(|entry| {
+                let p = std::fs::canonicalize(entry.path()).unwrap_or_else(|_| entry.path().to_path_buf());
+                seen.insert(p)
+            })
             .filter_map(|entry| Self::inspect_in_roots(entry.path(), roots).ok())
             .collect()
     }
@@ -267,6 +272,22 @@ mod tests {
                 .iter()
                 .any(|directory| { directory.relative_path == Path::new("Empty Collection") })
         );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn nested_roots_do_not_double_count() -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("papr-nested-roots-test-{}", std::process::id()));
+        let sub = root.join("downloads");
+        fs::create_dir_all(&sub)?;
+        let pdf = sub.join("paper.pdf");
+        fs::write(&pdf, b"%PDF-1.4 paper")?;
+
+        let roots = vec![root.clone(), sub.clone()];
+        let scanned = LibraryIndexer::scan(&roots);
+        assert_eq!(scanned.len(), 1);
 
         fs::remove_dir_all(root)?;
         Ok(())
