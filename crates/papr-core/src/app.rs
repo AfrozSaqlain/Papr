@@ -241,10 +241,10 @@ pub struct App {
     pub today_scroll: usize,
     /// Loading state for the latest-paper feed.
     pub today_status: DiscoveryStatus,
-    /// Command palette query.
-    pub palette_query: String,
-    /// Command palette cursor.
-    pub palette_cursor: usize,
+    /// Command palette selected row.
+    pub palette_selected: usize,
+    /// Vertical list scroll offset for the command palette.
+    pub palette_scroll: usize,
     /// Remote paper discovery state.
     pub discovery: DiscoveryState,
     /// Local paper catalog state.
@@ -326,8 +326,8 @@ impl Default for App {
             today_selected: 0,
             today_scroll: 0,
             today_status: DiscoveryStatus::Idle,
-            palette_query: String::new(),
-            palette_cursor: 0,
+            palette_selected: 0,
+            palette_scroll: 0,
             discovery: DiscoveryState::default(),
             library: LibraryState::default(),
             downloads: Vec::new(),
@@ -464,8 +464,8 @@ impl App {
                 } else {
                     AppMode::CommandPalette
                 };
-                self.palette_query.clear();
-                self.palette_cursor = 0;
+                self.palette_selected = 0;
+                self.palette_scroll = 0;
             }
             Command::ToggleHelp => {
                 self.mode = if self.mode == AppMode::Help {

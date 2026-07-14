@@ -1460,9 +1460,21 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.mode == AppMode::CommandPalette {
         match key.code {
             KeyCode::Esc => app.dispatch(Command::TogglePalette),
-            _ => {
-                edit_text(&mut app.palette_query, &mut app.palette_cursor, key);
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.palette_selected = app.palette_selected.saturating_sub(1);
             }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.palette_selected = (app.palette_selected + 1)
+                    .min(papr_core::Page::ALL.len().saturating_sub(1));
+            }
+            KeyCode::Enter => {
+                let selected = app.palette_selected;
+                app.dispatch(Command::TogglePalette);
+                app.sidebar_index = selected;
+                app.page = papr_core::Page::ALL[selected];
+                app.content_focused = true;
+            }
+            _ => {}
         }
         return None;
     }
@@ -1479,6 +1491,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         return handle_search_key(app, key);
     }
     let key = normalize_panel_navigation(key);
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if let Some(command) = navigation_command(key) {
+            app.dispatch(command);
+            return None;
+        }
+    }
     if app.mode == AppMode::PaperDetail {
         return handle_paper_detail_key(app, key);
     }
@@ -2101,20 +2119,20 @@ mod tests {
     }
 
     #[test]
-    fn palette_captures_and_erases_query() {
+    fn palette_navigates_options() {
         let mut app = App {
             mode: AppMode::CommandPalette,
             ..App::default()
         };
         let _ = handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         );
         let _ = handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
         );
-        assert!(app.palette_query.is_empty());
+        assert_eq!(app.palette_selected, 2);
     }
 
     #[test]

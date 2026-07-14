@@ -1467,36 +1467,32 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme
 }
 
 fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
-    let area = centered(64, 9, frame.area());
+    let area = centered(40, 17, frame.area());
     frame.render_widget(Clear, area);
-    let query = if app.palette_query.is_empty() {
-        "Type a command…"
-    } else {
-        &app.palette_query
-    };
-    let content = vec![
-        Line::styled(format!("> {query}"), Style::default().fg(theme.text)),
-        Line::raw(""),
-        Line::styled("Open Dashboard", Style::default().fg(theme.accent)),
-        Line::styled("Open Library", Style::default().fg(theme.muted)),
-        Line::styled("Quit papr", Style::default().fg(theme.muted)),
-    ];
-    frame.render_widget(
-        Paragraph::new(content).block(
+
+    let items = papr_core::Page::ALL.iter().map(|page| {
+        ListItem::new(Line::styled(
+            page.title(),
+            Style::default().fg(theme.text),
+        ))
+    });
+
+    let list = List::new(items)
+        .block(
             Block::default()
-                .title(" COMMANDS ")
+                .title(" NAVIGATE ")
                 .borders(Borders::ALL)
                 .style(Style::default().bg(theme.surface))
                 .border_style(Style::default().fg(theme.accent)),
-        ),
-        area,
-    );
-    let cursor_offset =
-        u16::try_from(app.palette_query[..app.palette_cursor].chars().count()).unwrap_or(0);
-    frame.set_cursor_position((
-        area.x.saturating_add(3).saturating_add(cursor_offset),
-        area.y.saturating_add(1),
-    ));
+        )
+        .highlight_style(Style::default().bg(theme.border).fg(theme.accent))
+        .highlight_symbol("> ");
+
+    let mut state = ListState::default()
+        .with_selected(Some(app.palette_selected))
+        .with_offset(app.palette_scroll);
+    frame.render_stateful_widget(list, area, &mut state);
+    app.palette_scroll = state.offset();
 }
 
 fn render_help(frame: &mut Frame<'_>, theme: &Theme) {
