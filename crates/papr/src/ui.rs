@@ -952,35 +952,26 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
             DownloadStatus::Failed(error) => (format!("Failed: {error}"), theme.error),
         };
 
-        let title = if let Some(paper_id) = download.paper_id {
-            app.library
-                .papers
-                .iter()
-                .find(|p| p.id == paper_id)
-                .map(|p| p.title.clone())
-                .unwrap_or_else(|| download.title.clone())
+        let paper = if let Some(paper_id) = download.paper_id {
+            app.library.papers.iter().find(|p| p.id == paper_id)
+        } else if let Some(pdf_path) = &download.pdf_path {
+            app.library.papers.iter().find(|p| p.pdf_path.as_ref() == Some(pdf_path))
         } else {
-            download.title.clone()
+            None
         };
 
-        let path = if let Some(paper_id) = download.paper_id {
-            app.library
-                .papers
-                .iter()
-                .find(|p| p.id == paper_id)
-                .and_then(|p| p.pdf_path.clone())
+        let (title, meta_str) = if let Some(paper) = paper {
+            (paper.title.clone(), library_metadata(paper))
         } else {
-            download.pdf_path.clone()
+            (download.title.clone(), "Processing metadata...".to_owned())
         };
-
-        let path_str = path.unwrap_or_else(|| "Unknown path".to_owned());
 
         ListItem::new(vec![
             Line::styled(
                 title,
                 Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
             ),
-            Line::styled(path_str, Style::default().fg(theme.muted)),
+            Line::styled(meta_str, Style::default().fg(theme.muted)),
             Line::styled(label, Style::default().fg(color)),
             Line::raw(""),
         ])
