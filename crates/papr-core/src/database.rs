@@ -186,10 +186,18 @@ impl Database {
     /// # Errors
     /// Returns an error when the lookup fails.
     pub fn paper_id_for_pdf(&self, pdf: &ImportedPdf) -> Result<Option<i64>, DatabaseError> {
+        self.paper_id_for_path(&pdf.path.to_string_lossy())
+    }
+
+    /// Resolve a paper ID from a PDF path.
+    ///
+    /// # Errors
+    /// Returns an error when the lookup fails.
+    pub fn paper_id_for_path(&self, path: &str) -> Result<Option<i64>, DatabaseError> {
         self.connection
             .query_row(
                 "SELECT id FROM papers WHERE pdf_path = ?1 LIMIT 1",
-                params![pdf.path.to_string_lossy()],
+                params![path],
                 |row| row.get(0),
             )
             .optional()

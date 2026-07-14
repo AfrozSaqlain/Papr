@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
     app.plugins = plugin_host.plugins();
     app.plugin_diagnostics = plugin_host.diagnostics().len();
 
-    discover_local_downloads(&mut app, &download_dir);
+    discover_local_downloads(&mut app, &download_dir, &database);
 
     app.library.papers = database
         .library_papers_in_roots(&library_roots)
@@ -1294,7 +1294,11 @@ fn sync_pdf_collection_membership(
     Ok(())
 }
 
-fn discover_local_downloads(app: &mut App, download_dir: &std::path::Path) {
+fn discover_local_downloads(
+    app: &mut App,
+    download_dir: &std::path::Path,
+    database: &papr_core::database::Database,
+) {
     if let Ok(entries) = std::fs::read_dir(download_dir) {
         let mut existing_files: Vec<_> = entries
             .filter_map(std::result::Result::ok)
@@ -1311,13 +1315,15 @@ fn discover_local_downloads(app: &mut App, download_dir: &std::path::Path) {
             let size = entry.metadata().ok().map_or(0, |m| m.len());
             let title = entry.file_name().to_string_lossy().into_owned();
             let id = title.strip_suffix(".pdf").unwrap_or(&title).to_owned();
+            let pdf_path = entry.path().to_string_lossy().into_owned();
+            let paper_id = database.paper_id_for_path(&pdf_path).ok().flatten();
             app.downloads.push(DownloadTask {
                 id,
                 title,
                 downloaded: size,
                 total: Some(size),
-                paper_id: None,
-                pdf_path: Some(entry.path().to_string_lossy().into_owned()),
+                paper_id,
+                pdf_path: Some(pdf_path),
                 status: DownloadStatus::Completed,
             });
         }
@@ -1598,13 +1604,18 @@ fn handle_downloads_key(app: &App, key: KeyEvent) -> Option<UiAction> {
             }
         }
     }
-    if matches!(key.code, KeyCode::Char('R') | KeyCode::Char('s')) {
+    if matches!(
+        key.code,
+        KeyCode::Char('R') | KeyCode::Char('s') | KeyCode::Char('B') | KeyCode::Char('n')
+    ) {
         if let Some(task) = app.downloads.get(app.download_selected) {
             if matches!(task.status, DownloadStatus::Completed) {
                 if let Some(paper_id) = task.paper_id {
                     return match key.code {
                         KeyCode::Char('R') => Some(UiAction::RenamePdf(paper_id)),
                         KeyCode::Char('s') => Some(UiAction::Prompt(PaperTarget::Local(paper_id))),
+                        KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(paper_id))),
+                        KeyCode::Char('n') => Some(UiAction::OpenNote(PaperTarget::Local(paper_id))),
                         _ => None,
                     };
                 }
