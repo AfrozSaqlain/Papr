@@ -204,6 +204,35 @@ impl Database {
             .map_err(Into::into)
     }
 
+    /// Retrieve citation metadata for a specific paper.
+    ///
+    /// # Errors
+    /// Returns an error when the database query fails.
+    pub fn paper_citation_metadata(&self, paper_id: i64) -> Result<Option<crate::models::CitationMetadata>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT p.title,
+                    COALESCE((SELECT GROUP_CONCAT(a.name, ' and ')
+                              FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
+                              WHERE pa.paper_id = p.id ORDER BY pa.position), ''),
+                    p.doi, p.arxiv_id, strftime('%Y', p.published_at), p.journal
+             FROM papers p
+             WHERE p.id = ?1 LIMIT 1",
+        )?;
+        statement
+            .query_row(params![paper_id], |row| {
+                Ok(crate::models::CitationMetadata {
+                    title: row.get(0)?,
+                    authors: row.get(1)?,
+                    doi: row.get(2)?,
+                    arxiv_id: row.get(3)?,
+                    year: row.get(4)?,
+                    journal_ref: row.get(5)?,
+                })
+            })
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// List catalog entries that have a local PDF with author display metadata.
     ///
     /// # Errors

@@ -2,6 +2,7 @@
 
 mod terminal;
 mod ui;
+mod citation;
 
 use std::{
     collections::HashMap,
@@ -218,6 +219,7 @@ enum UiAction {
     OpenAuthor(i64),
     OpenDownload(String),
     RenamePdf(i64),
+    CopyCitation(PaperTarget),
 }
 
 enum KeyHandling {
@@ -278,6 +280,7 @@ struct MetadataEnrichment {
 #[derive(Debug)]
 enum AppEvent {
     ReadingSessionCompleted { session_id: i64, duration_s: u64 },
+    Toast(String),
 }
 
 #[derive(Debug)]
@@ -393,6 +396,9 @@ async fn run(
                         .database
                         .record_reading_duration(session_id, duration_s)?;
                     refresh_dashboard(&mut runtime, app)?;
+                }
+                AppEvent::Toast(message) => {
+                    app.toast = Some(message);
                 }
             }
         }
@@ -567,6 +573,28 @@ fn apply_ui_action(
             }
             let path = path.unwrap_or_else(|| runtime.download_dir.join(format!("{id}.pdf")));
             open_pdf(&runtime.pdf_viewer, &path, app, None, None)?;
+        }
+        UiAction::CopyCitation(target) => {
+            let metadata = match target {
+                PaperTarget::Local(id) => runtime.database.paper_citation_metadata(id)?,
+                PaperTarget::Remote(paper) => Some(papr_core::models::CitationMetadata {
+                    title: paper.title.clone(),
+                    authors: paper.authors.join(" and "),
+                    doi: paper.doi.clone(),
+                    arxiv_id: Some(paper.id.clone()),
+                    year: Some(paper.published.format("%Y").to_string()),
+                    journal_ref: paper.journal_ref.clone(),
+                }),
+            };
+            if let Some(metadata) = metadata {
+                app.toast = Some("Fetching citation...".into());
+                tokio::spawn(citation::fetch_and_copy_citation(
+                    metadata,
+                    senders.app_events.clone(),
+                ));
+            } else {
+                app.toast = Some("Citation metadata not available".into());
+            }
         }
     }
     Ok(())
@@ -1505,6 +1533,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             .get(app.discovery.selected)
             .map(|paper| UiAction::OpenBrowser(paper.id.clone()));
     }
+    if app.page == papr_core::Page::Discover && key.code == KeyCode::Char('c') {
+        return app
+            .discovery
+            .results
+            .get(app.discovery.selected)
+            .cloned()
+            .map(|paper| UiAction::CopyCitation(PaperTarget::Remote(Box::new(paper))));
+    }
     if app.page == papr_core::Page::Discover
         && matches!(
             key.code,
@@ -1568,6 +1604,7 @@ fn bookmark_action(app: &App, key: KeyEvent) -> Option<UiAction> {
     let bookmark = app.bookmarks.get(app.bookmark_selected)?;
     match key.code {
         KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(bookmark.paper_id))),
+        KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(bookmark.paper_id))),
         KeyCode::Enter | KeyCode::Char('p') => Some(UiAction::OpenPdf {
             paper_id: bookmark.paper_id,
             path: PathBuf::from(&bookmark.pdf_path),
@@ -1594,7 +1631,7 @@ fn handle_downloads_key(app: &App, key: KeyEvent) -> Option<UiAction> {
     }
     if matches!(
         key.code,
-        KeyCode::Char('R') | KeyCode::Char('s') | KeyCode::Char('B') | KeyCode::Char('n')
+        KeyCode::Char('R') | KeyCode::Char('s') | KeyCode::Char('B') | KeyCode::Char('n') | KeyCode::Char('c')
     ) {
         if let Some(task) = app.downloads.get(app.download_selected) {
             if matches!(task.status, DownloadStatus::Completed) {
@@ -1603,6 +1640,7 @@ fn handle_downloads_key(app: &App, key: KeyEvent) -> Option<UiAction> {
                         KeyCode::Char('R') => Some(UiAction::RenamePdf(paper_id)),
                         KeyCode::Char('s') => Some(UiAction::Prompt(PaperTarget::Local(paper_id))),
                         KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(paper_id))),
+                        KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(paper_id))),
                         KeyCode::Char('n') => Some(UiAction::OpenNote(PaperTarget::Local(paper_id))),
                         _ => None,
                     };
@@ -1634,6 +1672,14 @@ fn handle_dashboard_key(app: &mut App, key: KeyEvent) -> KeyHandling {
                 .get(app.today_selected)
                 .map(|paper| UiAction::OpenBrowser(paper.id.clone()))
                 .map(Box::new),
+        );
+    }
+    if key.code == KeyCode::Char('c') {
+        return KeyHandling::Handled(
+            app.today_papers
+                .get(app.today_selected)
+                .cloned()
+                .map(|paper| Box::new(UiAction::CopyCitation(PaperTarget::Remote(Box::new(paper))))),
         );
     }
     if matches!(
@@ -1681,6 +1727,14 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
                     app.collection_papers
                         .get(app.collection_paper_selected)
                         .map(|paper| UiAction::Bookmark(PaperTarget::Local(paper.id))),
+                );
+            }
+            KeyCode::Char('c') => {
+                return (
+                    true,
+                    app.collection_papers
+                        .get(app.collection_paper_selected)
+                        .map(|paper| UiAction::CopyCitation(PaperTarget::Local(paper.id))),
                 );
             }
             KeyCode::Char('R') => {
@@ -1756,6 +1810,14 @@ fn handle_author_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction>) {
                     app.author_papers
                         .get(app.author_paper_selected)
                         .map(|paper| UiAction::Bookmark(PaperTarget::Local(paper.id))),
+                );
+            }
+            KeyCode::Char('c') => {
+                return (
+                    true,
+                    app.author_papers
+                        .get(app.author_paper_selected)
+                        .map(|paper| UiAction::CopyCitation(PaperTarget::Local(paper.id))),
                 );
             }
             KeyCode::Char('R') => {
@@ -1953,6 +2015,9 @@ fn handle_paper_detail_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 .cloned()
                 .map(UiAction::Download);
         }
+        KeyCode::Char('c') => {
+            return selected_remote_target(app).map(UiAction::CopyCitation);
+        }
         KeyCode::Char('o') => {
             return app
                 .discovery
@@ -1985,6 +2050,7 @@ fn handle_library_metadata_key(app: &mut App, key: KeyEvent) -> Option<UiAction>
         KeyCode::Char('n') => Some(UiAction::OpenNote(target)),
         KeyCode::Char('s') => Some(UiAction::Prompt(target)),
         KeyCode::Char('B') => Some(UiAction::Bookmark(target)),
+        KeyCode::Char('c') => Some(UiAction::CopyCitation(target)),
         KeyCode::Char('R') => {
             if let PaperTarget::Local(id) = target {
                 Some(UiAction::RenamePdf(id))

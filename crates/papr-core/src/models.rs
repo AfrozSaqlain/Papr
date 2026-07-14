@@ -62,6 +62,23 @@ pub struct DashboardStats {
     pub favorites: u64,
 }
 
+/// Metadata required to generate or fetch a BibTeX citation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CitationMetadata {
+    /// Canonical title.
+    pub title: String,
+    /// Comma-separated author list.
+    pub authors: String,
+    /// Digital Object Identifier.
+    pub doi: Option<String>,
+    /// arXiv ID.
+    pub arxiv_id: Option<String>,
+    /// Original publication year extracted from `published_at`.
+    pub year: Option<String>,
+    /// Journal reference.
+    pub journal_ref: Option<String>,
+}
+
 /// A paper row shown in the local library.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LibraryPaper {
