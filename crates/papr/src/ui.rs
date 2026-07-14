@@ -1496,9 +1496,9 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
 }
 
 fn render_help(frame: &mut Frame<'_>, theme: &Theme) {
-    let area = centered(64, 18, frame.area());
+    let area = centered(64, 20, frame.area());
     frame.render_widget(Clear, area);
-    let help = "j / k      Move selection\nEnter/Right Open selection\nLeft       Focus navigation\nh / l      Back / open\nCtrl+p     Command palette\n/          Search arXiv\no          Open paper webpage\np          Open local PDF\nd          Download\nn          Notes\ns          Collection\nB          Bookmark\nq          Close / quit\n?          Toggle this help";
+    let help = "j / k      Move selection\nEnter/Right Open selection\nLeft       Focus navigation\nh / l      Back / open\nCtrl+p     Command palette\n/          Search arXiv\no          Open paper in webpage\np          Open local PDF\nd          Download\nc          Copy citation\nn          Notes\ns          Create / Move to Collection\nB          Bookmark\nq          Close / quit\n?          Toggle this help";
     frame.render_widget(
         Paragraph::new(help)
             .style(Style::default().fg(theme.text))
