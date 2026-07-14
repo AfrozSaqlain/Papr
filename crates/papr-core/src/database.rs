@@ -904,6 +904,24 @@ impl Database {
         Ok(())
     }
 
+    /// Delete a paper by its database ID.
+    ///
+    /// # Errors
+    /// Returns an error when the deletion fails.
+    pub fn delete_paper(&self, paper_id: i64) -> Result<(), DatabaseError> {
+        self.connection.execute("DELETE FROM papers WHERE id = ?1", [paper_id])?;
+        Ok(())
+    }
+
+    /// Delete a collection by its database ID.
+    ///
+    /// # Errors
+    /// Returns an error when the deletion fails.
+    pub fn delete_collection(&self, collection_id: i64) -> Result<(), DatabaseError> {
+        self.connection.execute("DELETE FROM collections WHERE id = ?1", [collection_id])?;
+        Ok(())
+    }
+
     /// Retrieve the name of the collection a paper belongs to.
     ///
     /// # Errors

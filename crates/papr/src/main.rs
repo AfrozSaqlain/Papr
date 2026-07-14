@@ -220,6 +220,10 @@ enum UiAction {
     OpenDownload(String),
     RenamePdf(i64),
     CopyCitation(PaperTarget),
+    ConfirmDeletePaper { paper_id: i64, title: String, path: Option<PathBuf> },
+    ConfirmDeleteCollection { collection_id: i64, name: String, path: Option<PathBuf> },
+    DeletePaper { paper_id: i64, path: Option<PathBuf> },
+    DeleteCollection { collection_id: i64, path: Option<PathBuf> },
 }
 
 enum KeyHandling {
@@ -596,6 +600,66 @@ fn apply_ui_action(
                 app.toast = Some("Citation metadata not available".into());
             }
         }
+        UiAction::ConfirmDeletePaper { paper_id, title, path } => {
+            app.delete_confirmation = Some(papr_core::DeletionTarget::Paper {
+                id: paper_id,
+                title,
+                path,
+            });
+            app.mode = AppMode::ConfirmDelete;
+        }
+        UiAction::ConfirmDeleteCollection { collection_id, name, path } => {
+            app.delete_confirmation = Some(papr_core::DeletionTarget::Collection {
+                id: collection_id,
+                name,
+                path,
+            });
+            app.mode = AppMode::ConfirmDelete;
+        }
+        UiAction::DeletePaper { paper_id, path } => {
+            if let Some(p) = &path {
+                if p.exists() {
+                    let _ = std::fs::remove_file(p);
+                }
+            }
+            runtime.database.delete_paper(paper_id)?;
+            refresh_library(runtime, app)?;
+            refresh_organization(&runtime.database, app)?;
+            refresh_dashboard(runtime, app)?;
+            app.downloads.clear();
+            discover_local_downloads(app, &runtime.download_dir, &runtime.database);
+            app.download_selected = app.download_selected.min(app.downloads.len().saturating_sub(1));
+            app.toast = Some("PDF permanently deleted".into());
+        }
+        UiAction::DeleteCollection { collection_id, path } => {
+            let papers = runtime.database.papers_for_collection(collection_id)?;
+            for paper in papers {
+                if let Some(ref path_str) = paper.pdf_path {
+                    let p = PathBuf::from(path_str);
+                    if p.exists() {
+                        let _ = std::fs::remove_file(p);
+                    }
+                }
+                runtime.database.delete_paper(paper.id)?;
+            }
+            if let Some(p) = &path {
+                if p.exists() {
+                    let _ = std::fs::remove_dir_all(p);
+                }
+            }
+            runtime.database.delete_collection(collection_id)?;
+            if app.active_collection.as_ref().map(|c| c.id) == Some(collection_id) {
+                app.active_collection = None;
+                app.collection_papers.clear();
+            }
+            refresh_library(runtime, app)?;
+            refresh_organization(&runtime.database, app)?;
+            refresh_dashboard(runtime, app)?;
+            app.downloads.clear();
+            discover_local_downloads(app, &runtime.download_dir, &runtime.database);
+            app.download_selected = app.download_selected.min(app.downloads.len().saturating_sub(1));
+            app.toast = Some("Collection permanently deleted".into());
+        }
     }
     Ok(())
 }
@@ -858,12 +922,16 @@ fn refresh_organization(database: &Database, app: &mut App) -> Result<()> {
     app.collection_selected = app
         .collection_selected
         .min(app.collections.len().saturating_sub(1));
-    if let Some(active) = &app.active_collection {
+    if let Some(active_id) = app.active_collection.as_ref().map(|c| c.id) {
         app.active_collection = app
             .collections
             .iter()
-            .find(|collection| collection.id == active.id)
+            .find(|collection| collection.id == active_id)
             .cloned();
+        app.collection_papers = database.papers_for_collection(active_id)?;
+        app.collection_paper_selected = app
+            .collection_paper_selected
+            .min(app.collection_papers.len().saturating_sub(1));
     }
     app.bookmarks = database.bookmarks()?;
     app.bookmark_selected = app
@@ -871,8 +939,12 @@ fn refresh_organization(database: &Database, app: &mut App) -> Result<()> {
         .min(app.bookmarks.len().saturating_sub(1));
     app.authors = database.authors()?;
     app.author_selected = app.author_selected.min(app.authors.len().saturating_sub(1));
-    if let Some(active) = &app.active_author {
-        app.active_author = app.authors.iter().find(|a| a.id == active.id).cloned();
+    if let Some(active_id) = app.active_author.as_ref().map(|a| a.id) {
+        app.active_author = app.authors.iter().find(|a| a.id == active_id).cloned();
+        app.author_papers = database.author_papers(active_id)?;
+        app.author_paper_selected = app
+            .author_paper_selected
+            .min(app.author_papers.len().saturating_sub(1));
     }
     Ok(())
 }
@@ -1489,6 +1561,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if matches!(app.mode, AppMode::NoteEdit | AppMode::Prompt) {
         return handle_modal_key(app, key);
     }
+    if app.mode == AppMode::ConfirmDelete {
+        return handle_confirm_delete_key(app, key);
+    }
     if app.mode == AppMode::Search {
         return handle_search_key(app, key);
     }
@@ -1638,6 +1713,30 @@ fn handle_workspace_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction>
     None
 }
 
+fn handle_confirm_delete_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    use papr_core::DeletionTarget;
+    match key.code {
+        KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
+            let target = app.delete_confirmation.take()?;
+            app.mode = AppMode::Normal;
+            match target {
+                DeletionTarget::Paper { id, path, .. } => {
+                    Some(UiAction::DeletePaper { paper_id: id, path })
+                }
+                DeletionTarget::Collection { id, path, .. } => {
+                    Some(UiAction::DeleteCollection { collection_id: id, path })
+                }
+            }
+        }
+        KeyCode::Char('n' | 'N') | KeyCode::Esc | KeyCode::Char('q') => {
+            app.delete_confirmation = None;
+            app.mode = AppMode::Normal;
+            None
+        }
+        _ => None,
+    }
+}
+
 fn bookmark_action(app: &App, key: KeyEvent) -> Option<UiAction> {
     if app.page != papr_core::Page::Bookmarks {
         return None;
@@ -1652,6 +1751,11 @@ fn bookmark_action(app: &App, key: KeyEvent) -> Option<UiAction> {
         }),
         KeyCode::Char('s') => Some(UiAction::Prompt(PaperTarget::Local(bookmark.paper_id))),
         KeyCode::Char('R') => Some(UiAction::RenamePdf(bookmark.paper_id)),
+        KeyCode::Char('x') => Some(UiAction::ConfirmDeletePaper {
+            paper_id: bookmark.paper_id,
+            title: bookmark.paper_title.clone(),
+            path: Some(PathBuf::from(&bookmark.pdf_path)),
+        }),
         _ => None,
     }
 }
@@ -1672,7 +1776,7 @@ fn handle_downloads_key(app: &App, key: KeyEvent) -> Option<UiAction> {
     }
     if matches!(
         key.code,
-        KeyCode::Char('R') | KeyCode::Char('s') | KeyCode::Char('B') | KeyCode::Char('n') | KeyCode::Char('c')
+        KeyCode::Char('R') | KeyCode::Char('s') | KeyCode::Char('B') | KeyCode::Char('n') | KeyCode::Char('c') | KeyCode::Char('x')
     ) {
         if let Some(&task) = app.filtered_downloads().get(app.download_selected) {
             if matches!(task.status, DownloadStatus::Completed) {
@@ -1683,6 +1787,11 @@ fn handle_downloads_key(app: &App, key: KeyEvent) -> Option<UiAction> {
                         KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(paper_id))),
                         KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(paper_id))),
                         KeyCode::Char('n') => Some(UiAction::OpenNote(PaperTarget::Local(paper_id))),
+                        KeyCode::Char('x') => Some(UiAction::ConfirmDeletePaper {
+                            paper_id,
+                            title: task.title.clone(),
+                            path: task.pdf_path.as_ref().map(PathBuf::from),
+                        }),
                         _ => None,
                     };
                 }
@@ -1699,6 +1808,14 @@ fn library_action(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if matches!(key.code, KeyCode::Char('p') | KeyCode::Enter) {
         return selected_library_pdf(app)
             .map(|(paper_id, path)| UiAction::OpenPdf { paper_id, path });
+    }
+    if key.code == KeyCode::Char('x') {
+        let paper = *app.filtered_library_papers().get(app.library.selected)?;
+        return Some(UiAction::ConfirmDeletePaper {
+            paper_id: paper.id,
+            title: paper.title.clone(),
+            path: paper.pdf_path.as_ref().map(PathBuf::from),
+        });
     }
     handle_library_metadata_key(app, key)
 }
@@ -1794,6 +1911,18 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
                         .map(|&paper| UiAction::Prompt(PaperTarget::Local(paper.id))),
                 );
             }
+            KeyCode::Char('x') => {
+                return (
+                    true,
+                    app.filtered_collection_papers()
+                        .get(app.collection_paper_selected)
+                        .map(|&paper| UiAction::ConfirmDeletePaper {
+                            paper_id: paper.id,
+                            title: paper.title.clone(),
+                            path: paper.pdf_path.as_ref().map(PathBuf::from),
+                        }),
+                );
+            }
             _ => return (false, None),
         }
     }
@@ -1806,6 +1935,16 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
                 }
                 if key.code == KeyCode::Char('R') {
                     return (true, Some(UiAction::RenameCollection(collection.id)));
+                }
+                if key.code == KeyCode::Char('x') {
+                    return (
+                        true,
+                        Some(UiAction::ConfirmDeleteCollection {
+                            collection_id: collection.id,
+                            name: collection.name.clone(),
+                            path: collection.folder_path.as_ref().map(PathBuf::from),
+                        }),
+                    );
                 }
             }
             CollectionSearchItem::Paper(paper, _collection) => {
@@ -1834,6 +1973,16 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
                 }
                 if key.code == KeyCode::Char('s') {
                     return (true, Some(UiAction::Prompt(PaperTarget::Local(paper.id))));
+                }
+                if key.code == KeyCode::Char('x') {
+                    return (
+                        true,
+                        Some(UiAction::ConfirmDeletePaper {
+                            paper_id: paper.id,
+                            title: paper.title.clone(),
+                            path: paper.pdf_path.as_ref().map(PathBuf::from),
+                        }),
+                    );
                 }
             }
         }
@@ -1906,6 +2055,18 @@ fn handle_author_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction>) {
                     app.filtered_author_papers()
                         .get(app.author_paper_selected)
                         .map(|&paper| UiAction::OpenNote(PaperTarget::Local(paper.id))),
+                );
+            }
+            KeyCode::Char('x') => {
+                return (
+                    true,
+                    app.filtered_author_papers()
+                        .get(app.author_paper_selected)
+                        .map(|&paper| UiAction::ConfirmDeletePaper {
+                            paper_id: paper.id,
+                            title: paper.title.clone(),
+                            path: paper.pdf_path.as_ref().map(PathBuf::from),
+                        }),
                 );
             }
             _ => return (false, None),

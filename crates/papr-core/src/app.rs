@@ -96,6 +96,31 @@ pub enum AppMode {
     Prompt,
     /// Workspace-local search.
     WorkspaceSearch,
+    /// Confirm deletion of a paper or collection.
+    ConfirmDelete,
+}
+
+/// Target to delete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeletionTarget {
+    /// A paper to delete.
+    Paper {
+        /// ID of the paper in DB.
+        id: i64,
+        /// Title of the paper.
+        title: String,
+        /// Path to the PDF file.
+        path: Option<std::path::PathBuf>,
+    },
+    /// A collection to delete.
+    Collection {
+        /// ID of the collection in DB.
+        id: i64,
+        /// Name of the collection.
+        name: String,
+        /// Path to the collection directory.
+        path: Option<std::path::PathBuf>,
+    },
 }
 
 /// Active metadata input prompt.
@@ -296,6 +321,8 @@ pub struct App {
     pub collection_papers_map: std::collections::HashMap<i64, Vec<i64>>,
     /// Most recently opened collection, used to restore its paper cursor.
     pub last_opened_collection_id: Option<i64>,
+    /// Active delete confirmation state.
+    pub delete_confirmation: Option<DeletionTarget>,
     /// Bookmark summaries.
     pub bookmarks: Vec<BookmarkSummary>,
     /// Selected bookmarked PDF row.
@@ -366,6 +393,7 @@ impl Default for App {
             collection_paper_scroll: 0,
             collection_papers_map: std::collections::HashMap::new(),
             last_opened_collection_id: None,
+            delete_confirmation: None,
             bookmarks: Vec::new(),
             bookmark_selected: 0,
             bookmark_scroll: 0,

@@ -12,7 +12,7 @@ pub mod theme;
 
 pub use api::arxiv::ArxivClient;
 pub use app::{
-    App, AppMode, CollectionSearchItem, Command, DiscoveryStatus, DownloadStatus, DownloadTask,
+    App, AppMode, CollectionSearchItem, Command, DeletionTarget, DiscoveryStatus, DownloadStatus, DownloadTask,
     LibraryState, MetadataPrompt, Page,
 };
 pub use config::{Config, Paths};

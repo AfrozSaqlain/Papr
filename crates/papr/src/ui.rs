@@ -1,7 +1,7 @@
 //! Ratatui rendering for the application shell.
 
 use papr_core::{
-    App, AppMode, DiscoveryStatus, DownloadStatus, LibraryPaper, Page, RemotePaper, Theme,
+    App, AppMode, DeletionTarget, DiscoveryStatus, DownloadStatus, LibraryPaper, Page, RemotePaper, Theme,
 };
 use ratatui::{
     Frame,
@@ -48,6 +48,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         AppMode::PaperDetail => render_paper_detail(frame, app, theme),
         AppMode::NoteEdit => render_note_editor(frame, app, theme),
         AppMode::Prompt => render_metadata_prompt(frame, app, theme),
+        AppMode::ConfirmDelete => render_delete_confirmation(frame, app, theme),
         AppMode::Normal | AppMode::Search | AppMode::WorkspaceSearch => {}
     }
 }
@@ -819,6 +820,46 @@ fn chunk_string(s: &str, size: usize) -> Vec<String> {
     chunks
 }
 
+fn render_delete_confirmation(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
+    let Some(target) = &app.delete_confirmation else {
+        return;
+    };
+    
+    let (title, message, item_name) = match target {
+        DeletionTarget::Paper { title, .. } => (
+            " CONFIRM DELETE PDF ",
+            "Are you sure you want to permanently delete this PDF file from your disk?",
+            title.as_str(),
+        ),
+        DeletionTarget::Collection { name, .. } => (
+            " CONFIRM DELETE COLLECTION ",
+            "Are you sure you want to permanently delete this collection (subdirectory) and ALL of its contents?",
+            name.as_str(),
+        ),
+    };
+
+    let height = 12;
+    let width = 64;
+    let area = centered(width, height, frame.area());
+    frame.render_widget(Clear, area);
+
+    let lines = vec![
+        Line::raw(""),
+        Line::styled(message, Style::default().fg(theme.text)),
+        Line::raw(""),
+        Line::styled(format!("  \"{}\"", item_name), Style::default().fg(theme.warning).add_modifier(Modifier::BOLD)),
+        Line::raw(""),
+        Line::styled("Press [y/Enter] to confirm, or [n/Esc/q] to cancel.", Style::default().fg(theme.muted)),
+    ];
+
+    let block = Block::default()
+        .title(Line::styled(title, Style::default().fg(theme.error).add_modifier(Modifier::BOLD)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.error));
+        
+    frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: true }), area);
+}
+
 fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let Some(prompt) = &app.metadata_prompt else {
         return;
@@ -1567,7 +1608,7 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
 fn render_help(frame: &mut Frame<'_>, theme: &Theme) {
     let area = centered(64, 20, frame.area());
     frame.render_widget(Clear, area);
-    let help = "j / k      Move selection\nEnter/Right Open selection\nLeft       Focus navigation\nh / l      Back / open\nCtrl+p     Command palette\n/          Search arXiv\no          Open paper in webpage\np          Open local PDF\nd          Download\nc          Copy citation\nn          Notes\ns          Create / Move to Collection\nB          Bookmark\nq          Close / quit\n?          Toggle this help";
+    let help = "j / k      Move selection\nEnter/Right Open selection\nLeft       Focus navigation\nh / l      Back / open\nCtrl+p     Command palette\n/          Search arXiv\no          Open paper in webpage\np          Open local PDF\nd          Download\nc          Copy citation\nn          Notes\ns          Create / Move to Collection\nB          Bookmark\nx          Delete PDF or collection\nq          Close / quit\n?          Toggle this help";
     frame.render_widget(
         Paragraph::new(help)
             .style(Style::default().fg(theme.text))
