@@ -34,6 +34,8 @@ pub struct Paths {
     pub downloads_dir: PathBuf,
     /// Directory containing external plugin bundles.
     pub plugins_dir: PathBuf,
+    /// Plugin configuration file.
+    pub plugins_config_file: PathBuf,
 }
 
 impl Paths {
@@ -50,6 +52,7 @@ impl Paths {
             database_file: dirs.data_dir().join("papr.db"),
             downloads_dir: dirs.data_dir().join("papers"),
             plugins_dir: dirs.data_dir().join("plugins"),
+            plugins_config_file: dirs.config_dir().join("plugins.toml"),
         })
     }
 }

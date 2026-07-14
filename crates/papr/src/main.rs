@@ -11,6 +11,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use toml;
 use chrono::Local;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
@@ -99,7 +100,7 @@ async fn main() -> Result<()> {
         println!("indexed: {}, imported: {}", pdfs.len(), imported);
         return Ok(());
     }
-    let download_dir = config.download_path.clone().unwrap_or(paths.downloads_dir);
+    let download_dir = config.download_path.clone().unwrap_or_else(|| paths.downloads_dir.clone());
     std::fs::create_dir_all(&download_dir).context("failed to create download directory")?;
 
     let collection_roots = config.library_folders.clone();
@@ -136,6 +137,15 @@ async fn main() -> Result<()> {
     };
     app.plugins = plugin_host.plugins();
     app.plugin_diagnostics = plugin_host.diagnostics().len();
+    app.config_editor_text = std::fs::read_to_string(&paths.config_file).unwrap_or_default();
+    let plugin_config_path = paths.plugins_config_file.clone();
+    if !plugin_config_path.exists() {
+        if let Some(parent) = plugin_config_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&plugin_config_path, "# Plugin configuration\n");
+    }
+    app.plugin_editor_text = std::fs::read_to_string(&plugin_config_path).unwrap_or_default();
 
     discover_local_downloads(&mut app, &download_dir, &database);
 
@@ -161,6 +171,9 @@ async fn main() -> Result<()> {
         downloads,
         database,
         database_file: paths.database_file.clone(),
+        config_file: paths.config_file.clone(),
+        plugins_config_file: paths.plugins_config_file.clone(),
+        default_downloads_dir: paths.downloads_dir.clone(),
         download_dir,
         pdf_viewer: config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer),
         primary_library_root,
@@ -171,7 +184,7 @@ async fn main() -> Result<()> {
         dashboard_feed_date: local_feed_date(),
         watch_receiver,
     };
-    run(&mut session, &mut app, &theme, runtime).await
+    run(&mut session, &mut app, theme, runtime).await
 }
 
 async fn handle_plugin_cli(command: Option<&CliCommand>, plugin_host: &PluginHost) -> Result<bool> {
@@ -268,6 +281,9 @@ struct Runtime {
     downloads: DownloadManager,
     database: Database,
     database_file: PathBuf,
+    config_file: PathBuf,
+    plugins_config_file: PathBuf,
+    default_downloads_dir: PathBuf,
     download_dir: PathBuf,
     pdf_viewer: String,
     primary_library_root: PathBuf,
@@ -312,7 +328,7 @@ enum IndexResponse {
 async fn run(
     session: &mut TerminalSession,
     app: &mut App,
-    theme: &Theme,
+    mut theme: Theme,
     mut runtime: Runtime,
 ) -> Result<()> {
     let (sender, mut receiver) = mpsc::unbounded_channel::<SearchResponse>();
@@ -421,18 +437,23 @@ async fn run(
         }
         session
             .terminal_mut()
-            .draw(|frame| ui::render(frame, app, theme))?;
+            .draw(|frame| ui::render(frame, app, &theme))?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if let Some(action) = handle_key(app, key) {
+                    if app.page == papr_core::Page::Settings && app.config_editor_focused {
+                        handle_config_editor_key(app, key, &mut runtime, &mut theme);
+                    } else if app.page == papr_core::Page::Settings && app.plugin_editor_focused {
+                        handle_plugin_config_editor_key(app, key, &mut runtime, &mut theme);
+                    } else if let Some(action) = handle_key(app, key) {
                         apply_ui_action(
                             action,
                             &mut runtime,
                             &senders,
                             &mut pending_downloads,
                             app,
+                            &mut theme,
                         )?;
                     }
                 }
@@ -450,6 +471,7 @@ fn apply_ui_action(
     senders: &ActionSenders,
     pending_downloads: &mut HashMap<String, RemotePaper>,
     app: &mut App,
+    _theme: &mut Theme,
 ) -> Result<()> {
     match action {
         UiAction::Search(query) => {
@@ -1609,6 +1631,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         return None;
     }
     if !app.content_focused {
+        if app.page == papr_core::Page::Settings && matches!(key.code, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) {
+            app.content_focused = true;
+            app.config_editor_focused = true;
+            return None;
+        }
         if let Some(command) = navigation_command(key) {
             app.dispatch(command);
         }
@@ -2399,6 +2426,443 @@ fn selected_library_pdf(app: &App) -> Option<(i64, PathBuf)> {
         .pdf_path
         .as_ref()
         .map(|path| (paper.id, PathBuf::from(path)))
+}
+
+fn record_config_history(app: &mut App) {
+    if app.config_editor_history.is_empty() || app.config_editor_history[app.config_editor_history_idx] != app.config_editor_text {
+        app.config_editor_history.truncate(app.config_editor_history_idx + 1);
+        app.config_editor_history.push(app.config_editor_text.clone());
+        if app.config_editor_history.len() > 50 {
+            app.config_editor_history.remove(0);
+        }
+        app.config_editor_history_idx = app.config_editor_history.len() - 1;
+    }
+}
+
+fn apply_config_update(
+    runtime: &mut Runtime,
+    app: &mut App,
+    config: &Config,
+    theme: &mut Theme,
+) -> Result<()> {
+    let new_theme = Theme::load(&config.theme).map_err(|e| anyhow::anyhow!("Theme load failed: {e}"))?;
+    *theme = new_theme;
+
+    runtime.pdf_viewer = config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer);
+
+    let download_dir = config.download_path.clone().unwrap_or_else(|| runtime.default_downloads_dir.clone());
+    runtime.download_dir = download_dir.clone();
+
+    let collection_roots = config.library_folders.clone();
+    runtime.collection_roots = collection_roots.clone();
+
+    let mut library_roots = collection_roots.clone();
+    let download_inside = collection_roots.iter().any(|root| {
+        let root_canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+        let dl_canon = std::fs::canonicalize(&download_dir).unwrap_or_else(|_| download_dir.clone());
+        dl_canon.starts_with(&root_canon)
+    });
+    if !download_inside {
+        library_roots.push(download_dir.clone());
+    }
+    if !library_roots.is_empty() {
+        runtime.primary_library_root = library_roots[0].clone();
+    }
+    runtime.library_roots = library_roots;
+
+    runtime.dashboard_keywords = config.dashboard_keyword_list();
+    runtime.dashboard_keyword_signature.clear();
+
+    refresh_library(runtime, app)?;
+    refresh_organization(&runtime.database, &runtime.library_roots, app)?;
+    refresh_dashboard(runtime, app)?;
+
+    Ok(())
+}
+
+fn handle_config_editor_key(
+    app: &mut App,
+    key: KeyEvent,
+    runtime: &mut Runtime,
+    theme: &mut Theme,
+) -> Option<UiAction> {
+    if let Some(mut cmd) = app.config_editor_command.clone() {
+        match key.code {
+            KeyCode::Esc => {
+                app.config_editor_command = None;
+            }
+            KeyCode::Char(c) => {
+                cmd.push(c);
+                app.config_editor_command = Some(cmd);
+            }
+            KeyCode::Backspace => {
+                cmd.pop();
+                app.config_editor_command = Some(cmd);
+            }
+            KeyCode::Enter => {
+                app.config_editor_command = None;
+                let trimmed = cmd.trim();
+                if trimmed == "w" || trimmed == "wq" {
+                    let toml_str = &app.config_editor_text;
+                    match toml::from_str::<Config>(toml_str) {
+                        Ok(new_config) => {
+                            if let Err(e) = std::fs::write(&runtime.config_file, toml_str) {
+                                app.config_editor_error = Some(format!("Write failed: {e}"));
+                            } else {
+                                app.config_editor_error = None;
+                                app.toast = Some("Configuration saved and applied.".to_owned());
+                                if let Err(e) = apply_config_update(runtime, app, &new_config, theme) {
+                                    app.config_editor_error = Some(format!("Apply failed: {e}"));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            app.config_editor_error = Some(format!("Invalid TOML: {e}"));
+                        }
+                    }
+                }
+                if trimmed == "q" || (trimmed == "wq" && app.config_editor_error.is_none()) {
+                    app.config_editor_focused = false;
+                    app.content_focused = false;
+                }
+            }
+            _ => {}
+        }
+        return None;
+    }
+
+    if app.config_editor_insert_mode {
+        match key.code {
+            KeyCode::Esc => {
+                app.config_editor_insert_mode = false;
+            }
+            KeyCode::Backspace => {
+                if app.config_editor_cursor > 0 {
+                    record_config_history(app);
+                    let mut prev = app.config_editor_cursor - 1;
+                    while prev > 0 && !app.config_editor_text.is_char_boundary(prev) {
+                        prev -= 1;
+                    }
+                    app.config_editor_text.remove(prev);
+                    app.config_editor_cursor = prev;
+                }
+            }
+            KeyCode::Delete => {
+                if app.config_editor_cursor < app.config_editor_text.len() {
+                    record_config_history(app);
+                    app.config_editor_text.remove(app.config_editor_cursor);
+                }
+            }
+            KeyCode::Enter => {
+                record_config_history(app);
+                app.config_editor_text.insert(app.config_editor_cursor, '\n');
+                app.config_editor_cursor += 1;
+            }
+            KeyCode::Char(c) => {
+                record_config_history(app);
+                app.config_editor_text.insert(app.config_editor_cursor, c);
+                app.config_editor_cursor += c.len_utf8();
+            }
+            _ => {}
+        }
+        return None;
+    }
+
+    match key.code {
+        KeyCode::Char('i') => {
+            app.config_editor_insert_mode = true;
+        }
+        KeyCode::Char(':') => {
+            app.config_editor_command = Some(String::new());
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            if key.code == KeyCode::Left {
+                app.config_editor_focused = false;
+                app.content_focused = false;
+            } else if app.config_editor_cursor > 0 {
+                let mut prev = app.config_editor_cursor - 1;
+                while prev > 0 && !app.config_editor_text.is_char_boundary(prev) {
+                    prev -= 1;
+                }
+                if app.config_editor_text.as_bytes().get(prev) != Some(&b'\n') {
+                    app.config_editor_cursor = prev;
+                }
+            }
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            if key.code == KeyCode::Right {
+                app.config_editor_focused = false;
+                app.plugin_editor_focused = true;
+            } else if app.config_editor_cursor < app.config_editor_text.len() {
+                let mut next = app.config_editor_cursor + 1;
+                while next < app.config_editor_text.len() && !app.config_editor_text.is_char_boundary(next) {
+                    next += 1;
+                }
+                if app.config_editor_text.as_bytes().get(app.config_editor_cursor) != Some(&b'\n') {
+                    app.config_editor_cursor = next.min(app.config_editor_text.len());
+                }
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            let text = &app.config_editor_text;
+            let cursor = &mut app.config_editor_cursor;
+            if *cursor > 0 {
+                let current_line_start = text[..*cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                let col = *cursor - current_line_start;
+                if current_line_start > 0 {
+                    let prev_line_search = &text[..current_line_start - 1];
+                    let prev_line_start = prev_line_search.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                    let prev_line_len = (current_line_start - 1) - prev_line_start;
+                    let mut target = prev_line_start + col.min(prev_line_len);
+                    while target > prev_line_start && !text.is_char_boundary(target) {
+                        target -= 1;
+                    }
+                    *cursor = target;
+                }
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let text = &app.config_editor_text;
+            let cursor = &mut app.config_editor_cursor;
+            if *cursor < text.len() {
+                let current_line_start = text[..*cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                let col = *cursor - current_line_start;
+                if let Some(current_line_end) = text[*cursor..].find('\n').map(|idx| *cursor + idx) {
+                    let next_line_start = current_line_end + 1;
+                    if next_line_start <= text.len() {
+                        let next_line_end = text[next_line_start..].find('\n').map(|idx| next_line_start + idx).unwrap_or(text.len());
+                        let next_line_len = next_line_end - next_line_start;
+                        let mut target = next_line_start + col.min(next_line_len);
+                        while target > next_line_start && !text.is_char_boundary(target) {
+                            target -= 1;
+                        }
+                        *cursor = target;
+                    }
+                }
+            }
+        }
+        KeyCode::Char('x') => {
+            if app.config_editor_cursor < app.config_editor_text.len() {
+                record_config_history(app);
+                app.config_editor_text.remove(app.config_editor_cursor);
+            }
+        }
+        KeyCode::Char('u') => {
+            if app.config_editor_history_idx > 0 {
+                app.config_editor_history_idx -= 1;
+                app.config_editor_text = app.config_editor_history[app.config_editor_history_idx].clone();
+                app.config_editor_cursor = app.config_editor_cursor.min(app.config_editor_text.len());
+            }
+        }
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.config_editor_history_idx + 1 < app.config_editor_history.len() {
+                app.config_editor_history_idx += 1;
+                app.config_editor_text = app.config_editor_history[app.config_editor_history_idx].clone();
+                app.config_editor_cursor = app.config_editor_cursor.min(app.config_editor_text.len());
+            }
+        }
+        KeyCode::Char('q') => {
+            app.config_editor_focused = false;
+            app.content_focused = false;
+        }
+        _ => {}
+    }
+    None
+}
+
+fn record_plugin_config_history(app: &mut App) {
+    if app.plugin_editor_history.is_empty() || app.plugin_editor_history[app.plugin_editor_history_idx] != app.plugin_editor_text {
+        app.plugin_editor_history.truncate(app.plugin_editor_history_idx + 1);
+        app.plugin_editor_history.push(app.plugin_editor_text.clone());
+        if app.plugin_editor_history.len() > 50 {
+            app.plugin_editor_history.remove(0);
+        }
+        app.plugin_editor_history_idx = app.plugin_editor_history.len() - 1;
+    }
+}
+
+fn handle_plugin_config_editor_key(
+    app: &mut App,
+    key: KeyEvent,
+    runtime: &mut Runtime,
+    _theme: &mut Theme,
+) -> Option<UiAction> {
+    if let Some(mut cmd) = app.plugin_editor_command.clone() {
+        match key.code {
+            KeyCode::Esc => {
+                app.plugin_editor_command = None;
+            }
+            KeyCode::Char(c) => {
+                cmd.push(c);
+                app.plugin_editor_command = Some(cmd);
+            }
+            KeyCode::Backspace => {
+                cmd.pop();
+                app.plugin_editor_command = Some(cmd);
+            }
+            KeyCode::Enter => {
+                app.plugin_editor_command = None;
+                let trimmed = cmd.trim();
+                if trimmed == "w" || trimmed == "wq" {
+                    let toml_str = &app.plugin_editor_text;
+                    match toml::from_str::<toml::Value>(toml_str) {
+                        Ok(_) => {
+                            if let Err(e) = std::fs::write(&runtime.plugins_config_file, toml_str) {
+                                app.plugin_editor_error = Some(format!("Write failed: {e}"));
+                            } else {
+                                app.plugin_editor_error = None;
+                                app.toast = Some("Plugin configuration saved.".to_owned());
+                            }
+                        }
+                        Err(e) => {
+                            app.plugin_editor_error = Some(format!("Invalid TOML: {e}"));
+                        }
+                    }
+                }
+                if trimmed == "q" || (trimmed == "wq" && app.plugin_editor_error.is_none()) {
+                    app.plugin_editor_focused = false;
+                    app.content_focused = false;
+                }
+            }
+            _ => {}
+        }
+        return None;
+    }
+
+    if app.plugin_editor_insert_mode {
+        match key.code {
+            KeyCode::Esc => {
+                app.plugin_editor_insert_mode = false;
+            }
+            KeyCode::Backspace => {
+                if app.plugin_editor_cursor > 0 {
+                    record_plugin_config_history(app);
+                    let mut prev = app.plugin_editor_cursor - 1;
+                    while prev > 0 && !app.plugin_editor_text.is_char_boundary(prev) {
+                        prev -= 1;
+                    }
+                    app.plugin_editor_text.remove(prev);
+                    app.plugin_editor_cursor = prev;
+                }
+            }
+            KeyCode::Delete => {
+                if app.plugin_editor_cursor < app.plugin_editor_text.len() {
+                    record_plugin_config_history(app);
+                    app.plugin_editor_text.remove(app.plugin_editor_cursor);
+                }
+            }
+            KeyCode::Enter => {
+                record_plugin_config_history(app);
+                app.plugin_editor_text.insert(app.plugin_editor_cursor, '\n');
+                app.plugin_editor_cursor += 1;
+            }
+            KeyCode::Char(c) => {
+                record_plugin_config_history(app);
+                app.plugin_editor_text.insert(app.plugin_editor_cursor, c);
+                app.plugin_editor_cursor += c.len_utf8();
+            }
+            _ => {}
+        }
+        return None;
+    }
+
+    match key.code {
+        KeyCode::Char('i') => {
+            app.plugin_editor_insert_mode = true;
+        }
+        KeyCode::Char(':') => {
+            app.plugin_editor_command = Some(String::new());
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            if key.code == KeyCode::Left {
+                app.plugin_editor_focused = false;
+                app.config_editor_focused = true;
+            } else if app.plugin_editor_cursor > 0 {
+                let mut prev = app.plugin_editor_cursor - 1;
+                while prev > 0 && !app.plugin_editor_text.is_char_boundary(prev) {
+                    prev -= 1;
+                }
+                if app.plugin_editor_text.as_bytes().get(prev) != Some(&b'\n') {
+                    app.plugin_editor_cursor = prev;
+                }
+            }
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            if app.plugin_editor_cursor < app.plugin_editor_text.len() {
+                let mut next = app.plugin_editor_cursor + 1;
+                while next < app.plugin_editor_text.len() && !app.plugin_editor_text.is_char_boundary(next) {
+                    next += 1;
+                }
+                if app.plugin_editor_text.as_bytes().get(app.plugin_editor_cursor) != Some(&b'\n') {
+                    app.plugin_editor_cursor = next.min(app.plugin_editor_text.len());
+                }
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            let text = &app.plugin_editor_text;
+            let cursor = &mut app.plugin_editor_cursor;
+            if *cursor > 0 {
+                let current_line_start = text[..*cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                let col = *cursor - current_line_start;
+                if current_line_start > 0 {
+                    let prev_line_search = &text[..current_line_start - 1];
+                    let prev_line_start = prev_line_search.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                    let prev_line_len = (current_line_start - 1) - prev_line_start;
+                    let mut target = prev_line_start + col.min(prev_line_len);
+                    while target > prev_line_start && !text.is_char_boundary(target) {
+                        target -= 1;
+                    }
+                    *cursor = target;
+                }
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let text = &app.plugin_editor_text;
+            let cursor = &mut app.plugin_editor_cursor;
+            if *cursor < text.len() {
+                let current_line_start = text[..*cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                let col = *cursor - current_line_start;
+                if let Some(current_line_end) = text[*cursor..].find('\n').map(|idx| *cursor + idx) {
+                    let next_line_start = current_line_end + 1;
+                    if next_line_start <= text.len() {
+                        let next_line_end = text[next_line_start..].find('\n').map(|idx| next_line_start + idx).unwrap_or(text.len());
+                        let next_line_len = next_line_end - next_line_start;
+                        let mut target = next_line_start + col.min(next_line_len);
+                        while target > next_line_start && !text.is_char_boundary(target) {
+                            target -= 1;
+                        }
+                        *cursor = target;
+                    }
+                }
+            }
+        }
+        KeyCode::Char('x') => {
+            if app.plugin_editor_cursor < app.plugin_editor_text.len() {
+                record_plugin_config_history(app);
+                app.plugin_editor_text.remove(app.plugin_editor_cursor);
+            }
+        }
+        KeyCode::Char('u') => {
+            if app.plugin_editor_history_idx > 0 {
+                app.plugin_editor_history_idx -= 1;
+                app.plugin_editor_text = app.plugin_editor_history[app.plugin_editor_history_idx].clone();
+                app.plugin_editor_cursor = app.plugin_editor_cursor.min(app.plugin_editor_text.len());
+            }
+        }
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.plugin_editor_history_idx + 1 < app.plugin_editor_history.len() {
+                app.plugin_editor_history_idx += 1;
+                app.plugin_editor_text = app.plugin_editor_history[app.plugin_editor_history_idx].clone();
+                app.plugin_editor_cursor = app.plugin_editor_cursor.min(app.plugin_editor_text.len());
+            }
+        }
+        KeyCode::Char('q') => {
+            app.plugin_editor_focused = false;
+            app.content_focused = false;
+        }
+        _ => {}
+    }
+    None
 }
 
 #[cfg(test)]
