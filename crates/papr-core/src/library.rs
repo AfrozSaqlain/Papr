@@ -68,22 +68,32 @@ impl LibraryIndexer {
     /// Recursively count readable PDF files in configured roots.
     #[must_use]
     pub fn count_pdfs(roots: &[PathBuf]) -> u64 {
+        let mut seen = std::collections::HashSet::new();
         roots
             .iter()
             .flat_map(|root| WalkDir::new(root).follow_links(false).into_iter())
             .filter_map(Result::ok)
             .filter(|entry| entry.file_type().is_file() && is_pdf(entry.path()))
+            .filter(|entry| {
+                let p = std::fs::canonicalize(entry.path()).unwrap_or_else(|_| entry.path().to_path_buf());
+                seen.insert(p)
+            })
             .count() as u64
     }
 
     /// Recursively calculate total size of readable PDF files in configured roots.
     #[must_use]
     pub fn pdf_storage_size(roots: &[PathBuf]) -> u64 {
+        let mut seen = std::collections::HashSet::new();
         roots
             .iter()
             .flat_map(|root| WalkDir::new(root).follow_links(false).into_iter())
             .filter_map(Result::ok)
             .filter(|entry| entry.file_type().is_file() && is_pdf(entry.path()))
+            .filter(|entry| {
+                let p = std::fs::canonicalize(entry.path()).unwrap_or_else(|_| entry.path().to_path_buf());
+                seen.insert(p)
+            })
             .map(|entry| entry.metadata().map(|m| m.len()).unwrap_or(0))
             .sum()
     }

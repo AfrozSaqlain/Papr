@@ -102,20 +102,14 @@ async fn main() -> Result<()> {
     let mut dashboard = database
         .research_dashboard()
         .context("failed to load research dashboard")?;
-    let mut all_roots = library_roots.clone();
-    for root in &collection_roots {
-        if !all_roots.contains(root) {
-            all_roots.push(root.clone());
-        }
-    }
-    dashboard.counts.papers = LibraryIndexer::count_pdfs(&all_roots);
+    dashboard.counts.papers = LibraryIndexer::count_pdfs(&collection_roots);
     dashboard.counts.downloaded = LibraryIndexer::count_pdfs(&[download_dir.clone()]);
     dashboard.read = database
         .library_papers_in_roots(&library_roots)?
         .into_iter()
         .filter(|p| p.reading_status == "read")
         .count() as u64;
-    dashboard.disk_usage = LibraryIndexer::pdf_storage_size(&all_roots);
+    dashboard.disk_usage = LibraryIndexer::pdf_storage_size(&collection_roots);
     dashboard.downloads_size = LibraryIndexer::pdf_storage_size(&[download_dir.clone()]);
     dashboard.database_size = std::fs::metadata(&paths.database_file)
         .map(|m| m.len())
@@ -948,13 +942,7 @@ fn refresh_library(runtime: &Runtime, app: &mut App) -> Result<()> {
 
 fn refresh_dashboard(runtime: &Runtime, app: &mut App) -> Result<()> {
     app.dashboard = runtime.database.research_dashboard()?;
-    let mut all_roots = runtime.library_roots.clone();
-    for root in &runtime.collection_roots {
-        if !all_roots.contains(root) {
-            all_roots.push(root.clone());
-        }
-    }
-    app.dashboard.counts.papers = LibraryIndexer::count_pdfs(&all_roots);
+    app.dashboard.counts.papers = LibraryIndexer::count_pdfs(&runtime.collection_roots);
     app.dashboard.counts.downloaded = LibraryIndexer::count_pdfs(&[runtime.download_dir.clone()]);
     app.dashboard.read = runtime
         .database
@@ -962,7 +950,7 @@ fn refresh_dashboard(runtime: &Runtime, app: &mut App) -> Result<()> {
         .into_iter()
         .filter(|p| p.reading_status == "read")
         .count() as u64;
-    app.dashboard.disk_usage = LibraryIndexer::pdf_storage_size(&all_roots);
+    app.dashboard.disk_usage = LibraryIndexer::pdf_storage_size(&runtime.collection_roots);
     app.dashboard.downloads_size =
         LibraryIndexer::pdf_storage_size(&[runtime.download_dir.clone()]);
     app.dashboard.database_size = std::fs::metadata(&runtime.database_file)
