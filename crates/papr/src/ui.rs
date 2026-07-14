@@ -8,11 +8,43 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
+    symbols::border,
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 const LOGO: &str = "[ P A P R ]";
+
+fn focus_block<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> {
+    let border_style = if focused {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.border)
+    };
+
+    let title_style = if focused {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.muted)
+    };
+
+    let mut block = Block::default()
+        .title(Line::styled(title, title_style))
+        .borders(Borders::ALL)
+        .border_style(border_style);
+
+    if focused {
+        block = block
+            .border_type(BorderType::Thick)
+            .border_set(border::THICK);
+    }
+
+    block
+}
 
 /// Render the complete application for the current state.
 pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
@@ -82,16 +114,15 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme
 }
 
 fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+    let focused = !app.content_focused;
+    let block = focus_block(" NAVIGATION ", focused, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
     let items = Page::ALL
         .iter()
         .map(|page| ListItem::new(format!("  {}", page.title())));
     let list = List::new(items)
-        .block(
-            Block::default()
-                .title(" NAVIGATE ")
-                .borders(Borders::RIGHT)
-                .border_style(Style::default().fg(theme.border)),
-        )
         .style(Style::default().fg(theme.muted))
         .highlight_style(if app.content_focused {
             Style::default().fg(theme.text).bg(theme.surface)
@@ -105,16 +136,24 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
     let mut state = ListState::default()
         .with_selected(Some(app.sidebar_index))
         .with_offset(app.sidebar_scroll);
-    frame.render_stateful_widget(list, area, &mut state);
+    frame.render_stateful_widget(list, inner, &mut state);
     app.sidebar_scroll = state.offset();
 }
 
 fn render_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+    let block = focus_block(
+        " WORKSPACE ",
+        app.content_focused,
+        theme,
+    );
+    let outer = block.inner(area);
+    frame.render_widget(block, area);
+
     let inset = Rect::new(
-        area.x + 2,
-        area.y + 1,
-        area.width.saturating_sub(4),
-        area.height.saturating_sub(2),
+        outer.x + 1,
+        outer.y,
+        outer.width.saturating_sub(2),
+        outer.height,
     );
     let mut workspace_area = inset;
     if matches!(
