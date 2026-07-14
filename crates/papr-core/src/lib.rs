@@ -12,8 +12,8 @@ pub mod theme;
 
 pub use api::arxiv::ArxivClient;
 pub use app::{
-    App, AppMode, Command, DiscoveryStatus, DownloadStatus, DownloadTask, LibraryState,
-    MetadataPrompt, Page,
+    App, AppMode, CollectionSearchItem, Command, DiscoveryStatus, DownloadStatus, DownloadTask,
+    LibraryState, MetadataPrompt, Page,
 };
 pub use config::{Config, Paths};
 pub use database::Database;

@@ -763,6 +763,7 @@ fn refresh_renamed_collection(
     collection_id: i64,
 ) -> Result<()> {
     app.collections = database.collections()?;
+    app.collection_papers_map = database.collection_papers_map().unwrap_or_default();
     app.collection_selected = app
         .collections
         .iter()
@@ -853,6 +854,7 @@ fn resolve_target(target: PaperTarget, database: &mut Database) -> Result<i64> {
 
 fn refresh_organization(database: &Database, app: &mut App) -> Result<()> {
     app.collections = database.collections()?;
+    app.collection_papers_map = database.collection_papers_map().unwrap_or_default();
     app.collection_selected = app
         .collection_selected
         .min(app.collections.len().saturating_sub(1));
@@ -1490,6 +1492,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.mode == AppMode::Search {
         return handle_search_key(app, key);
     }
+    if app.mode == AppMode::WorkspaceSearch {
+        return handle_workspace_search_key(app, key);
+    }
     let key = normalize_panel_navigation(key);
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         if let Some(command) = navigation_command(key) {
@@ -1615,11 +1620,29 @@ fn handle_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     None
 }
 
+fn handle_workspace_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    match key.code {
+        KeyCode::Esc => app.mode = AppMode::Normal,
+        KeyCode::Down | KeyCode::Enter => {
+            app.mode = AppMode::Normal;
+            app.content_focused = true;
+        }
+        _ => {
+            edit_text(
+                &mut app.workspace_query,
+                &mut app.workspace_query_cursor,
+                key,
+            );
+        }
+    }
+    None
+}
+
 fn bookmark_action(app: &App, key: KeyEvent) -> Option<UiAction> {
     if app.page != papr_core::Page::Bookmarks {
         return None;
     }
-    let bookmark = app.bookmarks.get(app.bookmark_selected)?;
+    let bookmark = *app.filtered_bookmarks().get(app.bookmark_selected)?;
     match key.code {
         KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(bookmark.paper_id))),
         KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(bookmark.paper_id))),
@@ -1641,7 +1664,7 @@ fn handle_downloads_key(app: &App, key: KeyEvent) -> Option<UiAction> {
         key.code,
         KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
     ) {
-        if let Some(task) = app.downloads.get(app.download_selected) {
+        if let Some(&task) = app.filtered_downloads().get(app.download_selected) {
             if matches!(task.status, DownloadStatus::Completed) {
                 return Some(UiAction::OpenDownload(task.id.clone()));
             }
@@ -1651,7 +1674,7 @@ fn handle_downloads_key(app: &App, key: KeyEvent) -> Option<UiAction> {
         key.code,
         KeyCode::Char('R') | KeyCode::Char('s') | KeyCode::Char('B') | KeyCode::Char('n') | KeyCode::Char('c')
     ) {
-        if let Some(task) = app.downloads.get(app.download_selected) {
+        if let Some(&task) = app.filtered_downloads().get(app.download_selected) {
             if matches!(task.status, DownloadStatus::Completed) {
                 if let Some(paper_id) = task.paper_id {
                     return match key.code {
@@ -1724,7 +1747,7 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
                 return (true, None);
             }
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l' | 'p') => {
-                let Some(paper) = app.collection_papers.get(app.collection_paper_selected) else {
+                let Some(&paper) = app.filtered_collection_papers().get(app.collection_paper_selected) else {
                     return (true, None);
                 };
                 let Some(path) = &paper.pdf_path else {
@@ -1742,55 +1765,78 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
             KeyCode::Char('B') => {
                 return (
                     true,
-                    app.collection_papers
+                    app.filtered_collection_papers()
                         .get(app.collection_paper_selected)
-                        .map(|paper| UiAction::Bookmark(PaperTarget::Local(paper.id))),
+                        .map(|&paper| UiAction::Bookmark(PaperTarget::Local(paper.id))),
                 );
             }
             KeyCode::Char('c') => {
                 return (
                     true,
-                    app.collection_papers
+                    app.filtered_collection_papers()
                         .get(app.collection_paper_selected)
-                        .map(|paper| UiAction::CopyCitation(PaperTarget::Local(paper.id))),
+                        .map(|&paper| UiAction::CopyCitation(PaperTarget::Local(paper.id))),
                 );
             }
             KeyCode::Char('R') => {
                 return (
                     true,
-                    app.collection_papers
+                    app.filtered_collection_papers()
                         .get(app.collection_paper_selected)
-                        .map(|paper| UiAction::RenamePdf(paper.id)),
+                        .map(|&paper| UiAction::RenamePdf(paper.id)),
                 );
             }
             KeyCode::Char('s') => {
                 return (
                     true,
-                    app.collection_papers
+                    app.filtered_collection_papers()
                         .get(app.collection_paper_selected)
-                        .map(|paper| UiAction::Prompt(PaperTarget::Local(paper.id))),
+                        .map(|&paper| UiAction::Prompt(PaperTarget::Local(paper.id))),
                 );
             }
             _ => return (false, None),
         }
     }
-    if matches!(
-        key.code,
-        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
-    ) {
-        let action = app
-            .collections
-            .get(app.collection_selected)
-            .map(|collection| UiAction::OpenCollection(collection.id));
-        return (true, action);
-    }
-    if key.code == KeyCode::Char('R') {
-        return (
-            true,
-            app.collections
-                .get(app.collection_selected)
-                .map(|collection| UiAction::RenameCollection(collection.id)),
-        );
+    if let Some(item) = app.filtered_collections().get(app.collection_selected) {
+        use papr_core::CollectionSearchItem;
+        match item {
+            CollectionSearchItem::Collection(collection) => {
+                if matches!(key.code, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) {
+                    return (true, Some(UiAction::OpenCollection(collection.id)));
+                }
+                if key.code == KeyCode::Char('R') {
+                    return (true, Some(UiAction::RenameCollection(collection.id)));
+                }
+            }
+            CollectionSearchItem::Paper(paper, _collection) => {
+                if matches!(key.code, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l' | 'p')) {
+                    if let Some(path) = &paper.pdf_path {
+                        return (
+                            true,
+                            Some(UiAction::OpenPdf {
+                                paper_id: paper.id,
+                                path: PathBuf::from(path),
+                            }),
+                        );
+                    } else {
+                        app.toast = Some("This paper has no local PDF to open".into());
+                        return (true, None);
+                    }
+                }
+                if key.code == KeyCode::Char('B') {
+                    return (true, Some(UiAction::Bookmark(PaperTarget::Local(paper.id))));
+                }
+                if key.code == KeyCode::Char('c') {
+                    return (true, Some(UiAction::CopyCitation(PaperTarget::Local(paper.id))));
+                }
+                if key.code == KeyCode::Char('R') {
+                    return (true, Some(UiAction::RenamePdf(paper.id)));
+                }
+                if key.code == KeyCode::Char('s') {
+                    return (true, Some(UiAction::Prompt(PaperTarget::Local(paper.id))));
+                }
+            }
+        }
     }
     if matches!(key.code, KeyCode::Char('c' | 'n')) {
         return (true, Some(UiAction::CreateCollection));
@@ -1807,7 +1853,7 @@ fn handle_author_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction>) {
                 return (true, None);
             }
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l' | 'p') => {
-                let Some(paper) = app.author_papers.get(app.author_paper_selected) else {
+                let Some(&paper) = app.filtered_author_papers().get(app.author_paper_selected) else {
                     return (true, None);
                 };
                 let Some(path) = &paper.pdf_path else {
@@ -1825,41 +1871,41 @@ fn handle_author_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction>) {
             KeyCode::Char('B') => {
                 return (
                     true,
-                    app.author_papers
+                    app.filtered_author_papers()
                         .get(app.author_paper_selected)
-                        .map(|paper| UiAction::Bookmark(PaperTarget::Local(paper.id))),
+                        .map(|&paper| UiAction::Bookmark(PaperTarget::Local(paper.id))),
                 );
             }
             KeyCode::Char('c') => {
                 return (
                     true,
-                    app.author_papers
+                    app.filtered_author_papers()
                         .get(app.author_paper_selected)
-                        .map(|paper| UiAction::CopyCitation(PaperTarget::Local(paper.id))),
+                        .map(|&paper| UiAction::CopyCitation(PaperTarget::Local(paper.id))),
                 );
             }
             KeyCode::Char('R') => {
                 return (
                     true,
-                    app.author_papers
+                    app.filtered_author_papers()
                         .get(app.author_paper_selected)
-                        .map(|paper| UiAction::RenamePdf(paper.id)),
+                        .map(|&paper| UiAction::RenamePdf(paper.id)),
                 );
             }
             KeyCode::Char('s') => {
                 return (
                     true,
-                    app.author_papers
+                    app.filtered_author_papers()
                         .get(app.author_paper_selected)
-                        .map(|paper| UiAction::Prompt(PaperTarget::Local(paper.id))),
+                        .map(|&paper| UiAction::Prompt(PaperTarget::Local(paper.id))),
                 );
             }
             KeyCode::Char('n') => {
                 return (
                     true,
-                    app.author_papers
+                    app.filtered_author_papers()
                         .get(app.author_paper_selected)
-                        .map(|paper| UiAction::OpenNote(PaperTarget::Local(paper.id))),
+                        .map(|&paper| UiAction::OpenNote(PaperTarget::Local(paper.id))),
                 );
             }
             _ => return (false, None),
@@ -1870,9 +1916,9 @@ fn handle_author_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction>) {
         KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
     ) {
         let action = app
-            .authors
+            .filtered_authors()
             .get(app.author_selected)
-            .map(|author| UiAction::OpenAuthor(author.id));
+            .map(|&author| UiAction::OpenAuthor(author.id));
         return (true, action);
     }
     (false, None)
@@ -1882,6 +1928,9 @@ fn navigation_command(key: KeyEvent) -> Option<Command> {
     match (key.code, key.modifiers) {
         (KeyCode::Char('p'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(Command::TogglePalette)
+        }
+        (KeyCode::Char('/'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(Command::ToggleWorkspaceSearch)
         }
         (KeyCode::Char('j') | KeyCode::Down, _) => Some(Command::MoveDown),
         (KeyCode::Char('k') | KeyCode::Up, _) => Some(Command::MoveUp),
@@ -2059,10 +2108,9 @@ fn handle_paper_detail_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
 
 fn handle_library_metadata_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     let target = app
-        .library
-        .papers
+        .filtered_library_papers()
         .get(app.library.selected)
-        .map(|paper| PaperTarget::Local(paper.id))?;
+        .map(|&paper| PaperTarget::Local(paper.id))?;
     app.modal_return = AppMode::Normal;
     match key.code {
         KeyCode::Char('n') => Some(UiAction::OpenNote(target)),
@@ -2090,7 +2138,7 @@ fn selected_remote_target(app: &App) -> Option<PaperTarget> {
 }
 
 fn selected_library_pdf(app: &App) -> Option<(i64, PathBuf)> {
-    let paper = app.library.papers.get(app.library.selected)?;
+    let paper = *app.filtered_library_papers().get(app.library.selected)?;
     paper
         .pdf_path
         .as_ref()

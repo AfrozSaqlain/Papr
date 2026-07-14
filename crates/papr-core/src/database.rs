@@ -616,6 +616,22 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Load the collection papers mapping (collection_id -> vec of paper_id)
+    pub fn collection_papers_map(&self) -> Result<std::collections::HashMap<i64, Vec<i64>>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT collection_id, paper_id FROM collection_papers"
+        )?;
+        let mut map: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (cid, pid) = row?;
+            map.entry(cid).or_default().push(pid);
+        }
+        Ok(map)
+    }
+
     /// List papers assigned to a collection in newest-first library order.
     ///
     /// # Errors

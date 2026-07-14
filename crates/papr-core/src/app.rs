@@ -94,6 +94,8 @@ pub enum AppMode {
     NoteEdit,
     /// Single-line collection input.
     Prompt,
+    /// Workspace-local search.
+    WorkspaceSearch,
 }
 
 /// Active metadata input prompt.
@@ -146,6 +148,15 @@ pub struct DiscoveryState {
     pub status: DiscoveryStatus,
     /// Vertical detail-page scroll offset.
     pub detail_scroll: u16,
+}
+
+/// An item in the hierarchical collection search view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CollectionSearchItem<'a> {
+    /// A collection.
+    Collection(&'a CollectionSummary),
+    /// A paper inside a collection.
+    Paper(&'a LibraryPaper, &'a CollectionSummary),
 }
 
 /// Local catalog rows and selection.
@@ -210,6 +221,8 @@ pub enum Command {
     TogglePalette,
     /// Show shortcut help.
     ToggleHelp,
+    /// Toggle workspace-local search focus.
+    ToggleWorkspaceSearch,
     /// Terminate the application.
     Quit,
 }
@@ -245,6 +258,10 @@ pub struct App {
     pub palette_selected: usize,
     /// Vertical list scroll offset for the command palette.
     pub palette_scroll: usize,
+    /// Local workspace search query.
+    pub workspace_query: String,
+    /// Cursor position in workspace query.
+    pub workspace_query_cursor: usize,
     /// Remote paper discovery state.
     pub discovery: DiscoveryState,
     /// Local paper catalog state.
@@ -275,6 +292,8 @@ pub struct App {
     pub collection_paper_selected: usize,
     /// Vertical list scroll offset for papers within a collection.
     pub collection_paper_scroll: usize,
+    /// Cached mapping from collection ID to paper IDs.
+    pub collection_papers_map: std::collections::HashMap<i64, Vec<i64>>,
     /// Most recently opened collection, used to restore its paper cursor.
     pub last_opened_collection_id: Option<i64>,
     /// Bookmark summaries.
@@ -328,6 +347,8 @@ impl Default for App {
             today_status: DiscoveryStatus::Idle,
             palette_selected: 0,
             palette_scroll: 0,
+            workspace_query: String::new(),
+            workspace_query_cursor: 0,
             discovery: DiscoveryState::default(),
             library: LibraryState::default(),
             downloads: Vec::new(),
@@ -343,6 +364,7 @@ impl Default for App {
             collection_papers: Vec::new(),
             collection_paper_selected: 0,
             collection_paper_scroll: 0,
+            collection_papers_map: std::collections::HashMap::new(),
             last_opened_collection_id: None,
             bookmarks: Vec::new(),
             bookmark_selected: 0,
@@ -365,6 +387,94 @@ impl Default for App {
 }
 
 impl App {
+    /// Check if a query matches the title or authors case-insensitively.
+    pub fn matches_query(query: &str, title: &str, authors: &str) -> bool {
+        if query.is_empty() {
+            return true;
+        }
+        let q = query.to_lowercase();
+        title.to_lowercase().contains(&q) || authors.to_lowercase().contains(&q)
+    }
+
+    /// Get the library papers filtered by the workspace search query.
+    pub fn filtered_library_papers(&self) -> Vec<&LibraryPaper> {
+        self.library
+            .papers
+            .iter()
+            .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors))
+            .collect()
+    }
+
+    /// Get the download tasks filtered by the workspace search query.
+    pub fn filtered_downloads(&self) -> Vec<&DownloadTask> {
+        self.downloads
+            .iter()
+            .filter(|d| Self::matches_query(&self.workspace_query, &d.title, ""))
+            .collect()
+    }
+
+    /// Get the collections filtered by the workspace search query.
+    pub fn filtered_collections(&self) -> Vec<CollectionSearchItem<'_>> {
+        let mut results = Vec::new();
+        if self.workspace_query.is_empty() {
+            for c in &self.collections {
+                results.push(CollectionSearchItem::Collection(c));
+            }
+            return results;
+        }
+
+        for c in &self.collections {
+            if let Some(paper_ids) = self.collection_papers_map.get(&c.id) {
+                let mut matching_papers = Vec::new();
+                for &pid in paper_ids {
+                    if let Some(p) = self.library.papers.iter().find(|p| p.id == pid) {
+                        if Self::matches_query(&self.workspace_query, &p.title, &p.authors) {
+                            matching_papers.push(p);
+                        }
+                    }
+                }
+                if !matching_papers.is_empty() {
+                    results.push(CollectionSearchItem::Collection(c));
+                    for p in matching_papers {
+                        results.push(CollectionSearchItem::Paper(p, c));
+                    }
+                }
+            }
+        }
+        results
+    }
+
+    /// Get the active collection's papers filtered by the workspace search query.
+    pub fn filtered_collection_papers(&self) -> Vec<&LibraryPaper> {
+        self.collection_papers
+            .iter()
+            .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors))
+            .collect()
+    }
+
+    /// Get the authors filtered by the workspace search query.
+    pub fn filtered_authors(&self) -> Vec<&AuthorSummary> {
+        self.authors
+            .iter()
+            .filter(|a| Self::matches_query(&self.workspace_query, &a.name, ""))
+            .collect()
+    }
+
+    /// Get the active author's papers filtered by the workspace search query.
+    pub fn filtered_author_papers(&self) -> Vec<&LibraryPaper> {
+        self.author_papers
+            .iter()
+            .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors))
+            .collect()
+    }
+
+    /// Get the bookmarks filtered by the workspace search query.
+    pub fn filtered_bookmarks(&self) -> Vec<&BookmarkSummary> {
+        self.bookmarks
+            .iter()
+            .filter(|b| Self::matches_query(&self.workspace_query, &b.paper_title, &b.authors))
+            .collect()
+    }
     /// Apply a semantic command to the state machine.
     pub fn dispatch(&mut self, command: Command) {
         match command {
@@ -377,24 +487,51 @@ impl App {
                 } else if self.page == Page::Discover {
                     self.discovery.selected = self.discovery.selected.saturating_sub(1);
                 } else if self.page == Page::Library {
-                    self.library.selected = self.library.selected.saturating_sub(1);
+                    if self.library.selected == 0 {
+                        self.mode = AppMode::WorkspaceSearch;
+                    } else {
+                        self.library.selected -= 1;
+                    }
                 } else if self.page == Page::Downloads {
-                    self.download_selected = self.download_selected.saturating_sub(1);
+                    if self.download_selected == 0 {
+                        self.mode = AppMode::WorkspaceSearch;
+                    } else {
+                        self.download_selected -= 1;
+                    }
                 } else if self.page == Page::Collections {
                     if self.active_collection.is_some() {
-                        self.collection_paper_selected =
-                            self.collection_paper_selected.saturating_sub(1);
+                        if self.collection_paper_selected == 0 {
+                            self.mode = AppMode::WorkspaceSearch;
+                        } else {
+                            self.collection_paper_selected -= 1;
+                        }
                     } else {
-                        self.collection_selected = self.collection_selected.saturating_sub(1);
+                        if self.collection_selected == 0 {
+                            self.mode = AppMode::WorkspaceSearch;
+                        } else {
+                            self.collection_selected -= 1;
+                        }
                     }
                 } else if self.page == Page::Authors {
                     if self.active_author.is_some() {
-                        self.author_paper_selected = self.author_paper_selected.saturating_sub(1);
+                        if self.author_paper_selected == 0 {
+                            self.mode = AppMode::WorkspaceSearch;
+                        } else {
+                            self.author_paper_selected -= 1;
+                        }
                     } else {
-                        self.author_selected = self.author_selected.saturating_sub(1);
+                        if self.author_selected == 0 {
+                            self.mode = AppMode::WorkspaceSearch;
+                        } else {
+                            self.author_selected -= 1;
+                        }
                     }
                 } else if self.page == Page::Bookmarks {
-                    self.bookmark_selected = self.bookmark_selected.saturating_sub(1);
+                    if self.bookmark_selected == 0 {
+                        self.mode = AppMode::WorkspaceSearch;
+                    } else {
+                        self.bookmark_selected -= 1;
+                    }
                 }
             }
             Command::MoveDown => {
@@ -410,29 +547,29 @@ impl App {
                         .min(self.discovery.results.len().saturating_sub(1));
                 } else if self.page == Page::Library {
                     self.library.selected = (self.library.selected + 1)
-                        .min(self.library.papers.len().saturating_sub(1));
+                        .min(self.filtered_library_papers().len().saturating_sub(1));
                 } else if self.page == Page::Downloads {
                     self.download_selected =
-                        (self.download_selected + 1).min(self.downloads.len().saturating_sub(1));
+                        (self.download_selected + 1).min(self.filtered_downloads().len().saturating_sub(1));
                 } else if self.page == Page::Collections {
                     if self.active_collection.is_some() {
                         self.collection_paper_selected = (self.collection_paper_selected + 1)
-                            .min(self.collection_papers.len().saturating_sub(1));
+                            .min(self.filtered_collection_papers().len().saturating_sub(1));
                     } else {
                         self.collection_selected = (self.collection_selected + 1)
-                            .min(self.collections.len().saturating_sub(1));
+                            .min(self.filtered_collections().len().saturating_sub(1));
                     }
                 } else if self.page == Page::Authors {
                     if self.active_author.is_some() {
                         self.author_paper_selected = (self.author_paper_selected + 1)
-                            .min(self.author_papers.len().saturating_sub(1));
+                            .min(self.filtered_author_papers().len().saturating_sub(1));
                     } else {
                         self.author_selected =
-                            (self.author_selected + 1).min(self.authors.len().saturating_sub(1));
+                            (self.author_selected + 1).min(self.filtered_authors().len().saturating_sub(1));
                     }
                 } else if self.page == Page::Bookmarks {
                     self.bookmark_selected =
-                        (self.bookmark_selected + 1).min(self.bookmarks.len().saturating_sub(1));
+                        (self.bookmark_selected + 1).min(self.filtered_bookmarks().len().saturating_sub(1));
                 }
             }
             Command::Open => {
@@ -468,11 +605,25 @@ impl App {
                 self.palette_scroll = 0;
             }
             Command::ToggleHelp => {
-                self.mode = if self.mode == AppMode::Help {
-                    AppMode::Normal
+                if self.mode == AppMode::Help {
+                    self.mode = AppMode::Normal;
                 } else {
-                    AppMode::Help
-                };
+                    self.mode = AppMode::Help;
+                }
+            }
+            Command::ToggleWorkspaceSearch => {
+                if matches!(
+                    self.page,
+                    Page::Library | Page::Downloads | Page::Collections | Page::Authors | Page::Bookmarks
+                ) {
+                    if self.mode == AppMode::WorkspaceSearch {
+                        self.mode = AppMode::Normal;
+                        self.content_focused = true;
+                    } else {
+                        self.mode = AppMode::WorkspaceSearch;
+                        self.content_focused = true;
+                    }
+                }
             }
             Command::Quit => self.should_quit = true,
         }

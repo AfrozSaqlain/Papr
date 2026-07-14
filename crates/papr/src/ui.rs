@@ -48,7 +48,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         AppMode::PaperDetail => render_paper_detail(frame, app, theme),
         AppMode::NoteEdit => render_note_editor(frame, app, theme),
         AppMode::Prompt => render_metadata_prompt(frame, app, theme),
-        AppMode::Normal | AppMode::Search => {}
+        AppMode::Normal | AppMode::Search | AppMode::WorkspaceSearch => {}
     }
 }
 
@@ -114,20 +114,30 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         area.width.saturating_sub(4),
         area.height.saturating_sub(2),
     );
+    let mut workspace_area = inset;
+    if matches!(
+        app.page,
+        Page::Library | Page::Downloads | Page::Collections | Page::Authors | Page::Bookmarks
+    ) {
+        let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(4)]).split(inset);
+        render_workspace_search_bar(frame, rows[0], app, theme);
+        workspace_area = rows[1];
+    }
+
     if app.page == Page::Dashboard {
         render_dashboard(frame, inset, app, theme);
     } else if app.page == Page::Discover {
         render_discover(frame, inset, app, theme);
     } else if app.page == Page::Library {
-        render_library(frame, inset, app, theme);
+        render_library(frame, workspace_area, app, theme);
     } else if app.page == Page::Downloads {
-        render_downloads(frame, inset, app, theme);
+        render_downloads(frame, workspace_area, app, theme);
     } else if app.page == Page::Collections {
-        render_collections(frame, inset, app, theme);
+        render_collections(frame, workspace_area, app, theme);
     } else if app.page == Page::Authors {
-        render_authors(frame, inset, app, theme);
+        render_authors(frame, workspace_area, app, theme);
     } else if app.page == Page::Bookmarks {
-        render_organization(frame, inset, app, theme);
+        render_organization(frame, workspace_area, app, theme);
     } else if app.page == Page::Notes {
         frame.render_widget(
             Paragraph::new("Select a paper in Library or Discover and press n to edit its note.")
@@ -156,12 +166,49 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
     }
 }
 
+fn render_workspace_search_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let style = if app.mode == AppMode::WorkspaceSearch {
+        Style::default().fg(theme.text).bg(theme.surface)
+    } else {
+        Style::default().fg(theme.muted)
+    };
+    let border_style = if app.mode == AppMode::WorkspaceSearch {
+        Style::default().fg(theme.accent)
+    } else {
+        Style::default().fg(theme.border)
+    };
+    
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(" Local Search (Ctrl+/) ");
+    
+    let mut text = app.workspace_query.clone();
+    if text.is_empty() && app.mode != AppMode::WorkspaceSearch {
+        text = "Type to filter...".to_owned();
+    }
+    frame.render_widget(Paragraph::new(text).style(style).block(block), area);
+    
+    if app.mode == AppMode::WorkspaceSearch {
+        let cursor_offset = app
+            .workspace_query
+            .chars()
+            .take(app.workspace_query_cursor)
+            .count();
+        frame.set_cursor_position((
+            area.x.saturating_add(1).saturating_add(u16::try_from(cursor_offset).unwrap_or(0)),
+            area.y.saturating_add(1),
+        ));
+    }
+}
+
 fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     if app.active_collection.is_some() {
         render_collection_papers(frame, area, app, theme);
         return;
     }
-    if app.collections.is_empty() {
+    let collections = app.filtered_collections();
+    if collections.is_empty() {
         frame.render_widget(
             Paragraph::new("No collections yet. Select a paper and press s to create one.")
                 .alignment(Alignment::Center)
@@ -170,19 +217,36 @@ fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
         );
         return;
     }
-    let items = app.collections.iter().map(|collection| {
-        ListItem::new(vec![
-            Line::styled(
-                &collection.name,
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Line::styled(
-                format!("{} papers", collection.paper_count),
-                Style::default().fg(theme.muted),
-            ),
-        ])
+    let items = collections.iter().map(|item| {
+        use papr_core::CollectionSearchItem;
+        match item {
+            CollectionSearchItem::Collection(collection) => {
+                ListItem::new(vec![
+                    Line::styled(
+                        &collection.name,
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Line::styled(
+                        format!("{} papers", collection.paper_count),
+                        Style::default().fg(theme.muted),
+                    ),
+                ])
+            }
+            CollectionSearchItem::Paper(paper, _) => {
+                ListItem::new(vec![
+                    Line::styled(
+                        format!("  {}", paper.title),
+                        Style::default().fg(theme.text),
+                    ),
+                    Line::styled(
+                        format!("    {}", paper.authors),
+                        Style::default().fg(theme.muted),
+                    ),
+                ])
+            }
+        }
     });
     let list = List::new(items)
         .block(
@@ -201,9 +265,10 @@ fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
 }
 
 fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
-    let Some(collection) = app.active_collection.as_ref() else {
+    let Some(collection) = &app.active_collection else {
         return;
     };
+    let papers = app.filtered_collection_papers();
     let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(4)]).split(area);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -221,7 +286,7 @@ fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
         ])),
         rows[0],
     );
-    if app.collection_papers.is_empty() {
+    if papers.is_empty() {
         frame.render_widget(
             Paragraph::new("No papers are assigned to this collection.")
                 .alignment(Alignment::Center)
@@ -230,7 +295,7 @@ fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
         );
         return;
     }
-    let items = app.collection_papers.iter().map(|paper| {
+    let items = papers.iter().map(|paper| {
         let availability = if paper.pdf_path.is_some() {
             "PDF available"
         } else {
@@ -251,7 +316,7 @@ fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
     let list = List::new(items)
         .block(
             Block::default()
-                .title(format!(" {} PAPERS ", app.collection_papers.len()))
+                .title(format!(" {} PAPERS ", papers.len()))
                 .borders(Borders::TOP)
                 .border_style(Style::default().fg(theme.border)),
         )
@@ -269,7 +334,8 @@ fn render_authors(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         render_author_papers(frame, area, app, theme);
         return;
     }
-    if app.authors.is_empty() {
+    let authors = app.filtered_authors();
+    if authors.is_empty() {
         frame.render_widget(
             Paragraph::new("No authors found in your library.")
                 .alignment(Alignment::Center)
@@ -278,7 +344,7 @@ fn render_authors(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         );
         return;
     }
-    let items = app.authors.iter().map(|author| {
+    let items = authors.iter().map(|author| {
         ListItem::new(vec![
             Line::styled(
                 &author.name,
@@ -295,7 +361,7 @@ fn render_authors(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
     let list = List::new(items)
         .block(
             Block::default()
-                .title(" AUTHORS - ENTER VIEW ")
+                .title(format!(" {} AUTHORS - ENTER VIEW ", authors.len()))
                 .borders(Borders::TOP)
                 .border_style(Style::default().fg(theme.border)),
         )
@@ -309,9 +375,10 @@ fn render_authors(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
 }
 
 fn render_author_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
-    let Some(author) = app.active_author.as_ref() else {
+    let Some(author) = &app.active_author else {
         return;
     };
+    let papers = app.filtered_author_papers();
     let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(4)]).split(area);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -329,7 +396,7 @@ fn render_author_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
         ])),
         rows[0],
     );
-    if app.author_papers.is_empty() {
+    if papers.is_empty() {
         frame.render_widget(
             Paragraph::new("No papers found for this author.")
                 .alignment(Alignment::Center)
@@ -338,7 +405,7 @@ fn render_author_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
         );
         return;
     }
-    let items = app.author_papers.iter().map(|paper| {
+    let items = papers.iter().map(|paper| {
         let availability = if paper.pdf_path.is_some() {
             "PDF available"
         } else {
@@ -359,7 +426,7 @@ fn render_author_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
     let list = List::new(items)
         .block(
             Block::default()
-                .title(format!(" {} PAPERS ", app.author_papers.len()))
+                .title(format!(" {} PAPERS ", papers.len()))
                 .borders(Borders::TOP)
                 .border_style(Style::default().fg(theme.border)),
         )
@@ -862,6 +929,7 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
 
 fn render_library(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(4)]).split(area);
+    let papers = app.filtered_library_papers();
     let message = app
         .library
         .message
@@ -875,7 +943,7 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         })),
         rows[0],
     );
-    if app.library.papers.is_empty() {
+    if papers.is_empty() {
         frame.render_widget(
             Paragraph::new("No local papers indexed")
                 .alignment(Alignment::Center)
@@ -884,7 +952,7 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         );
         return;
     }
-    let items = app.library.papers.iter().map(|paper| {
+    let items = papers.iter().map(|paper| {
         ListItem::new(vec![
             Line::styled(
                 &paper.title,
@@ -897,7 +965,7 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
     let list = List::new(items)
         .block(
             Block::default()
-                .title(format!(" {} PAPERS ", app.library.papers.len()))
+                .title(format!(" {} PAPERS ", papers.len()))
                 .borders(Borders::TOP)
                 .border_style(Style::default().fg(theme.border)),
         )
@@ -923,7 +991,8 @@ fn library_metadata(paper: &LibraryPaper) -> String {
 }
 
 fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
-    if app.downloads.is_empty() {
+    let downloads = app.filtered_downloads();
+    if downloads.is_empty() {
         frame.render_widget(
             Paragraph::new("No downloads yet. Press d on an arXiv paper to start one.")
                 .alignment(Alignment::Center)
@@ -932,7 +1001,7 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
         );
         return;
     }
-    let items = app.downloads.iter().map(|download| {
+    let items = downloads.iter().map(|download| {
         let (label, color) = match &download.status {
             DownloadStatus::Starting => ("Starting".to_owned(), theme.warning),
             DownloadStatus::Running => (
