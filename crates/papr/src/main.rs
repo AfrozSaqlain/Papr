@@ -146,10 +146,7 @@ async fn main() -> Result<()> {
         .context("failed to load library")?;
     refresh_organization(&database, &library_roots, &mut app)?;
     let (watch_sender, watch_receiver) = mpsc::unbounded_channel();
-    let _watcher = LibraryWatcher::start(&library_roots, move || {
-        let _ = watch_sender.send(());
-    })
-    .context("failed to watch library folders")?;
+    let watcher = start_library_watcher(&library_roots, watch_sender.clone())?;
 
     let arxiv = ArxivClient::new().context("failed to initialize arXiv client")?;
     let downloads = DownloadManager::new().context("failed to initialize download manager")?;
@@ -173,7 +170,9 @@ async fn main() -> Result<()> {
         dashboard_keywords,
         dashboard_keyword_signature,
         dashboard_feed_date: local_feed_date(),
+        watch_sender,
         watch_receiver,
+        _watcher: watcher,
     };
     run(&mut session, &mut app, theme, runtime).await
 }
@@ -288,7 +287,9 @@ struct Runtime {
     dashboard_keywords: Vec<String>,
     dashboard_keyword_signature: String,
     dashboard_feed_date: String,
+    watch_sender: mpsc::UnboundedSender<()>,
     watch_receiver: mpsc::UnboundedReceiver<()>,
+    _watcher: LibraryWatcher,
 }
 
 fn config_editor_wrap_rows(char_len: usize, wrap_width: usize) -> usize {
@@ -830,9 +831,7 @@ fn apply_ui_action(
             refresh_library(runtime, app)?;
             refresh_organization(&runtime.database, &runtime.library_roots, app)?;
             refresh_dashboard(runtime, app)?;
-            app.downloads.clear();
-            discover_local_downloads(app, &runtime.download_dir, &runtime.database);
-            app.download_selected = app.download_selected.min(app.downloads.len().saturating_sub(1));
+            refresh_downloads(runtime, app);
             app.toast = Some("PDF permanently deleted".into());
         }
         UiAction::DeleteCollection { collection_id, path } => {
@@ -859,9 +858,7 @@ fn apply_ui_action(
             refresh_library(runtime, app)?;
             refresh_organization(&runtime.database, &runtime.library_roots, app)?;
             refresh_dashboard(runtime, app)?;
-            app.downloads.clear();
-            discover_local_downloads(app, &runtime.download_dir, &runtime.database);
-            app.download_selected = app.download_selected.min(app.downloads.len().saturating_sub(1));
+            refresh_downloads(runtime, app);
             app.toast = Some("Collection permanently deleted".into());
         }
     }
@@ -923,6 +920,7 @@ fn apply_collection_prompt(
             refresh_library(runtime, app)?;
             refresh_organization(&runtime.database, &runtime.library_roots, app)?;
             refresh_dashboard(runtime, app)?;
+            refresh_downloads(runtime, app);
         }
         return Ok(());
     }
@@ -1023,6 +1021,8 @@ fn apply_collection_prompt(
     }
     refresh_library(runtime, app)?;
     refresh_organization(&runtime.database, &runtime.library_roots, app)?;
+    refresh_dashboard(runtime, app)?;
+    refresh_downloads(runtime, app);
     Ok(())
 }
 
@@ -1263,6 +1263,42 @@ fn refresh_dashboard(runtime: &Runtime, app: &mut App) -> Result<()> {
     Ok(())
 }
 
+fn refresh_downloads_from_dir(
+    app: &mut App,
+    download_dir: &Path,
+    database: &Database,
+) {
+    let previous_selected_path = app
+        .filtered_downloads()
+        .get(app.download_selected)
+        .and_then(|task| task.pdf_path.clone());
+    let previous_selected = app.download_selected;
+
+    let mut transient_downloads = app
+        .downloads
+        .iter()
+        .filter(|task| !matches!(task.status, DownloadStatus::Completed))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    app.downloads.clear();
+    app.downloads.append(&mut transient_downloads);
+    discover_local_downloads(app, download_dir, database);
+
+    app.download_selected = previous_selected_path
+        .as_ref()
+        .and_then(|path| {
+            app.filtered_downloads()
+                .iter()
+                .position(|task| task.pdf_path.as_deref() == Some(path.as_str()))
+        })
+        .unwrap_or_else(|| previous_selected.min(app.filtered_downloads().len().saturating_sub(1)));
+}
+
+fn refresh_downloads(runtime: &Runtime, app: &mut App) {
+    refresh_downloads_from_dir(app, &runtime.download_dir, &runtime.database);
+}
+
 fn default_pdf_viewer() -> String {
     if cfg!(target_os = "macos") {
         "open".into()
@@ -1401,6 +1437,21 @@ fn start_scan(
             directories: LibraryIndexer::collection_directories(&collection_roots),
         });
     });
+}
+
+fn start_library_watcher(
+    roots: &[PathBuf],
+    watch_sender: mpsc::UnboundedSender<()>,
+) -> Result<LibraryWatcher> {
+    LibraryWatcher::start(roots, move || {
+        let _ = watch_sender.send(());
+    })
+    .context("failed to watch library folders")
+}
+
+fn restart_runtime_watcher(runtime: &mut Runtime) -> Result<()> {
+    runtime._watcher = start_library_watcher(&runtime.library_roots, runtime.watch_sender.clone())?;
+    Ok(())
 }
 
 fn spawn_enrichment_if_needed(
@@ -1558,6 +1609,7 @@ fn apply_index_response(
     refresh_library(runtime, app)?;
     refresh_organization(&runtime.database, &runtime.library_roots, app)?;
     refresh_dashboard(runtime, app)?;
+    refresh_downloads(runtime, app);
     Ok(())
 }
 
@@ -2635,9 +2687,11 @@ fn apply_config_update(
     runtime.dashboard_keywords = config.dashboard_keyword_list();
     runtime.dashboard_keyword_signature.clear();
 
+    restart_runtime_watcher(runtime)?;
     refresh_library(runtime, app)?;
     refresh_organization(&runtime.database, &runtime.library_roots, app)?;
     refresh_dashboard(runtime, app)?;
+    refresh_downloads(runtime, app);
 
     Ok(())
 }
@@ -2875,16 +2929,18 @@ fn handle_config_editor_insert_key(app: &mut App, key: KeyEvent) {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use chrono::{TimeZone, Utc};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use papr_core::{
-        App, AppMode, BookmarkSummary, CollectionSummary, LibraryPaper, Page, PaperNote,
-        RemotePaper,
+        App, AppMode, BookmarkSummary, CollectionSummary, Database, DownloadStatus, DownloadTask,
+        LibraryPaper, Page, PaperNote, RemotePaper,
     };
 
     use super::{
         UiAction, build_config_editor_view, cursor_visual_position, diverse_latest_papers,
-        handle_config_editor_insert_key, handle_key, parse_command,
+        handle_config_editor_insert_key, handle_key, parse_command, refresh_downloads_from_dir,
     };
 
     #[test]
@@ -3099,6 +3155,73 @@ mod tests {
     fn cursor_visual_position_handles_wrap_boundary_at_line_end() {
         let (row, col) = cursor_visual_position("abcd", 4, 4);
         assert_eq!((row, col), (0, 3));
+    }
+
+    #[test]
+    fn downloads_workspace_syncs_completed_entries_to_download_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "papr-download-sync-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_micros()
+        ));
+        fs::create_dir_all(&root)?;
+        let keep_path = root.join("keep.pdf");
+        fs::write(&keep_path, b"%PDF keep")?;
+
+        let database = Database::in_memory()?;
+        let mut app = App {
+            downloads: vec![
+                DownloadTask {
+                    id: "stale".into(),
+                    title: "Stale".into(),
+                    downloaded: 10,
+                    total: Some(10),
+                    paper_id: None,
+                    pdf_path: Some(root.join("stale.pdf").to_string_lossy().into_owned()),
+                    status: DownloadStatus::Completed,
+                },
+                DownloadTask {
+                    id: "running".into(),
+                    title: "Running".into(),
+                    downloaded: 5,
+                    total: Some(10),
+                    paper_id: None,
+                    pdf_path: None,
+                    status: DownloadStatus::Running,
+                },
+            ],
+            ..App::default()
+        };
+
+        refresh_downloads_from_dir(&mut app, &root, &database);
+        assert_eq!(app.downloads.len(), 2);
+        assert!(app.downloads.iter().any(|task| task.id == "running"));
+        assert!(
+            app.downloads
+                .iter()
+                .any(|task| task.pdf_path.as_deref() == Some(keep_path.to_string_lossy().as_ref()))
+        );
+        assert!(!app.downloads.iter().any(|task| task.id == "stale"));
+
+        let incoming_path = root.join("incoming.pdf");
+        fs::write(&incoming_path, b"%PDF incoming")?;
+        fs::remove_file(&keep_path)?;
+        refresh_downloads_from_dir(&mut app, &root, &database);
+
+        assert!(
+            app.downloads
+                .iter()
+                .any(|task| task.pdf_path.as_deref() == Some(incoming_path.to_string_lossy().as_ref()))
+        );
+        assert!(
+            !app.downloads
+                .iter()
+                .any(|task| task.pdf_path.as_deref() == Some(keep_path.to_string_lossy().as_ref()))
+        );
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
     }
 
     #[test]
