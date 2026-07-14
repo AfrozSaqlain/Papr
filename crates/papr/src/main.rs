@@ -235,6 +235,7 @@ enum UiAction {
     OpenAuthor(i64),
     OpenDownload(String),
     RenamePdf(i64),
+    MarkUnread(i64),
     CopyCitation(PaperTarget),
     ConfirmDeletePaper { paper_id: i64, title: String, path: Option<PathBuf> },
     ConfirmDeleteCollection { collection_id: i64, name: String, path: Option<PathBuf> },
@@ -663,9 +664,7 @@ fn apply_ui_action(
             }
             app.mode = AppMode::PaperDetail;
             app.discovery.detail_scroll = 0;
-            refresh_library(runtime, app)?;
-            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
-            refresh_dashboard(runtime, app)?;
+            refresh_paper_views(runtime, app)?;
         }
         UiAction::OpenBrowser(url) => open_browser(&url, app),
         UiAction::Download(paper) => start_download(
@@ -686,9 +685,7 @@ fn apply_ui_action(
                 Some(session_id),
                 Some(senders.app_events.clone()),
             )?;
-            refresh_library(runtime, app)?;
-            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
-            refresh_dashboard(runtime, app)?;
+            refresh_paper_views(runtime, app)?;
         }
         UiAction::OpenNote(target) => {
             let paper_id = resolve_target(target, &mut runtime.database)?;
@@ -765,10 +762,12 @@ fn apply_ui_action(
         }
         UiAction::OpenDownload(id) => {
             let task = app.downloads.iter().find(|t| t.id == id);
+            let mut paper_id = None;
             let mut path = None;
             if let Some(task) = task {
-                if let Some(paper_id) = task.paper_id {
-                    if let Some(paper) = app.library.papers.iter().find(|p| p.id == paper_id) {
+                if let Some(task_paper_id) = task.paper_id {
+                    paper_id = Some(task_paper_id);
+                    if let Some(paper) = app.library.papers.iter().find(|p| p.id == task_paper_id) {
                         if let Some(pdf_path) = &paper.pdf_path {
                             path = Some(PathBuf::from(pdf_path));
                         }
@@ -781,7 +780,22 @@ fn apply_ui_action(
                 }
             }
             let path = path.unwrap_or_else(|| runtime.download_dir.join(format!("{id}.pdf")));
-            open_pdf(&runtime.pdf_viewer, &path, app, None, None)?;
+            let session_id = paper_id.map(|paper_id| runtime.database.record_open(paper_id, true)).transpose()?;
+            open_pdf(
+                &runtime.pdf_viewer,
+                &path,
+                app,
+                session_id,
+                Some(senders.app_events.clone()),
+            )?;
+            if paper_id.is_some() {
+                refresh_paper_views(runtime, app)?;
+            }
+        }
+        UiAction::MarkUnread(paper_id) => {
+            runtime.database.mark_unread(paper_id)?;
+            refresh_paper_views(runtime, app)?;
+            app.toast = Some("Marked unread".into());
         }
         UiAction::CopyCitation(target) => {
             let metadata = match target {
@@ -1297,6 +1311,14 @@ fn refresh_downloads_from_dir(
 
 fn refresh_downloads(runtime: &Runtime, app: &mut App) {
     refresh_downloads_from_dir(app, &runtime.download_dir, &runtime.database);
+}
+
+fn refresh_paper_views(runtime: &Runtime, app: &mut App) -> Result<()> {
+    refresh_library(runtime, app)?;
+    refresh_organization(&runtime.database, &runtime.library_roots, app)?;
+    refresh_dashboard(runtime, app)?;
+    refresh_downloads(runtime, app);
+    Ok(())
 }
 
 fn default_pdf_viewer() -> String {
@@ -1865,6 +1887,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
     if key.code == KeyCode::Char('r') && app.page == papr_core::Page::Library {
         return Some(UiAction::Reindex);
+    }
+    if key.code == KeyCode::Char('u') {
+        if let Some(paper_id) = selected_local_paper_id(app) {
+            return Some(UiAction::MarkUnread(paper_id));
+        }
     }
     if let KeyHandling::Handled(action) = handle_dashboard_key(app, key) {
         return action.map(|action| *action);
@@ -2642,6 +2669,67 @@ fn selected_library_pdf(app: &App) -> Option<(i64, PathBuf)> {
         .map(|path| (paper.id, PathBuf::from(path)))
 }
 
+fn selected_local_paper_id(app: &App) -> Option<i64> {
+    match app.page {
+        papr_core::Page::Library => app
+            .filtered_library_papers()
+            .get(app.library.selected)
+            .map(|paper| paper.id),
+        papr_core::Page::Downloads => app
+            .filtered_downloads()
+            .get(app.download_selected)
+            .and_then(|task| {
+                task.paper_id.or_else(|| {
+                    task.pdf_path.as_ref().and_then(|pdf_path| {
+                        app.library
+                            .papers
+                            .iter()
+                            .find(|paper| paper.pdf_path.as_deref() == Some(pdf_path.as_str()))
+                            .map(|paper| paper.id)
+                    })
+                })
+            }),
+        papr_core::Page::Collections => {
+            if app.active_collection.is_some() {
+                app.filtered_collection_papers()
+                    .get(app.collection_paper_selected)
+                    .map(|paper| paper.id)
+            } else {
+                app.filtered_collections()
+                    .get(app.collection_selected)
+                    .and_then(|item| match item {
+                        papr_core::CollectionSearchItem::Paper(paper, _) => Some(paper.id),
+                        papr_core::CollectionSearchItem::Collection(_) => None,
+                    })
+            }
+        }
+        papr_core::Page::Authors => {
+            if app.active_author.is_some() {
+                app.filtered_author_papers()
+                    .get(app.author_paper_selected)
+                    .map(|paper| paper.id)
+            } else {
+                None
+            }
+        }
+        papr_core::Page::Bookmarks => app
+            .filtered_bookmarks()
+            .get(app.bookmark_selected)
+            .map(|bookmark| bookmark.paper_id),
+        papr_core::Page::Notes => app
+            .filtered_notes_papers()
+            .get(app.notes_selected)
+            .map(|paper| paper.id),
+        papr_core::Page::Dashboard
+        | papr_core::Page::Discover
+        | papr_core::Page::ReadingQueue
+        | papr_core::Page::History
+        | papr_core::Page::Statistics
+        | papr_core::Page::Settings
+        | papr_core::Page::Help => None,
+    }
+}
+
 fn record_config_history(app: &mut App) {
     if app.config_editor_history.is_empty() || app.config_editor_history[app.config_editor_history_idx] != app.config_editor_text {
         app.config_editor_history.truncate(app.config_editor_history_idx + 1);
@@ -2934,9 +3022,10 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use papr_core::{
-        App, AppMode, BookmarkSummary, CollectionSummary, Database, DownloadStatus, DownloadTask,
-        LibraryPaper, Page, PaperNote, RemotePaper,
+        App, AppMode, BookmarkSummary, CollectionSummary, Database, DownloadStatus,
+        DownloadTask, LibraryPaper, Page, PaperNote, RemotePaper,
     };
+    use papr_core::models::AuthorSummary;
 
     use super::{
         UiAction, build_config_editor_view, cursor_visual_position, diverse_latest_papers,
@@ -3222,6 +3311,136 @@ mod tests {
 
         let _ = fs::remove_dir_all(root);
         Ok(())
+    }
+
+    #[test]
+    fn unread_keybind_targets_selected_paper_across_workspaces() {
+        let library_paper = LibraryPaper {
+            id: 11,
+            title: "Library Paper".into(),
+            authors: "Researcher".into(),
+            doi: None,
+            pdf_path: Some("/tmp/library.pdf".into()),
+            file_size: Some(1),
+            reading_status: "read".into(),
+            is_favorite: false,
+        };
+
+        let mut library_app = App {
+            page: Page::Library,
+            content_focused: true,
+            library: papr_core::LibraryState {
+                papers: vec![library_paper.clone()],
+                selected: 0,
+                ..papr_core::LibraryState::default()
+            },
+            ..App::default()
+        };
+        assert!(matches!(
+            handle_key(&mut library_app, KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)),
+            Some(UiAction::MarkUnread(11))
+        ));
+
+        let mut downloads_app = App {
+            page: Page::Downloads,
+            content_focused: true,
+            library: papr_core::LibraryState {
+                papers: vec![library_paper.clone()],
+                ..papr_core::LibraryState::default()
+            },
+            downloads: vec![DownloadTask {
+                id: "paper".into(),
+                title: "Paper".into(),
+                downloaded: 10,
+                total: Some(10),
+                paper_id: Some(11),
+                pdf_path: Some("/tmp/library.pdf".into()),
+                status: DownloadStatus::Completed,
+            }],
+            ..App::default()
+        };
+        assert!(matches!(
+            handle_key(
+                &mut downloads_app,
+                KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)
+            ),
+            Some(UiAction::MarkUnread(11))
+        ));
+
+        let mut collections_app = App {
+            page: Page::Collections,
+            content_focused: true,
+            active_collection: Some(CollectionSummary {
+                id: 1,
+                name: "Collection".into(),
+                paper_count: 1,
+                folder_path: None,
+            }),
+            collection_papers: vec![library_paper.clone()],
+            ..App::default()
+        };
+        assert!(matches!(
+            handle_key(
+                &mut collections_app,
+                KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)
+            ),
+            Some(UiAction::MarkUnread(11))
+        ));
+
+        let mut bookmarks_app = App {
+            page: Page::Bookmarks,
+            content_focused: true,
+            bookmarks: vec![BookmarkSummary {
+                id: 1,
+                paper_id: 11,
+                paper_title: "Bookmarked".into(),
+                authors: "Researcher".into(),
+                year: None,
+                journal: None,
+                doi: None,
+                pdf_path: "/tmp/library.pdf".into(),
+                page: None,
+                label: None,
+            }],
+            ..App::default()
+        };
+        assert!(matches!(
+            handle_key(
+                &mut bookmarks_app,
+                KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)
+            ),
+            Some(UiAction::MarkUnread(11))
+        ));
+
+        let mut authors_app = App {
+            page: Page::Authors,
+            content_focused: true,
+            active_author: Some(AuthorSummary {
+                id: 3,
+                name: "Researcher".into(),
+                paper_count: 1,
+            }),
+            author_papers: vec![library_paper.clone()],
+            ..App::default()
+        };
+        assert!(matches!(
+            handle_key(
+                &mut authors_app,
+                KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)
+            ),
+            Some(UiAction::MarkUnread(11))
+        ));
+
+        let mut notes_app = App {
+            page: Page::Notes,
+            content_focused: true,
+            notes_papers: vec![library_paper],
+            ..App::default()
+        };
+        assert!(matches!(
+            handle_key(&mut notes_app, KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)),
+            Some(UiAction::MarkUnread(11))
+        ));
     }
 
     #[test]

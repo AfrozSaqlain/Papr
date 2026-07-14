@@ -1192,6 +1192,19 @@ impl Database {
         Ok(())
     }
 
+    /// Reset a paper's current reading state to unread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the paper cannot be updated.
+    pub fn mark_unread(&self, paper_id: i64) -> Result<(), DatabaseError> {
+        self.connection.execute(
+            "UPDATE papers SET reading_status = 'unread' WHERE id = ?1",
+            [paper_id],
+        )?;
+        Ok(())
+    }
+
     /// Record a non-reading research activity.
     ///
     /// # Errors
