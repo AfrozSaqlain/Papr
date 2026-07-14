@@ -387,9 +387,9 @@ impl Database {
     /// # Errors
     ///
     /// Returns an error when metadata cannot be queried or persisted.
-    pub fn ensure_remote_paper(&self, paper: &RemotePaper) -> Result<i64, DatabaseError> {
-        let existing = self
-            .connection
+    pub fn ensure_remote_paper(&mut self, paper: &RemotePaper) -> Result<i64, DatabaseError> {
+        let transaction = self.connection.transaction()?;
+        let existing = transaction
             .query_row(
                 "SELECT id FROM papers WHERE arxiv_id = ?1 OR (?2 IS NOT NULL AND doi = ?2)
                  ORDER BY CASE WHEN arxiv_id = ?1 THEN 0 ELSE 1 END LIMIT 1",
@@ -397,8 +397,8 @@ impl Database {
                 |row| row.get::<_, i64>(0),
             )
             .optional()?;
-        if let Some(id) = existing {
-            self.connection.execute(
+        let paper_id = if let Some(id) = existing {
+            transaction.execute(
                 "UPDATE papers SET title = ?1, abstract = ?2, arxiv_id = ?3,
                  doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6 WHERE id = ?7",
                 params![
@@ -411,21 +411,48 @@ impl Database {
                     id
                 ],
             )?;
-            return Ok(id);
+            id
+        } else {
+            transaction.execute(
+                "INSERT INTO papers (title, abstract, arxiv_id, doi, published_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    paper.title,
+                    paper.abstract_text,
+                    paper.id,
+                    paper.doi,
+                    paper.published.to_rfc3339(),
+                    paper.updated.to_rfc3339()
+                ],
+            )?;
+            transaction.last_insert_rowid()
+        };
+        transaction.execute("DELETE FROM paper_authors WHERE paper_id = ?1", [paper_id])?;
+        for (position, author) in paper.authors.iter().enumerate() {
+            let author_id = if let Some(id) = transaction
+                .query_row(
+                    "SELECT id FROM authors WHERE name = ?1 COLLATE NOCASE ORDER BY id LIMIT 1",
+                    [author],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+            {
+                id
+            } else {
+                transaction.execute("INSERT INTO authors (name) VALUES (?1)", [author])?;
+                transaction.last_insert_rowid()
+            };
+            transaction.execute(
+                "INSERT INTO paper_authors (paper_id, author_id, position) VALUES (?1, ?2, ?3)",
+                params![
+                    paper_id,
+                    author_id,
+                    i64::try_from(position).unwrap_or(i64::MAX)
+                ],
+            )?;
         }
-        self.connection.execute(
-            "INSERT INTO papers (title, abstract, arxiv_id, doi, published_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                paper.title,
-                paper.abstract_text,
-                paper.id,
-                paper.doi,
-                paper.published.to_rfc3339(),
-                paper.updated.to_rfc3339()
-            ],
-        )?;
-        Ok(self.connection.last_insert_rowid())
+        transaction.commit()?;
+        Ok(paper_id)
     }
 
     /// Load the note for a paper, returning an empty draft when absent.
@@ -1248,6 +1275,134 @@ impl Database {
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+    /// Return local papers that have no author metadata and either have an
+    /// `arxiv_id` already set or a filename that looks like an arXiv ID.
+    ///
+    /// Each entry is `(paper_id, candidate_arxiv_id)` ready for API lookup.
+    ///
+    /// # Errors
+    /// Returns an error when the query fails.
+    pub fn papers_needing_enrichment(&self) -> Result<Vec<(i64, String)>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT p.id, p.arxiv_id, p.pdf_path
+             FROM papers p
+             WHERE p.pdf_path IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM paper_authors pa WHERE pa.paper_id = p.id
+               )",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            let arxiv_id: Option<String> = row.get(1)?;
+            let pdf_path: Option<String> = row.get(2)?;
+            Ok((id, arxiv_id, pdf_path))
+        })?;
+        let mut result = Vec::new();
+        for row in rows {
+            let (id, arxiv_id, pdf_path) = row?;
+            if let Some(aid) = arxiv_id.filter(|s| !s.is_empty()) {
+                let bare = aid.rsplit('/').next().unwrap_or(&aid);
+                let bare = strip_arxiv_version(bare);
+                result.push((id, bare.to_owned()));
+            } else if let Some(path) = pdf_path {
+                if let Some(extracted) = extract_arxiv_id(&path) {
+                    result.push((id, extracted));
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// Update an existing paper row with metadata fetched from arXiv.
+    ///
+    /// # Errors
+    /// Returns an error when the update or author insertion fails.
+    pub fn apply_arxiv_metadata(
+        &mut self,
+        paper_id: i64,
+        paper: &RemotePaper,
+    ) -> Result<(), DatabaseError> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "UPDATE papers SET title = ?1, abstract = ?2, arxiv_id = ?3,
+             doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6
+             WHERE id = ?7",
+            params![
+                paper.title,
+                paper.abstract_text,
+                paper.id,
+                paper.doi,
+                paper.published.to_rfc3339(),
+                paper.updated.to_rfc3339(),
+                paper_id
+            ],
+        )?;
+        transaction.execute("DELETE FROM paper_authors WHERE paper_id = ?1", [paper_id])?;
+        for (position, author) in paper.authors.iter().enumerate() {
+            let author_id = if let Some(id) = transaction
+                .query_row(
+                    "SELECT id FROM authors WHERE name = ?1 COLLATE NOCASE ORDER BY id LIMIT 1",
+                    [author],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+            {
+                id
+            } else {
+                transaction.execute("INSERT INTO authors (name) VALUES (?1)", [author])?;
+                transaction.last_insert_rowid()
+            };
+            transaction.execute(
+                "INSERT INTO paper_authors (paper_id, author_id, position) VALUES (?1, ?2, ?3)",
+                params![
+                    paper_id,
+                    author_id,
+                    i64::try_from(position).unwrap_or(i64::MAX)
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+}
+
+/// Strip a trailing version suffix like `v1`, `v2`, etc. from an arXiv ID.
+fn strip_arxiv_version(id: &str) -> &str {
+    if let Some(pos) = id.rfind('v') {
+        if id[pos + 1..].chars().all(|c| c.is_ascii_digit()) && pos + 1 < id.len() {
+            return &id[..pos];
+        }
+    }
+    id
+}
+
+/// Try to extract an arXiv ID from a file path.
+fn extract_arxiv_id(path: &str) -> Option<String> {
+    let filename = path.rsplit('/').next().unwrap_or(path);
+    let stem = filename.strip_suffix(".pdf").unwrap_or(filename);
+    let bytes = stem.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i + 9 <= len {
+        if bytes[i].is_ascii_digit()
+            && bytes[i + 1].is_ascii_digit()
+            && bytes[i + 2].is_ascii_digit()
+            && bytes[i + 3].is_ascii_digit()
+            && bytes[i + 4] == b'.'
+        {
+            let mut j = i + 5;
+            while j < len && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            let digit_count = j - (i + 5);
+            if digit_count >= 4 && digit_count <= 5 {
+                let candidate = &stem[i..j];
+                return Some(candidate.to_owned());
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 fn reading_streak(dates: &std::collections::HashSet<NaiveDate>, today: NaiveDate) -> u64 {
@@ -1313,7 +1468,7 @@ mod tests {
 
     #[test]
     fn remote_only_papers_do_not_appear_in_library() -> Result<(), Box<dyn std::error::Error>> {
-        let database = Database::in_memory()?;
+        let mut database = Database::in_memory()?;
         let timestamp = Utc
             .with_ymd_and_hms(2026, 2, 1, 0, 0, 0)
             .single()

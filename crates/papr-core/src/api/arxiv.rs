@@ -98,6 +98,24 @@ impl ArxivClient {
             .await
     }
 
+    /// Fetch metadata for a specific arXiv ID.
+    ///
+    /// # Errors
+    /// Returns an error when the request fails or Atom content is malformed.
+    pub async fn get_by_id(&self, id: &str) -> Result<Option<RemotePaper>, ArxivError> {
+        let response = self
+            .client
+            .get(self.endpoint.clone())
+            .query(&[("id_list", id)])
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        let mut papers = parse_feed(&response)?;
+        Ok(papers.pop())
+    }
+
     async fn query(
         &self,
         search_query: &str,

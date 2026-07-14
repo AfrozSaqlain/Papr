@@ -303,6 +303,8 @@ pub struct App {
     pub plugins: Vec<PluginInfo>,
     /// Number of invalid plugin bundles found at startup.
     pub plugin_diagnostics: usize,
+    /// Whether background arXiv metadata enrichment is in progress.
+    pub enrichment_pending: bool,
 }
 
 impl Default for App {
@@ -353,6 +355,7 @@ impl Default for App {
             modal_return: AppMode::Normal,
             plugins: Vec::new(),
             plugin_diagnostics: 0,
+            enrichment_pending: false,
         }
     }
 }

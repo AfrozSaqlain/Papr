@@ -264,6 +264,13 @@ struct ActionSenders {
     download: mpsc::UnboundedSender<DownloadEvent>,
     today: mpsc::UnboundedSender<TodayResponse>,
     app_events: mpsc::UnboundedSender<AppEvent>,
+    enrichment: mpsc::UnboundedSender<MetadataEnrichment>,
+}
+
+#[derive(Debug)]
+struct MetadataEnrichment {
+    paper_id: i64,
+    paper: RemotePaper,
 }
 
 #[derive(Debug)]
@@ -291,12 +298,14 @@ async fn run(
     let (download_sender, mut download_receiver) = mpsc::unbounded_channel::<DownloadEvent>();
     let (today_sender, mut today_receiver) = mpsc::unbounded_channel::<TodayResponse>();
     let (app_events_sender, mut app_events_receiver) = mpsc::unbounded_channel::<AppEvent>();
+    let (enrichment_sender, mut enrichment_receiver) = mpsc::unbounded_channel::<MetadataEnrichment>();
     let senders = ActionSenders {
         search: sender,
         index: index_sender,
         download: download_sender,
         today: today_sender,
         app_events: app_events_sender,
+        enrichment: enrichment_sender,
     };
     let mut pending_downloads = HashMap::<String, RemotePaper>::new();
     refresh_dashboard_papers(&runtime, &senders, app)?;
@@ -347,7 +356,16 @@ async fn run(
             start_runtime_scan(&runtime, &senders, app);
         }
         while let Ok(response) = index_receiver.try_recv() {
-            apply_index_response(response, &runtime, app)?;
+            apply_index_response(response, &mut runtime, &senders, app)?;
+        }
+        while let Ok(MetadataEnrichment { paper_id, paper }) = enrichment_receiver.try_recv() {
+            runtime.database.apply_arxiv_metadata(paper_id, &paper)?;
+        }
+        if enrichment_receiver.is_empty() && app.enrichment_pending {
+            app.enrichment_pending = false;
+            refresh_library(&runtime, app)?;
+            refresh_organization(&runtime.database, app)?;
+            refresh_dashboard(&mut runtime, app)?;
         }
         while let Ok(event) = download_receiver.try_recv() {
             apply_download_event(
@@ -449,7 +467,7 @@ fn apply_ui_action(
             refresh_dashboard(runtime, app)?;
         }
         UiAction::OpenNote(target) => {
-            let paper_id = resolve_target(target, &runtime.database)?;
+            let paper_id = resolve_target(target, &mut runtime.database)?;
             runtime
                 .database
                 .record_activity("note_opened", Some(paper_id), None)?;
@@ -459,7 +477,7 @@ fn apply_ui_action(
         }
         UiAction::SaveNote(note) => runtime.database.save_note(&note)?,
         UiAction::Prompt(target) => {
-            let paper_id = resolve_target(target, &runtime.database)?;
+            let paper_id = resolve_target(target, &mut runtime.database)?;
             let current = runtime.database.paper_collection_name(paper_id)?;
             show_collection_prompt(app, Some(paper_id), None, current);
         }
@@ -497,7 +515,7 @@ fn apply_ui_action(
             app.toast = Some(format!("Saved {}", prompt.value));
         }
         UiAction::Bookmark(target) => {
-            let paper_id = resolve_target(target, &runtime.database)?;
+            let paper_id = resolve_target(target, &mut runtime.database)?;
             let active = runtime.database.toggle_bookmark(paper_id)?;
             runtime.database.record_activity(
                 "bookmarked",
@@ -770,7 +788,7 @@ fn open_author(database: &Database, app: &mut App, author_id: i64) -> Result<()>
     Ok(())
 }
 
-fn resolve_target(target: PaperTarget, database: &Database) -> Result<i64> {
+fn resolve_target(target: PaperTarget, database: &mut Database) -> Result<i64> {
     match target {
         PaperTarget::Local(id) => Ok(id),
         PaperTarget::Remote(paper) => database.ensure_remote_paper(&paper).map_err(Into::into),
@@ -1063,35 +1081,68 @@ fn start_runtime_scan(runtime: &Runtime, senders: &ActionSenders, app: &mut App)
     );
 }
 
-fn apply_index_response(response: IndexResponse, runtime: &Runtime, app: &mut App) -> Result<()> {
-    let database = &runtime.database;
+fn apply_index_response(
+    response: IndexResponse,
+    runtime: &mut Runtime,
+    senders: &ActionSenders,
+    app: &mut App,
+) -> Result<()> {
     match response {
         IndexResponse::Scan { pdfs, directories } => {
             let found = pdfs.len();
             let mut imported = 0_usize;
             for directory in &directories {
-                database.sync_collection_directory(directory)?;
+                runtime.database.sync_collection_directory(directory)?;
             }
             for pdf in &pdfs {
-                imported += usize::from(database.import_pdf(pdf)?);
-                if let Some(paper_id) = database.paper_id_for_pdf(pdf)? {
+                imported += usize::from(runtime.database.import_pdf(pdf)?);
+                if let Some(paper_id) = runtime.database.paper_id_for_pdf(pdf)? {
                     sync_pdf_collection_membership(
-                        database,
+                        &runtime.database,
                         paper_id,
                         pdf,
                         &runtime.collection_roots,
                     )?;
                 }
             }
-            database.reconcile_collections(&runtime.collection_roots, &directories)?;
+            runtime.database.reconcile_collections(&runtime.collection_roots, &directories)?;
             app.library.indexing = false;
             app.library.message = Some(format!("Indexed {found} PDFs, imported {imported} new"));
+
+            let papers = runtime.database.papers_needing_enrichment()?;
+            if !papers.is_empty() {
+                let client = runtime.arxiv.clone();
+                let enrichment_tx = senders.enrichment.clone();
+                let count = papers.len();
+                app.enrichment_pending = true;
+                tokio::spawn(async move {
+                    let mut enriched = 0usize;
+                    for (i, (paper_id, arxiv_id)) in papers.into_iter().enumerate() {
+                        if i > 0 {
+                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        }
+                        match client.get_by_id(&arxiv_id).await {
+                            Ok(Some(paper)) => {
+                                enriched += 1;
+                                let _ = enrichment_tx.send(MetadataEnrichment { paper_id, paper });
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                eprintln!("arXiv enrichment failed for {arxiv_id}: {e}");
+                            }
+                        }
+                    }
+                    if enriched > 0 {
+                        eprintln!("Enriched {enriched}/{count} papers with arXiv metadata");
+                    }
+                });
+            }
         }
         IndexResponse::File(Ok(pdf)) => {
-            let imported = database.import_pdf(&pdf)?;
-            if let Some(paper_id) = database.paper_id_for_pdf(&pdf)? {
+            let imported = runtime.database.import_pdf(&pdf)?;
+            if let Some(paper_id) = runtime.database.paper_id_for_pdf(&pdf)? {
                 sync_pdf_collection_membership(
-                    database,
+                    &runtime.database,
                     paper_id,
                     &pdf,
                     &runtime.collection_roots,
@@ -1106,7 +1157,7 @@ fn apply_index_response(response: IndexResponse, runtime: &Runtime, app: &mut Ap
         IndexResponse::File(Err(error)) => app.library.message = Some(error),
     }
     refresh_library(runtime, app)?;
-    refresh_organization(database, app)?;
+    refresh_organization(&runtime.database, app)?;
     refresh_dashboard(runtime, app)?;
     Ok(())
 }
