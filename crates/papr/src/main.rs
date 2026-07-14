@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
     app.library.papers = database
         .library_papers_in_roots(&library_roots)
         .context("failed to load library")?;
-    refresh_organization(&database, &mut app)?;
+    refresh_organization(&database, &library_roots, &mut app)?;
     let (watch_sender, watch_receiver) = mpsc::unbounded_channel();
     let _watcher = LibraryWatcher::start(&library_roots, move || {
         let _ = watch_sender.send(());
@@ -375,7 +375,7 @@ async fn run(
         }
         if enriched_any {
             refresh_library(&runtime, app)?;
-            refresh_organization(&runtime.database, app)?;
+            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
             refresh_dashboard(&mut runtime, app)?;
         }
         if enrichment_receiver.is_empty() && app.enrichment_pending {
@@ -532,7 +532,7 @@ fn apply_ui_action(
         }
         UiAction::SubmitPrompt(prompt) => {
             apply_collection_prompt(runtime, app, &prompt)?;
-            refresh_organization(&runtime.database, app)?;
+            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
             refresh_dashboard(runtime, app)?;
             app.toast = Some(format!("Saved {}", prompt.value));
         }
@@ -544,7 +544,7 @@ fn apply_ui_action(
                 Some(paper_id),
                 Some(if active { "added" } else { "removed" }),
             )?;
-            refresh_organization(&runtime.database, app)?;
+            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
             refresh_dashboard(runtime, app)?;
             app.toast = Some(if active {
                 "Paper bookmarked".into()
@@ -556,7 +556,7 @@ fn apply_ui_action(
             open_collection(&runtime.database, app, collection_id)?;
         }
         UiAction::OpenAuthor(author_id) => {
-            open_author(&runtime.database, app, author_id)?;
+            open_author(&runtime.database, &runtime.library_roots, app, author_id)?;
         }
         UiAction::OpenDownload(id) => {
             let task = app.downloads.iter().find(|t| t.id == id);
@@ -624,7 +624,7 @@ fn apply_ui_action(
             }
             runtime.database.delete_paper(paper_id)?;
             refresh_library(runtime, app)?;
-            refresh_organization(&runtime.database, app)?;
+            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
             refresh_dashboard(runtime, app)?;
             app.downloads.clear();
             discover_local_downloads(app, &runtime.download_dir, &runtime.database);
@@ -653,7 +653,7 @@ fn apply_ui_action(
                 app.collection_papers.clear();
             }
             refresh_library(runtime, app)?;
-            refresh_organization(&runtime.database, app)?;
+            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
             refresh_dashboard(runtime, app)?;
             app.downloads.clear();
             discover_local_downloads(app, &runtime.download_dir, &runtime.database);
@@ -717,7 +717,7 @@ fn apply_collection_prompt(
             move_pdf_file(&source, &destination)?;
             runtime.database.rename_pdf(paper_id, &destination)?;
             refresh_library(runtime, app)?;
-            refresh_organization(&runtime.database, app)?;
+            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
             refresh_dashboard(runtime, app)?;
         }
         return Ok(());
@@ -753,7 +753,7 @@ fn apply_collection_prompt(
         runtime
             .database
             .reconcile_collections(&runtime.collection_roots, &directories)?;
-        refresh_renamed_collection(&runtime.database, app, collection_id)?;
+        refresh_renamed_collection(&runtime.database, &runtime.library_roots, app, collection_id)?;
         return Ok(());
     }
     if prompt.paper_id.is_none() {
@@ -818,34 +818,22 @@ fn apply_collection_prompt(
         return Err(error.into());
     }
     refresh_library(runtime, app)?;
+    refresh_organization(&runtime.database, &runtime.library_roots, app)?;
     Ok(())
 }
 
 fn refresh_renamed_collection(
     database: &Database,
+    library_roots: &[PathBuf],
     app: &mut App,
     collection_id: i64,
 ) -> Result<()> {
-    app.collections = database.collections()?;
-    app.collection_papers_map = database.collection_papers_map().unwrap_or_default();
+    refresh_organization(database, library_roots, app)?;
     app.collection_selected = app
         .collections
         .iter()
         .position(|collection| collection.id == collection_id)
         .unwrap_or_else(|| app.collections.len().saturating_sub(1));
-    if app.last_opened_collection_id == Some(collection_id) {
-        app.collection_papers = database.papers_for_collection(collection_id)?;
-        app.collection_paper_selected = app
-            .collection_paper_selected
-            .min(app.collection_papers.len().saturating_sub(1));
-    }
-    if app.active_collection.as_ref().map(|item| item.id) == Some(collection_id) {
-        app.active_collection = app
-            .collections
-            .iter()
-            .find(|collection| collection.id == collection_id)
-            .cloned();
-    }
     Ok(())
 }
 
@@ -891,14 +879,14 @@ fn open_collection(database: &Database, app: &mut App, collection_id: i64) -> Re
     Ok(())
 }
 
-fn open_author(database: &Database, app: &mut App, author_id: i64) -> Result<()> {
+fn open_author(database: &Database, library_roots: &[PathBuf], app: &mut App, author_id: i64) -> Result<()> {
     let restore_selection = app.last_opened_author_id == Some(author_id);
     app.active_author = app
         .authors
         .iter()
         .find(|author| author.id == author_id)
         .cloned();
-    app.author_papers = database.author_papers(author_id)?;
+    app.author_papers = database.author_papers(author_id, library_roots)?;
     app.author_paper_selected = if restore_selection {
         app.author_paper_selected
             .min(app.author_papers.len().saturating_sub(1))
@@ -916,7 +904,7 @@ fn resolve_target(target: PaperTarget, database: &mut Database) -> Result<i64> {
     }
 }
 
-fn refresh_organization(database: &Database, app: &mut App) -> Result<()> {
+fn refresh_organization(database: &Database, library_roots: &[PathBuf], app: &mut App) -> Result<()> {
     app.collections = database.collections()?;
     app.collection_papers_map = database.collection_papers_map().unwrap_or_default();
     app.collection_selected = app
@@ -937,14 +925,19 @@ fn refresh_organization(database: &Database, app: &mut App) -> Result<()> {
     app.bookmark_selected = app
         .bookmark_selected
         .min(app.bookmarks.len().saturating_sub(1));
-    app.authors = database.authors()?;
+    app.authors = database.authors(library_roots)?;
     app.author_selected = app.author_selected.min(app.authors.len().saturating_sub(1));
     if let Some(active_id) = app.active_author.as_ref().map(|a| a.id) {
         app.active_author = app.authors.iter().find(|a| a.id == active_id).cloned();
-        app.author_papers = database.author_papers(active_id)?;
-        app.author_paper_selected = app
-            .author_paper_selected
-            .min(app.author_papers.len().saturating_sub(1));
+        if app.active_author.is_some() {
+            app.author_papers = database.author_papers(active_id, library_roots)?;
+            app.author_paper_selected = app
+                .author_paper_selected
+                .min(app.author_papers.len().saturating_sub(1));
+        } else {
+            app.author_papers.clear();
+            app.author_paper_selected = 0;
+        }
     }
     Ok(())
 }
@@ -1353,7 +1346,7 @@ fn apply_index_response(
         IndexResponse::File(Err(error)) => app.library.message = Some(error),
     }
     refresh_library(runtime, app)?;
-    refresh_organization(&runtime.database, app)?;
+    refresh_organization(&runtime.database, &runtime.library_roots, app)?;
     refresh_dashboard(runtime, app)?;
     Ok(())
 }

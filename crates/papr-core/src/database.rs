@@ -1,7 +1,7 @@
 //! `SQLite` persistence and schema migrations.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -1301,30 +1301,59 @@ impl Database {
     ///
     /// # Errors
     /// Returns an error when the query fails.
-    pub fn authors(&self) -> Result<Vec<AuthorSummary>, DatabaseError> {
-        let mut statement = self.connection.prepare(
-            "SELECT a.id, a.name, COUNT(DISTINCT p.id) as paper_count
-             FROM authors a
-             JOIN paper_authors pa ON pa.author_id = a.id AND pa.position < 5
-             JOIN papers p ON p.id = pa.paper_id AND p.pdf_path IS NOT NULL
-             GROUP BY a.id
-             ORDER BY paper_count DESC, a.name ASC",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok(AuthorSummary {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                paper_count: row.get::<_, i64>(2)? as u64,
+    pub fn authors(&self, roots: &[PathBuf]) -> Result<Vec<AuthorSummary>, DatabaseError> {
+        let valid_papers: HashSet<i64> = self
+            .library_papers()?
+            .into_iter()
+            .filter(|paper| {
+                paper.pdf_path.as_deref().is_some_and(|path| {
+                    let path = Path::new(path);
+                    path.is_file() && roots.iter().any(|root| path.starts_with(root))
+                })
             })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            .map(|paper| paper.id)
+            .collect();
+
+        let mut statement = self.connection.prepare(
+            "SELECT a.id, a.name, pa.paper_id
+             FROM authors a
+             JOIN paper_authors pa ON pa.author_id = a.id AND pa.position < 5",
+        )?;
+        
+        let mut author_counts: HashMap<i64, (String, u64)> = HashMap::new();
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let author_id: i64 = row.get(0)?;
+            let name: String = row.get(1)?;
+            let paper_id: i64 = row.get(2)?;
+            if valid_papers.contains(&paper_id) {
+                let entry = author_counts.entry(author_id).or_insert((name, 0));
+                entry.1 += 1;
+            }
+        }
+        
+        let mut result: Vec<AuthorSummary> = author_counts
+            .into_iter()
+            .map(|(id, (name, count))| AuthorSummary {
+                id,
+                name,
+                paper_count: count,
+            })
+            .collect();
+            
+        result.sort_by(|a, b| {
+            b.paper_count
+                .cmp(&a.paper_count)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        Ok(result)
     }
 
     /// List all local papers associated with a specific author (using the first 5 authors per paper).
     ///
     /// # Errors
     /// Returns an error when the query fails.
-    pub fn author_papers(&self, author_id: i64) -> Result<Vec<LibraryPaper>, DatabaseError> {
+    pub fn author_papers(&self, author_id: i64, roots: &[PathBuf]) -> Result<Vec<LibraryPaper>, DatabaseError> {
         let mut statement = self.connection.prepare(
             "SELECT p.id, p.title,
                     COALESCE((SELECT GROUP_CONCAT(a.name, ', ')
@@ -1351,7 +1380,18 @@ impl Database {
                 is_favorite: row.get(7)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let mut papers = Vec::new();
+        for paper in rows {
+            let paper = paper?;
+            let valid = paper.pdf_path.as_deref().is_some_and(|path| {
+                let path = Path::new(path);
+                path.is_file() && roots.iter().any(|root| path.starts_with(root))
+            });
+            if valid {
+                papers.push(paper);
+            }
+        }
+        Ok(papers)
     }
     /// Return local papers that have no author metadata and either have an
     /// `arxiv_id` already set or a filename that looks like an arXiv ID.
@@ -1960,6 +2000,70 @@ mod tests {
                 .dashboard_feed_cache("2026-07-13", "different")?
                 .is_none()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn authors_and_author_papers_stay_synchronized_with_filesystem() -> Result<(), Box<dyn std::error::Error>> {
+        let mut database = Database::in_memory()?;
+        let root = std::env::temp_dir().join(format!("papr-authors-sync-{}-{}", std::process::id(), Utc::now().timestamp_micros()));
+        fs::create_dir_all(&root)?;
+        let pdf_path = root.join("test_author_paper.pdf");
+        fs::write(&pdf_path, "%PDF-1.4 test")?;
+
+        let timestamp = Utc::now();
+        let paper = RemotePaper {
+            id: "https://arxiv.org/abs/2602.00003".into(),
+            title: "Test Author Paper".into(),
+            authors: vec!["Alice Specialist".into()],
+            abstract_text: "Testing authors list synchronization.".into(),
+            published: timestamp,
+            updated: timestamp,
+            categories: vec!["cs.SE".into()],
+            pdf_url: None,
+            doi: None,
+            journal_ref: None,
+        };
+
+        let pdf = ImportedPdf {
+            path: pdf_path.clone(),
+            title: "Test Author Paper".into(),
+            file_size: 14,
+            library_root: Some(root.clone()),
+            relative_directory: None,
+        };
+
+        let paper_id = database.attach_download(&paper, &pdf)?;
+
+        // Case 1: Valid roots, file exists -> Alice should be returned with count 1
+        let authors = database.authors(&[root.clone()])?;
+        assert_eq!(authors.len(), 1);
+        assert_eq!(authors[0].name, "Alice Specialist");
+        assert_eq!(authors[0].paper_count, 1);
+
+        let papers = database.author_papers(authors[0].id, &[root.clone()])?;
+        assert_eq!(papers.len(), 1);
+        assert_eq!(papers[0].id, paper_id);
+
+        // Case 2: File is missing -> Alice should NOT be returned
+        fs::remove_file(&pdf_path)?;
+        let authors = database.authors(&[root.clone()])?;
+        assert!(authors.is_empty());
+        let papers = database.author_papers(1, &[root.clone()])?;
+        assert!(papers.is_empty());
+
+        // Case 3: Re-create file but query with wrong/different roots -> Alice should NOT be returned
+        fs::write(&pdf_path, "%PDF-1.4 test")?;
+        let different_root = root.join("other_dir");
+        let authors = database.authors(&[different_root.clone()])?;
+        assert!(authors.is_empty());
+        let papers = database.author_papers(1, &[different_root.clone()])?;
+        assert!(papers.is_empty());
+
+        // Clean up
+        let _ = fs::remove_file(&pdf_path);
+        let _ = fs::remove_dir(&root);
+
         Ok(())
     }
 
