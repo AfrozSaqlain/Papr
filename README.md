@@ -156,9 +156,9 @@ metadata and ranks stronger title and author matches first. Use a field prefix
 when the intended field is known:
 
 ```text
-author: Prayush Kumar
+author: Saqlain Afroz
 title: gravitational wave inference
-abstract: neutron star equation of state
+abstract: neural networks in gravitational wave astronomy
 category: gr-qc
 ```
 
