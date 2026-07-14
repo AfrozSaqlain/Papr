@@ -379,24 +379,12 @@ pub struct App {
     pub config_editor_history_idx: usize,
     /// Current Vim command string being entered.
     pub config_editor_command: Option<String>,
-    /// Text of the plugins.toml configuration file.
-    pub plugin_editor_text: String,
-    /// Byte cursor position in plugin_editor_text.
-    pub plugin_editor_cursor: usize,
-    /// Whether the plugin configuration editor currently has keyboard focus.
-    pub plugin_editor_focused: bool,
-    /// Whether the plugin editor is in insert mode (otherwise normal mode).
-    pub plugin_editor_insert_mode: bool,
-    /// Validation error message if the saved plugin configuration is invalid.
-    pub plugin_editor_error: Option<String>,
-    /// Vertical scroll offset of the plugin editor.
-    pub plugin_editor_scroll: usize,
-    /// Undo history log of plugin configuration states.
-    pub plugin_editor_history: Vec<String>,
-    /// Index pointing to active state in plugin_editor_history.
-    pub plugin_editor_history_idx: usize,
-    /// Current Vim command string being entered in the plugin editor.
-    pub plugin_editor_command: Option<String>,
+    /// Cached wrapped content width of the editor viewport.
+    pub config_editor_wrap_width: usize,
+    /// Cached visible height of the editor viewport in visual rows.
+    pub config_editor_viewport_height: usize,
+    /// Preferred visual column for vertical cursor movement.
+    pub config_editor_goal_column: Option<usize>,
 }
 
 impl Default for App {
@@ -464,15 +452,9 @@ impl Default for App {
             config_editor_history: Vec::new(),
             config_editor_history_idx: 0,
             config_editor_command: None,
-            plugin_editor_text: String::new(),
-            plugin_editor_cursor: 0,
-            plugin_editor_focused: false,
-            plugin_editor_insert_mode: false,
-            plugin_editor_error: None,
-            plugin_editor_scroll: 0,
-            plugin_editor_history: Vec::new(),
-            plugin_editor_history_idx: 0,
-            plugin_editor_command: None,
+            config_editor_wrap_width: 1,
+            config_editor_viewport_height: 0,
+            config_editor_goal_column: None,
         }
     }
 }

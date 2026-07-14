@@ -138,14 +138,6 @@ async fn main() -> Result<()> {
     app.plugins = plugin_host.plugins();
     app.plugin_diagnostics = plugin_host.diagnostics().len();
     app.config_editor_text = std::fs::read_to_string(&paths.config_file).unwrap_or_default();
-    let plugin_config_path = paths.plugins_config_file.clone();
-    if !plugin_config_path.exists() {
-        if let Some(parent) = plugin_config_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&plugin_config_path, "# Plugin configuration\n");
-    }
-    app.plugin_editor_text = std::fs::read_to_string(&plugin_config_path).unwrap_or_default();
 
     discover_local_downloads(&mut app, &download_dir, &database);
 
@@ -172,7 +164,6 @@ async fn main() -> Result<()> {
         database,
         database_file: paths.database_file.clone(),
         config_file: paths.config_file.clone(),
-        plugins_config_file: paths.plugins_config_file.clone(),
         default_downloads_dir: paths.downloads_dir.clone(),
         download_dir,
         pdf_viewer: config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer),
@@ -275,6 +266,12 @@ struct TodayResponse {
     result: Result<Vec<RemotePaper>, String>,
 }
 
+pub(crate) struct ConfigEditorView {
+    pub lines: Vec<String>,
+    pub cursor_row: usize,
+    pub cursor_col: usize,
+}
+
 struct Runtime {
     arxiv: ArxivClient,
     crossref: papr_core::api::crossref::CrossrefClient,
@@ -282,7 +279,6 @@ struct Runtime {
     database: Database,
     database_file: PathBuf,
     config_file: PathBuf,
-    plugins_config_file: PathBuf,
     default_downloads_dir: PathBuf,
     download_dir: PathBuf,
     pdf_viewer: String,
@@ -293,6 +289,174 @@ struct Runtime {
     dashboard_keyword_signature: String,
     dashboard_feed_date: String,
     watch_receiver: mpsc::UnboundedReceiver<()>,
+}
+
+fn config_editor_wrap_rows(char_len: usize, wrap_width: usize) -> usize {
+    if char_len == 0 {
+        1
+    } else {
+        char_len.div_ceil(wrap_width.max(1))
+    }
+}
+
+fn config_editor_line_start(text: &str, cursor: usize) -> usize {
+    let cursor = cursor.min(text.len());
+    text[..cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0)
+}
+
+fn config_editor_line_end(text: &str, cursor: usize) -> usize {
+    let cursor = cursor.min(text.len());
+    text[cursor..]
+        .find('\n')
+        .map(|idx| cursor + idx)
+        .unwrap_or(text.len())
+}
+
+fn prev_char_boundary(text: &str, cursor: usize) -> usize {
+    if cursor == 0 {
+        return 0;
+    }
+    let mut prev = cursor - 1;
+    while prev > 0 && !text.is_char_boundary(prev) {
+        prev -= 1;
+    }
+    prev
+}
+
+fn next_char_boundary(text: &str, cursor: usize) -> usize {
+    if cursor >= text.len() {
+        return text.len();
+    }
+    let mut next = cursor + 1;
+    while next < text.len() && !text.is_char_boundary(next) {
+        next += 1;
+    }
+    next.min(text.len())
+}
+
+fn byte_index_for_char_column(text: &str, char_col: usize) -> usize {
+    if char_col == 0 {
+        return 0;
+    }
+    text.char_indices()
+        .nth(char_col)
+        .map(|(idx, _)| idx)
+        .unwrap_or(text.len())
+}
+
+fn cursor_visual_position(text: &str, cursor: usize, wrap_width: usize) -> (usize, usize) {
+    let wrap_width = wrap_width.max(1);
+    let cursor = cursor.min(text.len());
+    let before = &text[..cursor];
+    let line_idx = before.chars().filter(|&c| c == '\n').count();
+    let line_start = config_editor_line_start(text, cursor);
+    let line_end = config_editor_line_end(text, cursor);
+    let line = &text[line_start..line_end];
+    let line_col = text[line_start..cursor].chars().count();
+    let line_len = line.chars().count();
+
+    let rows_before = text
+        .split('\n')
+        .take(line_idx)
+        .map(|segment| config_editor_wrap_rows(segment.chars().count(), wrap_width))
+        .sum::<usize>();
+
+    if line_col == line_len && line_len > 0 && line_len % wrap_width == 0 {
+        (rows_before + (line_col / wrap_width).saturating_sub(1), wrap_width - 1)
+    } else {
+        (rows_before + (line_col / wrap_width), line_col % wrap_width)
+    }
+}
+
+fn cursor_from_visual_position(
+    text: &str,
+    target_row: usize,
+    target_col: usize,
+    wrap_width: usize,
+) -> usize {
+    let wrap_width = wrap_width.max(1);
+    let mut row_base = 0_usize;
+    let mut line_start = 0_usize;
+
+    for line in text.split('\n') {
+        let line_len = line.chars().count();
+        let row_count = config_editor_wrap_rows(line_len, wrap_width);
+        if target_row < row_base + row_count {
+            let local_row = target_row - row_base;
+            let target_char_col = (local_row * wrap_width + target_col).min(line_len);
+            return line_start + byte_index_for_char_column(line, target_char_col);
+        }
+        row_base += row_count;
+        line_start += line.len() + 1;
+    }
+
+    text.len()
+}
+
+fn move_config_editor_vertical(app: &mut App, row_delta: isize) {
+    let wrap_width = app.config_editor_wrap_width.max(1);
+    let (row, col) = cursor_visual_position(&app.config_editor_text, app.config_editor_cursor, wrap_width);
+    let goal_col = app.config_editor_goal_column.unwrap_or(col);
+    let total_rows = app
+        .config_editor_text
+        .split('\n')
+        .map(|line| config_editor_wrap_rows(line.chars().count(), wrap_width))
+        .sum::<usize>()
+        .max(1);
+    let target_row = row
+        .saturating_add_signed(row_delta)
+        .min(total_rows.saturating_sub(1));
+    app.config_editor_cursor = cursor_from_visual_position(
+        &app.config_editor_text,
+        target_row,
+        goal_col,
+        wrap_width,
+    );
+    app.config_editor_goal_column = Some(goal_col);
+}
+
+fn reset_config_editor_goal_column(app: &mut App) {
+    app.config_editor_goal_column = None;
+}
+
+pub(crate) fn build_config_editor_view(
+    text: &str,
+    cursor: usize,
+    wrap_width: usize,
+    viewport_height: usize,
+    scroll: &mut usize,
+) -> ConfigEditorView {
+    let wrap_width = wrap_width.max(1);
+    let (cursor_row, cursor_col) = cursor_visual_position(text, cursor, wrap_width);
+
+    if cursor_row < *scroll {
+        *scroll = cursor_row;
+    } else if viewport_height > 0 && cursor_row >= *scroll + viewport_height {
+        *scroll = cursor_row - viewport_height + 1;
+    }
+
+    let mut lines = Vec::new();
+    for (line_idx, line) in text.split('\n').enumerate() {
+        let chars: Vec<char> = line.chars().collect();
+        let row_count = config_editor_wrap_rows(chars.len(), wrap_width);
+        for row in 0..row_count {
+            let prefix = if row == 0 {
+                format!("{:3} ", line_idx + 1)
+            } else {
+                "    ".to_owned()
+            };
+            let start = row * wrap_width;
+            let end = (start + wrap_width).min(chars.len());
+            let segment = chars[start..end].iter().collect::<String>();
+            lines.push(format!("{prefix}{segment}"));
+        }
+    }
+
+    ConfigEditorView {
+        lines,
+        cursor_row,
+        cursor_col,
+    }
 }
 
 struct ActionSenders {
@@ -444,8 +608,6 @@ async fn run(
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     if app.page == papr_core::Page::Settings && app.config_editor_focused {
                         handle_config_editor_key(app, key, &mut runtime, &mut theme);
-                    } else if app.page == papr_core::Page::Settings && app.plugin_editor_focused {
-                        handle_plugin_config_editor_key(app, key, &mut runtime, &mut theme);
                     } else if let Some(action) = handle_key(app, key) {
                         apply_ui_action(
                             action,
@@ -2532,45 +2694,14 @@ fn handle_config_editor_key(
     }
 
     if app.config_editor_insert_mode {
-        match key.code {
-            KeyCode::Esc => {
-                app.config_editor_insert_mode = false;
-            }
-            KeyCode::Backspace => {
-                if app.config_editor_cursor > 0 {
-                    record_config_history(app);
-                    let mut prev = app.config_editor_cursor - 1;
-                    while prev > 0 && !app.config_editor_text.is_char_boundary(prev) {
-                        prev -= 1;
-                    }
-                    app.config_editor_text.remove(prev);
-                    app.config_editor_cursor = prev;
-                }
-            }
-            KeyCode::Delete => {
-                if app.config_editor_cursor < app.config_editor_text.len() {
-                    record_config_history(app);
-                    app.config_editor_text.remove(app.config_editor_cursor);
-                }
-            }
-            KeyCode::Enter => {
-                record_config_history(app);
-                app.config_editor_text.insert(app.config_editor_cursor, '\n');
-                app.config_editor_cursor += 1;
-            }
-            KeyCode::Char(c) => {
-                record_config_history(app);
-                app.config_editor_text.insert(app.config_editor_cursor, c);
-                app.config_editor_cursor += c.len_utf8();
-            }
-            _ => {}
-        }
+        handle_config_editor_insert_key(app, key);
         return None;
     }
 
     match key.code {
         KeyCode::Char('i') => {
             app.config_editor_insert_mode = true;
+            reset_config_editor_goal_column(app);
         }
         KeyCode::Char(':') => {
             app.config_editor_command = Some(String::new());
@@ -2587,21 +2718,17 @@ fn handle_config_editor_key(
                 if app.config_editor_text.as_bytes().get(prev) != Some(&b'\n') {
                     app.config_editor_cursor = prev;
                 }
+                reset_config_editor_goal_column(app);
             }
         }
         KeyCode::Right | KeyCode::Char('l') => {
-            if key.code == KeyCode::Right {
-                app.config_editor_focused = false;
-                app.plugin_editor_focused = true;
-            } else if app.config_editor_cursor < app.config_editor_text.len() {
-                let mut next = app.config_editor_cursor + 1;
-                while next < app.config_editor_text.len() && !app.config_editor_text.is_char_boundary(next) {
-                    next += 1;
-                }
+            if app.config_editor_cursor < app.config_editor_text.len() {
+                let next = next_char_boundary(&app.config_editor_text, app.config_editor_cursor);
                 if app.config_editor_text.as_bytes().get(app.config_editor_cursor) != Some(&b'\n') {
                     app.config_editor_cursor = next.min(app.config_editor_text.len());
                 }
             }
+            reset_config_editor_goal_column(app);
         }
         KeyCode::Up | KeyCode::Char('k') => {
             let text = &app.config_editor_text;
@@ -2620,6 +2747,7 @@ fn handle_config_editor_key(
                     *cursor = target;
                 }
             }
+            reset_config_editor_goal_column(app);
         }
         KeyCode::Down | KeyCode::Char('j') => {
             let text = &app.config_editor_text;
@@ -2640,12 +2768,14 @@ fn handle_config_editor_key(
                     }
                 }
             }
+            reset_config_editor_goal_column(app);
         }
         KeyCode::Char('x') => {
             if app.config_editor_cursor < app.config_editor_text.len() {
                 record_config_history(app);
                 app.config_editor_text.remove(app.config_editor_cursor);
             }
+            reset_config_editor_goal_column(app);
         }
         KeyCode::Char('u') => {
             if app.config_editor_history_idx > 0 {
@@ -2653,6 +2783,7 @@ fn handle_config_editor_key(
                 app.config_editor_text = app.config_editor_history[app.config_editor_history_idx].clone();
                 app.config_editor_cursor = app.config_editor_cursor.min(app.config_editor_text.len());
             }
+            reset_config_editor_goal_column(app);
         }
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if app.config_editor_history_idx + 1 < app.config_editor_history.len() {
@@ -2660,209 +2791,86 @@ fn handle_config_editor_key(
                 app.config_editor_text = app.config_editor_history[app.config_editor_history_idx].clone();
                 app.config_editor_cursor = app.config_editor_cursor.min(app.config_editor_text.len());
             }
+            reset_config_editor_goal_column(app);
         }
         KeyCode::Char('q') => {
             app.config_editor_focused = false;
             app.content_focused = false;
+            reset_config_editor_goal_column(app);
         }
         _ => {}
     }
     None
 }
 
-fn record_plugin_config_history(app: &mut App) {
-    if app.plugin_editor_history.is_empty() || app.plugin_editor_history[app.plugin_editor_history_idx] != app.plugin_editor_text {
-        app.plugin_editor_history.truncate(app.plugin_editor_history_idx + 1);
-        app.plugin_editor_history.push(app.plugin_editor_text.clone());
-        if app.plugin_editor_history.len() > 50 {
-            app.plugin_editor_history.remove(0);
-        }
-        app.plugin_editor_history_idx = app.plugin_editor_history.len() - 1;
-    }
-}
-
-fn handle_plugin_config_editor_key(
-    app: &mut App,
-    key: KeyEvent,
-    runtime: &mut Runtime,
-    _theme: &mut Theme,
-) -> Option<UiAction> {
-    if let Some(mut cmd) = app.plugin_editor_command.clone() {
-        match key.code {
-            KeyCode::Esc => {
-                app.plugin_editor_command = None;
-            }
-            KeyCode::Char(c) => {
-                cmd.push(c);
-                app.plugin_editor_command = Some(cmd);
-            }
-            KeyCode::Backspace => {
-                cmd.pop();
-                app.plugin_editor_command = Some(cmd);
-            }
-            KeyCode::Enter => {
-                app.plugin_editor_command = None;
-                let trimmed = cmd.trim();
-                if trimmed == "w" || trimmed == "wq" {
-                    let toml_str = &app.plugin_editor_text;
-                    match toml::from_str::<toml::Value>(toml_str) {
-                        Ok(_) => {
-                            if let Err(e) = std::fs::write(&runtime.plugins_config_file, toml_str) {
-                                app.plugin_editor_error = Some(format!("Write failed: {e}"));
-                            } else {
-                                app.plugin_editor_error = None;
-                                app.toast = Some("Plugin configuration saved.".to_owned());
-                            }
-                        }
-                        Err(e) => {
-                            app.plugin_editor_error = Some(format!("Invalid TOML: {e}"));
-                        }
-                    }
-                }
-                if trimmed == "q" || (trimmed == "wq" && app.plugin_editor_error.is_none()) {
-                    app.plugin_editor_focused = false;
-                    app.content_focused = false;
-                }
-            }
-            _ => {}
-        }
-        return None;
-    }
-
-    if app.plugin_editor_insert_mode {
-        match key.code {
-            KeyCode::Esc => {
-                app.plugin_editor_insert_mode = false;
-            }
-            KeyCode::Backspace => {
-                if app.plugin_editor_cursor > 0 {
-                    record_plugin_config_history(app);
-                    let mut prev = app.plugin_editor_cursor - 1;
-                    while prev > 0 && !app.plugin_editor_text.is_char_boundary(prev) {
-                        prev -= 1;
-                    }
-                    app.plugin_editor_text.remove(prev);
-                    app.plugin_editor_cursor = prev;
-                }
-            }
-            KeyCode::Delete => {
-                if app.plugin_editor_cursor < app.plugin_editor_text.len() {
-                    record_plugin_config_history(app);
-                    app.plugin_editor_text.remove(app.plugin_editor_cursor);
-                }
-            }
-            KeyCode::Enter => {
-                record_plugin_config_history(app);
-                app.plugin_editor_text.insert(app.plugin_editor_cursor, '\n');
-                app.plugin_editor_cursor += 1;
-            }
-            KeyCode::Char(c) => {
-                record_plugin_config_history(app);
-                app.plugin_editor_text.insert(app.plugin_editor_cursor, c);
-                app.plugin_editor_cursor += c.len_utf8();
-            }
-            _ => {}
-        }
-        return None;
-    }
-
+fn handle_config_editor_insert_key(app: &mut App, key: KeyEvent) {
     match key.code {
-        KeyCode::Char('i') => {
-            app.plugin_editor_insert_mode = true;
+        KeyCode::Esc => {
+            app.config_editor_insert_mode = false;
+            reset_config_editor_goal_column(app);
         }
-        KeyCode::Char(':') => {
-            app.plugin_editor_command = Some(String::new());
+        KeyCode::Left => {
+            app.config_editor_cursor = prev_char_boundary(&app.config_editor_text, app.config_editor_cursor);
+            reset_config_editor_goal_column(app);
         }
-        KeyCode::Left | KeyCode::Char('h') => {
-            if key.code == KeyCode::Left {
-                app.plugin_editor_focused = false;
-                app.config_editor_focused = true;
-            } else if app.plugin_editor_cursor > 0 {
-                let mut prev = app.plugin_editor_cursor - 1;
-                while prev > 0 && !app.plugin_editor_text.is_char_boundary(prev) {
-                    prev -= 1;
-                }
-                if app.plugin_editor_text.as_bytes().get(prev) != Some(&b'\n') {
-                    app.plugin_editor_cursor = prev;
-                }
+        KeyCode::Right => {
+            app.config_editor_cursor = next_char_boundary(&app.config_editor_text, app.config_editor_cursor);
+            reset_config_editor_goal_column(app);
+        }
+        KeyCode::Up => move_config_editor_vertical(app, -1),
+        KeyCode::Down => move_config_editor_vertical(app, 1),
+        KeyCode::Home => {
+            app.config_editor_cursor = config_editor_line_start(&app.config_editor_text, app.config_editor_cursor);
+            reset_config_editor_goal_column(app);
+        }
+        KeyCode::End => {
+            app.config_editor_cursor = config_editor_line_end(&app.config_editor_text, app.config_editor_cursor);
+            reset_config_editor_goal_column(app);
+        }
+        KeyCode::PageUp => move_config_editor_vertical(
+            app,
+            -(app.config_editor_viewport_height.max(1) as isize),
+        ),
+        KeyCode::PageDown => move_config_editor_vertical(
+            app,
+            app.config_editor_viewport_height.max(1) as isize,
+        ),
+        KeyCode::Backspace => {
+            if app.config_editor_cursor > 0 {
+                record_config_history(app);
+                let prev = prev_char_boundary(&app.config_editor_text, app.config_editor_cursor);
+                app.config_editor_text.remove(prev);
+                app.config_editor_cursor = prev;
             }
+            reset_config_editor_goal_column(app);
         }
-        KeyCode::Right | KeyCode::Char('l') => {
-            if app.plugin_editor_cursor < app.plugin_editor_text.len() {
-                let mut next = app.plugin_editor_cursor + 1;
-                while next < app.plugin_editor_text.len() && !app.plugin_editor_text.is_char_boundary(next) {
-                    next += 1;
-                }
-                if app.plugin_editor_text.as_bytes().get(app.plugin_editor_cursor) != Some(&b'\n') {
-                    app.plugin_editor_cursor = next.min(app.plugin_editor_text.len());
-                }
+        KeyCode::Delete => {
+            if app.config_editor_cursor < app.config_editor_text.len() {
+                record_config_history(app);
+                app.config_editor_text.remove(app.config_editor_cursor);
             }
+            reset_config_editor_goal_column(app);
         }
-        KeyCode::Up | KeyCode::Char('k') => {
-            let text = &app.plugin_editor_text;
-            let cursor = &mut app.plugin_editor_cursor;
-            if *cursor > 0 {
-                let current_line_start = text[..*cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
-                let col = *cursor - current_line_start;
-                if current_line_start > 0 {
-                    let prev_line_search = &text[..current_line_start - 1];
-                    let prev_line_start = prev_line_search.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
-                    let prev_line_len = (current_line_start - 1) - prev_line_start;
-                    let mut target = prev_line_start + col.min(prev_line_len);
-                    while target > prev_line_start && !text.is_char_boundary(target) {
-                        target -= 1;
-                    }
-                    *cursor = target;
-                }
-            }
+        KeyCode::Enter => {
+            record_config_history(app);
+            app.config_editor_text.insert(app.config_editor_cursor, '\n');
+            app.config_editor_cursor += 1;
+            reset_config_editor_goal_column(app);
         }
-        KeyCode::Down | KeyCode::Char('j') => {
-            let text = &app.plugin_editor_text;
-            let cursor = &mut app.plugin_editor_cursor;
-            if *cursor < text.len() {
-                let current_line_start = text[..*cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
-                let col = *cursor - current_line_start;
-                if let Some(current_line_end) = text[*cursor..].find('\n').map(|idx| *cursor + idx) {
-                    let next_line_start = current_line_end + 1;
-                    if next_line_start <= text.len() {
-                        let next_line_end = text[next_line_start..].find('\n').map(|idx| next_line_start + idx).unwrap_or(text.len());
-                        let next_line_len = next_line_end - next_line_start;
-                        let mut target = next_line_start + col.min(next_line_len);
-                        while target > next_line_start && !text.is_char_boundary(target) {
-                            target -= 1;
-                        }
-                        *cursor = target;
-                    }
-                }
-            }
+        KeyCode::Tab => {
+            record_config_history(app);
+            app.config_editor_text.insert(app.config_editor_cursor, '\t');
+            app.config_editor_cursor += 1;
+            reset_config_editor_goal_column(app);
         }
-        KeyCode::Char('x') => {
-            if app.plugin_editor_cursor < app.plugin_editor_text.len() {
-                record_plugin_config_history(app);
-                app.plugin_editor_text.remove(app.plugin_editor_cursor);
-            }
-        }
-        KeyCode::Char('u') => {
-            if app.plugin_editor_history_idx > 0 {
-                app.plugin_editor_history_idx -= 1;
-                app.plugin_editor_text = app.plugin_editor_history[app.plugin_editor_history_idx].clone();
-                app.plugin_editor_cursor = app.plugin_editor_cursor.min(app.plugin_editor_text.len());
-            }
-        }
-        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.plugin_editor_history_idx + 1 < app.plugin_editor_history.len() {
-                app.plugin_editor_history_idx += 1;
-                app.plugin_editor_text = app.plugin_editor_history[app.plugin_editor_history_idx].clone();
-                app.plugin_editor_cursor = app.plugin_editor_cursor.min(app.plugin_editor_text.len());
-            }
-        }
-        KeyCode::Char('q') => {
-            app.plugin_editor_focused = false;
-            app.content_focused = false;
+        KeyCode::Char(c) => {
+            record_config_history(app);
+            app.config_editor_text.insert(app.config_editor_cursor, c);
+            app.config_editor_cursor += c.len_utf8();
+            reset_config_editor_goal_column(app);
         }
         _ => {}
     }
-    None
 }
 
 #[cfg(test)]
@@ -2874,7 +2882,10 @@ mod tests {
         RemotePaper,
     };
 
-    use super::{UiAction, diverse_latest_papers, handle_key, parse_command};
+    use super::{
+        UiAction, build_config_editor_view, cursor_visual_position, diverse_latest_papers,
+        handle_config_editor_insert_key, handle_key, parse_command,
+    };
 
     #[test]
     fn control_p_opens_palette() {
@@ -3022,6 +3033,72 @@ mod tests {
             assert_eq!(app.last_opened_collection_id, Some(9));
             assert!(app.content_focused);
         }
+    }
+
+    #[test]
+    fn insert_mode_arrow_keys_move_without_exiting_insert_mode() {
+        let mut app = App {
+            config_editor_text: "abc\ndef".into(),
+            config_editor_cursor: 1,
+            config_editor_insert_mode: true,
+            config_editor_wrap_width: 8,
+            config_editor_viewport_height: 4,
+            ..App::default()
+        };
+
+        handle_config_editor_insert_key(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(app.config_editor_insert_mode);
+        assert_eq!(app.config_editor_cursor, 2);
+
+        handle_config_editor_insert_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert!(app.config_editor_insert_mode);
+        assert_eq!(app.config_editor_cursor, 1);
+
+        handle_config_editor_insert_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(app.config_editor_insert_mode);
+        assert_eq!(app.config_editor_cursor, 5);
+
+        handle_config_editor_insert_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert!(app.config_editor_insert_mode);
+        assert_eq!(app.config_editor_cursor, 1);
+    }
+
+    #[test]
+    fn insert_mode_vertical_movement_respects_wrapped_rows() {
+        let mut app = App {
+            config_editor_text: "abcdefghij".into(),
+            config_editor_cursor: 3,
+            config_editor_insert_mode: true,
+            config_editor_wrap_width: 4,
+            config_editor_viewport_height: 3,
+            ..App::default()
+        };
+
+        handle_config_editor_insert_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.config_editor_cursor, 7);
+
+        handle_config_editor_insert_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.config_editor_cursor, 10);
+
+        handle_config_editor_insert_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.config_editor_cursor, 7);
+    }
+
+    #[test]
+    fn wrapped_editor_view_tracks_visual_cursor_and_scroll() {
+        let text = "abcd\nefghijkl";
+        let mut scroll = 0;
+        let view = build_config_editor_view(text, 11, 4, 2, &mut scroll);
+
+        assert_eq!(view.lines, vec!["  1 abcd", "  2 efgh", "    ijkl"]);
+        assert_eq!((view.cursor_row, view.cursor_col), (2, 2));
+        assert_eq!(scroll, 1);
+    }
+
+    #[test]
+    fn cursor_visual_position_handles_wrap_boundary_at_line_end() {
+        let (row, col) = cursor_visual_position("abcd", 4, 4);
+        assert_eq!((row, col), (0, 3));
     }
 
     #[test]

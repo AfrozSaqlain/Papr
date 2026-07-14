@@ -1,5 +1,6 @@
 //! Ratatui rendering for the application shell.
 
+use crate::build_config_editor_view;
 use papr_core::{
     App, AppMode, DeletionTarget, DiscoveryStatus, DownloadStatus, LibraryPaper, Page, RemotePaper, Theme,
 };
@@ -435,10 +436,7 @@ fn render_author_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
 }
 
 fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
-    let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
-
-    // 1. config.toml Editor
-    let left_title = if app.config_editor_focused {
+    let title = if app.config_editor_focused {
         if app.config_editor_insert_mode {
             " CONFIG.TOML - INSERT "
         } else if app.config_editor_command.is_some() {
@@ -450,53 +448,54 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
         " CONFIG.TOML "
     };
 
-    let left_border_style = if app.config_editor_focused {
+    let border_style = if app.config_editor_focused {
         Style::default().fg(theme.accent)
     } else {
         Style::default().fg(theme.border)
     };
 
-    let left_chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(1)]).split(cols[0]);
-    let left_text = &app.config_editor_text;
-    let left_cursor = app.config_editor_cursor;
-    
-    let left_before = &left_text[..left_cursor.min(left_text.len())];
-    let left_row = left_before.chars().filter(|&c| c == '\n').count();
-    let left_last_line = left_before.split('\n').last().unwrap_or("");
-    let left_col = left_last_line.chars().count();
+    let chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(1)]).split(area);
+    let height = chunks[0].height.saturating_sub(2) as usize;
+    let wrap_width = chunks[0].width.saturating_sub(6) as usize;
+    app.config_editor_wrap_width = wrap_width.max(1);
+    app.config_editor_viewport_height = height;
 
-    let left_height = left_chunks[0].height.saturating_sub(2) as usize;
-    if left_row < app.config_editor_scroll {
-        app.config_editor_scroll = left_row;
-    } else if left_row >= app.config_editor_scroll + left_height {
-        app.config_editor_scroll = left_row - left_height + 1;
-    }
-
-    let left_lines: Vec<&str> = left_text.split('\n').collect();
-    let left_start = app.config_editor_scroll;
-
-    let mut left_displayed = Vec::new();
-    for (i, line) in left_lines.iter().enumerate().skip(left_start).take(left_height) {
-        let line_num = format!("{:3} ", i + 1);
-        left_displayed.push(Line::from(vec![
-            Span::styled(line_num, Style::default().fg(theme.muted)),
-            Span::styled(*line, Style::default().fg(theme.text)),
-        ]));
-    }
-
-    frame.render_widget(
-        Paragraph::new(left_displayed)
-            .block(
-                Block::default()
-                    .title(left_title)
-                    .borders(Borders::ALL)
-                    .border_style(left_border_style),
-            )
-            .style(Style::default().fg(theme.text).bg(theme.surface)),
-        left_chunks[0],
+    let view = build_config_editor_view(
+        &app.config_editor_text,
+        app.config_editor_cursor,
+        app.config_editor_wrap_width,
+        height,
+        &mut app.config_editor_scroll,
     );
 
-    let left_status_line = if let Some(ref err) = app.config_editor_error {
+    let displayed = view
+        .lines
+        .iter()
+        .skip(app.config_editor_scroll)
+        .take(height)
+        .map(|line| {
+            let (prefix, content) = line.split_at(4.min(line.len()));
+            Line::from(vec![
+                Span::styled(prefix.to_owned(), Style::default().fg(theme.muted)),
+                Span::styled(content.to_owned(), Style::default().fg(theme.text)),
+            ])
+        })
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(displayed)
+            .block(
+                Block::default()
+                    .title(title)
+                    .borders(Borders::ALL)
+                    .border_style(border_style),
+            )
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(theme.text).bg(theme.surface)),
+        chunks[0],
+    );
+
+    let status_line = if let Some(ref err) = app.config_editor_error {
         Line::styled(err.clone(), Style::default().fg(theme.error))
     } else if let Some(ref cmd) = app.config_editor_command {
         Line::styled(format!(":{}", cmd), Style::default().fg(theme.text))
@@ -510,92 +509,17 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
             Style::default().fg(theme.muted),
         )
     };
-    frame.render_widget(Paragraph::new(left_status_line), left_chunks[1]);
+    frame.render_widget(Paragraph::new(status_line), chunks[1]);
 
     if app.config_editor_focused {
-        let screen_x = left_chunks[0].x.saturating_add(5).saturating_add(u16::try_from(left_col).unwrap_or(0));
-        let screen_y = left_chunks[0].y.saturating_add(1).saturating_add(u16::try_from(left_row - app.config_editor_scroll).unwrap_or(0));
-        frame.set_cursor_position((screen_x, screen_y));
-    }
-
-    // 2. plugins.toml Editor
-    let right_title = if app.plugin_editor_focused {
-        if app.plugin_editor_insert_mode {
-            " PLUGINS.TOML - INSERT "
-        } else if app.plugin_editor_command.is_some() {
-            " PLUGINS.TOML - COMMAND "
-        } else {
-            " PLUGINS.TOML - NORMAL "
-        }
-    } else {
-        " PLUGINS.TOML "
-    };
-
-    let right_border_style = if app.plugin_editor_focused {
-        Style::default().fg(theme.accent)
-    } else {
-        Style::default().fg(theme.border)
-    };
-
-    let right_chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(1)]).split(cols[1]);
-    let right_text = &app.plugin_editor_text;
-    let right_cursor = app.plugin_editor_cursor;
-    
-    let right_before = &right_text[..right_cursor.min(right_text.len())];
-    let right_row = right_before.chars().filter(|&c| c == '\n').count();
-    let right_last_line = right_before.split('\n').last().unwrap_or("");
-    let right_col = right_last_line.chars().count();
-
-    let right_height = right_chunks[0].height.saturating_sub(2) as usize;
-    if right_row < app.plugin_editor_scroll {
-        app.plugin_editor_scroll = right_row;
-    } else if right_row >= app.plugin_editor_scroll + right_height {
-        app.plugin_editor_scroll = right_row - right_height + 1;
-    }
-
-    let right_lines: Vec<&str> = right_text.split('\n').collect();
-    let right_start = app.plugin_editor_scroll;
-
-    let mut right_displayed = Vec::new();
-    for (i, line) in right_lines.iter().enumerate().skip(right_start).take(right_height) {
-        let line_num = format!("{:3} ", i + 1);
-        right_displayed.push(Line::from(vec![
-            Span::styled(line_num, Style::default().fg(theme.muted)),
-            Span::styled(*line, Style::default().fg(theme.text)),
-        ]));
-    }
-
-    frame.render_widget(
-        Paragraph::new(right_displayed)
-            .block(
-                Block::default()
-                    .title(right_title)
-                    .borders(Borders::ALL)
-                    .border_style(right_border_style),
-            )
-            .style(Style::default().fg(theme.text).bg(theme.surface)),
-        right_chunks[0],
-    );
-
-    let right_status_line = if let Some(ref err) = app.plugin_editor_error {
-        Line::styled(err.clone(), Style::default().fg(theme.error))
-    } else if let Some(ref cmd) = app.plugin_editor_command {
-        Line::styled(format!(":{}", cmd), Style::default().fg(theme.text))
-    } else {
-        Line::styled(
-            if app.plugin_editor_insert_mode {
-                "-- INSERT --"
-            } else {
-                "-- NORMAL --"
-            },
-            Style::default().fg(theme.muted),
-        )
-    };
-    frame.render_widget(Paragraph::new(right_status_line), right_chunks[1]);
-
-    if app.plugin_editor_focused {
-        let screen_x = right_chunks[0].x.saturating_add(5).saturating_add(u16::try_from(right_col).unwrap_or(0));
-        let screen_y = right_chunks[0].y.saturating_add(1).saturating_add(u16::try_from(right_row - app.plugin_editor_scroll).unwrap_or(0));
+        let screen_x = chunks[0]
+            .x
+            .saturating_add(5)
+            .saturating_add(u16::try_from(view.cursor_col).unwrap_or(0));
+        let screen_y = chunks[0]
+            .y
+            .saturating_add(1)
+            .saturating_add(u16::try_from(view.cursor_row.saturating_sub(app.config_editor_scroll)).unwrap_or(0));
         frame.set_cursor_position((screen_x, screen_y));
     }
 }
