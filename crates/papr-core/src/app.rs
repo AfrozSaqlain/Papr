@@ -221,11 +221,18 @@ pub enum DownloadStatus {
     Starting,
     /// Bytes are actively streaming.
     Running,
+    /// Extracting metadata from PDF (inspection, etc.)
+    ExtractingMetadata,
+    /// Fetching paper metadata from online API (arXiv/Crossref)
+    Enriching,
+    /// Renaming target PDF file based on title/metadata
+    Renaming,
     /// PDF has been finalized and indexed.
     Completed,
     /// Transfer or indexing failed.
     Failed(String),
 }
+
 
 /// Download progress shown in the Downloads page and status bar.
 #[derive(Debug, Clone, PartialEq, Eq)]

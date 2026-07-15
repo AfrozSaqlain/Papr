@@ -477,7 +477,7 @@ struct ActionSenders {
 #[derive(Debug)]
 struct MetadataEnrichment {
     paper_id: i64,
-    paper: RemotePaper,
+    paper: Option<RemotePaper>,
 }
 
 #[derive(Debug)]
@@ -568,14 +568,24 @@ async fn run(
             apply_index_response(response, &mut runtime, &senders, app)?;
         }
         let mut enriched_any = false;
+        let mut any_enrichment_processed = false;
         while let Ok(MetadataEnrichment { paper_id, paper }) = enrichment_receiver.try_recv() {
-            runtime.database.apply_arxiv_metadata(paper_id, &paper)?;
-            enriched_any = true;
+            if let Some(ref p) = paper {
+                runtime.database.apply_arxiv_metadata(paper_id, p)?;
+                enriched_any = true;
+            }
+            if let Some(task) = app.downloads.iter_mut().find(|t| t.paper_id == Some(paper_id)) {
+                task.status = DownloadStatus::Completed;
+            }
+            any_enrichment_processed = true;
         }
         if enriched_any {
             refresh_library(&runtime, app)?;
             refresh_organization(&runtime.database, &runtime.library_roots, app)?;
             refresh_dashboard(&mut runtime, app)?;
+        }
+        if any_enrichment_processed {
+            refresh_downloads(&runtime, app);
         }
         if enrichment_receiver.is_empty() && app.enrichment_pending {
             app.enrichment_pending = false;
@@ -956,8 +966,15 @@ fn apply_collection_prompt(
             if destination.exists() {
                 anyhow::bail!("a file with this name already exists");
             }
+            if let Some(task) = app.downloads.iter_mut().find(|t| t.paper_id == Some(paper_id)) {
+                task.status = DownloadStatus::Renaming;
+            }
             move_pdf_file(&source, &destination)?;
             runtime.database.rename_pdf(paper_id, &destination)?;
+            if let Some(task) = app.downloads.iter_mut().find(|t| t.paper_id == Some(paper_id)) {
+                task.pdf_path = Some(destination.to_string_lossy().into_owned());
+                task.status = DownloadStatus::Completed;
+            }
             refresh_library(runtime, app)?;
             refresh_organization(&runtime.database, &runtime.library_roots, app)?;
             refresh_dashboard(runtime, app)?;
@@ -1492,6 +1509,21 @@ fn start_scan(
     });
 }
 
+fn log_message(database_file: &Path, message: &str) {
+    if let Some(parent) = database_file.parent() {
+        let log_file = parent.join("papr.log");
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file)
+        {
+            use std::io::Write;
+            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+            let _ = writeln!(file, "[{}] {}", timestamp, message);
+        }
+    }
+}
+
 fn start_library_watcher(
     roots: &[PathBuf],
     watch_sender: mpsc::UnboundedSender<()>,
@@ -1513,12 +1545,26 @@ fn spawn_enrichment_if_needed(
     app: &mut App,
 ) -> Result<()> {
     let papers = runtime.database.papers_needing_enrichment()?;
+    for task in &mut app.downloads {
+        if task.status == DownloadStatus::ExtractingMetadata {
+            let needs_enrichment = papers.iter().any(|(pid, _, _)| Some(*pid) == task.paper_id);
+            if !needs_enrichment {
+                task.status = DownloadStatus::Completed;
+            }
+        }
+    }
     if !papers.is_empty() {
+        for (paper_id, _, _) in &papers {
+            if let Some(task) = app.downloads.iter_mut().find(|t| t.paper_id == Some(*paper_id)) {
+                task.status = DownloadStatus::Enriching;
+            }
+        }
         let arxiv_client = runtime.arxiv.clone();
         let crossref_client = runtime.crossref.clone();
         let enrichment_tx = senders.enrichment.clone();
         let count = papers.len();
         app.enrichment_pending = true;
+        let db_file_log = runtime.database_file.clone();
         tokio::spawn(async move {
             let mut enriched = 0usize;
             for (i, (paper_id, mut candidate_arxiv, pdf_path)) in papers.into_iter().enumerate() {
@@ -1559,6 +1605,7 @@ fn spawn_enrichment_if_needed(
                     }
                 }
 
+                let mut enriched_paper = None;
                 if let Some(arxiv_id) = candidate_arxiv {
                     if i > 0 {
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -1566,11 +1613,11 @@ fn spawn_enrichment_if_needed(
                     match arxiv_client.get_by_id(&arxiv_id).await {
                         Ok(Some(paper)) => {
                             enriched += 1;
-                            let _ = enrichment_tx.send(MetadataEnrichment { paper_id, paper });
+                            enriched_paper = Some(paper);
                         }
                         Ok(None) => {}
                         Err(e) => {
-                            eprintln!("arXiv enrichment failed for {arxiv_id}: {e}");
+                            log_message(&db_file_log, &format!("arXiv enrichment failed for {arxiv_id}: {e}"));
                         }
                     }
                 } else if let Some(doi) = candidate_doi {
@@ -1580,17 +1627,21 @@ fn spawn_enrichment_if_needed(
                     match crossref_client.get_by_doi(&doi).await {
                         Ok(Some(paper)) => {
                             enriched += 1;
-                            let _ = enrichment_tx.send(MetadataEnrichment { paper_id, paper });
+                            enriched_paper = Some(paper);
                         }
                         Ok(None) => {}
                         Err(e) => {
-                            eprintln!("Crossref enrichment failed for {doi}: {e}");
+                            log_message(&db_file_log, &format!("Crossref enrichment failed for {doi}: {e}"));
                         }
                     }
                 }
+                let _ = enrichment_tx.send(MetadataEnrichment {
+                    paper_id,
+                    paper: enriched_paper,
+                });
             }
             if enriched > 0 {
-                eprintln!("Enriched {enriched}/{count} papers with metadata");
+                log_message(&db_file_log, &format!("Enriched {enriched}/{count} papers with metadata"));
             }
         });
     }
@@ -1656,7 +1707,7 @@ fn apply_index_response(
             spawn_enrichment_if_needed(runtime, senders, app)?;
         }
         IndexResponse::File(Err(error)) => {
-            eprintln!("Library indexing error: {error}");
+            log_message(&runtime.database_file, &format!("Library indexing error: {error}"));
         }
     }
     refresh_library(runtime, app)?;
@@ -1714,6 +1765,13 @@ fn discover_local_downloads(
             let title = entry.file_name().to_string_lossy().into_owned();
             let id = title.strip_suffix(".pdf").unwrap_or(&title).to_owned();
             let pdf_path = entry.path().to_string_lossy().into_owned();
+            
+            if app.downloads.iter().any(|task| {
+                task.pdf_path.as_deref() == Some(&pdf_path) || task.id == id
+            }) {
+                continue;
+            }
+
             let paper_id = database.paper_id_for_path(&pdf_path).ok().flatten();
             app.downloads.push(DownloadTask {
                 id,
@@ -1771,7 +1829,7 @@ fn start_download(
         downloaded: 0,
         total: None,
         paper_id: None,
-        pdf_path: None,
+        pdf_path: Some(destination.to_string_lossy().into_owned()),
         status: DownloadStatus::Starting,
     });
     let manager = manager.clone();
@@ -1814,6 +1872,7 @@ fn apply_download_event(
             task.total = total;
         }
         DownloadEvent::Completed { id, path } => {
+            task.status = DownloadStatus::ExtractingMetadata;
             let pdf = LibraryIndexer::inspect(&path).context("failed to index downloaded PDF")?;
             if let Some(paper) = pending.remove(&id) {
                 let paper_id = runtime.database.attach_download(&paper, &pdf)?;
@@ -1825,7 +1884,6 @@ fn apply_download_event(
             task.pdf_path = Some(pdf.path.to_string_lossy().to_string());
             task.downloaded = pdf.file_size;
             task.total = Some(pdf.file_size);
-            task.status = DownloadStatus::Completed;
             refresh_library(runtime, app)?;
             refresh_dashboard(runtime, app)?;
             let _ = index_sender.send(IndexResponse::File(Ok(pdf)));

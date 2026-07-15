@@ -1413,6 +1413,9 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
                 ),
                 theme.accent,
             ),
+            DownloadStatus::ExtractingMetadata => ("Extracting Metadata".to_owned(), theme.warning),
+            DownloadStatus::Enriching => ("Enriching".to_owned(), theme.warning),
+            DownloadStatus::Renaming => ("Renaming".to_owned(), theme.warning),
             DownloadStatus::Completed => ("Completed".to_owned(), theme.success),
             DownloadStatus::Failed(_) => ("Failed".to_owned(), theme.error),
         };
