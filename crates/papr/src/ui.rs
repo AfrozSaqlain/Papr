@@ -1676,6 +1676,14 @@ fn render_paper_detail(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
             .style(Style::default().fg(theme.muted)),
         rows[2],
     );
+    if let Some(toast) = &app.toast {
+        frame.render_widget(
+            Paragraph::new(toast.as_str())
+                .alignment(Alignment::Right)
+                .style(Style::default().fg(theme.success)),
+            rows[2],
+        );
+    }
 }
 
 fn paper_detail_lines<'a>(paper: &'a RemotePaper, theme: &Theme) -> Vec<Line<'a>> {

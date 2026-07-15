@@ -101,14 +101,16 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     let download_dir = config.download_path.clone().unwrap_or_else(|| paths.downloads_dir.clone());
+    let download_dir = std::fs::canonicalize(&download_dir).unwrap_or(download_dir);
     std::fs::create_dir_all(&download_dir).context("failed to create download directory")?;
 
-    let collection_roots = config.library_folders.clone();
+    let mut collection_roots = Vec::new();
+    for root in &config.library_folders {
+        collection_roots.push(std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()));
+    }
     let mut library_roots = collection_roots.clone();
     let download_inside = collection_roots.iter().any(|root| {
-        let root_canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-        let dl_canon = std::fs::canonicalize(&download_dir).unwrap_or_else(|_| download_dir.clone());
-        dl_canon.starts_with(&root_canon)
+        download_dir.starts_with(root)
     });
     if !download_inside {
         library_roots.push(download_dir.clone());
@@ -646,7 +648,16 @@ async fn run(
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     if app.page == papr_core::Page::Settings && app.config_editor_focused {
-                        handle_config_editor_key(app, key, &mut runtime, &mut theme);
+                        if let Some(action) = handle_config_editor_key(app, key, &mut runtime, &mut theme) {
+                            apply_ui_action(
+                                action,
+                                &mut runtime,
+                                &senders,
+                                &mut pending_downloads,
+                                app,
+                                &mut theme,
+                            )?;
+                        }
                     } else if let Some(action) = handle_key(app, key) {
                         apply_ui_action(
                             action,
@@ -1846,6 +1857,7 @@ fn start_download(
     let destination = directory.join(format!("{filename}.pdf"));
     let id = paper.id.clone();
     pending.insert(id.clone(), paper.clone());
+    app.toast = Some("Downloading paper...".to_owned());
     app.downloads.push(DownloadTask {
         id: id.clone(),
         title: paper.title,
@@ -2999,16 +3011,18 @@ fn apply_config_update(
     runtime.pdf_viewer = config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer);
 
     let download_dir = config.download_path.clone().unwrap_or_else(|| runtime.default_downloads_dir.clone());
+    let download_dir = std::fs::canonicalize(&download_dir).unwrap_or(download_dir);
     runtime.download_dir = download_dir.clone();
 
-    let collection_roots = config.library_folders.clone();
+    let mut collection_roots = Vec::new();
+    for root in &config.library_folders {
+        collection_roots.push(std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()));
+    }
     runtime.collection_roots = collection_roots.clone();
 
     let mut library_roots = collection_roots.clone();
     let download_inside = collection_roots.iter().any(|root| {
-        let root_canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-        let dl_canon = std::fs::canonicalize(&download_dir).unwrap_or_else(|_| download_dir.clone());
-        dl_canon.starts_with(&root_canon)
+        download_dir.starts_with(root)
     });
     if !download_inside {
         library_roots.push(download_dir.clone());
@@ -3052,6 +3066,7 @@ fn handle_config_editor_key(
             KeyCode::Enter => {
                 app.config_editor_command = None;
                 let trimmed = cmd.trim();
+                let mut action_to_return = None;
                 if trimmed == "w" || trimmed == "wq" {
                     let toml_str = &app.config_editor_text;
                     match toml::from_str::<Config>(toml_str) {
@@ -3063,6 +3078,8 @@ fn handle_config_editor_key(
                                 app.toast = Some("Configuration saved and applied.".to_owned());
                                 if let Err(e) = apply_config_update(runtime, app, &new_config, theme) {
                                     app.config_editor_error = Some(format!("Apply failed: {e}"));
+                                } else {
+                                    action_to_return = Some(UiAction::Reindex);
                                 }
                             }
                         }
@@ -3074,6 +3091,9 @@ fn handle_config_editor_key(
                 if trimmed == "q" || (trimmed == "wq" && app.config_editor_error.is_none()) {
                     app.config_editor_focused = false;
                     app.content_focused = false;
+                }
+                if action_to_return.is_some() {
+                    return action_to_return;
                 }
             }
             _ => {}
