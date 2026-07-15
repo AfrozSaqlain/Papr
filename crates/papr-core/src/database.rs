@@ -557,7 +557,7 @@ impl Database {
                 transaction.last_insert_rowid()
             };
             transaction.execute(
-                "INSERT INTO paper_authors (paper_id, author_id, position) VALUES (?1, ?2, ?3)",
+                "INSERT OR IGNORE INTO paper_authors (paper_id, author_id, position) VALUES (?1, ?2, ?3)",
                 params![
                     paper_id,
                     author_id,
@@ -630,7 +630,7 @@ impl Database {
                 transaction.last_insert_rowid()
             };
             transaction.execute(
-                "INSERT INTO paper_authors (paper_id, author_id, position) VALUES (?1, ?2, ?3)",
+                "INSERT OR IGNORE INTO paper_authors (paper_id, author_id, position) VALUES (?1, ?2, ?3)",
                 params![
                     paper_id,
                     author_id,
@@ -1741,7 +1741,7 @@ impl Database {
                 transaction.last_insert_rowid()
             };
             transaction.execute(
-                "INSERT INTO paper_authors (paper_id, author_id, position) VALUES (?1, ?2, ?3)",
+                "INSERT OR IGNORE INTO paper_authors (paper_id, author_id, position) VALUES (?1, ?2, ?3)",
                 params![
                     target_id,
                     author_id,

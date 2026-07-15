@@ -2037,7 +2037,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         return None;
     }
     if !app.content_focused {
-        if app.page == papr_core::Page::Settings && matches!(key.code, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) {
+        if app.page == papr_core::Page::Settings && matches!(key.code, KeyCode::Right | KeyCode::Char('l')) {
+            app.content_focused = true;
+            return None;
+        }
+        if app.page == papr_core::Page::Settings && matches!(key.code, KeyCode::Enter) {
             app.content_focused = true;
             app.config_editor_focused = true;
             return None;
@@ -2046,6 +2050,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             app.dispatch(command);
         }
         return None;
+    }
+    if app.content_focused && app.page == papr_core::Page::Settings && !app.config_editor_focused {
+        if matches!(key.code, KeyCode::Enter) {
+            app.config_editor_focused = true;
+            return None;
+        }
     }
     if key.code == KeyCode::Char('r')
         && app.page == papr_core::Page::Discover
@@ -3133,6 +3143,9 @@ fn handle_config_editor_key(
     }
 
     match key.code {
+        KeyCode::Esc => {
+            app.config_editor_focused = false;
+        }
         KeyCode::Char('i') => {
             app.config_editor_insert_mode = true;
             reset_config_editor_goal_column(app);
@@ -3141,10 +3154,7 @@ fn handle_config_editor_key(
             app.config_editor_command = Some(String::new());
         }
         KeyCode::Left | KeyCode::Char('h') => {
-            if key.code == KeyCode::Left {
-                app.config_editor_focused = false;
-                app.content_focused = false;
-            } else if app.config_editor_cursor > 0 {
+            if app.config_editor_cursor > 0 {
                 let mut prev = app.config_editor_cursor - 1;
                 while prev > 0 && !app.config_editor_text.is_char_boundary(prev) {
                     prev -= 1;
