@@ -2147,6 +2147,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
 
     if let Some(command) = navigation_command(key) {
+        if app.page == papr_core::Page::Discover && command == Command::MoveUp && app.discovery.selected == 0 {
+            app.mode = AppMode::Search;
+            return None;
+        }
         app.dispatch(command);
     }
     None
@@ -2164,6 +2168,16 @@ fn normalize_panel_navigation(mut key: KeyEvent) -> KeyEvent {
 fn handle_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     match key.code {
         KeyCode::Esc => app.mode = AppMode::Normal,
+        KeyCode::Down => {
+            if !app.discovery.results.is_empty() {
+                app.mode = AppMode::Normal;
+                app.discovery.selected = 0;
+            }
+        }
+        KeyCode::Left => {
+            app.content_focused = false;
+            app.mode = AppMode::Normal;
+        }
         KeyCode::Enter if !app.discovery.query.trim().is_empty() => {
             let query = app.discovery.query.trim().to_owned();
             app.discovery.query.clone_from(&query);
