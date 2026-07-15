@@ -107,7 +107,9 @@ impl Config {
         if let Some(parent) = paths.config_file.parent() {
             fs::create_dir_all(parent)?;
         }
-        let config = Self::default();
+        let mut config = Self::default();
+        config.library_folders = vec![paths.downloads_dir.clone()];
+        config.download_path = Some(paths.downloads_dir.clone());
         fs::write(&paths.config_file, toml::to_string_pretty(&config)?)?;
         Ok(config)
     }
