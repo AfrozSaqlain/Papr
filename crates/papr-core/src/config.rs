@@ -107,10 +107,60 @@ impl Config {
         if let Some(parent) = paths.config_file.parent() {
             fs::create_dir_all(parent)?;
         }
+
+        let default_pdf_viewer = if cfg!(target_os = "macos") {
+            "open"
+        } else if cfg!(target_os = "windows") {
+            "cmd /C start \"\""
+        } else {
+            "xdg-open"
+        };
+
+        #[derive(Serialize)]
+        struct PathValue {
+            val: PathBuf,
+        }
+        let serialized_path = toml::to_string(&PathValue { val: paths.downloads_dir.clone() })?;
+        let downloads_dir_str = serialized_path
+            .strip_prefix("val = ")
+            .unwrap_or(&serialized_path)
+            .trim_end();
+
+        let toml_content = format!(
+            r#"# Active built-in theme name or path to a custom TOML theme.
+theme = "catppuccin-mocha"
+
+# Page selected at startup.
+startup_page = "dashboard"
+
+# Preferred external PDF viewer command.
+pdf_viewer = "{default_pdf_viewer}"
+
+# Directories scanned for existing papers.
+library_folders = [
+  {downloads_dir_str}
+]
+
+# Destination for downloaded papers.
+download_path = {downloads_dir_str}
+
+# Comma-separated search terms used for dashboard recommendations.
+dashboard_keywords = ""
+
+# Whether mouse event capture is enabled.
+mouse = false
+
+# Plugin identifiers explicitly allowed to execute.
+enabled_plugins = []
+"#
+        );
+
+        fs::write(&paths.config_file, toml_content)?;
+
         let mut config = Self::default();
         config.library_folders = vec![paths.downloads_dir.clone()];
         config.download_path = Some(paths.downloads_dir.clone());
-        fs::write(&paths.config_file, toml::to_string_pretty(&config)?)?;
+        config.pdf_viewer = Some(default_pdf_viewer.to_string());
         Ok(config)
     }
 
@@ -146,6 +196,52 @@ mod tests {
             config.dashboard_keyword_list(),
             ["machine learning", "gravitational waves"]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_or_create_generates_all_keys() -> Result<(), Box<dyn std::error::Error>> {
+        let unique_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("papr_test_{}", unique_id));
+        std::fs::create_dir_all(&temp_dir)?;
+
+        let paths = super::Paths {
+            config_file: temp_dir.join("config.toml"),
+            database_file: temp_dir.join("papr.db"),
+            downloads_dir: temp_dir.join("papers"),
+            plugins_dir: temp_dir.join("plugins"),
+            plugins_config_file: temp_dir.join("plugins.toml"),
+        };
+
+        let config = Config::load_or_create(&paths)?;
+        
+        let content = std::fs::read_to_string(&paths.config_file)?;
+        
+        assert!(content.contains("theme ="));
+        assert!(content.contains("startup_page ="));
+        assert!(content.contains("pdf_viewer ="));
+        assert!(content.contains("library_folders ="));
+        assert!(content.contains("download_path ="));
+        assert!(content.contains("dashboard_keywords ="));
+        assert!(content.contains("mouse ="));
+        assert!(content.contains("enabled_plugins ="));
+        
+        let parsed: Config = toml::from_str(&content)?;
+        assert_eq!(parsed.theme, config.theme);
+        assert_eq!(parsed.startup_page, config.startup_page);
+        
+        let expected_viewer = if cfg!(target_os = "macos") {
+            "open".to_string()
+        } else if cfg!(target_os = "windows") {
+            "cmd /C start \"\"".to_string()
+        } else {
+            "xdg-open".to_string()
+        };
+        assert_eq!(parsed.pdf_viewer, Some(expected_viewer));
+
+        std::fs::remove_dir_all(&temp_dir)?;
         Ok(())
     }
 }
