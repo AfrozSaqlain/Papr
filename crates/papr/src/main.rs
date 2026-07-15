@@ -1450,6 +1450,20 @@ fn open_pdf(
     }
 
     let program = argv.remove(0);
+
+    #[cfg(target_os = "windows")]
+    let program = if program.eq_ignore_ascii_case("start") {
+        argv.insert(0, program);
+        if argv.len() == 1 {
+            // Only "start" was provided, add empty title to prevent path being treated as title
+            argv.push("".to_string());
+        }
+        argv.insert(0, "/C".to_string());
+        "cmd".to_string()
+    } else {
+        program
+    };
+
     let mut command = tokio::process::Command::new(&program);
     command.args(argv);
     if !has_placeholder {
