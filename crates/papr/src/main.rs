@@ -241,6 +241,10 @@ enum UiAction {
     ConfirmDeleteCollection { collection_id: i64, name: String, path: Option<PathBuf> },
     DeletePaper { paper_id: i64, path: Option<PathBuf> },
     DeleteCollection { collection_id: i64, path: Option<PathBuf> },
+    AddToQueue(i64),
+    RemoveFromQueue(i64),
+    MoveQueueItemUp(i64),
+    MoveQueueItemDown(i64),
 }
 
 enum KeyHandling {
@@ -754,6 +758,29 @@ fn apply_ui_action(
                 "Bookmark removed".into()
             });
         }
+        UiAction::AddToQueue(paper_id) => {
+            runtime.database.add_to_queue(paper_id)?;
+            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
+            refresh_dashboard(runtime, app)?;
+            app.toast = Some("Added to Reading Queue".into());
+        }
+        UiAction::RemoveFromQueue(paper_id) => {
+            runtime.database.remove_from_queue(paper_id)?;
+            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
+            refresh_dashboard(runtime, app)?;
+            app.toast = Some("Removed from Reading Queue".into());
+        }
+        UiAction::MoveQueueItemUp(paper_id) => {
+            runtime.database.move_queue_item(paper_id, true)?;
+            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
+            app.reading_queue_selected = app.reading_queue_selected.saturating_sub(1);
+        }
+        UiAction::MoveQueueItemDown(paper_id) => {
+            runtime.database.move_queue_item(paper_id, false)?;
+            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
+            app.reading_queue_selected = (app.reading_queue_selected + 1)
+                .min(app.reading_queue_papers.len().saturating_sub(1));
+        }
         UiAction::OpenCollection(collection_id) => {
             open_collection(&runtime.database, app, collection_id)?;
         }
@@ -1161,6 +1188,10 @@ fn refresh_organization(database: &Database, library_roots: &[PathBuf], app: &mu
     app.notes_selected = app
         .notes_selected
         .min(app.notes_papers.len().saturating_sub(1));
+    app.reading_queue_papers = database.reading_queue_papers_in_roots(library_roots)?;
+    app.reading_queue_selected = app
+        .reading_queue_selected
+        .min(app.reading_queue_papers.len().saturating_sub(1));
     Ok(())
 }
 
@@ -1811,21 +1842,36 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.mode == AppMode::CommandPalette {
         match key.code {
             KeyCode::Esc => app.dispatch(Command::TogglePalette),
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 app.palette_selected = app.palette_selected.saturating_sub(1);
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 app.palette_selected = (app.palette_selected + 1)
-                    .min(papr_core::Page::ALL.len().saturating_sub(1));
+                    .min(app.filtered_palette_items().len().saturating_sub(1));
             }
             KeyCode::Enter => {
-                let selected = app.palette_selected;
-                app.dispatch(Command::TogglePalette);
-                app.sidebar_index = selected;
-                app.page = papr_core::Page::ALL[selected];
-                app.content_focused = true;
+                let items = app.filtered_palette_items();
+                if let Some(&page) = items.get(app.palette_selected) {
+                    app.dispatch(Command::TogglePalette);
+                    if let Some(index) = papr_core::Page::ALL.iter().position(|&p| p == page) {
+                        app.sidebar_index = index;
+                    }
+                    app.page = page;
+                    app.content_focused = true;
+                }
             }
-            _ => {}
+            _ => {
+                let old_query = app.palette_query.clone();
+                if edit_text(
+                    &mut app.palette_query,
+                    &mut app.palette_query_cursor,
+                    key,
+                ) {
+                    if app.palette_query != old_query {
+                        app.palette_selected = 0;
+                    }
+                }
+            }
         }
         return None;
     }
@@ -1893,6 +1939,16 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             return Some(UiAction::MarkUnread(paper_id));
         }
     }
+    if key.code == KeyCode::Char('a') {
+        if let Some(paper_id) = selected_local_paper_id(app) {
+            let is_queued = app.reading_queue_papers.iter().any(|p| p.id == paper_id);
+            if is_queued {
+                return Some(UiAction::RemoveFromQueue(paper_id));
+            } else {
+                return Some(UiAction::AddToQueue(paper_id));
+            }
+        }
+    }
     if let KeyHandling::Handled(action) = handle_dashboard_key(app, key) {
         return action.map(|action| *action);
     }
@@ -1912,6 +1968,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         return Some(action);
     }
     if let Some(action) = handle_notes_key(app, key) {
+        return Some(action);
+    }
+    if let Some(action) = handle_reading_queue_key(app, key) {
         return Some(action);
     }
     if app.page == papr_core::Page::Discover && key.code == KeyCode::Char('o') {
@@ -2067,6 +2126,48 @@ fn handle_notes_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         }
         KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(paper.id))),
         KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(paper.id))),
+        KeyCode::Char('s') => Some(UiAction::Prompt(PaperTarget::Local(paper.id))),
+        KeyCode::Char('R') => Some(UiAction::RenamePdf(paper.id)),
+        KeyCode::Char('x') => Some(UiAction::ConfirmDeletePaper {
+            paper_id: paper.id,
+            title: paper.title.clone(),
+            path: paper.pdf_path.as_ref().map(PathBuf::from),
+        }),
+        _ => None,
+    }
+}
+
+fn handle_reading_queue_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    if app.page != papr_core::Page::ReadingQueue {
+        return None;
+    }
+    
+    // Check for moving items up/down in the queue
+    if (key.code == KeyCode::Char('K'))
+        || (key.code == KeyCode::Up && (key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::CONTROL)))
+    {
+        let paper = *app.filtered_reading_queue_papers().get(app.reading_queue_selected)?;
+        return Some(UiAction::MoveQueueItemUp(paper.id));
+    }
+    if (key.code == KeyCode::Char('J'))
+        || (key.code == KeyCode::Down && (key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::CONTROL)))
+    {
+        let paper = *app.filtered_reading_queue_papers().get(app.reading_queue_selected)?;
+        return Some(UiAction::MoveQueueItemDown(paper.id));
+    }
+
+    let paper = *app.filtered_reading_queue_papers().get(app.reading_queue_selected)?;
+    match key.code {
+        KeyCode::Enter | KeyCode::Char('p') => {
+            let path = paper.pdf_path.clone().map(PathBuf::from)?;
+            Some(UiAction::OpenPdf {
+                paper_id: paper.id,
+                path,
+            })
+        }
+        KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(paper.id))),
+        KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(paper.id))),
+        KeyCode::Char('n') => Some(UiAction::OpenNote(PaperTarget::Local(paper.id))),
         KeyCode::Char('s') => Some(UiAction::Prompt(PaperTarget::Local(paper.id))),
         KeyCode::Char('R') => Some(UiAction::RenamePdf(paper.id)),
         KeyCode::Char('x') => Some(UiAction::ConfirmDeletePaper {
@@ -2720,9 +2821,12 @@ fn selected_local_paper_id(app: &App) -> Option<i64> {
             .filtered_notes_papers()
             .get(app.notes_selected)
             .map(|paper| paper.id),
+        papr_core::Page::ReadingQueue => app
+            .filtered_reading_queue_papers()
+            .get(app.reading_queue_selected)
+            .map(|paper| paper.id),
         papr_core::Page::Dashboard
         | papr_core::Page::Discover
-        | papr_core::Page::ReadingQueue
         | papr_core::Page::History
         | papr_core::Page::Statistics
         | papr_core::Page::Settings
@@ -3054,9 +3158,39 @@ mod tests {
         );
         let _ = handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         );
         assert_eq!(app.palette_selected, 2);
+    }
+
+    #[test]
+    fn palette_filtering_and_typing() {
+        let mut app = App {
+            mode: AppMode::CommandPalette,
+            ..App::default()
+        };
+
+        // Type 'l' to filter (should match Library, etc.)
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.palette_query, "l");
+        let items = app.filtered_palette_items();
+        assert!(items.contains(&papr_core::Page::Library));
+
+        // Down arrow should move selection
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        );
+        // Press Enter to activate
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(action.is_none());
+        assert_eq!(app.mode, AppMode::Normal);
     }
 
     #[test]
@@ -3694,5 +3828,45 @@ mod tests {
             doi: None,
             journal_ref: None,
         }
+    }
+
+    #[test]
+    fn reading_queue_workspace_keybinds_and_actions() {
+        let paper = LibraryPaper {
+            id: 42,
+            title: "Queue Paper".into(),
+            authors: "Researcher".into(),
+            doi: None,
+            pdf_path: Some("/tmp/queue.pdf".into()),
+            file_size: None,
+            reading_status: "unread".into(),
+            is_favorite: false,
+        };
+
+        // Case 1: Toggle Add to queue from Library
+        let mut app = App {
+            page: Page::Library,
+            content_focused: true,
+            library: papr_core::LibraryState {
+                papers: vec![paper.clone()],
+                ..papr_core::LibraryState::default()
+            },
+            ..App::default()
+        };
+        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(matches!(action, Some(UiAction::AddToQueue(42))));
+
+        // Case 2: Toggle Remove from queue from ReadingQueue page
+        app.page = Page::ReadingQueue;
+        app.reading_queue_papers = vec![paper];
+        app.reading_queue_selected = 0;
+        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(matches!(action, Some(UiAction::RemoveFromQueue(42))));
+
+        // Case 3: Move Up and Move Down in queue
+        let action_up = handle_key(&mut app, KeyEvent::new(KeyCode::Char('K'), KeyModifiers::NONE));
+        assert!(matches!(action_up, Some(UiAction::MoveQueueItemUp(42))));
+        let action_down = handle_key(&mut app, KeyEvent::new(KeyCode::Char('J'), KeyModifiers::NONE));
+        assert!(matches!(action_down, Some(UiAction::MoveQueueItemDown(42))));
     }
 }

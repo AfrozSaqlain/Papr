@@ -38,6 +38,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         7,
         include_str!("../migrations/0007_dashboard_feed_cache.sql"),
     ),
+    (
+        8,
+        include_str!("../migrations/0008_reading_queue.sql"),
+    ),
 ];
 
 /// Database initialization and query errors.
@@ -284,6 +288,145 @@ impl Database {
                 })
             })
             .collect())
+    }
+
+    /// List all papers in the reading queue, ordered by their queue position.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database query fails.
+    pub fn reading_queue_papers(&self) -> Result<Vec<LibraryPaper>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT p.id, p.title,
+                    COALESCE((SELECT GROUP_CONCAT(a.name, ', ')
+                              FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
+                              WHERE pa.paper_id = p.id ORDER BY pa.position), ''),
+                    p.doi, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
+             FROM papers p
+             JOIN reading_queue rq ON rq.paper_id = p.id
+             ORDER BY rq.queue_order ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let file_size: Option<i64> = row.get(5)?;
+            Ok(LibraryPaper {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                authors: row.get(2)?,
+                doi: row.get(3)?,
+                pdf_path: row.get(4)?,
+                file_size: file_size.and_then(|size| u64::try_from(size).ok()),
+                reading_status: row.get(6)?,
+                is_favorite: row.get(7)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// List all papers in the reading queue that are inside the configured roots.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the queue query fails.
+    pub fn reading_queue_papers_in_roots(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<Vec<LibraryPaper>, DatabaseError> {
+        Ok(self
+            .reading_queue_papers()?
+            .into_iter()
+            .filter(|paper| {
+                paper.pdf_path.as_deref().is_some_and(|path| {
+                    let path = Path::new(path);
+                    path.is_file() && roots.iter().any(|root| path.starts_with(root))
+                })
+            })
+            .collect())
+    }
+
+    /// Add a paper to the reading queue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when updating the status or inserting the queue item fails.
+    pub fn add_to_queue(&self, paper_id: i64) -> Result<(), DatabaseError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "UPDATE papers SET reading_status = 'queued' WHERE id = ?1",
+            [paper_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO reading_queue (paper_id, queue_order)
+             VALUES (?1, (SELECT COALESCE(MAX(queue_order), 0) + 1 FROM reading_queue))
+             ON CONFLICT(paper_id) DO NOTHING",
+            [paper_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Remove a paper from the reading queue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when updating the paper status or removing from the queue fails.
+    pub fn remove_from_queue(&self, paper_id: i64) -> Result<(), DatabaseError> {
+        self.connection.execute(
+            "UPDATE papers SET reading_status = 'unread' WHERE id = ?1",
+            [paper_id],
+        )?;
+        Ok(())
+    }
+
+    /// Reorder a paper in the reading queue up or down.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when swapping queue order fails.
+    pub fn move_queue_item(&self, paper_id: i64, direction_up: bool) -> Result<(), DatabaseError> {
+        let tx = self.connection.unchecked_transaction()?;
+        let current_order: Option<i64> = tx
+            .query_row(
+                "SELECT queue_order FROM reading_queue WHERE paper_id = ?1",
+                [paper_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(current_order) = current_order else {
+            return Ok(());
+        };
+
+        let neighbor: Option<(i64, i64)> = if direction_up {
+            tx.query_row(
+                "SELECT paper_id, queue_order FROM reading_queue WHERE queue_order < ?1 ORDER BY queue_order DESC LIMIT 1",
+                [current_order],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+        } else {
+            tx.query_row(
+                "SELECT paper_id, queue_order FROM reading_queue WHERE queue_order > ?1 ORDER BY queue_order ASC LIMIT 1",
+                [current_order],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+        };
+
+        if let Some((neighbor_id, neighbor_order)) = neighbor {
+            tx.execute(
+                "UPDATE reading_queue SET queue_order = -?2 WHERE paper_id = ?1",
+                params![neighbor_id, neighbor_order],
+            )?;
+            tx.execute(
+                "UPDATE reading_queue SET queue_order = ?2 WHERE paper_id = ?1",
+                params![paper_id, neighbor_order],
+            )?;
+            tx.execute(
+                "UPDATE reading_queue SET queue_order = ?2 WHERE paper_id = ?1",
+                params![neighbor_id, current_order],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Load the cached dashboard feed for one local date and keyword set.
@@ -2284,5 +2427,88 @@ mod tests {
             library_root: None,
             relative_directory: None,
         }
+    }
+
+    #[test]
+    fn reading_queue_preserves_order_and_syncs_status() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        let root = std::env::temp_dir().join(format!("papr-queue-sync-{}-{}", std::process::id(), Utc::now().timestamp_micros()));
+        fs::create_dir_all(&root)?;
+        
+        let path1 = root.join("paper1.pdf");
+        let path2 = root.join("paper2.pdf");
+        let path3 = root.join("paper3.pdf");
+        fs::write(&path1, "%PDF-1.4 paper1")?;
+        fs::write(&path2, "%PDF-1.4 paper2")?;
+        fs::write(&path3, "%PDF-1.4 paper3")?;
+
+        let mut pdf1 = imported_pdf(&path1.to_string_lossy());
+        pdf1.title = "Paper 1".into();
+        let mut pdf2 = imported_pdf(&path2.to_string_lossy());
+        pdf2.title = "Paper 2".into();
+        let mut pdf3 = imported_pdf(&path3.to_string_lossy());
+        pdf3.title = "Paper 3".into();
+
+        database.import_pdf(&pdf1)?;
+        database.import_pdf(&pdf2)?;
+        database.import_pdf(&pdf3)?;
+
+        let papers = database.library_papers()?;
+        let id1 = papers.iter().find(|p| p.title == "Paper 1").unwrap().id;
+        let id2 = papers.iter().find(|p| p.title == "Paper 2").unwrap().id;
+        let id3 = papers.iter().find(|p| p.title == "Paper 3").unwrap().id;
+
+        // Add to queue
+        database.add_to_queue(id1)?;
+        database.add_to_queue(id2)?;
+        database.add_to_queue(id3)?;
+
+        // Check order
+        let queue = database.reading_queue_papers_in_roots(&[root.clone()])?;
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue[0].id, id1);
+        assert_eq!(queue[1].id, id2);
+        assert_eq!(queue[2].id, id3);
+        assert_eq!(queue[0].reading_status, "queued");
+
+        // Move down P1 (index 0 -> index 1)
+        database.move_queue_item(id1, false)?;
+        let queue = database.reading_queue_papers_in_roots(&[root.clone()])?;
+        assert_eq!(queue[0].id, id2);
+        assert_eq!(queue[1].id, id1);
+        assert_eq!(queue[2].id, id3);
+
+        // Move up P3 (index 2 -> index 1)
+        database.move_queue_item(id3, true)?;
+        let queue = database.reading_queue_papers_in_roots(&[root.clone()])?;
+        assert_eq!(queue[0].id, id2);
+        assert_eq!(queue[1].id, id3);
+        assert_eq!(queue[2].id, id1);
+
+        // Mark unread P3 (index 1) -> should remove P3 from queue
+        database.mark_unread(id3)?;
+        let queue = database.reading_queue_papers_in_roots(&[root.clone()])?;
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[0].id, id2);
+        assert_eq!(queue[1].id, id1);
+
+        // Record open for P1 (index 1) -> should mark read and remove P1 from queue
+        database.record_open(id1, true)?;
+        let queue = database.reading_queue_papers_in_roots(&[root.clone()])?;
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].id, id2);
+
+        // Delete P2 -> should remove P2 from queue
+        database.delete_paper(id2)?;
+        let queue = database.reading_queue_papers_in_roots(&[root.clone()])?;
+        assert_eq!(queue.len(), 0);
+
+        // Clean up files
+        let _ = fs::remove_file(&path1);
+        let _ = fs::remove_file(&path2);
+        let _ = fs::remove_file(&path3);
+        let _ = fs::remove_dir(&root);
+
+        Ok(())
     }
 }

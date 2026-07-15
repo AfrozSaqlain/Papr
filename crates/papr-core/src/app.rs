@@ -283,6 +283,10 @@ pub struct App {
     pub palette_selected: usize,
     /// Vertical list scroll offset for the command palette.
     pub palette_scroll: usize,
+    /// Command palette search query.
+    pub palette_query: String,
+    /// Cursor position in command palette query.
+    pub palette_query_cursor: usize,
     /// Local workspace search query.
     pub workspace_query: String,
     /// Cursor position in workspace query.
@@ -291,6 +295,12 @@ pub struct App {
     pub discovery: DiscoveryState,
     /// Local paper catalog state.
     pub library: LibraryState,
+    /// Papers in the reading queue.
+    pub reading_queue_papers: Vec<LibraryPaper>,
+    /// Selected reading queue paper row.
+    pub reading_queue_selected: usize,
+    /// Vertical list scroll offset for the reading queue.
+    pub reading_queue_scroll: usize,
     /// Background PDF transfers.
     pub downloads: Vec<DownloadTask>,
     /// Selected transfer row.
@@ -404,10 +414,15 @@ impl Default for App {
             today_status: DiscoveryStatus::Idle,
             palette_selected: 0,
             palette_scroll: 0,
+            palette_query: String::new(),
+            palette_query_cursor: 0,
             workspace_query: String::new(),
             workspace_query_cursor: 0,
             discovery: DiscoveryState::default(),
             library: LibraryState::default(),
+            reading_queue_papers: Vec::new(),
+            reading_queue_selected: 0,
+            reading_queue_scroll: 0,
             downloads: Vec::new(),
             download_selected: 0,
             download_scroll: 0,
@@ -473,6 +488,14 @@ impl App {
     pub fn filtered_library_papers(&self) -> Vec<&LibraryPaper> {
         self.library
             .papers
+            .iter()
+            .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors))
+            .collect()
+    }
+
+    /// Get the reading queue papers filtered by the workspace search query.
+    pub fn filtered_reading_queue_papers(&self) -> Vec<&LibraryPaper> {
+        self.reading_queue_papers
             .iter()
             .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors))
             .collect()
@@ -556,6 +579,16 @@ impl App {
             .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors))
             .collect()
     }
+    /// Get the command palette items filtered by the query.
+    pub fn filtered_palette_items(&self) -> Vec<Page> {
+        let q = self.palette_query.to_lowercase();
+        Page::ALL
+            .iter()
+            .copied()
+            .filter(|page| page.title().to_lowercase().contains(&q))
+            .collect()
+    }
+
     /// Apply a semantic command to the state machine.
     pub fn dispatch(&mut self, command: Command) {
         match command {
@@ -619,13 +652,19 @@ impl App {
                     } else {
                         self.notes_selected -= 1;
                     }
+                } else if self.page == Page::ReadingQueue {
+                    if self.reading_queue_selected == 0 {
+                        self.mode = AppMode::WorkspaceSearch;
+                    } else {
+                        self.reading_queue_selected -= 1;
+                    }
                 }
             }
             Command::MoveDown => {
                 if !self.content_focused {
-                    self.sidebar_index =
+                     self.sidebar_index =
                         (self.sidebar_index + 1).min(Page::ALL.len().saturating_sub(1));
-                    self.page = Page::ALL[self.sidebar_index];
+                     self.page = Page::ALL[self.sidebar_index];
                 } else if self.page == Page::Dashboard && !self.today_papers.is_empty() {
                     self.today_selected =
                         (self.today_selected + 1).min(self.today_papers.len().saturating_sub(1));
@@ -660,6 +699,9 @@ impl App {
                 } else if self.page == Page::Notes {
                     self.notes_selected =
                         (self.notes_selected + 1).min(self.filtered_notes_papers().len().saturating_sub(1));
+                } else if self.page == Page::ReadingQueue {
+                    self.reading_queue_selected = (self.reading_queue_selected + 1)
+                        .min(self.filtered_reading_queue_papers().len().saturating_sub(1));
                 }
             }
             Command::Open => {
@@ -693,6 +735,8 @@ impl App {
                 };
                 self.palette_selected = 0;
                 self.palette_scroll = 0;
+                self.palette_query.clear();
+                self.palette_query_cursor = 0;
             }
             Command::ToggleHelp => {
                 if self.mode == AppMode::Help {
@@ -704,7 +748,7 @@ impl App {
             Command::ToggleWorkspaceSearch => {
                 if matches!(
                     self.page,
-                    Page::Library | Page::Downloads | Page::Collections | Page::Authors | Page::Bookmarks
+                    Page::Library | Page::Downloads | Page::Collections | Page::Authors | Page::Bookmarks | Page::ReadingQueue | Page::Notes
                 ) {
                     if self.mode == AppMode::WorkspaceSearch {
                         self.mode = AppMode::Normal;

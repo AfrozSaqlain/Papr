@@ -158,7 +158,7 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
     let mut workspace_area = inset;
     if matches!(
         app.page,
-        Page::Library | Page::Downloads | Page::Collections | Page::Authors | Page::Bookmarks
+        Page::Library | Page::Downloads | Page::Collections | Page::Authors | Page::Bookmarks | Page::ReadingQueue
     ) {
         let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(4)]).split(inset);
         render_workspace_search_bar(frame, rows[0], app, theme);
@@ -171,6 +171,8 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         render_discover(frame, inset, app, theme);
     } else if app.page == Page::Library {
         render_library(frame, workspace_area, app, theme);
+    } else if app.page == Page::ReadingQueue {
+        render_reading_queue(frame, workspace_area, app, theme);
     } else if app.page == Page::Downloads {
         render_downloads(frame, workspace_area, app, theme);
     } else if app.page == Page::Collections {
@@ -1342,6 +1344,49 @@ fn library_metadata(paper: &LibraryPaper) -> String {
     format!("{authors}  |  {}  |  {size}", paper.reading_status)
 }
 
+fn render_reading_queue(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+    let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(4)]).split(area);
+    let papers = app.filtered_reading_queue_papers();
+    let message = "Prioritized reading queue. Use K/J to prioritize, a to dequeue, enter to read.";
+    frame.render_widget(
+        Paragraph::new(message).style(Style::default().fg(theme.muted)),
+        rows[0],
+    );
+    if papers.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No papers in reading queue. Press a on a paper in other workspaces to queue it.")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme.muted)),
+            rows[1],
+        );
+        return;
+    }
+    let items = papers.iter().map(|paper| {
+        ListItem::new(vec![
+            Line::styled(
+                &paper.title,
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ),
+            Line::styled(library_metadata(paper), Style::default().fg(theme.muted)),
+            Line::raw(""),
+        ])
+    });
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(format!(" {} PAPERS ", papers.len()))
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(theme.border)),
+        )
+        .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
+        .highlight_symbol("> ");
+    let mut state = ListState::default()
+        .with_selected(Some(app.reading_queue_selected))
+        .with_offset(app.reading_queue_scroll);
+    frame.render_stateful_widget(list, rows[1], &mut state);
+    app.reading_queue_scroll = state.offset();
+}
+
 fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let downloads = app.filtered_downloads();
     if downloads.is_empty() {
@@ -1915,10 +1960,35 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme
 }
 
 fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
-    let area = centered(40, 17, frame.area());
+    let area = centered(45, 18, frame.area());
     frame.render_widget(Clear, area);
 
-    let items = papr_core::Page::ALL.iter().map(|page| {
+    // Split the area into Search Bar and Results List
+    let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(4)]).split(area);
+
+    // 1. Render the search input field
+    let search_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent))
+        .title(" Search Command ");
+    
+    let query_text = &app.palette_query;
+    frame.render_widget(Paragraph::new(query_text.as_str()).block(search_block), chunks[0]);
+
+    // Render text cursor position
+    let cursor_offset = app
+        .palette_query
+        .chars()
+        .take(app.palette_query_cursor)
+        .count();
+    frame.set_cursor_position((
+        chunks[0].x.saturating_add(1).saturating_add(u16::try_from(cursor_offset).unwrap_or(0)),
+        chunks[0].y.saturating_add(1),
+    ));
+
+    // 2. Filter items and render list
+    let filtered_pages = app.filtered_palette_items();
+    let items = filtered_pages.iter().map(|page| {
         ListItem::new(Line::styled(
             page.title(),
             Style::default().fg(theme.text),
@@ -1929,24 +1999,28 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         .block(
             Block::default()
                 .title(" NAVIGATE ")
-                .borders(Borders::ALL)
+                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
                 .style(Style::default().bg(theme.surface))
                 .border_style(Style::default().fg(theme.accent)),
         )
         .highlight_style(Style::default().bg(theme.border).fg(theme.accent))
         .highlight_symbol("> ");
 
+    // Ensure selected index is valid for filtered items
+    app.palette_selected = app.palette_selected.min(filtered_pages.len().saturating_sub(1));
+
     let mut state = ListState::default()
-        .with_selected(Some(app.palette_selected))
+        .with_selected(if filtered_pages.is_empty() { None } else { Some(app.palette_selected) })
         .with_offset(app.palette_scroll);
-    frame.render_stateful_widget(list, area, &mut state);
+    
+    frame.render_stateful_widget(list, chunks[1], &mut state);
     app.palette_scroll = state.offset();
 }
 
 fn render_help(frame: &mut Frame<'_>, theme: &Theme) {
     let area = centered(64, 20, frame.area());
     frame.render_widget(Clear, area);
-    let help = "j / k      Move selection\nEnter/Right Open selection\nLeft       Focus navigation\nh / l      Back / open\nCtrl+p     Command palette\n/          Search arXiv\no          Open paper in webpage\np          Open local PDF\nu         Set status of a PDF as unread\nd          Download\nc          Copy citation\nn          Notes\ns          Create / Move to Collection\nB          Bookmark\nx          Delete PDF or collection\nq          Close / quit\n?          Toggle this help";
+    let help = "j / k      Move selection\nEnter/Right Open selection\nLeft       Focus navigation\nh / l      Back / open\nCtrl+p     Command palette\n/          Search arXiv\no          Open paper in webpage\np          Open local PDF\nu         Set status of a PDF as unread\nd          Download\nc          Copy citation\nn          Notes\ns          Create / Move to Collection\nB          Bookmark\nx          Delete PDF or collection\na          Queue / dequeue paper\nq          Close / quit\n?          Toggle this help";
     frame.render_widget(
         Paragraph::new(help)
             .style(Style::default().fg(theme.text))
