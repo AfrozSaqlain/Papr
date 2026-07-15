@@ -7,7 +7,7 @@ use crate::models::{
 use crate::plugins::PluginInfo;
 
 /// Top-level application pages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Page {
     /// Research overview.
     Dashboard,
@@ -38,6 +38,21 @@ pub enum Page {
 }
 
 impl Page {
+    /// Whether this page supports local/workspace search.
+    #[must_use]
+    pub const fn supports_workspace_search(self) -> bool {
+        matches!(
+            self,
+            Self::Library
+                | Self::Downloads
+                | Self::Collections
+                | Self::Authors
+                | Self::Bookmarks
+                | Self::Notes
+                | Self::ReadingQueue
+        )
+    }
+
     /// All pages in sidebar order.
     pub const ALL: [Self; 13] = [
         Self::Dashboard,
@@ -295,6 +310,8 @@ pub struct App {
     pub workspace_query: String,
     /// Cursor position in workspace query.
     pub workspace_query_cursor: usize,
+    /// Active search mode for each supported workspace page.
+    pub active_search_workspaces: std::collections::HashSet<Page>,
     /// Remote paper discovery state.
     pub discovery: DiscoveryState,
     /// Local paper catalog state.
@@ -424,6 +441,7 @@ impl Default for App {
             credits_scroll: 0,
             workspace_query: String::new(),
             workspace_query_cursor: 0,
+            active_search_workspaces: std::collections::HashSet::new(),
             discovery: DiscoveryState::default(),
             library: LibraryState::default(),
             reading_queue_papers: Vec::new(),
@@ -743,6 +761,9 @@ impl App {
                 } else if self.page == Page::Credits {
                     self.credits_selected = self.credits_selected.saturating_sub(1);
                 }
+                if self.mode == AppMode::WorkspaceSearch {
+                    self.active_search_workspaces.insert(self.page);
+                }
             }
             Command::MoveDown => {
                 if !self.content_focused {
@@ -795,6 +816,11 @@ impl App {
                 if !self.content_focused {
                     self.page = Page::ALL[self.sidebar_index];
                     self.content_focused = true;
+                    if self.active_search_workspaces.contains(&self.page) {
+                        self.mode = AppMode::WorkspaceSearch;
+                    } else {
+                        self.mode = AppMode::Normal;
+                    }
                 } else if self.page == Page::Dashboard && !self.today_papers.is_empty() {
                     self.discovery.results.clone_from(&self.today_papers);
                     self.discovery.selected = self
@@ -833,16 +859,15 @@ impl App {
                 }
             }
             Command::ToggleWorkspaceSearch => {
-                if matches!(
-                    self.page,
-                    Page::Library | Page::Downloads | Page::Collections | Page::Authors | Page::Bookmarks | Page::ReadingQueue | Page::Notes
-                ) {
+                if self.page.supports_workspace_search() {
                     if self.mode == AppMode::WorkspaceSearch {
                         self.mode = AppMode::Normal;
                         self.content_focused = true;
+                        self.active_search_workspaces.remove(&self.page);
                     } else {
                         self.mode = AppMode::WorkspaceSearch;
                         self.content_focused = true;
+                        self.active_search_workspaces.insert(self.page);
                     }
                 }
             }

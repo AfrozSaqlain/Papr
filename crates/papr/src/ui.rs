@@ -156,10 +156,7 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         outer.height,
     );
     let mut workspace_area = inset;
-    if matches!(
-        app.page,
-        Page::Library | Page::Downloads | Page::Collections | Page::Authors | Page::Bookmarks | Page::ReadingQueue
-    ) {
+    if app.page.supports_workspace_search() {
         let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(4)]).split(inset);
         render_workspace_search_bar(frame, rows[0], app, theme);
         workspace_area = rows[1];

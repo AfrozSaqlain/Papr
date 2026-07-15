@@ -1858,6 +1858,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                     }
                     app.page = page;
                     app.content_focused = true;
+                    if app.active_search_workspaces.contains(&app.page) {
+                        app.mode = AppMode::WorkspaceSearch;
+                    } else {
+                        app.mode = AppMode::Normal;
+                    }
                 }
             }
             _ => {
@@ -2049,10 +2054,18 @@ fn handle_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
 
 fn handle_workspace_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     match key.code {
-        KeyCode::Esc => app.mode = AppMode::Normal,
+        KeyCode::Esc => {
+            app.mode = AppMode::Normal;
+            app.active_search_workspaces.remove(&app.page);
+        }
         KeyCode::Down | KeyCode::Enter => {
             app.mode = AppMode::Normal;
             app.content_focused = true;
+            app.active_search_workspaces.remove(&app.page);
+        }
+        KeyCode::Left => {
+            app.mode = AppMode::Normal;
+            app.content_focused = false;
         }
         _ => {
             edit_text(
@@ -3271,6 +3284,64 @@ mod tests {
             assert_eq!(app.page, page);
             assert_eq!(app.sidebar_index, index);
             assert!(!app.content_focused);
+        }
+    }
+
+    #[test]
+    fn test_workspace_search_navigation_and_restore() {
+        use std::collections::HashSet;
+        for page in [
+            Page::Library,
+            Page::Downloads,
+            Page::Collections,
+            Page::Authors,
+            Page::Bookmarks,
+            Page::Notes,
+            Page::ReadingQueue,
+        ] {
+            let mut app = App {
+                page,
+                content_focused: true,
+                mode: AppMode::WorkspaceSearch,
+                workspace_query: "test query".to_string(),
+                workspace_query_cursor: 10,
+                active_search_workspaces: {
+                    let mut s = HashSet::new();
+                    s.insert(page);
+                    s
+                },
+                ..App::default()
+            };
+
+            // Pressing Left Arrow in WorkspaceSearch mode should immediately transfer focus to navigation pane
+            let action = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+            assert!(action.is_none());
+            assert!(!app.content_focused);
+            assert_eq!(app.mode, AppMode::Normal);
+            assert_eq!(app.workspace_query, "test query");
+            assert!(app.active_search_workspaces.contains(&page));
+
+            // Move to another page
+            app.sidebar_index = 0; // Dashboard
+            app.page = Page::Dashboard;
+
+            // Enter Dashboard - should not restore search mode since it's not active
+            app.dispatch(papr_core::Command::Open);
+            assert!(app.content_focused);
+            assert_eq!(app.mode, AppMode::Normal);
+
+            // Go back to sidebar, select original page, and enter it
+            app.content_focused = false;
+            if let Some(index) = Page::ALL.iter().position(|&p| p == page) {
+                app.sidebar_index = index;
+            }
+            app.dispatch(papr_core::Command::Open);
+
+            // It should enter the workspace and restore search mode and its state!
+            assert!(app.content_focused);
+            assert_eq!(app.mode, AppMode::WorkspaceSearch);
+            assert_eq!(app.workspace_query, "test query");
+            assert_eq!(app.workspace_query_cursor, 10);
         }
     }
 
