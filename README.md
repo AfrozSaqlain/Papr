@@ -402,7 +402,7 @@ This architecture makes plugins:
 | `r` | Refresh/retry the current search |
 | `h` / `Esc` | Return to results |
 
-### Library & Collections
+### Library, Reading Queue, Collections, Bookmarks, Authors
 
 | Key | Action |
 | --- | --- |
@@ -411,8 +411,9 @@ This architecture makes plugins:
 | `n` | Edit Markdown note |
 | `s` | Move PDF file to a collection folder |
 | `B` | Toggle bookmark |
+| `>` | Toggle local search |
 | `R` | Rename a PDF file or collection folder |
-| `c` / `n` | Create a new collection and folder |
+| `c` | Copy citation |
 
 ### Downloads Tab
 
@@ -423,6 +424,8 @@ This architecture makes plugins:
 | `n` | Edit Markdown note for the downloaded paper |
 | `s` | Move the downloaded paper to a collection |
 | `R` | Rename the downloaded PDF |
+| `>` | Toggle local search |
+| `c` | Copy citation |
 
 ### Markdown Editor
 
