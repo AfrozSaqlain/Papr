@@ -494,9 +494,100 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
         Style::default().fg(theme.border)
     };
 
-    let chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(1)]).split(area);
-    let height = chunks[0].height.saturating_sub(2) as usize;
-    let wrap_width = chunks[0].width.saturating_sub(6) as usize;
+    let chunks = Layout::vertical([
+        Constraint::Length(6),
+        Constraint::Min(4),
+        Constraint::Length(1),
+    ]).split(area);
+    let summary_area = chunks[0];
+    let editor_area = chunks[1];
+    let status_area = chunks[2];
+
+    let summary_cols = Layout::horizontal([
+        Constraint::Percentage(50),
+        Constraint::Percentage(50),
+    ]).split(summary_area);
+
+    // Render themes
+    let active_name = &theme.name;
+    let mut is_builtin = false;
+    let mut themes_spans = Vec::new();
+    for t_name in Theme::BUILTIN_THEMES {
+        if t_name.to_lowercase() == active_name.to_lowercase() {
+            is_builtin = true;
+            break;
+        }
+    }
+    if !is_builtin {
+        themes_spans.push(Span::styled(
+            format!("{} (Custom)", active_name),
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ));
+    }
+    for (i, t_name) in Theme::BUILTIN_THEMES.iter().enumerate() {
+        if i > 0 || !is_builtin {
+            themes_spans.push(Span::raw("  "));
+        }
+        if t_name.to_lowercase() == active_name.to_lowercase() {
+            themes_spans.push(Span::styled(
+                *t_name,
+                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            themes_spans.push(Span::styled(
+                *t_name,
+                Style::default().fg(theme.muted),
+            ));
+        }
+    }
+
+    let themes_block = Block::default()
+        .title(" Active & Available Themes ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border));
+
+    frame.render_widget(
+        Paragraph::new(Line::from(themes_spans))
+            .block(themes_block)
+            .wrap(Wrap { trim: true }),
+        summary_cols[0],
+    );
+
+    // Render plugins
+    let plugins_block = Block::default()
+        .title(" Installed & Discovered Plugins ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border));
+
+    let mut plugins_spans = Vec::new();
+    if app.plugins.is_empty() {
+        plugins_spans.push(Span::styled(
+            "No plugins installed.",
+            Style::default().fg(theme.muted),
+        ));
+    } else {
+        for (i, plugin) in app.plugins.iter().enumerate() {
+            if i > 0 {
+                plugins_spans.push(Span::raw("  "));
+            }
+            let status = if plugin.enabled { "Enabled" } else { "Disabled" };
+            let color = if plugin.enabled { theme.success } else { theme.muted };
+            plugins_spans.push(Span::styled(
+                format!("{} ({})", plugin.name, status),
+                Style::default().fg(color),
+            ));
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(plugins_spans))
+            .block(plugins_block)
+            .wrap(Wrap { trim: true }),
+        summary_cols[1],
+    );
+
+    let height = editor_area.height.saturating_sub(2) as usize;
+    let wrap_width = editor_area.width.saturating_sub(6) as usize;
     app.config_editor_wrap_width = wrap_width.max(1);
     app.config_editor_viewport_height = height;
 
@@ -532,7 +623,7 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
             )
             .wrap(Wrap { trim: false })
             .style(Style::default().fg(theme.text).bg(theme.surface)),
-        chunks[0],
+        editor_area,
     );
 
     let status_line = if let Some(ref err) = app.config_editor_error {
@@ -549,14 +640,14 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
             Style::default().fg(theme.muted),
         )
     };
-    frame.render_widget(Paragraph::new(status_line), chunks[1]);
+    frame.render_widget(Paragraph::new(status_line), status_area);
 
     if app.config_editor_focused {
-        let screen_x = chunks[0]
+        let screen_x = editor_area
             .x
             .saturating_add(5)
             .saturating_add(u16::try_from(view.cursor_col).unwrap_or(0));
-        let screen_y = chunks[0]
+        let screen_y = editor_area
             .y
             .saturating_add(1)
             .saturating_add(u16::try_from(view.cursor_row.saturating_sub(app.config_editor_scroll)).unwrap_or(0));

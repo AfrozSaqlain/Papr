@@ -78,6 +78,25 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// List of built-in theme names.
+    pub const BUILTIN_THEMES: &'static [&'static str] = &[
+        "catppuccin-mocha",
+        "catppuccin-macchiato",
+        "catppuccin-frappe",
+        "catppuccin-latte",
+        "tokyo-night",
+        "gruvbox",
+        "nord",
+        "dracula",
+        "light",
+        "rose-pink-dark",
+        "rose-pink-light",
+        "everforest",
+        "kanagawa",
+        "one-dark",
+        "cyberpunk",
+    ];
+
     /// Load a built-in theme by name, or a custom theme from a TOML path.
     ///
     /// # Errors

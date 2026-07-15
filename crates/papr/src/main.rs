@@ -3091,6 +3091,13 @@ fn apply_config_update(
     refresh_dashboard(runtime, app)?;
     refresh_downloads(runtime, app);
 
+    if let Ok(paths) = Paths::discover() {
+        if let Ok(plugin_host) = PluginHost::discover(&paths.plugins_dir, &config.enabled_plugins) {
+            app.plugins = plugin_host.plugins();
+            app.plugin_diagnostics = plugin_host.diagnostics().len();
+        }
+    }
+
     Ok(())
 }
 
