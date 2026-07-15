@@ -648,7 +648,7 @@ async fn run(
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     if app.page == papr_core::Page::Settings && app.config_editor_focused {
-                        if let Some(action) = handle_config_editor_key(app, key, &mut runtime, &mut theme) {
+                        if let Some(action) = handle_config_editor_key(app, key, &mut runtime, &mut theme, &senders) {
                             apply_ui_action(
                                 action,
                                 &mut runtime,
@@ -3070,6 +3070,7 @@ fn apply_config_update(
     app: &mut App,
     config: &Config,
     theme: &mut Theme,
+    senders: &ActionSenders,
 ) -> Result<()> {
     let new_theme = Theme::load(&config.theme).map_err(|e| anyhow::anyhow!("Theme load failed: {e}"))?;
     *theme = new_theme;
@@ -3098,8 +3099,10 @@ fn apply_config_update(
     }
     runtime.library_roots = library_roots;
 
+    let old_sig = runtime.dashboard_keyword_signature.clone();
     runtime.dashboard_keywords = config.dashboard_keyword_list();
-    runtime.dashboard_keyword_signature.clear();
+    runtime.dashboard_keyword_signature = runtime.dashboard_keywords.join(",");
+    let keywords_changed = old_sig != runtime.dashboard_keyword_signature;
 
     restart_runtime_watcher(runtime)?;
     refresh_library(runtime, app)?;
@@ -3114,6 +3117,10 @@ fn apply_config_update(
         }
     }
 
+    if keywords_changed {
+        refresh_dashboard_papers(runtime, senders, app)?;
+    }
+
     Ok(())
 }
 
@@ -3122,6 +3129,7 @@ fn handle_config_editor_key(
     key: KeyEvent,
     runtime: &mut Runtime,
     theme: &mut Theme,
+    senders: &ActionSenders,
 ) -> Option<UiAction> {
     if let Some(mut cmd) = app.config_editor_command.clone() {
         match key.code {
@@ -3149,7 +3157,7 @@ fn handle_config_editor_key(
                             } else {
                                 app.config_editor_error = None;
                                 app.toast = Some("Configuration saved and applied.".to_owned());
-                                if let Err(e) = apply_config_update(runtime, app, &new_config, theme) {
+                                if let Err(e) = apply_config_update(runtime, app, &new_config, theme, senders) {
                                     app.config_editor_error = Some(format!("Apply failed: {e}"));
                                 } else {
                                     action_to_return = Some(UiAction::Reindex);
