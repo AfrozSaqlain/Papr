@@ -520,6 +520,7 @@ async fn run(
     refresh_dashboard_papers(&runtime, &senders, app)?;
     start_runtime_scan(&runtime, &senders, app);
     let mut last_date_check = std::time::Instant::now();
+    let mut last_page = app.page;
     while !app.should_quit {
         while let Ok(TodayResponse { feed_date, result }) = today_receiver.try_recv() {
             if feed_date != runtime.dashboard_feed_date {
@@ -614,6 +615,11 @@ async fn run(
                     app.toast = Some(message);
                 }
             }
+        }
+        if app.page != last_page {
+            app.workspace_query.clear();
+            app.workspace_query_cursor = 0;
+            last_page = app.page;
         }
         session
             .terminal_mut()
