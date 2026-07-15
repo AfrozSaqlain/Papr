@@ -217,7 +217,7 @@ fn render_workspace_search_bar(frame: &mut Frame<'_>, area: Rect, app: &App, the
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .title(" Local Search (Ctrl+/) ");
+        .title(" Local Search (Press: > to toggle) ");
     
     let mut text = app.workspace_query.clone();
     if text.is_empty() && app.mode != AppMode::WorkspaceSearch {

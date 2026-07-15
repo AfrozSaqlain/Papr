@@ -2053,6 +2053,13 @@ fn handle_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
 }
 
 fn handle_workspace_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    if key.code == KeyCode::Char('>') {
+        app.mode = AppMode::Normal;
+        app.content_focused = true;
+        app.active_search_workspaces.remove(&app.page);
+        return None;
+    }
+
     match key.code {
         KeyCode::Esc => {
             app.mode = AppMode::Normal;
@@ -2062,6 +2069,30 @@ fn handle_workspace_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction>
             app.mode = AppMode::Normal;
             app.content_focused = true;
             app.active_search_workspaces.remove(&app.page);
+            if key.code == KeyCode::Down {
+                match app.page {
+                    papr_core::Page::Library => app.library.selected = 0,
+                    papr_core::Page::Downloads => app.download_selected = 0,
+                    papr_core::Page::Collections => {
+                        if app.active_collection.is_some() {
+                            app.collection_paper_selected = 0;
+                        } else {
+                            app.collection_selected = 0;
+                        }
+                    }
+                    papr_core::Page::Authors => {
+                        if app.active_author.is_some() {
+                            app.author_paper_selected = 0;
+                        } else {
+                            app.author_selected = 0;
+                        }
+                    }
+                    papr_core::Page::Bookmarks => app.bookmark_selected = 0,
+                    papr_core::Page::Notes => app.notes_selected = 0,
+                    papr_core::Page::ReadingQueue => app.reading_queue_selected = 0,
+                    _ => {}
+                }
+            }
         }
         KeyCode::Left => {
             app.mode = AppMode::Normal;
@@ -2550,7 +2581,7 @@ fn navigation_command(key: KeyEvent) -> Option<Command> {
         (KeyCode::Char('p'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(Command::TogglePalette)
         }
-        (KeyCode::Char('/'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+        (KeyCode::Char('>'), _) => {
             Some(Command::ToggleWorkspaceSearch)
         }
         (KeyCode::Char('j') | KeyCode::Down, _) => Some(Command::MoveDown),
@@ -3342,6 +3373,99 @@ mod tests {
             assert_eq!(app.mode, AppMode::WorkspaceSearch);
             assert_eq!(app.workspace_query, "test query");
             assert_eq!(app.workspace_query_cursor, 10);
+        }
+    }
+
+    #[test]
+    fn test_workspace_search_greater_than_and_arrow_keys() {
+        for page in [
+            Page::Library,
+            Page::Downloads,
+            Page::Collections,
+            Page::Authors,
+            Page::Bookmarks,
+            Page::Notes,
+            Page::ReadingQueue,
+        ] {
+            let mut app = App {
+                page,
+                content_focused: true,
+                mode: AppMode::Normal,
+                workspace_query: "some query".to_string(),
+                workspace_query_cursor: 10,
+                library: papr_core::LibraryState {
+                    selected: 5,
+                    ..papr_core::LibraryState::default()
+                },
+                download_selected: 5,
+                collection_selected: 5,
+                collection_paper_selected: 5,
+                author_selected: 5,
+                author_paper_selected: 5,
+                bookmark_selected: 5,
+                notes_selected: 5,
+                reading_queue_selected: 5,
+                ..App::default()
+            };
+            app.active_collection = Some(papr_core::models::CollectionSummary {
+                id: 1,
+                name: "Collection".into(),
+                paper_count: 5,
+                folder_path: None,
+            });
+            app.active_author = Some(papr_core::models::AuthorSummary {
+                id: 2,
+                name: "Author".into(),
+                paper_count: 5,
+            });
+
+            // 1. When workspace has focus, pressing '>' should return focus to search bar
+            let action = handle_key(&mut app, KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE));
+            assert!(action.is_none());
+            assert!(app.content_focused);
+            assert_eq!(app.mode, AppMode::WorkspaceSearch);
+            assert!(app.active_search_workspaces.contains(&page));
+
+            // 2. Pressing '>' again in search mode should return focus to workspace
+            let action = handle_key(&mut app, KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE));
+            assert!(action.is_none());
+            assert!(app.content_focused);
+            assert_eq!(app.mode, AppMode::Normal);
+            assert_eq!(app.workspace_query, "some query");
+            assert!(!app.active_search_workspaces.contains(&page));
+
+            // 3. Enter search mode again and test Down Arrow
+            handle_key(&mut app, KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE));
+            assert_eq!(app.mode, AppMode::WorkspaceSearch);
+
+            // Pressing Down Arrow should move focus to first visible paper in filtered list (index 0)
+            let action = handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            assert!(action.is_none());
+            assert!(app.content_focused);
+            assert_eq!(app.mode, AppMode::Normal);
+            assert!(!app.active_search_workspaces.contains(&page));
+
+            match page {
+                Page::Library => assert_eq!(app.library.selected, 0),
+                Page::Downloads => assert_eq!(app.download_selected, 0),
+                Page::Collections => assert_eq!(app.collection_paper_selected, 0),
+                Page::Authors => assert_eq!(app.author_paper_selected, 0),
+                Page::Bookmarks => assert_eq!(app.bookmark_selected, 0),
+                Page::Notes => assert_eq!(app.notes_selected, 0),
+                Page::ReadingQueue => assert_eq!(app.reading_queue_selected, 0),
+                _ => {}
+            }
+
+            // 4. Enter search mode and test Esc
+            handle_key(&mut app, KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE));
+            assert_eq!(app.mode, AppMode::WorkspaceSearch);
+
+            let action = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert!(action.is_none());
+            assert!(app.content_focused);
+            assert_eq!(app.mode, AppMode::Normal);
+            assert_eq!(app.workspace_query, "some query");
+            assert!(!app.active_search_workspaces.contains(&page));
         }
     }
 
