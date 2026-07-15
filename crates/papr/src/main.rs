@@ -1407,7 +1407,7 @@ fn default_pdf_viewer() -> String {
     if cfg!(target_os = "macos") {
         "open".into()
     } else if cfg!(target_os = "windows") {
-        "cmd /C start".into()
+        "cmd /C start \"\"".into()
     } else {
         "xdg-open".into()
     }
@@ -1424,6 +1424,18 @@ fn open_pdf(
         app.toast = Some(format!("PDF not found: {}", path.display()));
         return Ok(());
     }
+
+    let absolute_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    #[cfg(target_os = "windows")]
+    let absolute_path = {
+        let path_str = absolute_path.to_string_lossy();
+        if let Some(stripped) = path_str.strip_prefix(r"\\?\") {
+            PathBuf::from(stripped)
+        } else {
+            absolute_path
+        }
+    };
+    let path = &absolute_path;
 
     let mut argv = parse_command(viewer)?;
     if argv.is_empty() {
