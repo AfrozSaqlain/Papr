@@ -357,7 +357,7 @@ This architecture makes plugins:
 * **Dashboard:** Displays reading statistics, streaks, storage usage, and a daily feed of new arXiv papers matching your keywords.
 * **Discover:** Search arXiv, explore paper metadata, and queue background downloads.
 * **Library:** View all indexed local PDFs within your configured folders.
-* **Reading Queue:** A prioritized list of papers you plan to read next.
+* **Reading Queue:** A prioritized list of papers you plan to read next. Supports reordering/prioritization with `K`/`J` (or Shift/Ctrl + Up/Down) and toggling with `a` key.
 * **Collections:** Paper groups mapping directly to subdirectories in your library.
 * **Bookmarks:** Quick-access list of bookmarked local PDFs.
 * **Authors:** Browse local papers grouped by author name.
@@ -366,7 +366,7 @@ This architecture makes plugins:
 * **History:** A chronological log of searches, downloads, and paper opens.
 * **Statistics:** Detailed reading streaks, totals, top dimensions, and a 12-week reading heatmap.
 * **Settings:** Quick summary of active paths, configurations, and plugins.
-* **Help:** Interactive keyboard reference map.
+* **Credits:** Redesigned interactive Credits/About page for Papr.
 
 ---
 
@@ -382,6 +382,7 @@ This architecture makes plugins:
 | `Left` | Return focus to the sidebar navigation |
 | `h` | Go back to the previous screen or list |
 | `u` | Set the current state of the paper as unread |
+| `a` | Toggle paper queue/dequeue status |
 | `/` | Start a new arXiv search |
 | `Ctrl+P` | Open the command palette |
 | `?` | Toggle the help helper screen |
