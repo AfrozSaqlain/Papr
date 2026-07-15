@@ -521,6 +521,7 @@ async fn run(
     start_runtime_scan(&runtime, &senders, app);
     let mut last_date_check = std::time::Instant::now();
     let mut last_page = app.page;
+    let mut last_toast = None;
     while !app.should_quit {
         while let Ok(TodayResponse { feed_date, result }) = today_receiver.try_recv() {
             if feed_date != runtime.dashboard_feed_date {
@@ -620,6 +621,22 @@ async fn run(
             app.workspace_query.clear();
             app.workspace_query_cursor = 0;
             last_page = app.page;
+        }
+        if app.toast.is_some() {
+            if app.toast != last_toast {
+                app.toast_timestamp = Some(std::time::Instant::now());
+                last_toast = app.toast.clone();
+            }
+            if let Some(ts) = app.toast_timestamp {
+                if ts.elapsed() >= std::time::Duration::from_secs(7) {
+                    app.toast = None;
+                    app.toast_timestamp = None;
+                    last_toast = None;
+                }
+            }
+        } else {
+            app.toast_timestamp = None;
+            last_toast = None;
         }
         session
             .terminal_mut()

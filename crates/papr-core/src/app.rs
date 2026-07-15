@@ -385,6 +385,8 @@ pub struct App {
     pub last_opened_author_id: Option<i64>,
     /// Short user-facing operation result.
     pub toast: Option<String>,
+    /// Timestamp when toast was last set.
+    pub toast_timestamp: Option<std::time::Instant>,
     /// Mode restored when an editor or prompt closes.
     pub modal_return: AppMode,
     /// Discovered plugin summaries.
@@ -482,6 +484,7 @@ impl Default for App {
             author_paper_scroll: 0,
             last_opened_author_id: None,
             toast: None,
+            toast_timestamp: None,
             modal_return: AppMode::Normal,
             plugins: Vec::new(),
             plugin_diagnostics: 0,
