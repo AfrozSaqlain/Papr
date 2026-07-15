@@ -2175,8 +2175,16 @@ fn handle_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             }
         }
         KeyCode::Left => {
-            app.content_focused = false;
-            app.mode = AppMode::Normal;
+            if app.discovery.query_cursor == 0 {
+                app.content_focused = false;
+                app.mode = AppMode::Normal;
+            } else {
+                edit_text(
+                    &mut app.discovery.query,
+                    &mut app.discovery.query_cursor,
+                    key,
+                );
+            }
         }
         KeyCode::Enter if !app.discovery.query.trim().is_empty() => {
             let query = app.discovery.query.trim().to_owned();
@@ -2238,8 +2246,16 @@ fn handle_workspace_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction>
             }
         }
         KeyCode::Left => {
-            app.mode = AppMode::Normal;
-            app.content_focused = false;
+            if app.workspace_query_cursor == 0 {
+                app.mode = AppMode::Normal;
+                app.content_focused = false;
+            } else {
+                edit_text(
+                    &mut app.workspace_query,
+                    &mut app.workspace_query_cursor,
+                    key,
+                );
+            }
         }
         _ => {
             edit_text(
@@ -3345,7 +3361,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use papr_core::{
-        App, AppMode, BookmarkSummary, CollectionSummary, Database, DownloadStatus,
+        App, AppMode, BookmarkSummary, CollectionSummary, Database, DiscoveryState, DownloadStatus,
         DownloadTask, LibraryPaper, Page, PaperNote, RemotePaper,
     };
     use papr_core::models::AuthorSummary;
@@ -3502,7 +3518,15 @@ mod tests {
                 ..App::default()
             };
 
-            // Pressing Left Arrow in WorkspaceSearch mode should immediately transfer focus to navigation pane
+            // Pressing Left Arrow in WorkspaceSearch mode when cursor > 0 should move cursor left
+            let action = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+            assert!(action.is_none());
+            assert!(app.content_focused);
+            assert_eq!(app.mode, AppMode::WorkspaceSearch);
+            assert_eq!(app.workspace_query_cursor, 9);
+
+            // Pressing Left Arrow when cursor == 0 should transfer focus to navigation pane
+            app.workspace_query_cursor = 0;
             let action = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
             assert!(action.is_none());
             assert!(!app.content_focused);
@@ -3530,8 +3554,37 @@ mod tests {
             assert!(app.content_focused);
             assert_eq!(app.mode, AppMode::WorkspaceSearch);
             assert_eq!(app.workspace_query, "test query");
-            assert_eq!(app.workspace_query_cursor, 10);
+            assert_eq!(app.workspace_query_cursor, 0);
         }
+    }
+
+    #[test]
+    fn test_discover_search_navigation() {
+        let mut app = App {
+            page: Page::Discover,
+            content_focused: true,
+            mode: AppMode::Search,
+            discovery: DiscoveryState {
+                query: "test query".to_string(),
+                query_cursor: 10,
+                ..DiscoveryState::default()
+            },
+            ..App::default()
+        };
+
+        // Pressing Left Arrow when cursor > 0 should move cursor left
+        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert!(action.is_none());
+        assert!(app.content_focused);
+        assert_eq!(app.mode, AppMode::Search);
+        assert_eq!(app.discovery.query_cursor, 9);
+
+        // Pressing Left Arrow when cursor == 0 should transfer focus to navigation pane
+        app.discovery.query_cursor = 0;
+        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert!(action.is_none());
+        assert!(!app.content_focused);
+        assert_eq!(app.mode, AppMode::Normal);
     }
 
     #[test]
