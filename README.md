@@ -67,6 +67,69 @@ cargo run --release --bin papr
 
 ---
 
+## Running with Docker
+
+This project includes a Dockerfile that builds `papr` inside a lightweight Alpine-based build environment and produces a small runtime image containing only the compiled executable.
+
+### Build the image
+
+From the root of the repository, run:
+
+```bash
+docker build \
+    --build-arg USERNAME=$(whoami) \
+    --build-arg UID=$(id -u) \
+    --build-arg GID=$(id -g) \
+    -t papr .
+```
+
+This will:
+
+* Build `papr` from source inside a Rust/Alpine builder image.
+* Create a lightweight Alpine runtime image.
+* Create a user inside the container with the same UID and GID as your host user, avoiding file permission issues when mounting directories.
+
+### Start a shell
+
+```bash
+docker run --rm -it \
+    --hostname qubit \
+    -w /home/$(whoami) \
+    papr \
+    bash
+```
+
+Once inside the container, launch `papr` with:
+
+```bash
+papr
+```
+
+### Persist your data
+
+By default, any files created inside the container are removed when the container exits because `--rm` deletes the container after it stops.
+
+To keep your PDFs, configuration, and other files on your host machine, mount a directory:
+
+```bash
+docker run --rm -it \
+    --hostname papr \
+    -v /path/to/your/data:/home/$(whoami) \
+    -w /home/$(whoami) \
+    papr \
+    bash
+```
+
+Replace `/path/to/your/data` with the directory on your host where you want your library and configuration to be stored.
+
+### Notes
+
+* The final runtime image is based on Alpine Linux and does **not** include the Rust toolchain.
+* The Rust compiler and build dependencies exist only in the temporary build stage and are not included in the final image.
+* The default Docker hostname is the container ID. Passing `--hostname qubit` gives the container a more readable hostname.
+
+---
+
 ## Configuration
 
 Papr generates a default configuration file (`config.toml`) automatically upon its first run. To inspect your resolved paths (configuration, database, downloads, and plugins), execute:
