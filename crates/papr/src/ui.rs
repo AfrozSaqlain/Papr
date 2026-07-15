@@ -187,6 +187,8 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         render_statistics(frame, inset, app, theme);
     } else if app.page == Page::Settings {
         render_settings(frame, inset, app, theme);
+    } else if app.page == Page::Credits {
+        render_credits(frame, inset, app, theme);
     } else {
         let lines = vec![
             Line::styled(
@@ -2053,6 +2055,104 @@ fn centered(width: u16, height: u16, area: Rect) -> Rect {
         width,
         height,
     )
+}
+
+fn render_credits(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+    let chunks = Layout::horizontal([
+        Constraint::Percentage(50),
+        Constraint::Percentage(50),
+    ]).split(area);
+
+    // Left Column: Overview and info
+    let left_lines = vec![
+        Line::styled("Papr - Academic TUI Workspace", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+        Line::styled("A keyboard-first terminal workspace for academic papers.", Style::default().fg(theme.text)),
+        Line::raw(""),
+        Line::styled("PROJECT DETAILS", Style::default().fg(theme.secondary).add_modifier(Modifier::BOLD)),
+        Line::from(vec![
+            Span::styled("Version:        ", Style::default().fg(theme.muted)),
+            Span::styled(env!("CARGO_PKG_VERSION"), Style::default().fg(theme.text)),
+        ]),
+        Line::from(vec![
+            Span::styled("License:        ", Style::default().fg(theme.muted)),
+            Span::styled("MIT", Style::default().fg(theme.text)),
+        ]),
+        Line::from(vec![
+            Span::styled("Authors:        ", Style::default().fg(theme.muted)),
+            Span::styled("Saqlain Afroz & Tanveer", Style::default().fg(theme.text)),
+        ]),
+        Line::raw(""),
+        Line::styled("RESEARCH DATA PROVIDERS & APIS", Style::default().fg(theme.secondary).add_modifier(Modifier::BOLD)),
+        Line::styled("• arXiv API (Preprint search and metadata retrieval)", Style::default().fg(theme.text)),
+        Line::styled("• Crossref API (DOI resolution and BibTeX citation metadata)", Style::default().fg(theme.text)),
+        Line::raw(""),
+        Line::styled("CORE TECHNOLOGIES USED", Style::default().fg(theme.secondary).add_modifier(Modifier::BOLD)),
+        Line::styled("• Rust (Robust system programming language)", Style::default().fg(theme.text)),
+        Line::styled("• Ratatui & Crossterm (Terminal rendering and TUI library)", Style::default().fg(theme.text)),
+        Line::styled("• SQLite (Local metadata storage and persistence)", Style::default().fg(theme.text)),
+        Line::styled("• Tokio (Asynchronous task pool and download scheduler)", Style::default().fg(theme.text)),
+        Line::styled("• Reqwest (HTTP client for querying search APIs)", Style::default().fg(theme.text)),
+        Line::raw(""),
+        Line::styled("SPECIAL THANKS", Style::default().fg(theme.secondary).add_modifier(Modifier::BOLD)),
+        Line::styled("Dedicated to the open-source community,", Style::default().fg(theme.text)),
+        Line::styled("and academic authors worldwide who share their work freely.", Style::default().fg(theme.text)),
+        Line::styled("And to our parents who always supported us.", Style::default().fg(theme.text)),
+    ];
+
+    let left_para = Paragraph::new(left_lines)
+        .block(
+            Block::default()
+                .title(" ABOUT PAPR ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border))
+                .style(Style::default().bg(theme.surface)),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(left_para, chunks[0]);
+
+    // Right Column: Interactive links & dependencies list
+    let right_chunks = Layout::vertical([
+        Constraint::Min(4),
+        Constraint::Length(1),
+    ]).split(chunks[1]);
+
+    let credits_items = app.credits_items();
+    let list_items: Vec<ListItem> = credits_items
+        .iter()
+        .map(|item| {
+            ListItem::new(vec![
+                Line::styled(&item.label, Style::default().fg(theme.text)),
+                Line::styled(&item.url, Style::default().fg(theme.muted)),
+            ])
+        })
+        .collect();
+
+    let list = List::new(list_items)
+        .block(
+            Block::default()
+                .title(" INTERACTIVE LINKS & DEPENDENCIES ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.accent))
+                .style(Style::default().bg(theme.surface)),
+        )
+        .highlight_style(Style::default().bg(theme.border).fg(theme.accent))
+        .highlight_symbol("> ");
+
+    // Safety check selection boundaries
+    app.credits_selected = app.credits_selected.min(credits_items.len().saturating_sub(1));
+
+    let mut state = ListState::default()
+        .with_selected(Some(app.credits_selected))
+        .with_offset(app.credits_scroll);
+
+    frame.render_stateful_widget(list, right_chunks[0], &mut state);
+    app.credits_scroll = state.offset();
+
+    let instructions = Line::styled(
+        " ▲/▼: Select  |  Enter: Open link in default browser",
+        Style::default().fg(theme.muted),
+    );
+    frame.render_widget(Paragraph::new(instructions), right_chunks[1]);
 }
 
 #[cfg(test)]

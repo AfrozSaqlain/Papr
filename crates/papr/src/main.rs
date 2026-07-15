@@ -1973,6 +1973,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if let Some(action) = handle_reading_queue_key(app, key) {
         return Some(action);
     }
+    if let Some(action) = handle_credits_key(app, key) {
+        return Some(action);
+    }
     if app.page == papr_core::Page::Discover && key.code == KeyCode::Char('o') {
         return app
             .discovery
@@ -2106,6 +2109,20 @@ fn bookmark_action(app: &App, key: KeyEvent) -> Option<UiAction> {
             title: bookmark.paper_title.clone(),
             path: Some(PathBuf::from(&bookmark.pdf_path)),
         }),
+        _ => None,
+    }
+}
+
+fn handle_credits_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    if app.page != papr_core::Page::Credits {
+        return None;
+    }
+    match key.code {
+        KeyCode::Enter => {
+            let items = app.credits_items();
+            let selected = items.get(app.credits_selected)?;
+            Some(UiAction::OpenBrowser(selected.url.clone()))
+        }
         _ => None,
     }
 }
@@ -2830,7 +2847,7 @@ fn selected_local_paper_id(app: &App) -> Option<i64> {
         | papr_core::Page::History
         | papr_core::Page::Statistics
         | papr_core::Page::Settings
-        | papr_core::Page::Help => None,
+        | papr_core::Page::Credits => None,
     }
 }
 
@@ -3868,5 +3885,26 @@ mod tests {
         assert!(matches!(action_up, Some(UiAction::MoveQueueItemUp(42))));
         let action_down = handle_key(&mut app, KeyEvent::new(KeyCode::Char('J'), KeyModifiers::NONE));
         assert!(matches!(action_down, Some(UiAction::MoveQueueItemDown(42))));
+    }
+
+    #[test]
+    fn credits_workspace_keybinds_and_actions() {
+        let mut app = App {
+            page: Page::Credits,
+            content_focused: true,
+            credits_selected: 0,
+            ..App::default()
+        };
+
+        // MoveDown command should navigate down
+        app.dispatch(papr_core::Command::MoveDown);
+        assert_eq!(app.credits_selected, 1);
+
+        app.dispatch(papr_core::Command::MoveUp);
+        assert_eq!(app.credits_selected, 0);
+
+        // Enter key should trigger UiAction::OpenBrowser(url)
+        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(action, Some(UiAction::OpenBrowser(ref url)) if url == "https://github.com/AfrozSaqlain/Papr"));
     }
 }

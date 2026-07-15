@@ -33,8 +33,8 @@ pub enum Page {
     Statistics,
     /// User preferences.
     Settings,
-    /// Shortcut reference.
-    Help,
+    /// Credits and about information.
+    Credits,
 }
 
 impl Page {
@@ -52,7 +52,7 @@ impl Page {
         Self::History,
         Self::Statistics,
         Self::Settings,
-        Self::Help,
+        Self::Credits,
     ];
 
     /// Human-readable navigation label.
@@ -71,7 +71,7 @@ impl Page {
             Self::History => "History",
             Self::Statistics => "Statistics",
             Self::Settings => "Settings",
-            Self::Help => "Help",
+            Self::Credits => "Credits",
         }
     }
 }
@@ -287,6 +287,10 @@ pub struct App {
     pub palette_query: String,
     /// Cursor position in command palette query.
     pub palette_query_cursor: usize,
+    /// Selected credits item row.
+    pub credits_selected: usize,
+    /// Vertical list scroll offset for credits list.
+    pub credits_scroll: usize,
     /// Local workspace search query.
     pub workspace_query: String,
     /// Cursor position in workspace query.
@@ -416,6 +420,8 @@ impl Default for App {
             palette_scroll: 0,
             palette_query: String::new(),
             palette_query_cursor: 0,
+            credits_selected: 0,
+            credits_scroll: 0,
             workspace_query: String::new(),
             workspace_query_cursor: 0,
             discovery: DiscoveryState::default(),
@@ -474,7 +480,83 @@ impl Default for App {
     }
 }
 
+/// Represents a clickable credit/dependency item on the Credits/About page.
+#[derive(Debug, Clone)]
+pub struct InteractiveCreditItem {
+    /// The display label.
+    pub label: String,
+    /// The external URL.
+    pub url: String,
+}
+
 impl App {
+    /// Get dependencies parsed from Cargo.toml.
+    pub fn get_dependencies(&self) -> Vec<(String, String)> {
+        let mut deps = Vec::new();
+        if let Ok(value) = toml::from_str::<toml::Value>(include_str!("../../../Cargo.toml")) {
+            if let Some(workspace) = value.get("workspace") {
+                if let Some(dependencies) = workspace.get("dependencies") {
+                    if let Some(table) = dependencies.as_table() {
+                        for (k, v) in table {
+                            let version = match v {
+                                toml::Value::String(s) => s.clone(),
+                                toml::Value::Table(t) => {
+                                    t.get("version")
+                                        .and_then(|ver| ver.as_str())
+                                        .unwrap_or("")
+                                        .to_string()
+                                }
+                                _ => "".to_string(),
+                            };
+                            deps.push((k.clone(), version));
+                        }
+                    }
+                }
+            }
+        }
+        deps.sort_by(|a, b| a.0.cmp(&b.0));
+        deps
+    }
+
+    /// Get list of all interactive credits items (docs, libraries, dependencies).
+    pub fn credits_items(&self) -> Vec<InteractiveCreditItem> {
+        let mut items = vec![
+            InteractiveCreditItem {
+                label: "GitHub Repository (AfrozSaqlain/Papr)".to_string(),
+                url: "https://github.com/AfrozSaqlain/Papr".to_string(),
+            },
+            InteractiveCreditItem {
+                label: "arXiv API Documentation".to_string(),
+                url: "https://arxiv.org/help/api/index".to_string(),
+            },
+            InteractiveCreditItem {
+                label: "Crossref REST API".to_string(),
+                url: "https://www.crossref.org/documentation/retrieve-metadata/rest-api/".to_string(),
+            },
+            InteractiveCreditItem {
+                label: "Ratatui TUI Framework".to_string(),
+                url: "https://ratatui.rs/".to_string(),
+            },
+            InteractiveCreditItem {
+                label: "Tokio Async Runtime".to_string(),
+                url: "https://tokio.rs/".to_string(),
+            },
+            InteractiveCreditItem {
+                label: "SQLite Database Engine".to_string(),
+                url: "https://www.sqlite.org/".to_string(),
+            },
+        ];
+
+        for (name, version) in self.get_dependencies() {
+            items.push(InteractiveCreditItem {
+                label: format!("{} ({})", name, version),
+                url: format!("https://crates.io/crates/{}", name),
+            });
+        }
+
+        items
+    }
+
     /// Check if a query matches the title or authors case-insensitively.
     pub fn matches_query(query: &str, title: &str, authors: &str) -> bool {
         if query.is_empty() {
@@ -658,6 +740,8 @@ impl App {
                     } else {
                         self.reading_queue_selected -= 1;
                     }
+                } else if self.page == Page::Credits {
+                    self.credits_selected = self.credits_selected.saturating_sub(1);
                 }
             }
             Command::MoveDown => {
@@ -702,6 +786,9 @@ impl App {
                 } else if self.page == Page::ReadingQueue {
                     self.reading_queue_selected = (self.reading_queue_selected + 1)
                         .min(self.filtered_reading_queue_papers().len().saturating_sub(1));
+                } else if self.page == Page::Credits {
+                    self.credits_selected = (self.credits_selected + 1)
+                        .min(self.credits_items().len().saturating_sub(1));
                 }
             }
             Command::Open => {
