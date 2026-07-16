@@ -1492,36 +1492,48 @@ fn pdf_scroll(app: &mut App, delta: i64) {
         return;
     }
 
-    // `pdf_viewer_page_pixel_h` is updated by draw_pdf_viewer each frame once
-    // the page has been rendered.  Until the first frame it will be 0 –
-    // treat it as "unknown" and just apply the delta without boundary logic.
-    let page_h = app.pdf_viewer_page_pixel_h;
+    // All comparisons are in terminal cell rows to match how draw_pdf_viewer
+    // stores and clamps `pdf_viewer_scroll_y`.
+    //
+    // `pdf_viewer_max_scroll_y` is written by draw_pdf_viewer every frame once
+    // the current page has been rendered.  Before the first render it is 0 –
+    // that means no clamping/boundary logic applies yet, which is safe.
+    let max_scroll = app.pdf_viewer_max_scroll_y;
 
     if delta > 0 {
-        // Scrolling down
+        // ── Scrolling down ──────────────────────────────────────────────────
         let new_y = app.pdf_viewer_scroll_y.saturating_add(delta as u32);
 
-        if page_h > 0 && new_y >= page_h && app.pdf_viewer_page < app.pdf_viewer_total_pages {
-            // Cross into the next page
+        if new_y > max_scroll && app.pdf_viewer_page < app.pdf_viewer_total_pages {
+            // Past the bottom of this page → advance to the next page and
+            // carry any overshoot so scrolling feels continuous.
+            let overshoot = new_y.saturating_sub(max_scroll).saturating_sub(1);
             app.pdf_viewer_page += 1;
-            app.pdf_viewer_scroll_y = 0;
+            app.pdf_viewer_scroll_y = overshoot;
+            // Reset the published max so the next draw frame recomputes it for
+            // the new page rather than leaving a stale value that would
+            // immediately trigger another transition.
+            app.pdf_viewer_max_scroll_y = 0;
         } else {
-            app.pdf_viewer_scroll_y = new_y;
+            app.pdf_viewer_scroll_y = new_y.min(max_scroll);
         }
     } else {
-        // Scrolling up
+        // ── Scrolling up ────────────────────────────────────────────────────
         let abs_delta = (-delta) as u32;
+
         if abs_delta > app.pdf_viewer_scroll_y && app.pdf_viewer_page > 1 {
-            // Cross back to the previous page – land near the bottom
+            // Past the top of this page → go back to the previous page.
+            // Land near the bottom; draw_pdf_viewer will clamp precisely once
+            // the previous page's max_scroll is known.
             app.pdf_viewer_page -= 1;
-            // Use page_h as a proxy for the height of the previous page;
-            // draw_pdf_viewer will clamp once that page is rendered.
-            app.pdf_viewer_scroll_y = if page_h > 0 { page_h.saturating_sub(1) } else { u32::MAX };
+            app.pdf_viewer_scroll_y = u32::MAX; // draw will clamp on next frame
+            app.pdf_viewer_max_scroll_y = 0;
         } else {
             app.pdf_viewer_scroll_y = app.pdf_viewer_scroll_y.saturating_sub(abs_delta);
         }
     }
 }
+
 
 
 fn open_pdf(
@@ -1560,6 +1572,7 @@ fn open_pdf(
         app.pdf_viewer_zoom = 100.0;
         app.pdf_viewer_scroll_y = 0;
         app.pdf_viewer_page_pixel_h = 0;
+        app.pdf_viewer_max_scroll_y = 0;
         app.pdf_viewer_total_pages = get_pdf_page_count(path);
         app.toast = Some(format!(
             "Viewing PDF: {}",
@@ -1567,6 +1580,7 @@ fn open_pdf(
         ));
         return Ok(());
     }
+
 
 
     let mut argv = parse_command(viewer)?;

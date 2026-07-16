@@ -416,6 +416,9 @@ pub fn draw_pdf_viewer(frame: &mut Frame<'_>, app: &mut App) {
     // Keep the cell-level counter in sync with the clamped pixel offset.
     app.pdf_viewer_scroll_y = scroll_px / (font_h as u32);
     let max_scroll_cells = max_scroll_px / (font_h as u32);
+    // Publish the maximum so pdf_scroll can compare in the same unit (cell rows).
+    app.pdf_viewer_max_scroll_y = max_scroll_cells;
+
 
     // Visible crop rectangle
     let crop_h = pixel_h.min(page_h.saturating_sub(scroll_px));
