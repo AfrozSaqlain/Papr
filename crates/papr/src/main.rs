@@ -1850,7 +1850,14 @@ fn discover_local_downloads(
                 continue;
             }
 
-            let paper_id = database.paper_id_for_path(&pdf_path).ok().flatten();
+            let canonical_path = std::fs::canonicalize(&pdf_path)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| pdf_path.clone());
+            let paper_id = database
+                .paper_id_for_path(&pdf_path)
+                .ok()
+                .flatten()
+                .or_else(|| database.paper_id_for_path(&canonical_path).ok().flatten());
             app.downloads.push(DownloadTask {
                 id,
                 title,
@@ -2427,7 +2434,7 @@ fn handle_reading_queue_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
 }
 
-fn handle_downloads_key(app: &App, key: KeyEvent) -> Option<UiAction> {
+fn handle_downloads_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.page != papr_core::Page::Downloads {
         return None;
     }
@@ -2445,9 +2452,28 @@ fn handle_downloads_key(app: &App, key: KeyEvent) -> Option<UiAction> {
         key.code,
         KeyCode::Char('R') | KeyCode::Char('s') | KeyCode::Char('B') | KeyCode::Char('n') | KeyCode::Char('c') | KeyCode::Char('x')
     ) {
-        if let Some(&task) = app.filtered_downloads().get(app.download_selected) {
+        if let Some(task) = app.filtered_downloads().get(app.download_selected).cloned().cloned() {
             if matches!(task.status, DownloadStatus::Completed) {
-                if let Some(paper_id) = task.paper_id {
+                let paper_id = task.paper_id.or_else(|| {
+                    task.pdf_path.as_ref().and_then(|pdf_path| {
+                        app.library
+                            .papers
+                            .iter()
+                            .find(|paper| {
+                                paper.pdf_path.as_deref() == Some(pdf_path.as_str())
+                                    || (|| {
+                                        let paper_path = PathBuf::from(paper.pdf_path.as_deref()?);
+                                        let task_path = PathBuf::from(pdf_path);
+                                        let c_paper = std::fs::canonicalize(&paper_path).ok()?;
+                                        let c_task = std::fs::canonicalize(&task_path).ok()?;
+                                        Some(c_paper == c_task)
+                                    })().unwrap_or(false)
+                            })
+                            .map(|paper| paper.id)
+                    })
+                });
+                if let Some(paper_id) = paper_id {
+                    app.modal_return = AppMode::Normal;
                     return match key.code {
                         KeyCode::Char('R') => Some(UiAction::RenamePdf(paper_id)),
                         KeyCode::Char('s') => Some(UiAction::Prompt(PaperTarget::Local(paper_id))),
@@ -3033,7 +3059,16 @@ fn selected_local_paper_id(app: &App) -> Option<i64> {
                         app.library
                             .papers
                             .iter()
-                            .find(|paper| paper.pdf_path.as_deref() == Some(pdf_path.as_str()))
+                            .find(|paper| {
+                                paper.pdf_path.as_deref() == Some(pdf_path.as_str())
+                                    || (|| {
+                                        let paper_path = PathBuf::from(paper.pdf_path.as_deref()?);
+                                        let task_path = PathBuf::from(pdf_path);
+                                        let c_paper = std::fs::canonicalize(&paper_path).ok()?;
+                                        let c_task = std::fs::canonicalize(&task_path).ok()?;
+                                        Some(c_paper == c_task)
+                                    })().unwrap_or(false)
+                            })
                             .map(|paper| paper.id)
                     })
                 })
@@ -3415,6 +3450,7 @@ mod tests {
     use super::{
         UiAction, build_config_editor_view, cursor_visual_position, diverse_latest_papers,
         handle_config_editor_insert_key, handle_key, parse_command, refresh_downloads_from_dir,
+        PaperTarget,
     };
 
     #[test]
@@ -4044,6 +4080,47 @@ mod tests {
             handle_key(&mut notes_app, KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)),
             Some(UiAction::MarkUnread(11))
         ));
+    }
+
+    #[test]
+    fn downloads_keybinding_s_assigns_to_collection() {
+        let library_paper = LibraryPaper {
+            id: 11,
+            title: "Library Paper".into(),
+            authors: "Researcher".into(),
+            doi: None,
+            pdf_path: Some("/tmp/library.pdf".into()),
+            file_size: Some(1),
+            reading_status: "read".into(),
+            is_favorite: false,
+        };
+
+        let mut downloads_app = App {
+            page: Page::Downloads,
+            content_focused: true,
+            library: papr_core::LibraryState {
+                papers: vec![library_paper],
+                ..papr_core::LibraryState::default()
+            },
+            downloads: vec![DownloadTask {
+                id: "paper".into(),
+                title: "Paper".into(),
+                downloaded: 10,
+                total: Some(10),
+                paper_id: Some(11),
+                pdf_path: Some("/tmp/library.pdf".into()),
+                status: DownloadStatus::Completed,
+            }],
+            ..App::default()
+        };
+        assert!(matches!(
+            handle_key(
+                &mut downloads_app,
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)
+            ),
+            Some(UiAction::Prompt(PaperTarget::Local(11)))
+        ));
+        assert_eq!(downloads_app.modal_return, AppMode::Normal);
     }
 
     #[test]

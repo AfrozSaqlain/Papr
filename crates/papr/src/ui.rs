@@ -2,7 +2,7 @@
 
 use crate::build_config_editor_view;
 use papr_core::{
-    App, AppMode, DeletionTarget, DiscoveryStatus, DownloadStatus, LibraryPaper, Page, RemotePaper, Theme,
+    App, AppMode, DeletionTarget, DiscoveryStatus, DownloadStatus, Page, RemotePaper, Theme,
 };
 use ratatui::{
     Frame,
@@ -331,23 +331,30 @@ fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
         );
         return;
     }
+    let available_width = rows[1].width.saturating_sub(2) as usize;
     let items = papers.iter().map(|paper| {
         let availability = if paper.pdf_path.is_some() {
             "PDF available"
         } else {
             "Metadata only"
         };
-        ListItem::new(vec![
-            Line::styled(
-                &paper.title,
-                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-            ),
-            Line::styled(
-                format!("{}  |  {}", library_metadata(paper), availability),
-                Style::default().fg(theme.muted),
-            ),
-            Line::raw(""),
-        ])
+        let lines = build_paper_lines(
+            app,
+            theme,
+            Some(paper.id),
+            &paper.title,
+            &paper.authors,
+            &paper.reading_status,
+            paper.file_size,
+            Some(availability),
+            None,
+            None,
+            None,
+            None,
+            None,
+            available_width,
+        );
+        ListItem::new(lines)
     });
     let list = List::new(items)
         .block(
@@ -441,23 +448,30 @@ fn render_author_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
         );
         return;
     }
+    let available_width = rows[1].width.saturating_sub(2) as usize;
     let items = papers.iter().map(|paper| {
         let availability = if paper.pdf_path.is_some() {
             "PDF available"
         } else {
             "Metadata only"
         };
-        ListItem::new(vec![
-            Line::styled(
-                &paper.title,
-                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-            ),
-            Line::styled(
-                format!("{}  |  {}", library_metadata(paper), availability),
-                Style::default().fg(theme.muted),
-            ),
-            Line::raw(""),
-        ])
+        let lines = build_paper_lines(
+            app,
+            theme,
+            Some(paper.id),
+            &paper.title,
+            &paper.authors,
+            &paper.reading_status,
+            paper.file_size,
+            Some(availability),
+            None,
+            None,
+            None,
+            None,
+            None,
+            available_width,
+        );
+        ListItem::new(lines)
     });
     let list = List::new(items)
         .block(
@@ -818,51 +832,55 @@ fn activity_kind(kind: &str) -> &str {
 }
 
 fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+    let available_width = area.width.saturating_sub(2) as usize;
     let items: Vec<ListItem<'_>> = match app.page {
         Page::Bookmarks => app
             .bookmarks
             .iter()
             .map(|item| {
-                let mut metadata = Vec::new();
-                if !item.authors.is_empty() {
-                    metadata.push(item.authors.clone());
-                }
-                if let Some(year) = &item.year {
-                    metadata.push(year.clone());
-                }
-                if let Some(journal) = &item.journal {
-                    metadata.push(journal.clone());
-                } else if let Some(doi) = &item.doi {
-                    metadata.push(format!("DOI {doi}"));
-                }
-                if let Some(page) = item.page {
-                    metadata.push(format!("page {page}"));
-                }
-                if metadata.is_empty() {
-                    metadata.push("Local PDF".into());
-                }
-                ListItem::new(vec![
-                    Line::styled(
-                        &item.paper_title,
-                        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-                    ),
-                    Line::styled(metadata.join("  |  "), Style::default().fg(theme.muted)),
-                    Line::raw(""),
-                ])
+                let lib_paper = app.library.papers.iter().find(|p| p.id == item.paper_id);
+                let reading_status = lib_paper.map(|p| p.reading_status.as_str()).unwrap_or("");
+                let file_size = lib_paper.and_then(|p| p.file_size);
+                let lines = build_paper_lines(
+                    app,
+                    theme,
+                    Some(item.paper_id),
+                    &item.paper_title,
+                    &item.authors,
+                    reading_status,
+                    file_size,
+                    None,
+                    item.year.as_deref(),
+                    item.journal.as_deref(),
+                    item.doi.as_deref(),
+                    item.page.map(|p| p as u64),
+                    None,
+                    available_width,
+                );
+                ListItem::new(lines)
             })
             .collect(),
         Page::Notes => app
             .filtered_notes_papers()
             .iter()
             .map(|paper| {
-                ListItem::new(vec![
-                    Line::styled(
-                        &paper.title,
-                        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-                    ),
-                    Line::styled(library_metadata(paper), Style::default().fg(theme.muted)),
-                    Line::raw(""),
-                ])
+                let lines = build_paper_lines(
+                    app,
+                    theme,
+                    Some(paper.id),
+                    &paper.title,
+                    &paper.authors,
+                    &paper.reading_status,
+                    paper.file_size,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    available_width,
+                );
+                ListItem::new(lines)
             })
             .collect(),
         _ => Vec::new(),
@@ -1396,15 +1414,25 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         );
         return;
     }
+    let available_width = rows[1].width.saturating_sub(2) as usize;
     let items = papers.iter().map(|paper| {
-        ListItem::new(vec![
-            Line::styled(
-                &paper.title,
-                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-            ),
-            Line::styled(library_metadata(paper), Style::default().fg(theme.muted)),
-            Line::raw(""),
-        ])
+        let lines = build_paper_lines(
+            app,
+            theme,
+            Some(paper.id),
+            &paper.title,
+            &paper.authors,
+            &paper.reading_status,
+            paper.file_size,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            available_width,
+        );
+        ListItem::new(lines)
     });
     let list = List::new(items)
         .block(
@@ -1420,18 +1448,6 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         .with_offset(app.library.scroll);
     frame.render_stateful_widget(list, rows[1], &mut state);
     app.library.scroll = state.offset();
-}
-
-fn library_metadata(paper: &LibraryPaper) -> String {
-    let authors = if paper.authors.is_empty() {
-        "Unknown authors"
-    } else {
-        &paper.authors
-    };
-    let size = paper
-        .file_size
-        .map_or_else(|| "metadata only".to_owned(), format_bytes);
-    format!("{authors}  |  {}  |  {size}", paper.reading_status)
 }
 
 fn render_reading_queue(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
@@ -1451,15 +1467,25 @@ fn render_reading_queue(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
         );
         return;
     }
+    let available_width = rows[1].width.saturating_sub(2) as usize;
     let items = papers.iter().map(|paper| {
-        ListItem::new(vec![
-            Line::styled(
-                &paper.title,
-                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-            ),
-            Line::styled(library_metadata(paper), Style::default().fg(theme.muted)),
-            Line::raw(""),
-        ])
+        let lines = build_paper_lines(
+            app,
+            theme,
+            Some(paper.id),
+            &paper.title,
+            &paper.authors,
+            &paper.reading_status,
+            paper.file_size,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            available_width,
+        );
+        ListItem::new(lines)
     });
     let list = List::new(items)
         .block(
@@ -1488,6 +1514,7 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
         );
         return;
     }
+    let available_width = area.width.saturating_sub(2) as usize;
     let items = downloads.iter().map(|download| {
         let (label, color) = match &download.status {
             DownloadStatus::Starting => ("Starting".to_owned(), theme.warning),
@@ -1519,21 +1546,49 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
             None
         };
 
-        let (title, meta_str) = if let Some(paper) = paper {
-            (paper.title.clone(), library_metadata(paper))
+        let lines = if let Some(paper) = paper {
+            let mut pl = build_paper_lines(
+                app,
+                theme,
+                Some(paper.id),
+                &paper.title,
+                &paper.authors,
+                &paper.reading_status,
+                paper.file_size,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                available_width,
+            );
+            let len = pl.len();
+            pl.insert(len - 1, Line::styled(label, Style::default().fg(color)));
+            pl
         } else {
-            (download.title.clone(), "Processing metadata...".to_owned())
+            let mut pl = build_paper_lines(
+                app,
+                theme,
+                None,
+                &download.title,
+                "",
+                "",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                available_width,
+            );
+            let len = pl.len();
+            pl.insert(len - 1, Line::styled(label, Style::default().fg(color)));
+            pl
         };
 
-        ListItem::new(vec![
-            Line::styled(
-                title,
-                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-            ),
-            Line::styled(meta_str, Style::default().fg(theme.muted)),
-            Line::styled(label, Style::default().fg(color)),
-            Line::raw(""),
-        ])
+        ListItem::new(lines)
     });
     let list = List::new(items)
         .block(
@@ -2252,6 +2307,147 @@ fn render_credits(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         Style::default().fg(theme.muted),
     );
     frame.render_widget(Paragraph::new(instructions), right_chunks[1]);
+}
+
+fn get_paper_collection_name(app: &App, paper_id: i64) -> Option<String> {
+    for (collection_id, paper_ids) in &app.collection_papers_map {
+        if paper_ids.contains(&paper_id) {
+            if let Some(collection) = app.collections.iter().find(|c| c.id == *collection_id) {
+                return Some(collection.name.clone());
+            }
+        }
+    }
+    None
+}
+
+fn safe_truncate(s: &str, max_width: usize) -> String {
+    if s.chars().count() <= max_width {
+        s.to_string()
+    } else {
+        let mut truncated: String = s.chars().take(max_width.saturating_sub(3)).collect();
+        truncated.push_str("...");
+        truncated
+    }
+}
+
+fn build_paper_lines<'a>(
+    app: &App,
+    theme: &Theme,
+    paper_id: Option<i64>,
+    title: &'a str,
+    authors: &'a str,
+    reading_status: &str,
+    file_size: Option<u64>,
+    availability: Option<&str>,
+    bookmark_year: Option<&str>,
+    bookmark_journal: Option<&str>,
+    bookmark_doi: Option<&str>,
+    bookmark_page: Option<u64>,
+    download_label: Option<(&str, ratatui::style::Color)>,
+    available_width: usize,
+) -> Vec<Line<'a>> {
+    let mut stats_spans = Vec::new();
+
+    // 1. Read/Unread Status
+    if !reading_status.is_empty() {
+        stats_spans.push(Span::styled(reading_status.to_string(), Style::default().fg(theme.muted)));
+    }
+
+    // 2. Bookmarks details
+    if let Some(year) = bookmark_year {
+        if !stats_spans.is_empty() {
+            stats_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
+        }
+        stats_spans.push(Span::styled(year.to_string(), Style::default().fg(theme.muted)));
+    }
+    if let Some(journal) = bookmark_journal {
+        if !stats_spans.is_empty() {
+            stats_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
+        }
+        stats_spans.push(Span::styled(journal.to_string(), Style::default().fg(theme.muted)));
+    } else if let Some(doi) = bookmark_doi {
+        if !stats_spans.is_empty() {
+            stats_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
+        }
+        stats_spans.push(Span::styled(format!("DOI {doi}"), Style::default().fg(theme.muted)));
+    }
+    if let Some(page) = bookmark_page {
+        if !stats_spans.is_empty() {
+            stats_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
+        }
+        stats_spans.push(Span::styled(format!("page {page}"), Style::default().fg(theme.muted)));
+    }
+
+    // 3. Collection (if any)
+    let collection_name = paper_id.and_then(|id| get_paper_collection_name(app, id));
+    if let Some(col_name) = collection_name {
+        if !stats_spans.is_empty() {
+            stats_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
+        }
+        stats_spans.push(Span::styled("(", Style::default().fg(theme.muted)));
+        stats_spans.push(Span::styled(
+            col_name,
+            Style::default().bg(theme.surface).fg(theme.secondary).add_modifier(Modifier::BOLD),
+        ));
+        stats_spans.push(Span::styled(")", Style::default().fg(theme.muted)));
+    }
+
+    // 4. File Size
+    if let Some(size) = file_size {
+        if !stats_spans.is_empty() {
+            stats_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
+        }
+        stats_spans.push(Span::styled(format_bytes(size), Style::default().fg(theme.muted)));
+    } else if file_size.is_none() && bookmark_year.is_none() && download_label.is_none() {
+        if paper_id.is_some() {
+            if !stats_spans.is_empty() {
+                stats_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
+            }
+            stats_spans.push(Span::styled("metadata only", Style::default().fg(theme.muted)));
+        }
+    }
+
+    // 5. Availability (Local PDF / Remote metadata)
+    if let Some(avail) = availability {
+        if !stats_spans.is_empty() {
+            stats_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
+        }
+        stats_spans.push(Span::styled(avail.to_string(), Style::default().fg(theme.muted)));
+    }
+
+    // 6. Download label
+    if let Some((dl_lbl, dl_col)) = download_label {
+        if !stats_spans.is_empty() {
+            stats_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
+        }
+        stats_spans.push(Span::styled(dl_lbl.to_string(), Style::default().fg(dl_col)));
+    }
+
+    let stats_len: usize = stats_spans.iter().map(|s| s.width()).sum();
+    let authors_str = if authors.is_empty() { "Unknown authors" } else { authors };
+    let single_line_len = authors_str.chars().count() + (if stats_spans.is_empty() { 0 } else { 5 }) + stats_len;
+
+    if single_line_len <= available_width {
+        let mut line_spans = vec![
+            Span::styled(authors_str.to_string(), Style::default().fg(theme.muted)),
+        ];
+        if !stats_spans.is_empty() {
+            line_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
+            line_spans.extend(stats_spans);
+        }
+        vec![
+            Line::styled(title.to_string(), Style::default().fg(theme.text).add_modifier(Modifier::BOLD)),
+            Line::from(line_spans),
+            Line::raw(""),
+        ]
+    } else {
+        vec![
+            Line::styled(title.to_string(), Style::default().fg(theme.text).add_modifier(Modifier::BOLD)),
+            Line::styled(safe_truncate(authors_str, available_width), Style::default().fg(theme.muted)),
+            Line::from(stats_spans),
+            Line::raw(""),
+        ]
+    }
 }
 
 #[cfg(test)]
