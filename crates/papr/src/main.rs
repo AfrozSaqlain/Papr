@@ -656,11 +656,15 @@ async fn run(
             std::time::Duration::from_millis(100)
         };
 
-        // Drain all available key events before the next render so that
-        // rapid/held key input is consumed in bulk (prevents input lag).
+        // Drain all immediately available events (both Press and Repeat)
+        // before the next render.  Processing every queued repeat event here
+        // keeps scroll state fully up-to-date so the frame reflects all
+        // accumulated key input without an extra round-trip delay.
         while event::poll(std::time::Duration::ZERO)? {
             match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                Event::Key(key)
+                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                {
                     if app.page == papr_core::Page::Settings && app.config_editor_focused {
                         if let Some(action) =
                             handle_config_editor_key(app, key, &mut runtime, &mut theme, &senders)
@@ -688,11 +692,12 @@ async fn run(
                 _ => {}
             }
         }
-        // Now wait for the next event up to poll_timeout so we yield the CPU
-        // rather than busy-spinning.
+        // Now block up to poll_timeout waiting for the next event.
         if event::poll(poll_timeout)? {
             match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                Event::Key(key)
+                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                {
                     if app.page == papr_core::Page::Settings && app.config_editor_focused {
                         if let Some(action) =
                             handle_config_editor_key(app, key, &mut runtime, &mut theme, &senders)
@@ -2171,42 +2176,47 @@ fn apply_download_event(
 
 fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.mode == AppMode::PdfView {
+        // Accept both Press and Repeat so held-key scrolling is driven by
+        // the OS key-repeat rate rather than by the 16 ms poll timeout.
+        let is_scroll_event = matches!(
+            key.kind,
+            KeyEventKind::Press | KeyEventKind::Repeat
+        );
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
+            KeyCode::Esc | KeyCode::Char('q') if key.kind == KeyEventKind::Press => {
                 app.mode = AppMode::Normal;
                 app.pdf_viewer_path = None;
-                // Evict cache for the pages we were looking at
                 pdf_viewer::evict_distant_pages(0);
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                pdf_scroll(app, -3);
+            KeyCode::Up | KeyCode::Char('k') if is_scroll_event => {
+                pdf_scroll(app, -5);
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                pdf_scroll(app, 3);
+            KeyCode::Down | KeyCode::Char('j') if is_scroll_event => {
+                pdf_scroll(app, 5);
             }
-            KeyCode::PageUp => {
+            KeyCode::PageUp if key.kind == KeyEventKind::Press => {
                 if app.pdf_viewer_page > 1 {
                     app.pdf_viewer_page -= 1;
                     app.pdf_viewer_scroll_y = 0;
+                    app.pdf_viewer_max_scroll_y = 0;
                 }
             }
-            KeyCode::PageDown => {
+            KeyCode::PageDown if key.kind == KeyEventKind::Press => {
                 if app.pdf_viewer_page < app.pdf_viewer_total_pages {
                     app.pdf_viewer_page += 1;
                     app.pdf_viewer_scroll_y = 0;
+                    app.pdf_viewer_max_scroll_y = 0;
                 }
             }
-            KeyCode::Char('+') | KeyCode::Char('=') => {
+            KeyCode::Char('+') | KeyCode::Char('=') if key.kind == KeyEventKind::Press => {
                 app.pdf_viewer_zoom = (app.pdf_viewer_zoom + 10.0).min(300.0);
-                // Scroll position is in px; reset to 0 so the clamp in draw
-                // doesn't overshoot after a zoom change (page height changes).
                 app.pdf_viewer_scroll_y = 0;
             }
-            KeyCode::Char('-') | KeyCode::Char('_') => {
+            KeyCode::Char('-') | KeyCode::Char('_') if key.kind == KeyEventKind::Press => {
                 app.pdf_viewer_zoom = (app.pdf_viewer_zoom - 10.0).max(50.0);
                 app.pdf_viewer_scroll_y = 0;
             }
-            KeyCode::Char('0') => {
+            KeyCode::Char('0') if key.kind == KeyEventKind::Press => {
                 app.pdf_viewer_zoom = 100.0;
                 app.pdf_viewer_scroll_y = 0;
             }
