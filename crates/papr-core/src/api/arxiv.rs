@@ -68,6 +68,11 @@ impl ArxivClient {
     ///
     /// Returns an error when the request fails or Atom content is malformed.
     pub async fn search(&self, query: &str, limit: u16) -> Result<Vec<RemotePaper>, ArxivError> {
+        if let Some(arxiv_id) = parse_arxiv_id(query) {
+            if let Some(paper) = self.get_by_id(&arxiv_id).await? {
+                return Ok(vec![paper]);
+            }
+        }
         let mut papers = self
             .query(&build_search_query(query), limit, "relevance")
             .await?;
@@ -94,6 +99,11 @@ impl ArxivClient {
         query: &str,
         limit: u16,
     ) -> Result<Vec<RemotePaper>, ArxivError> {
+        if let Some(arxiv_id) = parse_arxiv_id(query) {
+            if let Some(paper) = self.get_by_id(&arxiv_id).await? {
+                return Ok(vec![paper]);
+            }
+        }
         self.query(&build_search_query(query), limit, "submittedDate")
             .await
     }
@@ -421,6 +431,70 @@ fn looks_like_category(value: &str) -> bool {
         && value
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-'))
+}
+
+fn clean_arxiv_id(s: &str) -> String {
+    let s = s.trim().to_ascii_lowercase();
+    let clean = if let Some(idx) = s.find("/abs/") {
+        &s[idx + 5..]
+    } else if let Some(idx) = s.find("/pdf/") {
+        let after = &s[idx + 5..];
+        after.strip_suffix(".pdf").unwrap_or(after)
+    } else {
+        &s
+    };
+    clean.trim().to_string()
+}
+
+fn parse_arxiv_id(s: &str) -> Option<String> {
+    let s = s.trim().to_ascii_lowercase();
+    let clean = clean_arxiv_id(&s);
+    let (base, version) = if let Some(v_idx) = clean.rfind('v') {
+        let (b, v) = clean.split_at(v_idx);
+        let v_suffix = &v[1..];
+        if !v_suffix.is_empty() && v_suffix.chars().all(|c| c.is_ascii_digit()) {
+            (b, Some(v.to_string()))
+        } else {
+            (clean.as_str(), None)
+        }
+    } else {
+        (clean.as_str(), None)
+    };
+
+    // Modern format: "YYMM.NNNN" or "YYMM.NNNNN"
+    if base.len() >= 9 && base.len() <= 10 {
+        let parts: Vec<&str> = base.split('.').collect();
+        if parts.len() == 2 {
+            let yymm = parts[0];
+            let nnnn = parts[1];
+            if yymm.len() == 4 && yymm.chars().all(|c| c.is_ascii_digit())
+                && (nnnn.len() == 4 || nnnn.len() == 5) && nnnn.chars().all(|c| c.is_ascii_digit())
+            {
+                let mut normalized = base.to_string();
+                if let Some(v) = version {
+                    normalized.push_str(&v);
+                }
+                return Some(normalized);
+            }
+        }
+    }
+
+    // Legacy format: "archive/YYMMNNN" or "subject-class/YYMMNNN"
+    if let Some(slash_idx) = base.find('/') {
+        let (cat, num) = base.split_at(slash_idx);
+        let num = &num[1..];
+        if num.len() == 7 && num.chars().all(|c| c.is_ascii_digit()) {
+            if !cat.is_empty() && cat.chars().all(|c| c.is_ascii_alphabetic() || c == '-' || c == '.') {
+                let mut normalized = base.to_string();
+                if let Some(v) = version {
+                    normalized.push_str(&v);
+                }
+                return Some(normalized);
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]

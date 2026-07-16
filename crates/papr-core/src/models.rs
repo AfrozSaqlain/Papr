@@ -90,6 +90,8 @@ pub struct LibraryPaper {
     pub authors: String,
     /// Digital object identifier when known.
     pub doi: Option<String>,
+    /// arXiv ID.
+    pub arxiv_id: Option<String>,
     /// Local PDF path when downloaded or imported.
     pub pdf_path: Option<String>,
     /// PDF size in bytes.

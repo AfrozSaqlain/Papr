@@ -585,12 +585,38 @@ impl App {
         items
     }
 
-    /// Check if a query matches the title or authors case-insensitively.
-    pub fn matches_query(query: &str, title: &str, authors: &str) -> bool {
+    /// Check if a query matches the title, authors, DOI, or arXiv ID case-insensitively.
+    pub fn matches_query(
+        query: &str,
+        title: &str,
+        authors: &str,
+        doi: Option<&str>,
+        arxiv_id: Option<&str>,
+    ) -> bool {
         if query.is_empty() {
             return true;
         }
-        let q = query.to_lowercase();
+        let q = query.trim().to_ascii_lowercase();
+
+        // 1. Check if the query matches an arXiv ID
+        if let Some(q_arxiv) = parse_arxiv_id(&q) {
+            if let Some(p_arxiv_raw) = arxiv_id {
+                if let Some(p_arxiv) = parse_arxiv_id(&clean_arxiv_id(p_arxiv_raw)) {
+                    if strip_arxiv_version(&q_arxiv) == strip_arxiv_version(&p_arxiv) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // 2. Check if the query matches DOI
+        if let Some(p_doi) = doi {
+            if p_doi.trim().to_ascii_lowercase() == q {
+                return true;
+            }
+        }
+
+        // 3. Fall back to title and authors matching
         title.to_lowercase().contains(&q) || authors.to_lowercase().contains(&q)
     }
 
@@ -599,7 +625,7 @@ impl App {
         self.library
             .papers
             .iter()
-            .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors))
+            .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors, p.doi.as_deref(), p.arxiv_id.as_deref()))
             .collect()
     }
 
@@ -607,7 +633,7 @@ impl App {
     pub fn filtered_reading_queue_papers(&self) -> Vec<&LibraryPaper> {
         self.reading_queue_papers
             .iter()
-            .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors))
+            .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors, p.doi.as_deref(), p.arxiv_id.as_deref()))
             .collect()
     }
 
@@ -615,7 +641,21 @@ impl App {
     pub fn filtered_downloads(&self) -> Vec<&DownloadTask> {
         self.downloads
             .iter()
-            .filter(|d| Self::matches_query(&self.workspace_query, &d.title, ""))
+            .filter(|d| {
+                let paper = if let Some(paper_id) = d.paper_id {
+                    self.library.papers.iter().find(|p| p.id == paper_id)
+                } else if let Some(pdf_path) = &d.pdf_path {
+                    self.library.papers.iter().find(|p| p.pdf_path.as_ref() == Some(pdf_path))
+                } else {
+                    None
+                };
+                if let Some(p) = paper {
+                    Self::matches_query(&self.workspace_query, &p.title, &p.authors, p.doi.as_deref(), p.arxiv_id.as_deref())
+                } else {
+                    let raw_arxiv = d.id.strip_prefix("arxiv:").unwrap_or(&d.id);
+                    Self::matches_query(&self.workspace_query, &d.title, "", None, Some(raw_arxiv))
+                }
+            })
             .collect()
     }
 
@@ -634,7 +674,7 @@ impl App {
                 let mut matching_papers = Vec::new();
                 for &pid in paper_ids {
                     if let Some(p) = self.library.papers.iter().find(|p| p.id == pid) {
-                        if Self::matches_query(&self.workspace_query, &p.title, &p.authors) {
+                        if Self::matches_query(&self.workspace_query, &p.title, &p.authors, p.doi.as_deref(), p.arxiv_id.as_deref()) {
                             matching_papers.push(p);
                         }
                     }
@@ -654,7 +694,7 @@ impl App {
     pub fn filtered_collection_papers(&self) -> Vec<&LibraryPaper> {
         self.collection_papers
             .iter()
-            .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors))
+            .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors, p.doi.as_deref(), p.arxiv_id.as_deref()))
             .collect()
     }
 
@@ -662,7 +702,7 @@ impl App {
     pub fn filtered_authors(&self) -> Vec<&AuthorSummary> {
         self.authors
             .iter()
-            .filter(|a| Self::matches_query(&self.workspace_query, &a.name, ""))
+            .filter(|a| Self::matches_query(&self.workspace_query, &a.name, "", None, None))
             .collect()
     }
 
@@ -670,7 +710,7 @@ impl App {
     pub fn filtered_author_papers(&self) -> Vec<&LibraryPaper> {
         self.author_papers
             .iter()
-            .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors))
+            .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors, p.doi.as_deref(), p.arxiv_id.as_deref()))
             .collect()
     }
 
@@ -678,7 +718,12 @@ impl App {
     pub fn filtered_bookmarks(&self) -> Vec<&BookmarkSummary> {
         self.bookmarks
             .iter()
-            .filter(|b| Self::matches_query(&self.workspace_query, &b.paper_title, &b.authors))
+            .filter(|b| {
+                let lib_paper = self.library.papers.iter().find(|p| p.id == b.paper_id);
+                let paper_doi = lib_paper.and_then(|p| p.doi.as_deref());
+                let paper_arxiv = lib_paper.and_then(|p| p.arxiv_id.as_deref());
+                Self::matches_query(&self.workspace_query, &b.paper_title, &b.authors, paper_doi, paper_arxiv)
+            })
             .collect()
     }
 
@@ -686,7 +731,7 @@ impl App {
     pub fn filtered_notes_papers(&self) -> Vec<&LibraryPaper> {
         self.notes_papers
             .iter()
-            .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors))
+            .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors, p.doi.as_deref(), p.arxiv_id.as_deref()))
             .collect()
     }
     /// Get the command palette items filtered by the query.
@@ -886,6 +931,79 @@ impl App {
     }
 }
 
+fn strip_arxiv_version(id: &str) -> &str {
+    if let Some(pos) = id.rfind('v') {
+        if id[pos + 1..].chars().all(|c| c.is_ascii_digit()) && pos + 1 < id.len() {
+            return &id[..pos];
+        }
+    }
+    id
+}
+
+fn clean_arxiv_id(s: &str) -> String {
+    let s = s.trim().to_ascii_lowercase();
+    let clean = if let Some(idx) = s.find("/abs/") {
+        &s[idx + 5..]
+    } else if let Some(idx) = s.find("/pdf/") {
+        let after = &s[idx + 5..];
+        after.strip_suffix(".pdf").unwrap_or(after)
+    } else {
+        &s
+    };
+    clean.trim().to_string()
+}
+
+fn parse_arxiv_id(s: &str) -> Option<String> {
+    let s = s.trim().to_ascii_lowercase();
+    let clean = clean_arxiv_id(&s);
+    let (base, version) = if let Some(v_idx) = clean.rfind('v') {
+        let (b, v) = clean.split_at(v_idx);
+        let v_suffix = &v[1..];
+        if !v_suffix.is_empty() && v_suffix.chars().all(|c| c.is_ascii_digit()) {
+            (b, Some(v.to_string()))
+        } else {
+            (clean.as_str(), None)
+        }
+    } else {
+        (clean.as_str(), None)
+    };
+
+    // Modern format: "YYMM.NNNN" or "YYMM.NNNNN"
+    if base.len() >= 9 && base.len() <= 10 {
+        let parts: Vec<&str> = base.split('.').collect();
+        if parts.len() == 2 {
+            let yymm = parts[0];
+            let nnnn = parts[1];
+            if yymm.len() == 4 && yymm.chars().all(|c| c.is_ascii_digit())
+                && (nnnn.len() == 4 || nnnn.len() == 5) && nnnn.chars().all(|c| c.is_ascii_digit())
+            {
+                let mut normalized = base.to_string();
+                if let Some(v) = version {
+                    normalized.push_str(&v);
+                }
+                return Some(normalized);
+            }
+        }
+    }
+
+    // Legacy format: "archive/YYMMNNN" or "subject-class/YYMMNNN"
+    if let Some(slash_idx) = base.find('/') {
+        let (cat, num) = base.split_at(slash_idx);
+        let num = &num[1..];
+        if num.len() == 7 && num.chars().all(|c| c.is_ascii_digit()) {
+            if !cat.is_empty() && cat.chars().all(|c| c.is_ascii_alphabetic() || c == '-' || c == '.') {
+                let mut normalized = base.to_string();
+                if let Some(v) = version {
+                    normalized.push_str(&v);
+                }
+                return Some(normalized);
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::{App, Command, Page};
@@ -898,5 +1016,27 @@ mod tests {
         app.dispatch(Command::MoveDown);
         app.dispatch(Command::Open);
         assert_eq!(app.page, Page::Discover);
+    }
+
+    #[test]
+    fn test_arxiv_id_search_matching() {
+        // Modern ID match (with and without version)
+        assert!(App::matches_query("1402.4146v2", "Title", "Authors", None, Some("http://arxiv.org/abs/1402.4146v2")));
+        assert!(App::matches_query("1402.4146", "Title", "Authors", None, Some("http://arxiv.org/abs/1402.4146v2")));
+        assert!(App::matches_query("1402.4146v2", "Title", "Authors", None, Some("1402.4146")));
+        assert!(App::matches_query("1402.4146", "Title", "Authors", None, Some("1402.4146")));
+        assert!(App::matches_query("1402.4146v1", "Title", "Authors", None, Some("1402.4146v3")));
+
+        // Legacy ID match (with and without version)
+        assert!(App::matches_query("hep-th/0309012v1", "Title", "Authors", None, Some("https://arxiv.org/abs/hep-th/0309012")));
+        assert!(App::matches_query("hep-th/0309012", "Title", "Authors", None, Some("https://arxiv.org/abs/hep-th/0309012v3")));
+        assert!(App::matches_query("math.GT/0309012", "Title", "Authors", None, Some("math.gt/0309012")));
+
+        // Case insensitivity
+        assert!(App::matches_query("HeP-Th/0309012", "Title", "Authors", None, Some("hep-th/0309012")));
+
+        // Non-matching
+        assert!(!App::matches_query("1402.4146", "Title", "Authors", None, Some("1502.4146")));
+        assert!(!App::matches_query("hep-th/0309012", "Title", "Authors", None, Some("hep-th/0309013")));
     }
 }

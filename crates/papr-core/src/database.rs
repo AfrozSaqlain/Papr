@@ -249,22 +249,23 @@ impl Database {
                     COALESCE((SELECT GROUP_CONCAT(a.name, ', ')
                               FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
                               WHERE pa.paper_id = p.id ORDER BY pa.position), ''),
-                    p.doi, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
+                    p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
              FROM papers p
              WHERE p.pdf_path IS NOT NULL
              ORDER BY p.created_at DESC, p.id DESC",
         )?;
         let rows = statement.query_map([], |row| {
-            let file_size: Option<i64> = row.get(5)?;
+            let file_size: Option<i64> = row.get(6)?;
             Ok(LibraryPaper {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 authors: row.get(2)?,
                 doi: row.get(3)?,
-                pdf_path: row.get(4)?,
+                arxiv_id: row.get(4)?,
+                pdf_path: row.get(5)?,
                 file_size: file_size.and_then(|size| u64::try_from(size).ok()),
-                reading_status: row.get(6)?,
-                is_favorite: row.get(7)?,
+                reading_status: row.get(7)?,
+                is_favorite: row.get(8)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -302,22 +303,23 @@ impl Database {
                     COALESCE((SELECT GROUP_CONCAT(a.name, ', ')
                               FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
                               WHERE pa.paper_id = p.id ORDER BY pa.position), ''),
-                    p.doi, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
+                    p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
              FROM papers p
              JOIN reading_queue rq ON rq.paper_id = p.id
              ORDER BY rq.queue_order ASC",
         )?;
         let rows = statement.query_map([], |row| {
-            let file_size: Option<i64> = row.get(5)?;
+            let file_size: Option<i64> = row.get(6)?;
             Ok(LibraryPaper {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 authors: row.get(2)?,
                 doi: row.get(3)?,
-                pdf_path: row.get(4)?,
+                arxiv_id: row.get(4)?,
+                pdf_path: row.get(5)?,
                 file_size: file_size.and_then(|size| u64::try_from(size).ok()),
-                reading_status: row.get(6)?,
-                is_favorite: row.get(7)?,
+                reading_status: row.get(7)?,
+                is_favorite: row.get(8)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -705,22 +707,23 @@ impl Database {
                     COALESCE((SELECT GROUP_CONCAT(a.name, ', ')
                               FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
                               WHERE pa.paper_id = p.id ORDER BY pa.position), ''),
-                    p.doi, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
+                    p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
              FROM notes n JOIN papers p ON p.id = n.paper_id
              WHERE p.pdf_path IS NOT NULL
              ORDER BY n.updated_at DESC, n.id DESC",
         )?;
         let rows = statement.query_map([], |row| {
-            let file_size: Option<i64> = row.get(5)?;
+            let file_size: Option<i64> = row.get(6)?;
             Ok(LibraryPaper {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 authors: row.get(2)?,
                 doi: row.get(3)?,
-                pdf_path: row.get(4)?,
+                arxiv_id: row.get(4)?,
+                pdf_path: row.get(5)?,
                 file_size: file_size.and_then(|size| u64::try_from(size).ok()),
-                reading_status: row.get(6)?,
-                is_favorite: row.get(7)?,
+                reading_status: row.get(7)?,
+                is_favorite: row.get(8)?,
             })
         })?;
         let mut papers = Vec::new();
@@ -836,21 +839,22 @@ impl Database {
                     COALESCE((SELECT GROUP_CONCAT(a.name, ', ')
                               FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
                               WHERE pa.paper_id = p.id ORDER BY pa.position), ''),
-                    p.doi, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
+                    p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
              FROM collection_papers cp JOIN papers p ON p.id = cp.paper_id
              WHERE cp.collection_id = ?1 ORDER BY p.created_at DESC, p.id DESC",
         )?;
         let rows = statement.query_map([collection_id], |row| {
-            let file_size: Option<i64> = row.get(5)?;
+            let file_size: Option<i64> = row.get(6)?;
             Ok(LibraryPaper {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 authors: row.get(2)?,
                 doi: row.get(3)?,
-                pdf_path: row.get(4)?,
+                arxiv_id: row.get(4)?,
+                pdf_path: row.get(5)?,
                 file_size: file_size.and_then(|size| u64::try_from(size).ok()),
-                reading_status: row.get(6)?,
-                is_favorite: row.get(7)?,
+                reading_status: row.get(7)?,
+                is_favorite: row.get(8)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -1573,7 +1577,7 @@ impl Database {
                     COALESCE((SELECT GROUP_CONCAT(a.name, ', ')
                               FROM paper_authors pa2 JOIN authors a ON a.id = pa2.author_id
                               WHERE pa2.paper_id = p.id ORDER BY pa2.position), ''),
-                    p.doi, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
+                    p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
              FROM papers p
              JOIN paper_authors pa ON pa.paper_id = p.id
              WHERE p.pdf_path IS NOT NULL
@@ -1582,16 +1586,17 @@ impl Database {
              ORDER BY p.created_at DESC, p.id DESC",
         )?;
         let rows = statement.query_map([author_id], |row| {
-            let file_size: Option<i64> = row.get(5)?;
+            let file_size: Option<i64> = row.get(6)?;
             Ok(LibraryPaper {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 authors: row.get(2)?,
                 doi: row.get(3)?,
-                pdf_path: row.get(4)?,
+                arxiv_id: row.get(4)?,
+                pdf_path: row.get(5)?,
                 file_size: file_size.and_then(|size| u64::try_from(size).ok()),
-                reading_status: row.get(6)?,
-                is_favorite: row.get(7)?,
+                reading_status: row.get(7)?,
+                is_favorite: row.get(8)?,
             })
         })?;
         let mut papers = Vec::new();
