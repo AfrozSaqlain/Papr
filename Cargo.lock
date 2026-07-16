@@ -1377,7 +1377,7 @@ dependencies = [
 
 [[package]]
 name = "papr"
-version = "0.1.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1395,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "papr-core"
-version = "0.1.1"
+version = "0.1.0"
 dependencies = [
  "chrono",
  "directories",
