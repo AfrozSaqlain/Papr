@@ -1853,11 +1853,42 @@ fn discover_local_downloads(
             let canonical_path = std::fs::canonicalize(&pdf_path)
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| pdf_path.clone());
-            let paper_id = database
+
+            let content_hash = {
+                let mut hash_ok = None;
+                if let Ok(mut file) = std::fs::File::open(&pdf_path) {
+                    use sha2::{Digest, Sha256};
+                    let mut hasher = Sha256::new();
+                    if std::io::copy(&mut file, &mut hasher).is_ok() {
+                        hash_ok = Some(format!("{:x}", hasher.finalize()));
+                    }
+                }
+                hash_ok
+            };
+
+            let mut paper_id = database
                 .paper_id_for_path(&pdf_path)
                 .ok()
                 .flatten()
                 .or_else(|| database.paper_id_for_path(&canonical_path).ok().flatten());
+
+            let mut db_pdf_path = None;
+            if let Some(ref hash) = content_hash {
+                if let Ok(Some((id, path))) = database.paper_by_hash(hash) {
+                    paper_id = Some(id);
+                    db_pdf_path = Some(path);
+                }
+            }
+
+            if let Some(ref path) = db_pdf_path {
+                let path_buf = std::path::PathBuf::from(path);
+                if !path_buf.starts_with(download_dir) {
+                    // Stale download file (already moved to collection)! Remove it.
+                    let _ = std::fs::remove_file(&pdf_path);
+                    continue;
+                }
+            }
+
             app.downloads.push(DownloadTask {
                 id,
                 title,
@@ -1959,8 +1990,11 @@ fn apply_download_event(
         }
         DownloadEvent::Completed { id, path } => {
             task.status = DownloadStatus::ExtractingMetadata;
-            let mut pdf = LibraryIndexer::inspect(&path).context("failed to index downloaded PDF")?;
-            pdf.path = pdf.path.with_extension(""); // Change extension from .pdf.part to .pdf
+            let final_path = path.with_extension("");
+            if path.exists() {
+                std::fs::rename(&path, &final_path).context("failed to promote temporary download path")?;
+            }
+            let pdf = LibraryIndexer::inspect(&final_path).context("failed to index downloaded PDF")?;
             if let Some(paper) = pending.remove(&id) {
                 let paper_id = runtime.database.attach_download(&paper, &pdf)?;
                 runtime

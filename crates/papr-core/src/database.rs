@@ -170,17 +170,65 @@ impl Database {
     ///
     /// Returns an error when the record cannot be inserted or queried.
     pub fn import_pdf(&self, pdf: &ImportedPdf) -> Result<bool, DatabaseError> {
+        let existing: Option<(i64, String)> = self.connection
+            .query_row(
+                "SELECT id, pdf_path FROM papers WHERE content_hash = ?1 LIMIT 1",
+                params![pdf.content_hash],
+                |row| Ok((row.get(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+
+        if let Some((id, existing_path)) = existing {
+            let existing_exists = Path::new(&existing_path).is_file();
+            if !existing_exists {
+                // Moved file on disk! Update DB path.
+                self.connection.execute(
+                    "UPDATE papers SET pdf_path = ?1, file_size = ?2, indexed_at = CURRENT_TIMESTAMP WHERE id = ?3",
+                    params![
+                        pdf.path.to_string_lossy(),
+                        i64::try_from(pdf.file_size).unwrap_or(i64::MAX),
+                        id
+                    ],
+                )?;
+                return Ok(true);
+            } else if pdf.path.to_string_lossy() != existing_path {
+                // Check if the new path is in a collection and the existing one is not.
+                let old_in_collection = self.connection.query_row(
+                    "SELECT COUNT(*) FROM collection_papers WHERE paper_id = ?1",
+                    [id],
+                    |row| row.get::<_, i64>(0),
+                ).unwrap_or(0) > 0;
+                let new_in_collection = pdf.relative_directory.is_some();
+                if new_in_collection && !old_in_collection {
+                    self.connection.execute(
+                        "UPDATE papers SET pdf_path = ?1, file_size = ?2, indexed_at = CURRENT_TIMESTAMP WHERE id = ?3",
+                        params![
+                            pdf.path.to_string_lossy(),
+                            i64::try_from(pdf.file_size).unwrap_or(i64::MAX),
+                            id
+                        ],
+                    )?;
+                    return Ok(true);
+                }
+                return Ok(false);
+            } else {
+                return Ok(false);
+            }
+        }
+
         let changed = self.connection.execute(
-            "INSERT INTO papers (title, pdf_path, file_size, indexed_at)
-             VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
+            "INSERT INTO papers (title, pdf_path, file_size, content_hash, indexed_at)
+             VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
              ON CONFLICT(pdf_path) DO UPDATE SET
+                 content_hash = excluded.content_hash,
                  title = CASE WHEN arxiv_id IS NULL AND doi IS NULL THEN excluded.title ELSE title END,
                  file_size = excluded.file_size,
                  indexed_at = CURRENT_TIMESTAMP",
             params![
                 pdf.title,
                 pdf.path.to_string_lossy(),
-                i64::try_from(pdf.file_size).unwrap_or(i64::MAX)
+                i64::try_from(pdf.file_size).unwrap_or(i64::MAX),
+                pdf.content_hash,
             ],
         )?;
         Ok(changed > 0)
@@ -204,6 +252,21 @@ impl Database {
                 "SELECT id FROM papers WHERE pdf_path = ?1 LIMIT 1",
                 params![path],
                 |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Resolve a paper ID and path from a content hash.
+    ///
+    /// # Errors
+    /// Returns an error when the lookup fails.
+    pub fn paper_by_hash(&self, hash: &str) -> Result<Option<(i64, String)>, DatabaseError> {
+        self.connection
+            .query_row(
+                "SELECT id, pdf_path FROM papers WHERE content_hash = ?1 LIMIT 1",
+                params![hash],
+                |row| Ok((row.get(0)?, row.get::<_, String>(1)?)),
             )
             .optional()
             .map_err(Into::into)
@@ -493,10 +556,10 @@ impl Database {
             let mut stmt = transaction.prepare(
                 "SELECT id FROM papers
                  WHERE arxiv_id = ?1 OR (?2 IS NOT NULL AND doi = ?2)
-                    OR pdf_path = ?3
+                    OR pdf_path = ?3 OR (?4 IS NOT NULL AND content_hash = ?4)
                  ORDER BY CASE WHEN arxiv_id = ?1 THEN 0 ELSE 1 END"
             )?;
-            let rows = stmt.query_map(params![paper.id, paper.doi, pdf.path.to_string_lossy()], |row| row.get(0))?;
+            let rows = stmt.query_map(params![paper.id, paper.doi, pdf.path.to_string_lossy(), pdf.content_hash], |row| row.get(0))?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
 
@@ -511,7 +574,7 @@ impl Database {
             transaction.execute(
                 "UPDATE papers SET title = ?1, abstract = ?2, doi = ?3, arxiv_id = ?4,
                     published_at = ?5, updated_at = ?6, pdf_path = ?7,
-                    file_size = ?8, indexed_at = CURRENT_TIMESTAMP WHERE id = ?9",
+                    file_size = ?8, content_hash = ?9, indexed_at = CURRENT_TIMESTAMP WHERE id = ?10",
                 params![
                     paper.title,
                     paper.abstract_text,
@@ -521,6 +584,7 @@ impl Database {
                     paper.updated.to_rfc3339(),
                     pdf.path.to_string_lossy(),
                     file_size,
+                    pdf.content_hash,
                     paper_id
                 ],
             )?;
@@ -529,8 +593,8 @@ impl Database {
             transaction.execute(
                 "INSERT INTO papers
                     (title, abstract, doi, arxiv_id, published_at, updated_at, pdf_path,
-                     file_size, indexed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP)",
+                     file_size, content_hash, indexed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, CURRENT_TIMESTAMP)",
                 params![
                     paper.title,
                     paper.abstract_text,
@@ -539,7 +603,8 @@ impl Database {
                     paper.published.to_rfc3339(),
                     paper.updated.to_rfc3339(),
                     pdf.path.to_string_lossy(),
-                    file_size
+                    file_size,
+                    pdf.content_hash
                 ],
             )?;
             transaction.last_insert_rowid()
@@ -2250,6 +2315,7 @@ mod tests {
         let pdf = ImportedPdf {
             path: pdf_path.clone(),
             title: "Test Author Paper".into(),
+            content_hash: "hash".into(),
             file_size: 14,
             library_root: Some(root.clone()),
             relative_directory: None,
@@ -2314,6 +2380,7 @@ mod tests {
         let pdf = ImportedPdf {
             path: pdf_path.clone(),
             title: "Test Bookmarked Paper".into(),
+            content_hash: "hash".into(),
             file_size: 14,
             library_root: Some(root.clone()),
             relative_directory: None,
@@ -2370,6 +2437,7 @@ mod tests {
         let pdf = ImportedPdf {
             path: pdf_path.clone(),
             title: "Test Noted Paper".into(),
+            content_hash: "hash".into(),
             file_size: 14,
             library_root: Some(root.clone()),
             relative_directory: None,
@@ -2425,10 +2493,14 @@ mod tests {
     }
 
     fn imported_pdf(path: &str) -> ImportedPdf {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(path.as_bytes());
+        let hash = format!("{:x}", hasher.finalize());
         ImportedPdf {
             path: PathBuf::from(path),
             title: "Imported title".into(),
-
+            content_hash: hash,
             file_size: 42,
             library_root: None,
             relative_directory: None,

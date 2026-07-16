@@ -19,7 +19,7 @@ pub struct ImportedPdf {
     /// Human-readable title inferred from the filename.
     pub title: String,
     /// SHA-256 content digest used for duplicate detection.
-
+    pub content_hash: String,
     /// File size in bytes.
     pub file_size: u64,
     /// Configured library root containing this file.
@@ -136,16 +136,23 @@ impl LibraryIndexer {
     ///
     /// Returns an error when the file metadata or contents cannot be read.
     pub fn inspect(path: &Path) -> Result<ImportedPdf, LibraryError> {
-        let file = File::open(path)?;
+        let mut file = File::open(path)?;
         let file_size = file.metadata()?.len();
         let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let title = path
             .file_stem()
             .and_then(|name| name.to_str())
             .map_or_else(|| "Untitled PDF".to_owned(), humanize_filename);
+
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        std::io::copy(&mut file, &mut hasher)?;
+        let content_hash = format!("{:x}", hasher.finalize());
+
         Ok(ImportedPdf {
             path: canonical_path,
             title,
+            content_hash,
             file_size,
             library_root: None,
             relative_directory: None,
