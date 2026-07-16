@@ -86,7 +86,8 @@ impl DownloadManager {
         destination: &Path,
         events: &mpsc::UnboundedSender<DownloadEvent>,
     ) -> Result<(), DownloadError> {
-        if let Some(parent) = destination.parent() {
+        let temp_destination = destination.with_extension("pdf.part");
+        if let Some(parent) = temp_destination.parent() {
             fs::create_dir_all(parent).await?;
         }
         let response = self.client.get(url).send().await?.error_for_status()?;
@@ -95,7 +96,7 @@ impl DownloadManager {
             id: id.to_owned(),
             total,
         });
-        let mut file = fs::File::create(&destination).await?;
+        let mut file = fs::File::create(&temp_destination).await?;
         let mut downloaded = 0_u64;
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
@@ -112,7 +113,7 @@ impl DownloadManager {
         drop(file);
         let _ = events.send(DownloadEvent::Completed {
             id: id.to_owned(),
-            path: destination.into(),
+            path: temp_destination,
         });
         Ok(())
     }

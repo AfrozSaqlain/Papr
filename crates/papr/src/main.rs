@@ -494,6 +494,7 @@ enum IndexResponse {
         pdfs: Vec<ImportedPdf>,
         directories: Vec<CollectionDirectory>,
     },
+    #[allow(dead_code)]
     File(Result<ImportedPdf, String>),
 }
 
@@ -565,30 +566,32 @@ async fn run(
                 }
             }
         }
+        let has_active_downloads = app.downloads.iter().any(|task| {
+            !matches!(task.status, DownloadStatus::Completed | DownloadStatus::Failed(_))
+        });
         while runtime.watch_receiver.try_recv().is_ok() {
-            start_runtime_scan(&runtime, &senders, app);
+            if !has_active_downloads {
+                start_silent_runtime_scan(&runtime, &senders, app);
+            }
         }
         while let Ok(response) = index_receiver.try_recv() {
             apply_index_response(response, &mut runtime, &senders, app)?;
         }
-        let mut enriched_any = false;
         let mut any_enrichment_processed = false;
         while let Ok(MetadataEnrichment { paper_id, paper }) = enrichment_receiver.try_recv() {
             if let Some(ref p) = paper {
                 runtime.database.apply_arxiv_metadata(paper_id, p)?;
-                enriched_any = true;
             }
             if let Some(task) = app.downloads.iter_mut().find(|t| t.paper_id == Some(paper_id)) {
                 task.status = DownloadStatus::Completed;
+                finalize_download_task(task);
             }
             any_enrichment_processed = true;
         }
-        if enriched_any {
+        if any_enrichment_processed {
             refresh_library(&runtime, app)?;
             refresh_organization(&runtime.database, &runtime.library_roots, app)?;
             refresh_dashboard(&mut runtime, app)?;
-        }
-        if any_enrichment_processed {
             refresh_downloads(&runtime, app);
         }
         if enrichment_receiver.is_empty() && app.enrichment_pending {
@@ -600,7 +603,7 @@ async fn run(
                 &mut pending_downloads,
                 &mut runtime,
                 app,
-                &senders.index,
+                &senders,
             )?;
         }
         while let Ok(event) = app_events_receiver.try_recv() {
@@ -1552,12 +1555,15 @@ fn start_scan(
     collection_roots: &[PathBuf],
     sender: &mpsc::UnboundedSender<IndexResponse>,
     app: &mut App,
+    silent: bool,
 ) {
     if app.library.indexing {
         return;
     }
-    app.library.indexing = true;
-    app.library.message = Some("Indexing library folders...".into());
+    app.library.indexing = !silent;
+    if !silent {
+        app.library.message = Some("Indexing library folders...".into());
+    }
     let pdf_roots = pdf_roots.to_vec();
     let collection_roots = collection_roots.to_vec();
     let sender = sender.clone();
@@ -1610,6 +1616,7 @@ fn spawn_enrichment_if_needed(
             let needs_enrichment = papers.iter().any(|(pid, _, _)| Some(*pid) == task.paper_id);
             if !needs_enrichment {
                 task.status = DownloadStatus::Completed;
+                finalize_download_task(task);
             }
         }
     }
@@ -1714,6 +1721,17 @@ fn start_runtime_scan(runtime: &Runtime, senders: &ActionSenders, app: &mut App)
         &runtime.collection_roots,
         &senders.index,
         app,
+        false,
+    );
+}
+
+fn start_silent_runtime_scan(runtime: &Runtime, senders: &ActionSenders, app: &mut App) {
+    start_scan(
+        &runtime.library_roots,
+        &runtime.collection_roots,
+        &senders.index,
+        app,
+        true,
     );
 }
 
@@ -1910,7 +1928,7 @@ fn apply_download_event(
     pending: &mut HashMap<String, RemotePaper>,
     runtime: &mut Runtime,
     app: &mut App,
-    index_sender: &mpsc::UnboundedSender<IndexResponse>,
+    senders: &ActionSenders,
 ) -> Result<()> {
     let id = match &event {
         DownloadEvent::Started { id, .. }
@@ -1918,23 +1936,24 @@ fn apply_download_event(
         | DownloadEvent::Completed { id, .. }
         | DownloadEvent::Failed { id, .. } => id,
     };
-    let Some(task) = app.downloads.iter_mut().find(|task| &task.id == id) else {
-        return Ok(());
-    };
+    let task = app
+        .downloads
+        .iter_mut()
+        .find(|t| &t.id == id)
+        .context("received download event for unknown task")?;
     match event {
         DownloadEvent::Started { total, .. } => {
-            task.total = total;
             task.status = DownloadStatus::Running;
-        }
-        DownloadEvent::Progress {
-            downloaded, total, ..
-        } => {
-            task.downloaded = downloaded;
             task.total = total;
+        }
+        DownloadEvent::Progress { downloaded, .. } => {
+            task.status = DownloadStatus::Running;
+            task.downloaded = downloaded;
         }
         DownloadEvent::Completed { id, path } => {
             task.status = DownloadStatus::ExtractingMetadata;
-            let pdf = LibraryIndexer::inspect(&path).context("failed to index downloaded PDF")?;
+            let mut pdf = LibraryIndexer::inspect(&path).context("failed to index downloaded PDF")?;
+            pdf.path = pdf.path.with_extension(""); // Change extension from .pdf.part to .pdf
             if let Some(paper) = pending.remove(&id) {
                 let paper_id = runtime.database.attach_download(&paper, &pdf)?;
                 runtime
@@ -1945,8 +1964,18 @@ fn apply_download_event(
             task.pdf_path = Some(pdf.path.to_string_lossy().to_string());
             task.downloaded = pdf.file_size;
             task.total = Some(pdf.file_size);
+
+            if let Some(paper_id) = task.paper_id {
+                sync_pdf_collection_membership(
+                    &runtime.database,
+                    paper_id,
+                    &pdf,
+                    &runtime.collection_roots,
+                )?;
+            }
+
+            spawn_enrichment_if_needed(runtime, senders, app)?;
             refresh_paper_views(runtime, app)?;
-            let _ = index_sender.send(IndexResponse::File(Ok(pdf)));
         }
         DownloadEvent::Failed { id, error } => {
             pending.remove(&id);
@@ -3358,6 +3387,16 @@ fn handle_config_editor_insert_key(app: &mut App, key: KeyEvent) {
             reset_config_editor_goal_column(app);
         }
         _ => {}
+    }
+}
+
+fn finalize_download_task(task: &mut DownloadTask) {
+    if let Some(ref pdf_path) = task.pdf_path {
+        let final_path = std::path::PathBuf::from(pdf_path);
+        let temp_path = final_path.with_extension("pdf.part");
+        if temp_path.exists() {
+            let _ = std::fs::rename(&temp_path, &final_path);
+        }
     }
 }
 
