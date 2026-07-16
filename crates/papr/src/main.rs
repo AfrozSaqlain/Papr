@@ -648,11 +648,55 @@ async fn run(
             .terminal_mut()
             .draw(|frame| ui::render(frame, app, &theme))?;
 
-        if event::poll(std::time::Duration::from_millis(100))? {
+        // Use a shorter timeout in the PDF viewer so held-key scrolling
+        // feels continuous at ~60 fps rather than 10 fps.
+        let poll_timeout = if app.mode == AppMode::PdfView {
+            std::time::Duration::from_millis(16)
+        } else {
+            std::time::Duration::from_millis(100)
+        };
+
+        // Drain all available key events before the next render so that
+        // rapid/held key input is consumed in bulk (prevents input lag).
+        while event::poll(std::time::Duration::ZERO)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     if app.page == papr_core::Page::Settings && app.config_editor_focused {
-                        if let Some(action) = handle_config_editor_key(app, key, &mut runtime, &mut theme, &senders) {
+                        if let Some(action) =
+                            handle_config_editor_key(app, key, &mut runtime, &mut theme, &senders)
+                        {
+                            apply_ui_action(
+                                action,
+                                &mut runtime,
+                                &senders,
+                                &mut pending_downloads,
+                                app,
+                                &mut theme,
+                            )?;
+                        }
+                    } else if let Some(action) = handle_key(app, key) {
+                        apply_ui_action(
+                            action,
+                            &mut runtime,
+                            &senders,
+                            &mut pending_downloads,
+                            app,
+                            &mut theme,
+                        )?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Now wait for the next event up to poll_timeout so we yield the CPU
+        // rather than busy-spinning.
+        if event::poll(poll_timeout)? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if app.page == papr_core::Page::Settings && app.config_editor_focused {
+                        if let Some(action) =
+                            handle_config_editor_key(app, key, &mut runtime, &mut theme, &senders)
+                        {
                             apply_ui_action(
                                 action,
                                 &mut runtime,
@@ -1439,6 +1483,47 @@ fn get_pdf_page_count(path: &Path) -> usize {
     1
 }
 
+/// Scroll the PDF viewer by `delta` pixels (positive = down, negative = up).
+/// Handles continuous page transitions:
+///   - scrolling past the bottom of a page advances to the next page.
+///   - scrolling past the top transitions back to the previous page.
+fn pdf_scroll(app: &mut App, delta: i64) {
+    if delta == 0 {
+        return;
+    }
+
+    // `pdf_viewer_page_pixel_h` is updated by draw_pdf_viewer each frame once
+    // the page has been rendered.  Until the first frame it will be 0 –
+    // treat it as "unknown" and just apply the delta without boundary logic.
+    let page_h = app.pdf_viewer_page_pixel_h;
+
+    if delta > 0 {
+        // Scrolling down
+        let new_y = app.pdf_viewer_scroll_y.saturating_add(delta as u32);
+
+        if page_h > 0 && new_y >= page_h && app.pdf_viewer_page < app.pdf_viewer_total_pages {
+            // Cross into the next page
+            app.pdf_viewer_page += 1;
+            app.pdf_viewer_scroll_y = 0;
+        } else {
+            app.pdf_viewer_scroll_y = new_y;
+        }
+    } else {
+        // Scrolling up
+        let abs_delta = (-delta) as u32;
+        if abs_delta > app.pdf_viewer_scroll_y && app.pdf_viewer_page > 1 {
+            // Cross back to the previous page – land near the bottom
+            app.pdf_viewer_page -= 1;
+            // Use page_h as a proxy for the height of the previous page;
+            // draw_pdf_viewer will clamp once that page is rendered.
+            app.pdf_viewer_scroll_y = if page_h > 0 { page_h.saturating_sub(1) } else { u32::MAX };
+        } else {
+            app.pdf_viewer_scroll_y = app.pdf_viewer_scroll_y.saturating_sub(abs_delta);
+        }
+    }
+}
+
+
 fn open_pdf(
     viewer: &str,
     path: &Path,
@@ -1464,15 +1549,25 @@ fn open_pdf(
     let path = &absolute_path;
 
     if viewer == "internal" {
+        // Flush any cached images / protocol state that belong to a different
+        // document.  This is the single place that guarantees the cache is
+        // always consistent with whatever path is about to be stored in
+        // `app.pdf_viewer_path`.
+        pdf_viewer::reset_for_new_document(path);
         app.mode = AppMode::PdfView;
         app.pdf_viewer_path = Some(path.to_path_buf());
         app.pdf_viewer_page = 1;
         app.pdf_viewer_zoom = 100.0;
         app.pdf_viewer_scroll_y = 0;
+        app.pdf_viewer_page_pixel_h = 0;
         app.pdf_viewer_total_pages = get_pdf_page_count(path);
-        app.toast = Some(format!("Viewing PDF: {}", path.file_name().unwrap_or_default().to_string_lossy()));
+        app.toast = Some(format!(
+            "Viewing PDF: {}",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ));
         return Ok(());
     }
+
 
     let mut argv = parse_command(viewer)?;
     if argv.is_empty() {
@@ -2066,12 +2161,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             KeyCode::Esc | KeyCode::Char('q') => {
                 app.mode = AppMode::Normal;
                 app.pdf_viewer_path = None;
+                // Evict cache for the pages we were looking at
+                pdf_viewer::evict_distant_pages(0);
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                app.pdf_viewer_scroll_y = app.pdf_viewer_scroll_y.saturating_sub(1);
+                pdf_scroll(app, -3);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                app.pdf_viewer_scroll_y = app.pdf_viewer_scroll_y.saturating_add(1);
+                pdf_scroll(app, 3);
             }
             KeyCode::PageUp => {
                 if app.pdf_viewer_page > 1 {
@@ -2087,12 +2184,17 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             }
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 app.pdf_viewer_zoom = (app.pdf_viewer_zoom + 10.0).min(300.0);
+                // Scroll position is in px; reset to 0 so the clamp in draw
+                // doesn't overshoot after a zoom change (page height changes).
+                app.pdf_viewer_scroll_y = 0;
             }
             KeyCode::Char('-') | KeyCode::Char('_') => {
                 app.pdf_viewer_zoom = (app.pdf_viewer_zoom - 10.0).max(50.0);
+                app.pdf_viewer_scroll_y = 0;
             }
             KeyCode::Char('0') => {
                 app.pdf_viewer_zoom = 100.0;
+                app.pdf_viewer_scroll_y = 0;
             }
             _ => {}
         }

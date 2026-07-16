@@ -433,10 +433,12 @@ pub struct App {
     pub pdf_viewer_page: usize,
     /// Internal PDF viewer zoom percentage.
     pub pdf_viewer_zoom: f64,
-    /// Internal PDF viewer scroll vertical offset inside the page.
+    /// Pixel offset from top of the current page (not the whole document).
     pub pdf_viewer_scroll_y: u32,
     /// Internal PDF viewer total page count.
     pub pdf_viewer_total_pages: usize,
+    /// Pixel height of the last rendered page (used for continuous scrolling).
+    pub pdf_viewer_page_pixel_h: u32,
 }
 
 impl Default for App {
@@ -521,6 +523,7 @@ impl Default for App {
             pdf_viewer_zoom: 100.0,
             pdf_viewer_scroll_y: 0,
             pdf_viewer_total_pages: 0,
+            pdf_viewer_page_pixel_h: 0,
         }
     }
 }
