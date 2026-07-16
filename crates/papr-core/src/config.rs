@@ -126,6 +126,16 @@ impl Config {
             .unwrap_or(&serialized_path)
             .trim_end();
 
+        #[derive(Serialize)]
+        struct StringValue {
+            val: String,
+        }
+        let serialized_viewer = toml::to_string(&StringValue { val: default_pdf_viewer.to_string() })?;
+        let pdf_viewer_str = serialized_viewer
+            .strip_prefix("val = ")
+            .unwrap_or(&serialized_viewer)
+            .trim_end();
+
         let toml_content = format!(
             r#"# Active built-in theme name or path to a custom TOML theme.
 theme = "catppuccin-mocha"
@@ -134,7 +144,7 @@ theme = "catppuccin-mocha"
 startup_page = "dashboard"
 
 # Preferred external PDF viewer command.
-pdf_viewer = "{default_pdf_viewer}"
+pdf_viewer = {pdf_viewer_str}
 
 # Directories scanned for existing papers.
 library_folders = [
@@ -179,6 +189,7 @@ enabled_plugins = []
 #[cfg(test)]
 mod tests {
     use super::Config;
+    use serde::{Deserialize, Serialize};
 
     #[test]
     fn defaults_apply_to_partial_toml() -> Result<(), toml::de::Error> {
@@ -244,4 +255,37 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir)?;
         Ok(())
     }
+
+    #[test]
+    fn test_pdf_viewer_serialization_formats_correctly() -> Result<(), Box<dyn std::error::Error>> {
+        let test_cases = vec![
+            "open",
+            "cmd /C start \"\"",
+            "xdg-open",
+            "C:\\Program Files\\SumatraPDF\\SumatraPDF.exe",
+        ];
+
+        for viewer in test_cases {
+            #[derive(Serialize)]
+            struct StringValue {
+                val: String,
+            }
+            let serialized = toml::to_string(&StringValue { val: viewer.to_string() })?;
+            let formatted_viewer = serialized
+                .strip_prefix("val = ")
+                .unwrap_or(&serialized)
+                .trim_end();
+            
+            let toml_content = format!("pdf_viewer = {}\n", formatted_viewer);
+            
+            #[derive(Deserialize)]
+            struct MockConfig {
+                pdf_viewer: String,
+            }
+            let parsed: MockConfig = toml::from_str(&toml_content)?;
+            assert_eq!(parsed.pdf_viewer, viewer);
+        }
+        Ok(())
+    }
 }
+
