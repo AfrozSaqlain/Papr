@@ -113,6 +113,8 @@ pub enum AppMode {
     WorkspaceSearch,
     /// Confirm deletion of a paper or collection.
     ConfirmDelete,
+    /// Internal PDF viewer.
+    PdfView,
 }
 
 /// Target to delete.
@@ -425,6 +427,16 @@ pub struct App {
     pub config_editor_viewport_height: usize,
     /// Preferred visual column for vertical cursor movement.
     pub config_editor_goal_column: Option<usize>,
+    /// Internal PDF viewer path.
+    pub pdf_viewer_path: Option<std::path::PathBuf>,
+    /// Internal PDF viewer current page (1-indexed).
+    pub pdf_viewer_page: usize,
+    /// Internal PDF viewer zoom percentage.
+    pub pdf_viewer_zoom: f64,
+    /// Internal PDF viewer scroll vertical offset inside the page.
+    pub pdf_viewer_scroll_y: u32,
+    /// Internal PDF viewer total page count.
+    pub pdf_viewer_total_pages: usize,
 }
 
 impl Default for App {
@@ -504,6 +516,11 @@ impl Default for App {
             config_editor_wrap_width: 1,
             config_editor_viewport_height: 0,
             config_editor_goal_column: None,
+            pdf_viewer_path: None,
+            pdf_viewer_page: 1,
+            pdf_viewer_zoom: 100.0,
+            pdf_viewer_scroll_y: 0,
+            pdf_viewer_total_pages: 0,
         }
     }
 }

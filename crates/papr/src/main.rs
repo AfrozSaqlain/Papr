@@ -3,6 +3,7 @@
 mod terminal;
 mod ui;
 mod citation;
+mod pdf_viewer;
 
 use std::{
     collections::HashMap,
@@ -677,6 +678,7 @@ async fn run(
         }
         tokio::task::yield_now().await;
     }
+    pdf_viewer::cleanup_temp_files();
     Ok(())
 }
 
@@ -1416,6 +1418,27 @@ fn default_pdf_viewer() -> String {
     }
 }
 
+fn get_pdf_page_count(path: &Path) -> usize {
+    if let Ok(output) = std::process::Command::new("pdfinfo")
+        .arg(path)
+        .output()
+    {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                if line.starts_with("Pages:") {
+                    if let Some(pages_str) = line.split_whitespace().nth(1) {
+                        if let Ok(pages) = pages_str.parse::<usize>() {
+                            return pages;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    1
+}
+
 fn open_pdf(
     viewer: &str,
     path: &Path,
@@ -1439,6 +1462,17 @@ fn open_pdf(
         }
     };
     let path = &absolute_path;
+
+    if viewer == "internal" {
+        app.mode = AppMode::PdfView;
+        app.pdf_viewer_path = Some(path.to_path_buf());
+        app.pdf_viewer_page = 1;
+        app.pdf_viewer_zoom = 100.0;
+        app.pdf_viewer_scroll_y = 0;
+        app.pdf_viewer_total_pages = get_pdf_page_count(path);
+        app.toast = Some(format!("Viewing PDF: {}", path.file_name().unwrap_or_default().to_string_lossy()));
+        return Ok(());
+    }
 
     let mut argv = parse_command(viewer)?;
     if argv.is_empty() {
@@ -2027,6 +2061,43 @@ fn apply_download_event(
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    if app.mode == AppMode::PdfView {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                app.mode = AppMode::Normal;
+                app.pdf_viewer_path = None;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.pdf_viewer_scroll_y = app.pdf_viewer_scroll_y.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.pdf_viewer_scroll_y = app.pdf_viewer_scroll_y.saturating_add(1);
+            }
+            KeyCode::PageUp => {
+                if app.pdf_viewer_page > 1 {
+                    app.pdf_viewer_page -= 1;
+                    app.pdf_viewer_scroll_y = 0;
+                }
+            }
+            KeyCode::PageDown => {
+                if app.pdf_viewer_page < app.pdf_viewer_total_pages {
+                    app.pdf_viewer_page += 1;
+                    app.pdf_viewer_scroll_y = 0;
+                }
+            }
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                app.pdf_viewer_zoom = (app.pdf_viewer_zoom + 10.0).min(300.0);
+            }
+            KeyCode::Char('-') | KeyCode::Char('_') => {
+                app.pdf_viewer_zoom = (app.pdf_viewer_zoom - 10.0).max(50.0);
+            }
+            KeyCode::Char('0') => {
+                app.pdf_viewer_zoom = 100.0;
+            }
+            _ => {}
+        }
+        return None;
+    }
     if app.mode == AppMode::CommandPalette {
         match key.code {
             KeyCode::Esc => app.dispatch(Command::TogglePalette),

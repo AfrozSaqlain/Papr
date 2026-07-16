@@ -48,6 +48,10 @@ fn focus_block<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> {
 
 /// Render the complete application for the current state.
 pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
+    if app.mode == AppMode::PdfView {
+        crate::pdf_viewer::draw_pdf_viewer(frame, app);
+        return;
+    }
     let area = frame.area();
     frame.render_widget(
         Block::default().style(Style::default().bg(theme.background)),
@@ -82,7 +86,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         AppMode::NoteEdit => render_note_editor(frame, app, theme),
         AppMode::Prompt => render_metadata_prompt(frame, app, theme),
         AppMode::ConfirmDelete => render_delete_confirmation(frame, app, theme),
-        AppMode::Normal | AppMode::Search | AppMode::WorkspaceSearch => {}
+        AppMode::Normal | AppMode::Search | AppMode::WorkspaceSearch | AppMode::PdfView => {}
     }
 }
 

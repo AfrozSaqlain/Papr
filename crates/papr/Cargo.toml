@@ -16,6 +16,8 @@ clap_complete.workspace = true
 crossterm.workspace = true
 papr-core = { path = "../papr-core", version = "0.1.0" }
 ratatui.workspace = true
+ratatui-image = { version = "8.1.1", features = ["crossterm", "image-defaults"] }
+image = "0.25.10"
 reqwest = { workspace = true, features = ["rustls-tls"] }
 serde_json.workspace = true
 sha2.workspace = true
