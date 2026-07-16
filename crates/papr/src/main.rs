@@ -1410,7 +1410,7 @@ fn default_pdf_viewer() -> String {
     if cfg!(target_os = "macos") {
         "open".into()
     } else if cfg!(target_os = "windows") {
-        "cmd /C start \"\"".into()
+        "cmd /C start msedge \"\"".into()
     } else {
         "xdg-open".into()
     }

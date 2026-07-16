@@ -111,7 +111,7 @@ impl Config {
         let default_pdf_viewer = if cfg!(target_os = "macos") {
             "open"
         } else if cfg!(target_os = "windows") {
-            "cmd /C start \"\""
+            "cmd /C start msedge \"\""
         } else {
             "xdg-open"
         };
@@ -246,7 +246,7 @@ mod tests {
         let expected_viewer = if cfg!(target_os = "macos") {
             "open".to_string()
         } else if cfg!(target_os = "windows") {
-            "cmd /C start \"\"".to_string()
+            "cmd /C start msedge \"\"".to_string()
         } else {
             "xdg-open".to_string()
         };
@@ -261,6 +261,7 @@ mod tests {
         let test_cases = vec![
             "open",
             "cmd /C start \"\"",
+            "cmd /C start msedge \"\"",
             "xdg-open",
             "C:\\Program Files\\SumatraPDF\\SumatraPDF.exe",
         ];

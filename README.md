@@ -37,7 +37,7 @@ Papr is implemented in Rust to meet the performance, reliability, and security d
 * A system PDF viewer available through the platform default:
   * Linux: `xdg-open`
   * macOS: `open`
-  * Windows: `cmd /C start`
+  * Windows: `cmd /C start msedge ""` (Microsoft Edge is pre-installed on Windows; this can be customized to brave, chrome, firefox, etc.)
 
 *Note: The default PDF viewer command can be overridden in the configuration.*
 
@@ -177,6 +177,8 @@ If you need custom arguments for your PDF viewer, use the `{path}` placeholder:
 pdf_viewer = "zathura --fork {path}"
 ```
 If `{path}` is omitted, the PDF file path is automatically appended as the final argument.
+
+On Windows, the default PDF viewer is configured as `'cmd /C start msedge ""'`, which opens PDFs in Microsoft Edge (pre-installed by default). You can customize this command to use other browsers or PDF viewers (e.g., `'cmd /C start chrome ""'`, `'cmd /C start firefox ""'`, or pointing directly to an executable like `'C:\Program Files\SumatraPDF\SumatraPDF.exe'`).
 
 ### Themes
 
