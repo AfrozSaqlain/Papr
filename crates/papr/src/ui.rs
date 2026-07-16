@@ -2425,11 +2425,18 @@ fn build_paper_lines<'a>(
 
     let stats_len: usize = stats_spans.iter().map(|s| s.width()).sum();
     let authors_str = if authors.is_empty() { "Unknown authors" } else { authors };
-    let single_line_len = authors_str.chars().count() + (if stats_spans.is_empty() { 0 } else { 5 }) + stats_len;
+    let separator_len = if stats_spans.is_empty() { 0 } else { 5 };
+    let max_authors_width = available_width.saturating_sub(stats_len).saturating_sub(separator_len);
 
-    if single_line_len <= available_width {
+    if stats_spans.is_empty() || authors_str.chars().count() <= max_authors_width || max_authors_width >= 20 {
+        let display_authors = if authors_str.chars().count() <= max_authors_width {
+            authors_str.to_string()
+        } else {
+            safe_truncate(authors_str, max_authors_width)
+        };
+
         let mut line_spans = vec![
-            Span::styled(authors_str.to_string(), Style::default().fg(theme.muted)),
+            Span::styled(display_authors, Style::default().fg(theme.muted)),
         ];
         if !stats_spans.is_empty() {
             line_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
@@ -2441,12 +2448,15 @@ fn build_paper_lines<'a>(
             Line::raw(""),
         ]
     } else {
-        vec![
+        let mut lines = vec![
             Line::styled(title.to_string(), Style::default().fg(theme.text).add_modifier(Modifier::BOLD)),
             Line::styled(safe_truncate(authors_str, available_width), Style::default().fg(theme.muted)),
-            Line::from(stats_spans),
-            Line::raw(""),
-        ]
+        ];
+        if !stats_spans.is_empty() {
+            lines.push(Line::from(stats_spans));
+        }
+        lines.push(Line::raw(""));
+        lines
     }
 }
 
