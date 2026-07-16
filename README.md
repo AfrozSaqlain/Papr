@@ -469,7 +469,7 @@ This architecture makes plugins:
 
 | Key | Action |
 | --- | --- |
-| `Enter` / `p` | Open the PDF in your default viewer |
+| `Enter` / `Right` / `l` | Open the PDF in your default viewer |
 | `r` | Scan library folders for new files |
 | `n` | Edit Markdown note |
 | `s` | Move PDF file to a collection folder |

@@ -138,12 +138,13 @@ impl LibraryIndexer {
     pub fn inspect(path: &Path) -> Result<ImportedPdf, LibraryError> {
         let file = File::open(path)?;
         let file_size = file.metadata()?.len();
+        let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let title = path
             .file_stem()
             .and_then(|name| name.to_str())
             .map_or_else(|| "Untitled PDF".to_owned(), humanize_filename);
         Ok(ImportedPdf {
-            path: path.to_path_buf(),
+            path: canonical_path,
             title,
             file_size,
             library_root: None,
@@ -157,20 +158,26 @@ impl LibraryIndexer {
     /// Returns an error when the PDF cannot be inspected.
     pub fn inspect_in_roots(path: &Path, roots: &[PathBuf]) -> Result<ImportedPdf, LibraryError> {
         let mut pdf = Self::inspect(path)?;
-        if let Some(root) = roots
+        let canonical_roots: Vec<PathBuf> = roots
             .iter()
-            .filter(|root| path.starts_with(root))
-            .max_by_key(|root| root.components().count())
+            .map(|r| std::fs::canonicalize(r).unwrap_or_else(|_| r.clone()))
+            .collect();
+        if let Some((root, canonical_root)) = roots
+            .iter()
+            .zip(canonical_roots.iter())
+            .filter(|(_, canonical_root)| pdf.path.starts_with(canonical_root))
+            .max_by_key(|(_, canonical_root)| canonical_root.components().count())
         {
             pdf.library_root = Some(root.clone());
-            pdf.relative_directory = path
+            pdf.relative_directory = pdf.path
                 .parent()
-                .and_then(|parent| parent.strip_prefix(root).ok())
+                .and_then(|parent| parent.strip_prefix(canonical_root).ok())
                 .filter(|relative| !relative.as_os_str().is_empty())
                 .map(Path::to_path_buf);
         }
         Ok(pdf)
     }
+
 }
 
 /// Keeps a native filesystem watcher alive for configured library roots.

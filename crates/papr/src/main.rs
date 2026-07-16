@@ -1945,8 +1945,7 @@ fn apply_download_event(
             task.pdf_path = Some(pdf.path.to_string_lossy().to_string());
             task.downloaded = pdf.file_size;
             task.total = Some(pdf.file_size);
-            refresh_library(runtime, app)?;
-            refresh_dashboard(runtime, app)?;
+            refresh_paper_views(runtime, app)?;
             let _ = index_sender.send(IndexResponse::File(Ok(pdf)));
         }
         DownloadEvent::Failed { id, error } => {
@@ -2300,7 +2299,7 @@ fn bookmark_action(app: &App, key: KeyEvent) -> Option<UiAction> {
     match key.code {
         KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(bookmark.paper_id))),
         KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(bookmark.paper_id))),
-        KeyCode::Enter | KeyCode::Char('p') => Some(UiAction::OpenPdf {
+        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => Some(UiAction::OpenPdf {
             paper_id: bookmark.paper_id,
             path: PathBuf::from(&bookmark.pdf_path),
         }),
@@ -2336,8 +2335,8 @@ fn handle_notes_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
     let paper = *app.filtered_notes_papers().get(app.notes_selected)?;
     match key.code {
-        KeyCode::Char('n') | KeyCode::Enter => Some(UiAction::OpenNote(PaperTarget::Local(paper.id))),
-        KeyCode::Char('p') => {
+        KeyCode::Char('n') => Some(UiAction::OpenNote(PaperTarget::Local(paper.id))),
+        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
             let path = paper.pdf_path.clone().map(PathBuf::from)?;
             Some(UiAction::OpenPdf {
                 paper_id: paper.id,
@@ -2378,7 +2377,7 @@ fn handle_reading_queue_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
 
     let paper = *app.filtered_reading_queue_papers().get(app.reading_queue_selected)?;
     match key.code {
-        KeyCode::Enter | KeyCode::Char('p') => {
+        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
             let path = paper.pdf_path.clone().map(PathBuf::from)?;
             Some(UiAction::OpenPdf {
                 paper_id: paper.id,
@@ -2444,7 +2443,7 @@ fn library_action(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.page != papr_core::Page::Library {
         return None;
     }
-    if matches!(key.code, KeyCode::Char('p') | KeyCode::Enter) {
+    if matches!(key.code, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) {
         return selected_library_pdf(app)
             .map(|(paper_id, path)| UiAction::OpenPdf { paper_id, path });
     }
@@ -2502,7 +2501,7 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
                 app.collection_papers.clear();
                 return (true, None);
             }
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l' | 'p') => {
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
                 let Some(&paper) = app.filtered_collection_papers().get(app.collection_paper_selected) else {
                     return (true, None);
                 };
@@ -2595,7 +2594,7 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
                 }
             }
             CollectionSearchItem::Paper(paper, _collection) => {
-                if matches!(key.code, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l' | 'p')) {
+                if matches!(key.code, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) {
                     if let Some(path) = &paper.pdf_path {
                         return (
                             true,
@@ -2651,7 +2650,7 @@ fn handle_author_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction>) {
                 app.author_papers.clear();
                 return (true, None);
             }
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l' | 'p') => {
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
                 let Some(&paper) = app.filtered_author_papers().get(app.author_paper_selected) else {
                     return (true, None);
                 };

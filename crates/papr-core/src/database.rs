@@ -173,7 +173,8 @@ impl Database {
         let changed = self.connection.execute(
             "INSERT INTO papers (title, pdf_path, file_size, indexed_at)
              VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
-             ON CONFLICT(pdf_path) DO UPDATE SET title = excluded.title,
+             ON CONFLICT(pdf_path) DO UPDATE SET
+                 title = CASE WHEN arxiv_id IS NULL AND doi IS NULL THEN excluded.title ELSE title END,
                  file_size = excluded.file_size,
                  indexed_at = CURRENT_TIMESTAMP",
             params![
