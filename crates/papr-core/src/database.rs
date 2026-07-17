@@ -42,6 +42,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         8,
         include_str!("../migrations/0008_reading_queue.sql"),
     ),
+    (
+        9,
+        include_str!("../migrations/0009_previous_status.sql"),
+    ),
 ];
 
 /// Database initialization and query errors.
@@ -416,15 +420,20 @@ impl Database {
     /// Returns an error when updating the status or inserting the queue item fails.
     pub fn add_to_queue(&self, paper_id: i64) -> Result<(), DatabaseError> {
         let transaction = self.connection.unchecked_transaction()?;
+        let current_status: String = transaction.query_row(
+            "SELECT reading_status FROM papers WHERE id = ?1",
+            [paper_id],
+            |row| row.get(0),
+        )?;
         transaction.execute(
             "UPDATE papers SET reading_status = 'queued' WHERE id = ?1",
             [paper_id],
         )?;
         transaction.execute(
-            "INSERT INTO reading_queue (paper_id, queue_order)
-             VALUES (?1, (SELECT COALESCE(MAX(queue_order), 0) + 1 FROM reading_queue))
-             ON CONFLICT(paper_id) DO NOTHING",
-            [paper_id],
+            "INSERT INTO reading_queue (paper_id, queue_order, previous_status)
+             VALUES (?1, (SELECT COALESCE(MAX(queue_order), 0) + 1 FROM reading_queue), ?2)
+             ON CONFLICT(paper_id) DO UPDATE SET previous_status = ?2",
+            params![paper_id, current_status],
         )?;
         transaction.commit()?;
         Ok(())
@@ -436,10 +445,19 @@ impl Database {
     ///
     /// Returns an error when updating the paper status or removing from the queue fails.
     pub fn remove_from_queue(&self, paper_id: i64) -> Result<(), DatabaseError> {
-        self.connection.execute(
-            "UPDATE papers SET reading_status = 'unread' WHERE id = ?1",
-            [paper_id],
+        let transaction = self.connection.unchecked_transaction()?;
+        let previous_status: String = transaction
+            .query_row(
+                "SELECT COALESCE(previous_status, 'unread') FROM reading_queue WHERE paper_id = ?1",
+                [paper_id],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| "unread".to_string());
+        transaction.execute(
+            "UPDATE papers SET reading_status = ?1 WHERE id = ?2",
+            params![previous_status, paper_id],
         )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -2591,6 +2609,34 @@ mod tests {
         let _ = fs::remove_file(&path3);
         let _ = fs::remove_dir(&root);
 
+        Ok(())
+    }
+
+    #[test]
+    fn reading_queue_status_preservation() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        let id1 = database.insert_paper("Paper 1", None)?;
+        let id2 = database.insert_paper("Paper 2", None)?;
+        database.connection.execute(
+            "UPDATE papers SET reading_status = 'read' WHERE id = ?1",
+            [id2],
+        )?;
+        database.add_to_queue(id1)?;
+        database.add_to_queue(id2)?;
+        database.remove_from_queue(id1)?;
+        let status1: String = database.connection.query_row(
+            "SELECT reading_status FROM papers WHERE id = ?1",
+            [id1],
+            |row| row.get(0),
+        )?;
+        assert_eq!(status1, "unread");
+        database.remove_from_queue(id2)?;
+        let status2: String = database.connection.query_row(
+            "SELECT reading_status FROM papers WHERE id = ?1",
+            [id2],
+            |row| row.get(0),
+        )?;
+        assert_eq!(status2, "read");
         Ok(())
     }
 }

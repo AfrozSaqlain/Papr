@@ -489,7 +489,7 @@ This architecture makes plugins:
 | Key | Action |
 | --- | --- |
 | `Enter` / `Right` / `l` | Open the PDF in your default viewer |
-| `r` | Scan library folders for new files (specific only to **Library** workspace) |
+| `r` | Scan library folders for new files / Retry failed downloads |
 | `n` | Edit Markdown note |
 | `s` | Move PDF file to a collection folder |
 | `B` | Toggle bookmark |

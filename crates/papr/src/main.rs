@@ -1063,14 +1063,12 @@ fn apply_ui_action(
         }
         UiAction::AddToQueue(paper_id) => {
             runtime.database.add_to_queue(paper_id)?;
-            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
-            refresh_dashboard(runtime, app)?;
+            refresh_paper_views(runtime, app)?;
             app.toast = Some("Added to Reading Queue".into());
         }
         UiAction::RemoveFromQueue(paper_id) => {
             runtime.database.remove_from_queue(paper_id)?;
-            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
-            refresh_dashboard(runtime, app)?;
+            refresh_paper_views(runtime, app)?;
             app.toast = Some("Removed from Reading Queue".into());
         }
         UiAction::MoveQueueItemUp(paper_id) => {
@@ -2828,7 +2826,7 @@ fn handle_downloads_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.page != papr_core::Page::Downloads {
         return None;
     }
-    if key.code == KeyCode::Char('r') || key.code == KeyCode::Char('R') {
+    if key.code == KeyCode::Char('r') {
         if let Some(&task) = app.filtered_downloads().get(app.download_selected) {
             if matches!(task.status, DownloadStatus::Failed(_)) {
                 if let Some(ref remote_paper) = task.remote_paper {
