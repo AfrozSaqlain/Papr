@@ -46,6 +46,14 @@ const MIGRATIONS: &[(i64, &str)] = &[
         9,
         include_str!("../migrations/0009_previous_status.sql"),
     ),
+    (
+        10,
+        include_str!("../migrations/0010_metadata_enrichment.sql"),
+    ),
+    (
+        11,
+        include_str!("../migrations/0011_activity_kind_paper_browsed.sql"),
+    ),
 ];
 
 /// Database initialization and query errors.
@@ -1715,8 +1723,17 @@ impl Database {
             "SELECT p.id, p.arxiv_id, p.pdf_path
              FROM papers p
              WHERE p.pdf_path IS NOT NULL
-               AND NOT EXISTS (
-                   SELECT 1 FROM paper_authors pa WHERE pa.paper_id = p.id
+               AND p.enrichment_status != 'success'
+               AND (
+                   p.enrichment_status = 'pending'
+                   OR (p.enrichment_status = 'failed' AND (
+                       p.last_enrichment_attempt IS NULL
+                       OR datetime(p.last_enrichment_attempt) <= datetime('now', '-5 minutes')
+                   ))
+                   OR (p.enrichment_status = 'unavailable' AND (
+                       p.last_enrichment_attempt IS NULL
+                       OR datetime(p.last_enrichment_attempt) <= datetime('now', '-24 hours')
+                   ))
                )",
         )?;
         let rows = statement.query_map([], |row| {
@@ -1820,6 +1837,10 @@ impl Database {
             )?;
             paper_id
         };
+        transaction.execute(
+            "UPDATE papers SET enrichment_status = 'success' WHERE id = ?1",
+            [target_id],
+        )?;
         transaction.execute("DELETE FROM paper_authors WHERE paper_id = ?1", [target_id])?;
         for (position, author) in paper.authors.iter().enumerate() {
             let author_id = if let Some(id) = transaction
@@ -1845,6 +1866,36 @@ impl Database {
             )?;
         }
         transaction.commit()?;
+        Ok(())
+    }
+
+    /// Record failed or unavailable metadata enrichment outcomes.
+    ///
+    /// # Errors
+    /// Returns an error when database writes fail.
+    pub fn update_enrichment_status(
+        &self,
+        paper_id: i64,
+        status: &str,
+    ) -> Result<(), DatabaseError> {
+        if status == "failed" {
+            self.connection.execute(
+                "UPDATE papers SET
+                    enrichment_status = 'failed',
+                    enrichment_attempts = enrichment_attempts + 1,
+                    last_enrichment_attempt = CURRENT_TIMESTAMP
+                 WHERE id = ?1",
+                [paper_id],
+            )?;
+        } else if status == "unavailable" {
+            self.connection.execute(
+                "UPDATE papers SET
+                    enrichment_status = 'unavailable',
+                    last_enrichment_attempt = CURRENT_TIMESTAMP
+                 WHERE id = ?1",
+                [paper_id],
+            )?;
+        }
         Ok(())
     }
 }
@@ -2646,6 +2697,51 @@ mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(status2, "read");
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_enrichment_tracking() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        let id1 = database.insert_paper("Paper 1", None)?;
+        database.connection.execute(
+            "UPDATE papers SET pdf_path = 'paper1.pdf' WHERE id = ?1",
+            [id1],
+        )?;
+        let needing = database.papers_needing_enrichment()?;
+        assert_eq!(needing.len(), 1);
+        assert_eq!(needing[0].0, id1);
+
+        database.update_enrichment_status(id1, "failed")?;
+        let needing = database.papers_needing_enrichment()?;
+        assert_eq!(needing.len(), 0);
+
+        database.connection.execute(
+            "UPDATE papers SET last_enrichment_attempt = datetime('now', '-10 minutes') WHERE id = ?1",
+            [id1],
+        )?;
+        let needing = database.papers_needing_enrichment()?;
+        assert_eq!(needing.len(), 1);
+
+        database.update_enrichment_status(id1, "unavailable")?;
+        let needing = database.papers_needing_enrichment()?;
+        assert_eq!(needing.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn activity_logging_distinction() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        let id = database.insert_paper("Test Paper", None)?;
+        database.record_activity("paper_browsed", Some(id), None)?;
+        let dashboard = database.research_dashboard()?;
+        assert_eq!(dashboard.reading.sessions, 0);
+
+        let session_id = database.record_open(id, true)?;
+        database.record_reading_duration(session_id, 30)?;
+        let dashboard = database.research_dashboard()?;
+        assert_eq!(dashboard.reading.sessions, 1);
+        assert_eq!(dashboard.reading.average_reading_seconds, 30);
         Ok(())
     }
 }

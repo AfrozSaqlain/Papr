@@ -176,6 +176,7 @@ async fn main() -> Result<()> {
         watch_sender,
         watch_receiver,
         _watcher: watcher,
+        active_enrichments: std::collections::HashSet::new(),
     };
     run(&mut session, &mut app, theme, runtime).await
 }
@@ -300,6 +301,7 @@ struct Runtime {
     watch_sender: mpsc::UnboundedSender<()>,
     watch_receiver: mpsc::UnboundedReceiver<()>,
     _watcher: LibraryWatcher,
+    active_enrichments: std::collections::HashSet<i64>,
 }
 
 fn config_editor_wrap_rows(char_len: usize, wrap_width: usize) -> usize {
@@ -570,9 +572,16 @@ struct ActionSenders {
 }
 
 #[derive(Debug)]
+enum EnrichmentOutcome {
+    Success(RemotePaper),
+    Failed,
+    Unavailable,
+}
+
+#[derive(Debug)]
 struct MetadataEnrichment {
     paper_id: i64,
-    paper: Option<RemotePaper>,
+    outcome: EnrichmentOutcome,
 }
 
 #[derive(Debug)]
@@ -616,6 +625,7 @@ async fn run(
     refresh_dashboard_papers(&runtime, &senders, app)?;
     start_runtime_scan(&runtime, &senders, app);
     let mut last_date_check = std::time::Instant::now();
+    let mut last_enrichment_check = std::time::Instant::now();
     let mut last_page = app.page;
     let mut last_toast = None;
     let mut last_pdf_page_cached = false;
@@ -665,6 +675,10 @@ async fn run(
                 state_changed = true;
             }
         }
+        if last_enrichment_check.elapsed() >= std::time::Duration::from_secs(300) {
+            last_enrichment_check = std::time::Instant::now();
+            spawn_enrichment_if_needed(&mut runtime, &senders, app)?;
+        }
         while let Ok(response) = receiver.try_recv() {
             state_changed = true;
             if response.query == app.discovery.query {
@@ -692,10 +706,37 @@ async fn run(
             apply_index_response(response, &mut runtime, &senders, app)?;
         }
         let mut any_enrichment_processed = false;
-        while let Ok(MetadataEnrichment { paper_id, paper }) = enrichment_receiver.try_recv() {
-            if let Some(ref p) = paper {
-                runtime.database.apply_arxiv_metadata(paper_id, p)?;
+        while let Ok(MetadataEnrichment { paper_id, outcome }) = enrichment_receiver.try_recv() {
+            match outcome {
+                EnrichmentOutcome::Success(ref p) => {
+                    runtime.database.apply_arxiv_metadata(paper_id, p)?;
+                    // Update in-memory today_papers
+                    for paper in &mut app.today_papers {
+                        if paper.id == p.id || (p.doi.is_some() && paper.doi == p.doi) {
+                            *paper = p.clone();
+                        }
+                    }
+                    // Update in-memory discovery results
+                    for paper in &mut app.discovery.results {
+                        if paper.id == p.id || (p.doi.is_some() && paper.doi == p.doi) {
+                            *paper = p.clone();
+                        }
+                    }
+                    // Save updated today_papers to SQLite dashboard feed cache
+                    let _ = runtime.database.save_dashboard_feed_cache(
+                        &runtime.dashboard_feed_date,
+                        &runtime.dashboard_keyword_signature,
+                        &app.today_papers,
+                    );
+                }
+                EnrichmentOutcome::Failed => {
+                    runtime.database.update_enrichment_status(paper_id, "failed")?;
+                }
+                EnrichmentOutcome::Unavailable => {
+                    runtime.database.update_enrichment_status(paper_id, "unavailable")?;
+                }
             }
+            runtime.active_enrichments.remove(&paper_id);
             if let Some(task) = app.downloads.iter_mut().find(|t| t.paper_id == Some(paper_id)) {
                 task.status = DownloadStatus::Completed;
                 finalize_download_task(task);
@@ -930,7 +971,7 @@ fn apply_ui_action(
         }
         UiAction::OpenPaper(paper) => {
             let paper_id = runtime.database.ensure_remote_paper(&paper)?;
-            runtime.database.record_open(paper_id, false)?;
+            runtime.database.record_activity("paper_browsed", Some(paper_id), None)?;
             if app.page == papr_core::Page::Dashboard {
                 app.discovery.results.clone_from(&app.today_papers);
                 app.discovery.selected = app
@@ -1928,7 +1969,11 @@ fn spawn_enrichment_if_needed(
     senders: &ActionSenders,
     app: &mut App,
 ) -> Result<()> {
-    let papers = runtime.database.papers_needing_enrichment()?;
+    let all_papers = runtime.database.papers_needing_enrichment()?;
+    let papers: Vec<_> = all_papers
+        .into_iter()
+        .filter(|(pid, _, _)| !runtime.active_enrichments.contains(pid))
+        .collect();
     for task in &mut app.downloads {
         if task.status == DownloadStatus::ExtractingMetadata {
             let needs_enrichment = papers.iter().any(|(pid, _, _)| Some(*pid) == task.paper_id);
@@ -1940,6 +1985,7 @@ fn spawn_enrichment_if_needed(
     }
     if !papers.is_empty() {
         for (paper_id, _, _) in &papers {
+            runtime.active_enrichments.insert(*paper_id);
             if let Some(task) = app.downloads.iter_mut().find(|t| t.paper_id == Some(*paper_id)) {
                 task.status = DownloadStatus::Enriching;
             }
@@ -1990,7 +2036,7 @@ fn spawn_enrichment_if_needed(
                     }
                 }
 
-                let mut enriched_paper = None;
+                let outcome;
                 if let Some(arxiv_id) = candidate_arxiv {
                     if i > 0 {
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -1998,11 +2044,15 @@ fn spawn_enrichment_if_needed(
                     match arxiv_client.get_by_id(&arxiv_id).await {
                         Ok(Some(paper)) => {
                             enriched += 1;
-                            enriched_paper = Some(paper);
+                            outcome = EnrichmentOutcome::Success(paper);
                         }
-                        Ok(None) => {}
+                        Ok(None) => {
+                            outcome = EnrichmentOutcome::Unavailable;
+                        }
                         Err(e) => {
-                            log_message(&db_file_log, &format!("arXiv enrichment failed for {arxiv_id}: {e}"));
+                            let err_msg = format!("arXiv enrichment failed for {arxiv_id}: {e}");
+                            log_message(&db_file_log, &err_msg);
+                            outcome = EnrichmentOutcome::Failed;
                         }
                     }
                 } else if let Some(doi) = candidate_doi {
@@ -2012,17 +2062,23 @@ fn spawn_enrichment_if_needed(
                     match crossref_client.get_by_doi(&doi).await {
                         Ok(Some(paper)) => {
                             enriched += 1;
-                            enriched_paper = Some(paper);
+                            outcome = EnrichmentOutcome::Success(paper);
                         }
-                        Ok(None) => {}
+                        Ok(None) => {
+                            outcome = EnrichmentOutcome::Unavailable;
+                        }
                         Err(e) => {
-                            log_message(&db_file_log, &format!("Crossref enrichment failed for {doi}: {e}"));
+                            let err_msg = format!("Crossref enrichment failed for {doi}: {e}");
+                            log_message(&db_file_log, &err_msg);
+                            outcome = EnrichmentOutcome::Failed;
                         }
                     }
+                } else {
+                    outcome = EnrichmentOutcome::Unavailable;
                 }
                 let _ = enrichment_tx.send(MetadataEnrichment {
                     paper_id,
-                    paper: enriched_paper,
+                    outcome,
                 });
             }
             if enriched > 0 {
@@ -2233,6 +2289,21 @@ fn start_download(
     let Some(url) = paper.pdf_url.clone() else {
         return;
     };
+    let is_downloaded = app.library.papers.iter().any(|p| {
+        if p.pdf_path.is_none() {
+            return false;
+        }
+        if let (Some(ldoi), Some(rdoi)) = (&p.doi, &paper.doi) {
+            if ldoi == rdoi {
+                return true;
+            }
+        }
+        p.title.to_lowercase() == paper.title.to_lowercase()
+    });
+    if is_downloaded {
+        app.toast = Some("Paper already available. Skipping download...".to_owned());
+        return;
+    }
     if pending.contains_key(&paper.id) {
         return;
     }

@@ -883,8 +883,9 @@ fn render_metric(
 
 fn activity_kind(kind: &str) -> &str {
     match kind {
+        "paper_browsed" => "Paper browsed",
         "paper_opened" => "Paper opened",
-        "pdf_opened" => "PDF opened",
+        "pdf_opened" => "Paper opened",
         "note_opened" => "Note opened",
         "search" => "Search",
         "downloaded" => "Downloaded",
@@ -1793,18 +1794,44 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
             p.title.to_lowercase() == paper.title.to_lowercase()
         }).map(|p| p.reading_status.as_str());
 
-        let mut meta = format!(
-            "{}  |  {}  |  {}",
-            paper.published.format("%Y-%m-%d"),
-            compact_authors(paper),
-            paper
-                .categories
-                .first()
-                .map_or("uncategorized", String::as_str)
-        );
+        let has_local = app.library.papers.iter().any(|p| {
+            if p.pdf_path.is_none() {
+                return false;
+            }
+            if let (Some(ldoi), Some(rdoi)) = (&p.doi, &paper.doi) {
+                if ldoi == rdoi {
+                    return true;
+                }
+            }
+            p.title.to_lowercase() == paper.title.to_lowercase()
+        });
+
+        let mut spans = vec![
+            Span::styled(
+                format!(
+                    "{}  |  {}  |  {}",
+                    paper.published.format("%Y-%m-%d"),
+                    compact_authors(paper),
+                    paper
+                        .categories
+                        .first()
+                        .map_or("uncategorized", String::as_str)
+                ),
+                Style::default().fg(theme.muted),
+            ),
+        ];
+
         if let Some(status) = local_status {
-            meta.push_str("  |  ");
-            meta.push_str(status);
+            spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
+            spans.push(Span::styled(status.to_string(), Style::default().fg(theme.muted)));
+        }
+
+        if has_local {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                " (Downloaded) ",
+                Style::default().fg(theme.success).bg(theme.surface).add_modifier(Modifier::BOLD),
+            ));
         }
 
         ListItem::new(vec![
@@ -1812,7 +1839,7 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
                 &paper.title,
                 Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
             ),
-            Line::styled(meta, Style::default().fg(theme.muted)),
+            Line::from(spans),
             Line::raw(""),
         ])
     });
@@ -1875,8 +1902,19 @@ fn render_paper_detail(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
             ),
         rows[0],
     );
+    let is_downloaded = app.library.papers.iter().any(|p| {
+        if p.pdf_path.is_none() {
+            return false;
+        }
+        if let (Some(ldoi), Some(rdoi)) = (&p.doi, &paper.doi) {
+            if ldoi == rdoi {
+                return true;
+            }
+        }
+        p.title.to_lowercase() == paper.title.to_lowercase()
+    });
     frame.render_widget(
-        Paragraph::new(paper_detail_lines(paper, theme))
+        Paragraph::new(paper_detail_lines(paper, theme, is_downloaded))
             .wrap(Wrap { trim: true })
             .scroll((app.discovery.detail_scroll, 0)),
         rows[1],
@@ -1896,15 +1934,25 @@ fn render_paper_detail(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     }
 }
 
-fn paper_detail_lines<'a>(paper: &'a RemotePaper, theme: &Theme) -> Vec<Line<'a>> {
+fn paper_detail_lines<'a>(paper: &'a RemotePaper, theme: &Theme, is_downloaded: bool) -> Vec<Line<'a>> {
     let doi = paper.doi.as_deref().unwrap_or("Not available");
     let journal = paper.journal_ref.as_deref().unwrap_or("Not available");
     let pdf = paper.pdf_url.as_deref().unwrap_or("Not available");
-    vec![
-        Line::styled(
+    let mut title_spans = vec![
+        Span::styled(
             &paper.title,
             Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         ),
+    ];
+    if is_downloaded {
+        title_spans.push(Span::raw(" "));
+        title_spans.push(Span::styled(
+            " (Downloaded) ",
+            Style::default().fg(theme.success).bg(theme.surface).add_modifier(Modifier::BOLD),
+        ));
+    }
+    vec![
+        Line::from(title_spans),
         Line::raw(""),
         Line::styled(paper.author_line(), Style::default().fg(theme.secondary)),
         Line::raw(""),
