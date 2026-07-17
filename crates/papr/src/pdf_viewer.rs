@@ -482,7 +482,6 @@ pub fn draw_pdf_viewer(frame: &mut Frame<'_>, app: &mut App) {
         crop_y: scroll_px,
         crop_h: pixel_h,
     };
-
     let need_encode = last_proto_key_clone.as_ref() != Some(&proto_key);
 
     if need_encode {
@@ -736,14 +735,14 @@ fn crop_and_stitch(
     let curr_visible = curr_h.saturating_sub(scroll_y);
     let next_visible = viewport_h.saturating_sub(curr_visible);
 
-    let mut stitched = RgbaImage::new(w, viewport_h);
+    let mut data = vec![0u8; (w * viewport_h * 4) as usize];
 
     if curr_visible > 0 {
         let bytes_per_row = w as usize * 4;
         let start = scroll_y as usize * bytes_per_row;
         let end = curr_h as usize * bytes_per_row;
         let slice = &curr_img.as_raw()[start..end];
-        stitched.as_mut()[0..slice.len()].copy_from_slice(slice);
+        data[0..slice.len()].copy_from_slice(slice);
     }
 
     if next_visible > 0 {
@@ -754,9 +753,10 @@ fn crop_and_stitch(
 
         let dest_start = curr_visible as usize * bytes_per_row;
         let dest_end = dest_start + slice.len();
-        stitched.as_mut()[dest_start..dest_end].copy_from_slice(slice);
+        data[dest_start..dest_end].copy_from_slice(slice);
     }
 
+    let stitched = RgbaImage::from_raw(w, viewport_h, data).unwrap();
     DynamicImage::ImageRgba8(stitched)
 }
 
@@ -769,15 +769,25 @@ fn crop_single_with_padding(
     let curr_h = curr_img.height();
     let curr_visible = curr_h.saturating_sub(scroll_y);
 
-    let mut stitched = RgbaImage::from_fn(w, viewport_h, |_, _| image::Rgba([20, 20, 20, 255]));
+    let mut data = vec![0u8; (w * viewport_h * 4) as usize];
 
     if curr_visible > 0 {
         let bytes_per_row = w as usize * 4;
         let start = scroll_y as usize * bytes_per_row;
         let end = curr_h as usize * bytes_per_row;
         let slice = &curr_img.as_raw()[start..end];
-        stitched.as_mut()[0..slice.len()].copy_from_slice(slice);
+        data[0..slice.len()].copy_from_slice(slice);
     }
 
+    let curr_len = (curr_visible as usize * w as usize * 4).min(data.len());
+    let padding_slice = &mut data[curr_len..];
+    padding_slice.chunks_exact_mut(4).for_each(|pixel| {
+        pixel[0] = 20;
+        pixel[1] = 20;
+        pixel[2] = 20;
+        pixel[3] = 255;
+    });
+
+    let stitched = RgbaImage::from_raw(w, viewport_h, data).unwrap();
     DynamicImage::ImageRgba8(stitched)
 }
