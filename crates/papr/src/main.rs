@@ -526,8 +526,23 @@ async fn run(
     let mut last_date_check = std::time::Instant::now();
     let mut last_page = app.page;
     let mut last_toast = None;
+    let mut last_pdf_page_cached = false;
+    let mut force_redraw = true;
+
     while !app.should_quit {
+        let mut state_changed = force_redraw;
+        force_redraw = false;
+
+        if app.mode == AppMode::PdfView {
+            let pdf_page_cached = pdf_viewer::is_current_page_cached(app);
+            if pdf_page_cached != last_pdf_page_cached {
+                state_changed = true;
+                last_pdf_page_cached = pdf_page_cached;
+            }
+        }
+
         while let Ok(TodayResponse { feed_date, result }) = today_receiver.try_recv() {
+            state_changed = true;
             if feed_date != runtime.dashboard_feed_date {
                 continue;
             }
@@ -553,9 +568,11 @@ async fn run(
             if current_date != runtime.dashboard_feed_date {
                 runtime.dashboard_feed_date = current_date;
                 refresh_dashboard_papers(&runtime, &senders, app)?;
+                state_changed = true;
             }
         }
         while let Ok(response) = receiver.try_recv() {
+            state_changed = true;
             if response.query == app.discovery.query {
                 match response.result {
                     Ok(papers) => {
@@ -571,11 +588,13 @@ async fn run(
             !matches!(task.status, DownloadStatus::Completed | DownloadStatus::Failed(_))
         });
         while runtime.watch_receiver.try_recv().is_ok() {
+            state_changed = true;
             if !has_active_downloads {
                 start_silent_runtime_scan(&runtime, &senders, app);
             }
         }
         while let Ok(response) = index_receiver.try_recv() {
+            state_changed = true;
             apply_index_response(response, &mut runtime, &senders, app)?;
         }
         let mut any_enrichment_processed = false;
@@ -588,6 +607,7 @@ async fn run(
                 finalize_download_task(task);
             }
             any_enrichment_processed = true;
+            state_changed = true;
         }
         if any_enrichment_processed {
             refresh_library(&runtime, app)?;
@@ -597,8 +617,10 @@ async fn run(
         }
         if enrichment_receiver.is_empty() && app.enrichment_pending {
             app.enrichment_pending = false;
+            state_changed = true;
         }
         while let Ok(event) = download_receiver.try_recv() {
+            state_changed = true;
             apply_download_event(
                 event,
                 &mut pending_downloads,
@@ -608,6 +630,7 @@ async fn run(
             )?;
         }
         while let Ok(event) = app_events_receiver.try_recv() {
+            state_changed = true;
             match event {
                 AppEvent::ReadingSessionCompleted {
                     session_id,
@@ -627,31 +650,46 @@ async fn run(
             app.workspace_query.clear();
             app.workspace_query_cursor = 0;
             last_page = app.page;
+            state_changed = true;
         }
         if app.toast.is_some() {
             if app.toast != last_toast {
                 app.toast_timestamp = Some(std::time::Instant::now());
                 last_toast = app.toast.clone();
+                state_changed = true;
             }
             if let Some(ts) = app.toast_timestamp {
                 if ts.elapsed() >= std::time::Duration::from_secs(7) {
                     app.toast = None;
                     app.toast_timestamp = None;
                     last_toast = None;
+                    state_changed = true;
                 }
             }
         } else {
+            if last_toast.is_some() {
+                state_changed = true;
+            }
             app.toast_timestamp = None;
             last_toast = None;
         }
-        session
-            .terminal_mut()
-            .draw(|frame| ui::render(frame, app, &theme))?;
 
-        // Use a shorter timeout in the PDF viewer so held-key scrolling
-        // feels continuous at ~60 fps rather than 10 fps.
+        if state_changed {
+            session
+                .terminal_mut()
+                .draw(|frame| ui::render(frame, app, &theme))?;
+        }
+
+        // Use a dynamic timeout based on cache and animation status to eliminate CPU spin
+        // when viewing pre-rendered pages, while keeping dots animation fluid.
         let poll_timeout = if app.mode == AppMode::PdfView {
-            std::time::Duration::from_millis(16)
+            if pdf_viewer::is_animating() {
+                std::time::Duration::from_millis(16)
+            } else if pdf_viewer::is_current_page_cached(app) {
+                std::time::Duration::from_millis(250)
+            } else {
+                std::time::Duration::from_millis(50)
+            }
         } else {
             std::time::Duration::from_millis(100)
         };
@@ -660,7 +698,9 @@ async fn run(
         // before the next render.  Processing every queued repeat event here
         // keeps scroll state fully up-to-date so the frame reflects all
         // accumulated key input without an extra round-trip delay.
+        let mut got_event = false;
         while event::poll(std::time::Duration::ZERO)? {
+            got_event = true;
             match event::read()? {
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
@@ -694,6 +734,7 @@ async fn run(
         }
         // Now block up to poll_timeout waiting for the next event.
         if event::poll(poll_timeout)? {
+            got_event = true;
             match event::read()? {
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
@@ -725,6 +766,11 @@ async fn run(
                 _ => {}
             }
         }
+
+        if got_event || pdf_viewer::is_animating() {
+            force_redraw = true;
+        }
+
         tokio::task::yield_now().await;
     }
     pdf_viewer::cleanup_temp_files();
@@ -1488,55 +1534,9 @@ fn get_pdf_page_count(path: &Path) -> usize {
     1
 }
 
-/// Scroll the PDF viewer by `delta` pixels (positive = down, negative = up).
-/// Handles continuous page transitions:
-///   - scrolling past the bottom of a page advances to the next page.
-///   - scrolling past the top transitions back to the previous page.
+/// Scroll the PDF viewer by `delta` rows.
 fn pdf_scroll(app: &mut App, delta: i64) {
-    if delta == 0 {
-        return;
-    }
-
-    // All comparisons are in terminal cell rows to match how draw_pdf_viewer
-    // stores and clamps `pdf_viewer_scroll_y`.
-    //
-    // `pdf_viewer_max_scroll_y` is written by draw_pdf_viewer every frame once
-    // the current page has been rendered.  Before the first render it is 0 –
-    // that means no clamping/boundary logic applies yet, which is safe.
-    let max_scroll = app.pdf_viewer_max_scroll_y;
-
-    if delta > 0 {
-        // ── Scrolling down ──────────────────────────────────────────────────
-        let new_y = app.pdf_viewer_scroll_y.saturating_add(delta as u32);
-
-        if new_y > max_scroll && app.pdf_viewer_page < app.pdf_viewer_total_pages {
-            // Past the bottom of this page → advance to the next page and
-            // carry any overshoot so scrolling feels continuous.
-            let overshoot = new_y.saturating_sub(max_scroll).saturating_sub(1);
-            app.pdf_viewer_page += 1;
-            app.pdf_viewer_scroll_y = overshoot;
-            // Reset the published max so the next draw frame recomputes it for
-            // the new page rather than leaving a stale value that would
-            // immediately trigger another transition.
-            app.pdf_viewer_max_scroll_y = 0;
-        } else {
-            app.pdf_viewer_scroll_y = new_y.min(max_scroll);
-        }
-    } else {
-        // ── Scrolling up ────────────────────────────────────────────────────
-        let abs_delta = (-delta) as u32;
-
-        if abs_delta > app.pdf_viewer_scroll_y && app.pdf_viewer_page > 1 {
-            // Past the top of this page → go back to the previous page.
-            // Land near the bottom; draw_pdf_viewer will clamp precisely once
-            // the previous page's max_scroll is known.
-            app.pdf_viewer_page -= 1;
-            app.pdf_viewer_scroll_y = u32::MAX; // draw will clamp on next frame
-            app.pdf_viewer_max_scroll_y = 0;
-        } else {
-            app.pdf_viewer_scroll_y = app.pdf_viewer_scroll_y.saturating_sub(abs_delta);
-        }
-    }
+    pdf_viewer::scroll_by_rows(app, delta);
 }
 
 
@@ -2189,36 +2189,25 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 pdf_viewer::evict_distant_pages(0);
             }
             KeyCode::Up | KeyCode::Char('k') if is_scroll_event => {
-                pdf_scroll(app, -4);
+                pdf_scroll(app, -1);
             }
             KeyCode::Down | KeyCode::Char('j') if is_scroll_event => {
-                pdf_scroll(app, 4);
+                pdf_scroll(app, 1);
             }
             KeyCode::PageUp if key.kind == KeyEventKind::Press => {
-                if app.pdf_viewer_page > 1 {
-                    app.pdf_viewer_page -= 1;
-                    app.pdf_viewer_scroll_y = 0;
-                    app.pdf_viewer_max_scroll_y = 0;
-                }
+                pdf_viewer::page_up(app);
             }
             KeyCode::PageDown if key.kind == KeyEventKind::Press => {
-                if app.pdf_viewer_page < app.pdf_viewer_total_pages {
-                    app.pdf_viewer_page += 1;
-                    app.pdf_viewer_scroll_y = 0;
-                    app.pdf_viewer_max_scroll_y = 0;
-                }
+                pdf_viewer::page_down(app);
             }
             KeyCode::Char('+') | KeyCode::Char('=') if key.kind == KeyEventKind::Press => {
                 app.pdf_viewer_zoom = (app.pdf_viewer_zoom + 10.0).min(300.0);
-                app.pdf_viewer_scroll_y = 0;
             }
             KeyCode::Char('-') | KeyCode::Char('_') if key.kind == KeyEventKind::Press => {
                 app.pdf_viewer_zoom = (app.pdf_viewer_zoom - 10.0).max(50.0);
-                app.pdf_viewer_scroll_y = 0;
             }
             KeyCode::Char('0') if key.kind == KeyEventKind::Press => {
                 app.pdf_viewer_zoom = 100.0;
-                app.pdf_viewer_scroll_y = 0;
             }
             _ => {}
         }
