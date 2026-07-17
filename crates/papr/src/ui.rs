@@ -631,11 +631,20 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
         })
         .collect::<Vec<_>>();
 
+    let hint_text = if app.config_editor_focused {
+        " Press Esc to exit editor mode "
+    } else {
+        " Press Enter to focus "
+    };
+    let hint_title = Line::styled(hint_text, Style::default().fg(theme.muted))
+        .alignment(Alignment::Right);
+
     frame.render_widget(
         Paragraph::new(displayed)
             .block(
                 Block::default()
                     .title(title)
+                    .title(hint_title)
                     .borders(Borders::ALL)
                     .border_style(border_style),
             )

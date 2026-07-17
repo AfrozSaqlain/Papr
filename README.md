@@ -26,6 +26,7 @@ Papr is implemented in Rust to meet the performance, reliability, and security d
 * **Accurate Storage Statistics:** Monitor reading statistics, active streaks, and disk usage. Folders are canonicalized to prevent duplicate PDF counts, even if your downloads folder is nested within a library path.
 * **Filesystem-Synced Collections:** Move papers into collections inside the TUI to automatically rename and migrate files on your disk.
 * **Markdown Annotation:** Take dedicated, auto-saved notes per paper. Features a styled Markdown live preview accessible with the `Tab` key.
+* **Built-in PDF Viewer:** View PDFs directly inside the terminal using high-performance Sixel or Kitty graphics protocols, with smooth physics-based scrolling.
 * **Process-Isolated Plugins:** Extend the application through process-isolated plugins using a versioned JSON RPC protocol.
 
 ---
@@ -34,6 +35,7 @@ Papr is implemented in Rust to meet the performance, reliability, and security d
 
 * A terminal with color and alternate-screen support.
 * Stable Rust toolchain (when building from source).
+* (Optional) For the built-in PDF viewer: a terminal emulator supporting Sixel or Kitty graphics protocols, and the `pdftoppm` command-line utility installed on your system path.
 * A system PDF viewer available through the platform default:
   * Linux: `xdg-open`
   * macOS: `open`
@@ -153,7 +155,7 @@ Below is a complete configuration structure:
 ```toml
 theme = "catppuccin-mocha"
 startup_page = "dashboard"
-pdf_viewer = "zathura"  # Custom PDF viewer command
+pdf_viewer = "zathura"  # Custom PDF viewer command (or "internal" for the built-in terminal PDF viewer)
 
 # Paths to recursively scan for local PDFs
 library_folders = [
@@ -177,6 +179,11 @@ If you need custom arguments for your PDF viewer, use the `{path}` placeholder:
 pdf_viewer = "zathura --fork {path}"
 ```
 If `{path}` is omitted, the PDF file path is automatically appended as the final argument.
+
+To use the fast, built-in terminal-based PDF viewer (which renders PDFs directly in your terminal if it supports Kitty or Sixel graphics protocols), set `pdf_viewer` to `"internal"`:
+```toml
+pdf_viewer = "internal"
+```
 
 On Windows, the default PDF viewer is configured as `'cmd /C start msedge ""'`, which opens PDFs in Microsoft Edge (pre-installed by default). You can customize this command to use other browsers or PDF viewers (e.g., `'cmd /C start chrome ""'`, `'cmd /C start firefox ""'`, or pointing directly to an executable like `'C:\Program Files\SumatraPDF\SumatraPDF.exe'`).
 
@@ -478,6 +485,7 @@ This architecture makes plugins:
 | `B` | Toggle bookmark |
 | `>` | Toggle local search |
 | `R` | Rename a PDF file or collection folder |
+| `x` | Delete a PDF file or collection folder |
 | `c` | Copy citation |
 
 ### Downloads Tab
@@ -489,8 +497,19 @@ This architecture makes plugins:
 | `n` | Edit Markdown note for the downloaded paper |
 | `s` | Move the downloaded paper to a collection |
 | `R` | Rename the downloaded PDF |
+| `x` | Delete the downloaded PDF |
 | `>` | Toggle local search |
 | `c` | Copy citation |
+
+### Internal PDF Viewer
+
+| Key | Action |
+| --- | --- |
+| `Esc` / `q` | Exit the PDF viewer |
+| `j` / `Down` | Scroll down |
+| `k` / `Up` | Scroll up |
+| `PageDown` | Scroll down by a page |
+| `PageUp` | Scroll up by a page |
 
 ### Markdown Editor
 
