@@ -73,8 +73,6 @@ pub struct Config {
     pub download_path: Option<PathBuf>,
     /// Comma-separated search terms used for dashboard recommendations.
     pub dashboard_keywords: String,
-    /// Whether mouse event capture is enabled.
-    pub mouse: bool,
     /// Plugin identifiers explicitly allowed to execute.
     pub enabled_plugins: Vec<String>,
 }
@@ -88,7 +86,6 @@ impl Default for Config {
             library_folders: Vec::new(),
             download_path: None,
             dashboard_keywords: String::new(),
-            mouse: false,
             enabled_plugins: Vec::new(),
         }
     }
@@ -156,9 +153,6 @@ download_path = {downloads_dir_str}
 
 # Comma-separated search terms used for dashboard recommendations.
 dashboard_keywords = ""
-
-# Whether mouse event capture is enabled.
-mouse = false
 
 # Plugin identifiers explicitly allowed to execute.
 enabled_plugins = []
@@ -236,7 +230,6 @@ mod tests {
         assert!(content.contains("library_folders ="));
         assert!(content.contains("download_path ="));
         assert!(content.contains("dashboard_keywords ="));
-        assert!(content.contains("mouse ="));
         assert!(content.contains("enabled_plugins ="));
         
         let parsed: Config = toml::from_str(&content)?;

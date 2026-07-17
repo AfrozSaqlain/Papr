@@ -153,7 +153,7 @@ async fn main() -> Result<()> {
 
     let arxiv = ArxivClient::new().context("failed to initialize arXiv client")?;
     let downloads = DownloadManager::new().context("failed to initialize download manager")?;
-    let mut session = TerminalSession::start(config.mouse)?;
+    let mut session = TerminalSession::start()?;
     let primary_library_root = library_roots[0].clone();
     let dashboard_keywords = config.dashboard_keyword_list();
     let dashboard_keyword_signature = dashboard_keywords.join(",");

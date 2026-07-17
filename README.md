@@ -169,7 +169,6 @@ download_path = "/home/user/Documents/papers"
 # Comma-separated interests to populate the Dashboard arXiv feed
 dashboard_keywords = "machine learning, gravitational waves, astrophysics"
 
-mouse = false
 enabled_plugins = []
 ```
 
