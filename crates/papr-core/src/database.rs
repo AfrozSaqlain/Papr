@@ -592,7 +592,7 @@ impl Database {
             transaction.execute(
                 "UPDATE papers SET title = ?1, abstract = ?2, doi = ?3, arxiv_id = ?4,
                     published_at = ?5, updated_at = ?6, pdf_path = ?7,
-                    file_size = ?8, content_hash = ?9, indexed_at = CURRENT_TIMESTAMP WHERE id = ?10",
+                    file_size = ?8, content_hash = ?9, journal = ?10, indexed_at = CURRENT_TIMESTAMP WHERE id = ?11",
                 params![
                     paper.title,
                     paper.abstract_text,
@@ -603,6 +603,7 @@ impl Database {
                     pdf.path.to_string_lossy(),
                     file_size,
                     pdf.content_hash,
+                    paper.journal_ref,
                     paper_id
                 ],
             )?;
@@ -611,8 +612,8 @@ impl Database {
             transaction.execute(
                 "INSERT INTO papers
                     (title, abstract, doi, arxiv_id, published_at, updated_at, pdf_path,
-                     file_size, content_hash, indexed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, CURRENT_TIMESTAMP)",
+                     file_size, content_hash, journal, indexed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, CURRENT_TIMESTAMP)",
                 params![
                     paper.title,
                     paper.abstract_text,
@@ -622,7 +623,8 @@ impl Database {
                     paper.updated.to_rfc3339(),
                     pdf.path.to_string_lossy(),
                     file_size,
-                    pdf.content_hash
+                    pdf.content_hash,
+                    paper.journal_ref
                 ],
             )?;
             transaction.last_insert_rowid()
@@ -673,7 +675,7 @@ impl Database {
         let paper_id = if let Some(id) = existing {
             transaction.execute(
                 "UPDATE papers SET title = ?1, abstract = ?2, arxiv_id = ?3,
-                 doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6 WHERE id = ?7",
+                 doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6, journal = ?7 WHERE id = ?8",
                 params![
                     paper.title,
                     paper.abstract_text,
@@ -681,21 +683,23 @@ impl Database {
                     paper.doi,
                     paper.published.to_rfc3339(),
                     paper.updated.to_rfc3339(),
+                    paper.journal_ref,
                     id
                 ],
             )?;
             id
         } else {
             transaction.execute(
-                "INSERT INTO papers (title, abstract, arxiv_id, doi, published_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO papers (title, abstract, arxiv_id, doi, published_at, updated_at, journal)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     paper.title,
                     paper.abstract_text,
                     paper.id,
                     paper.doi,
                     paper.published.to_rfc3339(),
-                    paper.updated.to_rfc3339()
+                    paper.updated.to_rfc3339(),
+                    paper.journal_ref
                 ],
             )?;
             transaction.last_insert_rowid()
@@ -1773,21 +1777,21 @@ impl Database {
                     transaction.execute(
                         "UPDATE papers SET pdf_path = ?1, file_size = COALESCE(?2, file_size),
                          title = ?3, abstract = ?4, doi = COALESCE(?5, doi),
-                         published_at = ?6, updated_at = ?7
-                         WHERE id = ?8",
+                         published_at = ?6, updated_at = ?7, journal = ?8
+                         WHERE id = ?9",
                         params![
                             path, file_size, paper.title, paper.abstract_text, paper.doi,
-                            paper.published.to_rfc3339(), paper.updated.to_rfc3339(), existing
+                            paper.published.to_rfc3339(), paper.updated.to_rfc3339(), paper.journal_ref, existing
                         ]
                     )?;
                 } else {
                     transaction.execute(
                         "UPDATE papers SET title = ?1, abstract = ?2,
-                         doi = COALESCE(?3, doi), published_at = ?4, updated_at = ?5
-                         WHERE id = ?6",
+                         doi = COALESCE(?3, doi), published_at = ?4, updated_at = ?5, journal = ?6
+                         WHERE id = ?7",
                         params![
                             paper.title, paper.abstract_text, paper.doi,
-                            paper.published.to_rfc3339(), paper.updated.to_rfc3339(), existing
+                            paper.published.to_rfc3339(), paper.updated.to_rfc3339(), paper.journal_ref, existing
                         ]
                     )?;
                 }
@@ -1795,11 +1799,11 @@ impl Database {
             } else {
                 transaction.execute(
                     "UPDATE papers SET title = ?1, abstract = ?2, arxiv_id = ?3,
-                     doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6
-                     WHERE id = ?7",
+                     doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6, journal = ?7
+                     WHERE id = ?8",
                     params![
                         paper.title, paper.abstract_text, paper.id, paper.doi,
-                        paper.published.to_rfc3339(), paper.updated.to_rfc3339(), paper_id
+                        paper.published.to_rfc3339(), paper.updated.to_rfc3339(), paper.journal_ref, paper_id
                     ],
                 )?;
                 paper_id
@@ -1807,11 +1811,11 @@ impl Database {
         } else {
             transaction.execute(
                 "UPDATE papers SET title = ?1, abstract = ?2, arxiv_id = ?3,
-                 doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6
-                 WHERE id = ?7",
+                 doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6, journal = ?7
+                 WHERE id = ?8",
                 params![
                     paper.title, paper.abstract_text, paper.id, paper.doi,
-                    paper.published.to_rfc3339(), paper.updated.to_rfc3339(), paper_id
+                    paper.published.to_rfc3339(), paper.updated.to_rfc3339(), paper.journal_ref, paper_id
                 ],
             )?;
             paper_id
@@ -2262,6 +2266,10 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::in_memory()?;
         let paper_id = database.insert_paper("History paper", None)?;
+        database.connection.execute(
+            "UPDATE papers SET journal = 'Nature' WHERE id = ?1",
+            [paper_id],
+        )?;
         let session_id = database.record_open(paper_id, true)?;
         database.record_reading_duration(session_id, 120)?;
         database.record_activity("search", None, Some("gravity waves"))?;
@@ -2270,6 +2278,7 @@ mod tests {
         assert_eq!(dashboard.reading.sessions, 1);
         assert_eq!(dashboard.reading.average_reading_seconds, 120);
         assert_eq!(dashboard.reading.current_streak, 1);
+        assert_eq!(dashboard.reading.most_read_journal.as_deref(), Some("Nature"));
         assert_eq!(dashboard.reading.heatmap.len(), 84);
         assert_eq!(dashboard.recent_activity.len(), 2);
         assert_eq!(dashboard.recent_activity[0].label, "gravity waves");
