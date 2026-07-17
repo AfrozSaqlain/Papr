@@ -122,7 +122,6 @@ struct PageCache {
 
     // ── Scroll state ─────────────────────────────────────────────────────
     last_viewport_h: u32,
-    last_zoom: f64,
     target_page: usize,
     target_scroll_px: f64,
     current_page: usize,
@@ -149,7 +148,6 @@ fn get_cache() -> Arc<Mutex<PageCache>> {
                 in_flight: std::collections::HashSet::new(),
                 temp_files: Vec::new(),
                 last_viewport_h: 600,
-                last_zoom: 100.0,
                 target_page: 1,
                 target_scroll_px: 0.0,
                 current_page: 1,
@@ -211,9 +209,7 @@ pub fn evict_distant_pages(current_page: usize) {
 // Background rendering
 // ---------------------------------------------------------------------------
 
-fn dpi_for_zoom(zoom: f64) -> u32 {
-    ((150.0 * zoom / 100.0) as u32).max(72)
-}
+const DPI: u32 = 150;
 
 /// Submit a background render job if the result isn't already cached or
 /// in-flight.  Uses a single lock acquisition to check-and-mark atomically.
@@ -584,14 +580,6 @@ pub fn draw_pdf_viewer(frame: &mut Frame<'_>, app: &mut App) {
 
         g.last_viewport_h = pixel_h;
 
-        // If zoom changed, scale targets proportionally
-        if g.last_zoom > 0.0 && g.last_zoom != app.pdf_viewer_zoom {
-            let ratio = app.pdf_viewer_zoom / g.last_zoom;
-            g.target_scroll_px *= ratio;
-            g.current_scroll_px *= ratio;
-        }
-        g.last_zoom = app.pdf_viewer_zoom;
-
         // Run smooth scroll physics
         let now = std::time::Instant::now();
         let dt = g.last_update.map(|t| (now - t).as_secs_f64()).unwrap_or(0.0);
@@ -622,7 +610,7 @@ pub fn draw_pdf_viewer(frame: &mut Frame<'_>, app: &mut App) {
         app.pdf_viewer_page = g.current_page;
         app.pdf_viewer_scroll_y = (g.current_scroll_px / font_h as f64) as u32;
 
-        let dpi = dpi_for_zoom(app.pdf_viewer_zoom);
+        let dpi = DPI;
         let key: PageKey = (pdf_path.clone(), g.current_page, dpi, pixel_w);
         let page_data = g.pages.get(&key).cloned();
         let next_key: PageKey = (pdf_path.clone(), g.current_page + 1, dpi, pixel_w);
@@ -645,7 +633,7 @@ pub fn draw_pdf_viewer(frame: &mut Frame<'_>, app: &mut App) {
         return;
     }
 
-    let dpi = dpi_for_zoom(app.pdf_viewer_zoom);
+    let dpi = DPI;
 
     // Submit pre-render jobs (no lock held here)
     for delta in [-2i32, -1, 0, 1, 2] {
@@ -830,15 +818,11 @@ fn render_status_bar(
             Style::default().fg(Color::White),
         ),
         Span::styled(
-            format!(" │ {}% ", app.pdf_viewer_zoom as u32),
-            Style::default().fg(Color::Green),
-        ),
-        Span::styled(
             format!(" │ {}/{} rows ", scroll, max_scroll),
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(
-            " │ Esc:exit  ↑↓/jk:scroll  PgUp/Dn:page  +/-:zoom  0:reset ",
+            " │ Esc:exit  ↑↓/jk:scroll  PgUp/Dn:page ",
             Style::default().fg(Color::DarkGray),
         ),
     ]);
@@ -858,7 +842,7 @@ pub fn is_current_page_cached(app: &App) -> bool {
         None => return true,
     };
     let page = app.pdf_viewer_page;
-    let dpi = dpi_for_zoom(app.pdf_viewer_zoom);
+    let dpi = DPI;
     if let Some(arc) = CACHE.get() {
         if let Ok(g) = arc.lock() {
             return g.pages.keys().any(|(p, pg, d, _)| p == pdf_path && *pg == page && *d == dpi);

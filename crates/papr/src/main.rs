@@ -1592,7 +1592,6 @@ fn open_pdf(
         app.mode = AppMode::PdfView;
         app.pdf_viewer_path = Some(path.to_path_buf());
         app.pdf_viewer_page = 1;
-        app.pdf_viewer_zoom = 100.0;
         app.pdf_viewer_scroll_y = 0;
         app.pdf_viewer_page_pixel_h = 0;
         app.pdf_viewer_max_scroll_y = 0;
@@ -2217,15 +2216,6 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             }
             KeyCode::PageDown if key.kind == KeyEventKind::Press => {
                 pdf_viewer::page_down(app);
-            }
-            KeyCode::Char('+') | KeyCode::Char('=') if key.kind == KeyEventKind::Press => {
-                app.pdf_viewer_zoom = (app.pdf_viewer_zoom + 10.0).min(300.0);
-            }
-            KeyCode::Char('-') | KeyCode::Char('_') if key.kind == KeyEventKind::Press => {
-                app.pdf_viewer_zoom = (app.pdf_viewer_zoom - 10.0).max(50.0);
-            }
-            KeyCode::Char('0') if key.kind == KeyEventKind::Press => {
-                app.pdf_viewer_zoom = 100.0;
             }
             _ => {}
         }

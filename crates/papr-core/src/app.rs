@@ -431,8 +431,6 @@ pub struct App {
     pub pdf_viewer_path: Option<std::path::PathBuf>,
     /// Internal PDF viewer current page (1-indexed).
     pub pdf_viewer_page: usize,
-    /// Internal PDF viewer zoom percentage.
-    pub pdf_viewer_zoom: f64,
     /// Scroll offset within the current page in terminal cell rows.
     pub pdf_viewer_scroll_y: u32,
     /// Internal PDF viewer total page count.
@@ -524,7 +522,6 @@ impl Default for App {
             config_editor_goal_column: None,
             pdf_viewer_path: None,
             pdf_viewer_page: 1,
-            pdf_viewer_zoom: 100.0,
             pdf_viewer_scroll_y: 0,
             pdf_viewer_total_pages: 0,
             pdf_viewer_page_pixel_h: 0,
