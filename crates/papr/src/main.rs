@@ -2189,10 +2189,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 pdf_viewer::evict_distant_pages(0);
             }
             KeyCode::Up | KeyCode::Char('k') if is_scroll_event => {
-                pdf_scroll(app, -5);
+                pdf_scroll(app, -4);
             }
             KeyCode::Down | KeyCode::Char('j') if is_scroll_event => {
-                pdf_scroll(app, 5);
+                pdf_scroll(app, 4);
             }
             KeyCode::PageUp if key.kind == KeyEventKind::Press => {
                 if app.pdf_viewer_page > 1 {
