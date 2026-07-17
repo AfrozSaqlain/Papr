@@ -722,6 +722,39 @@ fn render_history(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
     );
 }
 
+fn format_duration(seconds: u64) -> String {
+    let minutes = (seconds as f64) / 60.0;
+    if minutes < 60.0 {
+        format_decimal(minutes, "min")
+    } else {
+        let hours = minutes / 60.0;
+        if hours < 24.0 {
+            format_decimal(hours, "h")
+        } else {
+            let days = hours / 24.0;
+            if days < 30.0 {
+                format_decimal(days, "days")
+            } else {
+                let months = days / 30.0;
+                if months < 12.0 {
+                    format_decimal(months, "months")
+                } else {
+                    let years = days / 365.0;
+                    format_decimal(years, "years")
+                }
+            }
+        }
+    }
+}
+
+fn format_decimal(value: f64, unit: &str) -> String {
+    if (value - value.round()).abs() < 0.05 {
+        format!("{:.0} {}", value.round(), unit)
+    } else {
+        format!("{:.1} {}", value, unit)
+    }
+}
+
 fn render_statistics(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let reading = &app.dashboard.reading;
     let rows = Layout::vertical([
@@ -799,8 +832,15 @@ fn render_statistics(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &T
             Line::raw(""),
             Line::styled(
                 format!(
-                    "Average reading time: {} min",
-                    reading.average_reading_seconds / 60
+                    "Average reading time: {}",
+                    format_duration(reading.average_reading_seconds)
+                ),
+                Style::default().fg(theme.muted),
+            ),
+            Line::styled(
+                format!(
+                    "Total reading duration: {}",
+                    format_duration(reading.total_reading_seconds)
                 ),
                 Style::default().fg(theme.muted),
             ),

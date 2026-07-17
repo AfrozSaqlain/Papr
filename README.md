@@ -175,9 +175,23 @@ enabled_plugins = []
 #### Custom Viewer Arguments
 If you need custom arguments for your PDF viewer, use the `{path}` placeholder:
 ```toml
-pdf_viewer = "zathura --fork {path}"
+pdf_viewer = "zathura {path}"
 ```
 If `{path}` is omitted, the PDF file path is automatically appended as the final argument.
+
+> [!NOTE]
+> **Reading Time Tracking Requirements**:
+> For reading session durations to be recorded and displayed as statistics, the TUI must be able to track the lifetime of the viewer process.
+> 
+> * **Supported configurations (records reading time)**:
+>   - **Internal Viewer**: `pdf_viewer = "internal"` (tracks time inside the TUI session).
+>   - **Zathura (Blocking)**: `pdf_viewer = "zathura {path}"` (do **NOT** use `--fork`).
+>   - **Okular**: `pdf_viewer = "okular {path}"`.
+>   - **Evince**: `pdf_viewer = "evince {path}"`.
+>   - **SumatraPDF (Windows)**: `pdf_viewer = "C:\\Path\\To\\SumatraPDF.exe {path}"`.
+> * **Unsupported configurations (always reports 0 seconds)**:
+>   - System launchers like `xdg-open` or macOS `open` (these hand off the PDF and immediately exit).
+>   - Background forks (e.g. `zathura --fork {path}`).
 
 To use the fast, built-in terminal-based PDF viewer (which renders PDFs directly in your terminal if it supports Kitty or Sixel graphics protocols), set `pdf_viewer` to `"internal"`:
 ```toml

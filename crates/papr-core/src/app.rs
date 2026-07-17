@@ -441,6 +441,10 @@ pub struct App {
     /// Written by draw_pdf_viewer every frame; read by pdf_scroll to detect
     /// when the user has reached the bottom of the page.
     pub pdf_viewer_max_scroll_y: u32,
+    /// Active internal reading session ID.
+    pub active_pdf_session_id: Option<i64>,
+    /// Active internal reading session start time.
+    pub active_pdf_session_start: Option<std::time::Instant>,
 }
 
 impl Default for App {
@@ -526,6 +530,8 @@ impl Default for App {
             pdf_viewer_total_pages: 0,
             pdf_viewer_page_pixel_h: 0,
             pdf_viewer_max_scroll_y: 0,
+            active_pdf_session_id: None,
+            active_pdf_session_start: None,
         }
     }
 }

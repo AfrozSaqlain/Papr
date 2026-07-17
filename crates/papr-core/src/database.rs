@@ -1368,6 +1368,7 @@ impl Database {
             "INSERT INTO reading_history (paper_id) VALUES (?1)",
             [paper_id],
         )?;
+        let session_id = transaction.last_insert_rowid();
         transaction.execute(
             "INSERT INTO activity_log (kind, paper_id) VALUES (?1, ?2)",
             params![if pdf { "pdf_opened" } else { "paper_opened" }, paper_id],
@@ -1383,7 +1384,6 @@ impl Database {
                 [paper_id],
             )?;
         }
-        let session_id = transaction.last_insert_rowid();
         transaction.commit()?;
         Ok(session_id)
     }
@@ -1476,15 +1476,16 @@ impl Database {
     /// Returns an error when history aggregates cannot be queried.
     pub fn reading_statistics(&self) -> Result<ReadingStatistics, DatabaseError> {
         let now = chrono::Local::now();
-        let (sessions, monthly_reading, yearly_reading, average_reading_seconds) =
+        let (sessions, monthly_reading, yearly_reading, average_reading_seconds, total_reading_seconds) =
             self.connection.query_row(
                 "SELECT COUNT(*),
                     COALESCE(SUM(CASE WHEN strftime('%Y-%m', opened_at, 'localtime') = ?1 THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN strftime('%Y', opened_at, 'localtime') = ?2 THEN 1 ELSE 0 END), 0),
-                    CAST(COALESCE(AVG(duration_s), 0) AS INTEGER)
+                    CAST(COALESCE((SELECT AVG(duration_s) FROM reading_history WHERE duration_s > 0), 0) AS INTEGER),
+                    COALESCE(SUM(duration_s), 0)
                  FROM reading_history",
                 params![now.format("%Y-%m").to_string(), now.year().to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )?;
         let heatmap = self.reading_heatmap()?;
         let dates = heatmap
@@ -1520,6 +1521,7 @@ impl Database {
             yearly_reading,
             sessions,
             average_reading_seconds,
+            total_reading_seconds,
             most_active_day,
             most_read_author,
             most_read_journal,
@@ -2242,11 +2244,13 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::in_memory()?;
         let paper_id = database.insert_paper("History paper", None)?;
-        database.record_open(paper_id, true)?;
+        let session_id = database.record_open(paper_id, true)?;
+        database.record_reading_duration(session_id, 120)?;
         database.record_activity("search", None, Some("gravity waves"))?;
 
         let dashboard = database.research_dashboard()?;
         assert_eq!(dashboard.reading.sessions, 1);
+        assert_eq!(dashboard.reading.average_reading_seconds, 120);
         assert_eq!(dashboard.reading.current_streak, 1);
         assert_eq!(dashboard.reading.heatmap.len(), 84);
         assert_eq!(dashboard.recent_activity.len(), 2);

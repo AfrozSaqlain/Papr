@@ -197,6 +197,8 @@ pub struct ReadingStatistics {
     pub sessions: u64,
     /// Average recorded session duration in seconds.
     pub average_reading_seconds: u64,
+    /// Total recorded reading duration in seconds.
+    pub total_reading_seconds: u64,
     /// Weekday with the most reading sessions.
     pub most_active_day: Option<String>,
     /// Most frequently opened author.

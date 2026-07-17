@@ -248,6 +248,7 @@ enum UiAction {
     RemoveFromQueue(i64),
     MoveQueueItemUp(i64),
     MoveQueueItemDown(i64),
+    ClosePdf,
 }
 
 enum KeyHandling {
@@ -1033,6 +1034,18 @@ fn apply_ui_action(
             app.reading_queue_selected = (app.reading_queue_selected + 1)
                 .min(app.reading_queue_papers.len().saturating_sub(1));
         }
+        UiAction::ClosePdf => {
+            if let (Some(session_id), Some(start)) = (app.active_pdf_session_id, app.active_pdf_session_start) {
+                let duration_s = start.elapsed().as_secs();
+                runtime.database.record_reading_duration(session_id, duration_s)?;
+                refresh_dashboard(runtime, app)?;
+            }
+            app.active_pdf_session_id = None;
+            app.active_pdf_session_start = None;
+            app.mode = AppMode::Normal;
+            app.pdf_viewer_path = None;
+            pdf_viewer::evict_distant_pages(0);
+        }
         UiAction::OpenCollection(collection_id) => {
             open_collection(&runtime.database, app, collection_id)?;
         }
@@ -1686,6 +1699,8 @@ fn open_pdf(
         app.pdf_viewer_page_pixel_h = 0;
         app.pdf_viewer_max_scroll_y = 0;
         app.pdf_viewer_total_pages = get_pdf_page_count(path);
+        app.active_pdf_session_id = session_id;
+        app.active_pdf_session_start = Some(std::time::Instant::now());
         app.toast = Some(format!(
             "Viewing PDF: {}",
             path.file_name().unwrap_or_default().to_string_lossy()
@@ -2291,9 +2306,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         );
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') if key.kind == KeyEventKind::Press => {
-                app.mode = AppMode::Normal;
-                app.pdf_viewer_path = None;
-                pdf_viewer::evict_distant_pages(0);
+                return Some(UiAction::ClosePdf);
             }
             KeyCode::Up | KeyCode::Char('k') if is_scroll_event => {
                 pdf_scroll(app, -1);
