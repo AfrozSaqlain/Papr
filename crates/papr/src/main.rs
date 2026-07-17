@@ -530,8 +530,10 @@ async fn run(
     let mut force_redraw = true;
 
     while !app.should_quit {
+        let loop_start = std::time::Instant::now();
+        // state_changed drives non-PDF redraws; force_redraw (for PDF/animation)
+        // is consumed and reset at the bottom of the loop after drawing.
         let mut state_changed = force_redraw;
-        force_redraw = false;
 
         if app.mode == AppMode::PdfView {
             let pdf_page_cached = pdf_viewer::is_current_page_cached(app);
@@ -674,17 +676,17 @@ async fn run(
             last_toast = None;
         }
 
-        if state_changed {
-            session
-                .terminal_mut()
-                .draw(|frame| ui::render(frame, app, &theme))?;
-        }
+        // ── FIXED EVENT ORDERING ─────────────────────────────────────────────
+        // Read all pending events FIRST, THEN draw.  Previously the loop drew
+        // state before reading keys, adding one full iteration of input latency.
+        // Now: drain pending events → block-wait → draw updated state.
 
-        // Use a dynamic timeout based on cache and animation status to eliminate CPU spin
-        // when viewing pre-rendered pages, while keeping dots animation fluid.
+        // Use a dynamic timeout based on cache and animation status.
+        // Only call is_animating() once per iteration (it acquires a mutex).
+        let animating = app.mode == AppMode::PdfView && pdf_viewer::is_animating();
         let poll_timeout = if app.mode == AppMode::PdfView {
-            if pdf_viewer::is_animating() {
-                std::time::Duration::from_millis(16)
+            if animating {
+                std::time::Duration::from_millis(8)  // ~120fps cap while animating
             } else if pdf_viewer::is_current_page_cached(app) {
                 std::time::Duration::from_millis(250)
             } else {
@@ -694,10 +696,8 @@ async fn run(
             std::time::Duration::from_millis(100)
         };
 
-        // Drain all immediately available events (both Press and Repeat)
-        // before the next render.  Processing every queued repeat event here
-        // keeps scroll state fully up-to-date so the frame reflects all
-        // accumulated key input without an extra round-trip delay.
+        // Step 1: drain all immediately-available events so we fold multiple
+        // key-repeat events into a single physics update before drawing.
         let mut got_event = false;
         while event::poll(std::time::Duration::ZERO)? {
             got_event = true;
@@ -732,7 +732,8 @@ async fn run(
                 _ => {}
             }
         }
-        // Now block up to poll_timeout waiting for the next event.
+
+        // Step 2: block-wait for the next event (up to poll_timeout).
         if event::poll(poll_timeout)? {
             got_event = true;
             match event::read()? {
@@ -767,8 +768,25 @@ async fn run(
             }
         }
 
-        if got_event || pdf_viewer::is_animating() {
+        if got_event || animating {
             force_redraw = true;
+        }
+
+        // Step 3: draw with the fully-updated state (key effects are visible
+        // in THIS iteration, not the next one).
+        if state_changed || force_redraw {
+            force_redraw = false;  // consumed here
+            let draw_start = std::time::Instant::now();
+            session
+                .terminal_mut()
+                .draw(|frame| ui::render(frame, app, &theme))?;
+            if draw_start.elapsed() > std::time::Duration::from_millis(16) {
+                log_message(&runtime.database_file, &format!("Slow draw: {:?}", draw_start.elapsed()));
+            }
+        }
+
+        if loop_start.elapsed() > std::time::Duration::from_millis(50) {
+            log_message(&runtime.database_file, &format!("Slow main loop iteration: {:?}", loop_start.elapsed()));
         }
 
         tokio::task::yield_now().await;
