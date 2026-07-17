@@ -102,8 +102,8 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     let download_dir = config.download_path.clone().unwrap_or_else(|| paths.downloads_dir.clone());
-    let download_dir = std::fs::canonicalize(&download_dir).unwrap_or(download_dir);
     std::fs::create_dir_all(&download_dir).context("failed to create download directory")?;
+    let download_dir = std::fs::canonicalize(&download_dir).unwrap_or(download_dir);
 
     let mut collection_roots = Vec::new();
     for root in &config.library_folders {
@@ -3488,6 +3488,7 @@ fn apply_config_update(
     runtime.pdf_viewer = config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer);
 
     let download_dir = config.download_path.clone().unwrap_or_else(|| runtime.default_downloads_dir.clone());
+    let _ = std::fs::create_dir_all(&download_dir);
     let download_dir = std::fs::canonicalize(&download_dir).unwrap_or(download_dir);
     runtime.download_dir = download_dir.clone();
 
