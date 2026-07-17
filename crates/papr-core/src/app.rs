@@ -253,6 +253,10 @@ pub struct DownloadTask {
     pub pdf_path: Option<String>,
     /// Current transfer state.
     pub status: DownloadStatus,
+    /// Remote paper metadata preserved for retries.
+    pub remote_paper: Option<RemotePaper>,
+    /// When the task failed (used to auto-cleanup older failures).
+    pub failed_at: Option<std::time::Instant>,
 }
 
 /// Commands available to keybindings and the command palette.

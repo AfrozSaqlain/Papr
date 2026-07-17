@@ -2626,6 +2626,8 @@ mod tests {
             paper_id: None,
             pdf_path: None,
             status: DownloadStatus::Running,
+            remote_paper: None,
+            failed_at: None,
         });
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
         let text = rendered_text(&terminal);

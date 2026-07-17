@@ -249,6 +249,7 @@ enum UiAction {
     MoveQueueItemUp(i64),
     MoveQueueItemDown(i64),
     ClosePdf,
+    RetryDownload { id: String, paper: RemotePaper },
 }
 
 enum KeyHandling {
@@ -767,6 +768,23 @@ async fn run(
             last_toast = None;
         }
 
+        // Auto-cleanup failed downloads after 2 minutes (120 seconds)
+        let before_len = app.downloads.len();
+        app.downloads.retain(|task| {
+            if let DownloadStatus::Failed(_) = task.status {
+                if let Some(failed_at) = task.failed_at {
+                    if failed_at.elapsed() >= std::time::Duration::from_secs(120) {
+                        return false;
+                    }
+                }
+            }
+            true
+        });
+        if app.downloads.len() != before_len {
+            state_changed = true;
+            app.download_selected = app.download_selected.min(app.downloads.len().saturating_sub(1));
+        }
+
         // ── FIXED EVENT ORDERING ─────────────────────────────────────────────
         // Read all pending events FIRST, THEN draw.  Previously the loop drew
         // state before reading keys, adding one full iteration of input latency.
@@ -932,6 +950,38 @@ fn apply_ui_action(
             pending_downloads,
             app,
         ),
+        UiAction::RetryDownload { id, paper } => {
+            if pending_downloads.contains_key(&id) {
+                return Ok(());
+            }
+            if let Some(task) = app.downloads.iter_mut().find(|t| t.id == id) {
+                if let Some(ref path_str) = task.pdf_path {
+                    let path = std::path::PathBuf::from(path_str);
+                    let part_path = path.with_extension("pdf.part");
+                    let _ = std::fs::remove_file(&path);
+                    let _ = std::fs::remove_file(&part_path);
+                }
+                task.downloaded = 0;
+                task.total = None;
+                task.status = DownloadStatus::Starting;
+                task.failed_at = None;
+                let destination = task.pdf_path.as_ref()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| runtime.download_dir.join(format!("{}.pdf", id)));
+                pending_downloads.insert(id.clone(), paper.clone());
+                app.toast = Some("Retrying download...".to_owned());
+                let manager = runtime.downloads.clone();
+                let events = senders.download.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = manager.download(&id, &paper.pdf_url.clone().unwrap_or_default(), &destination, &events).await {
+                        let _ = events.send(DownloadEvent::Failed {
+                            id,
+                            error: error.to_string(),
+                        });
+                    }
+                });
+            }
+        }
         UiAction::Reindex => start_runtime_scan(runtime, senders, app),
         UiAction::OpenPdf { paper_id, path } => {
             let session_id = runtime.database.record_open(paper_id, true)?;
@@ -2167,6 +2217,8 @@ fn discover_local_downloads(
                 paper_id,
                 pdf_path: Some(pdf_path),
                 status: DownloadStatus::Completed,
+                remote_paper: None,
+                failed_at: None,
             });
         }
     }
@@ -2212,12 +2264,14 @@ fn start_download(
     app.toast = Some("Downloading paper...".to_owned());
     app.downloads.push(DownloadTask {
         id: id.clone(),
-        title: paper.title,
+        title: paper.title.clone(),
         downloaded: 0,
         total: None,
         paper_id: None,
         pdf_path: Some(destination.to_string_lossy().into_owned()),
         status: DownloadStatus::Starting,
+        remote_paper: Some(paper),
+        failed_at: None,
     });
     let manager = manager.clone();
     let events = events.clone();
@@ -2238,16 +2292,17 @@ fn apply_download_event(
     app: &mut App,
     senders: &ActionSenders,
 ) -> Result<()> {
+    let is_completed = matches!(event, DownloadEvent::Completed { .. });
     let id = match &event {
         DownloadEvent::Started { id, .. }
         | DownloadEvent::Progress { id, .. }
         | DownloadEvent::Completed { id, .. }
-        | DownloadEvent::Failed { id, .. } => id,
+        | DownloadEvent::Failed { id, .. } => id.clone(),
     };
     let task = app
         .downloads
         .iter_mut()
-        .find(|t| &t.id == id)
+        .find(|t| t.id == id)
         .context("received download event for unknown task")?;
     match event {
         DownloadEvent::Started { total, .. } => {
@@ -2291,7 +2346,11 @@ fn apply_download_event(
         DownloadEvent::Failed { id, error } => {
             pending.remove(&id);
             task.status = DownloadStatus::Failed(error);
+            task.failed_at = Some(std::time::Instant::now());
         }
+    }
+    if is_completed {
+        app.downloads.retain(|t| t.id != id || !matches!(t.status, DownloadStatus::Failed(_)));
     }
     Ok(())
 }
@@ -2768,6 +2827,18 @@ fn handle_reading_queue_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
 fn handle_downloads_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.page != papr_core::Page::Downloads {
         return None;
+    }
+    if key.code == KeyCode::Char('r') || key.code == KeyCode::Char('R') {
+        if let Some(&task) = app.filtered_downloads().get(app.download_selected) {
+            if matches!(task.status, DownloadStatus::Failed(_)) {
+                if let Some(ref remote_paper) = task.remote_paper {
+                    return Some(UiAction::RetryDownload {
+                        id: task.id.clone(),
+                        paper: remote_paper.clone(),
+                    });
+                }
+            }
+        }
     }
     if matches!(
         key.code,
@@ -3817,7 +3888,7 @@ mod tests {
 
     use super::{
         UiAction, build_config_editor_view, cursor_visual_position, diverse_latest_papers,
-        handle_config_editor_insert_key, handle_key, parse_command, refresh_downloads_from_dir,
+        handle_config_editor_insert_key, handle_downloads_key, handle_key, parse_command, refresh_downloads_from_dir,
         PaperTarget,
     };
 
@@ -4250,6 +4321,46 @@ mod tests {
     }
 
     #[test]
+    fn downloads_workspace_retries_failed_download() {
+        let paper = RemotePaper {
+            id: "retry_id".into(),
+            title: "Retry Paper".into(),
+            authors: vec!["Researcher".into()],
+            abstract_text: "Abstract".into(),
+            published: Utc::now(),
+            updated: Utc::now(),
+            categories: vec!["cs.DL".into()],
+            pdf_url: Some("http://example.com/retry.pdf".into()),
+            doi: None,
+            journal_ref: None,
+        };
+        let mut app = App {
+            page: Page::Downloads,
+            content_focused: true,
+            downloads: vec![DownloadTask {
+                id: "retry_id".into(),
+                title: "Retry Paper".into(),
+                downloaded: 0,
+                total: None,
+                paper_id: None,
+                pdf_path: Some("/tmp/retry_path.pdf".into()),
+                status: DownloadStatus::Failed("Network Error".into()),
+                remote_paper: Some(paper.clone()),
+                failed_at: Some(std::time::Instant::now()),
+            }],
+            ..App::default()
+        };
+        let action = handle_downloads_key(&mut app, KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(action.is_some());
+        if let Some(UiAction::RetryDownload { id, paper: retry_paper }) = action {
+            assert_eq!(id, "retry_id");
+            assert_eq!(retry_paper.title, "Retry Paper");
+        } else {
+            panic!("Expected UiAction::RetryDownload");
+        }
+    }
+
+    #[test]
     fn insert_mode_vertical_movement_respects_wrapped_rows() {
         let mut app = App {
             config_editor_text: "abcdefghij".into(),
@@ -4310,6 +4421,8 @@ mod tests {
                     paper_id: None,
                     pdf_path: Some(root.join("stale.pdf").to_string_lossy().into_owned()),
                     status: DownloadStatus::Completed,
+                    remote_paper: None,
+                    failed_at: None,
                 },
                 DownloadTask {
                     id: "running".into(),
@@ -4319,6 +4432,8 @@ mod tests {
                     paper_id: None,
                     pdf_path: None,
                     status: DownloadStatus::Running,
+                    remote_paper: None,
+                    failed_at: None,
                 },
             ],
             ..App::default()
@@ -4398,6 +4513,8 @@ mod tests {
                 paper_id: Some(11),
                 pdf_path: Some("/tmp/library.pdf".into()),
                 status: DownloadStatus::Completed,
+                remote_paper: None,
+                failed_at: None,
             }],
             ..App::default()
         };
@@ -4514,6 +4631,8 @@ mod tests {
                 paper_id: Some(11),
                 pdf_path: Some("/tmp/library.pdf".into()),
                 status: DownloadStatus::Completed,
+                remote_paper: None,
+                failed_at: None,
             }],
             ..App::default()
         };
