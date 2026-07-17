@@ -343,6 +343,96 @@ fn next_char_boundary(text: &str, cursor: usize) -> usize {
     next.min(text.len())
 }
 
+fn prev_word_boundary(text: &str, cursor: usize) -> usize {
+    if cursor == 0 {
+        return 0;
+    }
+    let mut pos = cursor.min(text.len());
+    
+    // First, skip any whitespace/newlines to the left
+    while pos > 0 {
+        let prev = prev_char_boundary(text, pos);
+        let ch = text[prev..pos].chars().next().unwrap_or(' ');
+        if !ch.is_whitespace() {
+            break;
+        }
+        pos = prev;
+    }
+    
+    if pos == 0 {
+        return 0;
+    }
+    
+    // Now determine the type of character we are on
+    let prev = prev_char_boundary(text, pos);
+    let first_ch = text[prev..pos].chars().next().unwrap_or(' ');
+    let is_word_char = first_ch.is_alphanumeric() || first_ch == '_';
+    
+    // Skip characters of the same type
+    while pos > 0 {
+        let prev = prev_char_boundary(text, pos);
+        let ch = text[prev..pos].chars().next().unwrap_or(' ');
+        if ch.is_whitespace() {
+            break;
+        }
+        let ch_is_word = ch.is_alphanumeric() || ch == '_';
+        if ch_is_word != is_word_char {
+            break;
+        }
+        pos = prev;
+    }
+    
+    pos
+}
+
+fn next_word_boundary(text: &str, cursor: usize) -> usize {
+    let mut pos = cursor.min(text.len());
+    if pos >= text.len() {
+        return text.len();
+    }
+    
+    // Determine the type of character at the cursor
+    let first_ch = text[pos..].chars().next().unwrap_or(' ');
+    
+    if first_ch.is_whitespace() {
+        // Skip whitespace/newlines
+        while pos < text.len() {
+            let next = next_char_boundary(text, pos);
+            let ch = text[pos..next].chars().next().unwrap_or(' ');
+            if !ch.is_whitespace() {
+                break;
+            }
+            pos = next;
+        }
+    } else {
+        let is_word_char = first_ch.is_alphanumeric() || first_ch == '_';
+        // Skip characters of the same type
+        while pos < text.len() {
+            let next = next_char_boundary(text, pos);
+            let ch = text[pos..next].chars().next().unwrap_or(' ');
+            if ch.is_whitespace() {
+                break;
+            }
+            let ch_is_word = ch.is_alphanumeric() || ch == '_';
+            if ch_is_word != is_word_char {
+                break;
+            }
+            pos = next;
+        }
+        // Then, skip trailing whitespace
+        while pos < text.len() {
+            let next = next_char_boundary(text, pos);
+            let ch = text[pos..next].chars().next().unwrap_or(' ');
+            if !ch.is_whitespace() {
+                break;
+            }
+            pos = next;
+        }
+    }
+    
+    pos
+}
+
 fn byte_index_for_char_column(text: &str, char_col: usize) -> usize {
     if char_col == 0 {
         return 0;
@@ -2437,7 +2527,7 @@ fn handle_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 app.discovery.selected = 0;
             }
         }
-        KeyCode::Left => {
+        KeyCode::Left if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             if app.discovery.query_cursor == 0 {
                 app.content_focused = false;
                 app.mode = AppMode::Normal;
@@ -2508,7 +2598,7 @@ fn handle_workspace_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction>
                 }
             }
         }
-        KeyCode::Left => {
+        KeyCode::Left if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             if app.workspace_query_cursor == 0 {
                 app.mode = AppMode::Normal;
                 app.content_focused = false;
@@ -3039,7 +3129,9 @@ fn edit_text(text: &mut String, cursor: &mut usize, key: KeyEvent) -> bool {
     let mut changed = false;
     match key.code {
         KeyCode::Left => {
-            if *cursor > 0 {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                *cursor = prev_word_boundary(text, *cursor);
+            } else if *cursor > 0 {
                 let mut prev = *cursor - 1;
                 while prev > 0 && !text.is_char_boundary(prev) {
                     prev -= 1;
@@ -3048,13 +3140,27 @@ fn edit_text(text: &mut String, cursor: &mut usize, key: KeyEvent) -> bool {
             }
         }
         KeyCode::Right => {
-            if *cursor < text.len() {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                *cursor = next_word_boundary(text, *cursor);
+            } else if *cursor < text.len() {
                 let mut next = *cursor + 1;
                 while next < text.len() && !text.is_char_boundary(next) {
                     next += 1;
                 }
                 *cursor = next;
             }
+        }
+        KeyCode::Home => {
+            let s = &text[..*cursor];
+            let line_start = s.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+            *cursor = line_start;
+        }
+        KeyCode::End => {
+            let line_end = text[*cursor..]
+                .find('\n')
+                .map(|idx| *cursor + idx)
+                .unwrap_or(text.len());
+            *cursor = line_end;
         }
         KeyCode::Backspace => {
             if *cursor > 0 {
@@ -3490,7 +3596,9 @@ fn handle_config_editor_key(
             app.config_editor_command = Some(String::new());
         }
         KeyCode::Left | KeyCode::Char('h') => {
-            if app.config_editor_cursor > 0 {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                app.config_editor_cursor = prev_word_boundary(&app.config_editor_text, app.config_editor_cursor);
+            } else if app.config_editor_cursor > 0 {
                 let mut prev = app.config_editor_cursor - 1;
                 while prev > 0 && !app.config_editor_text.is_char_boundary(prev) {
                     prev -= 1;
@@ -3498,16 +3606,26 @@ fn handle_config_editor_key(
                 if app.config_editor_text.as_bytes().get(prev) != Some(&b'\n') {
                     app.config_editor_cursor = prev;
                 }
-                reset_config_editor_goal_column(app);
             }
+            reset_config_editor_goal_column(app);
         }
         KeyCode::Right | KeyCode::Char('l') => {
-            if app.config_editor_cursor < app.config_editor_text.len() {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                app.config_editor_cursor = next_word_boundary(&app.config_editor_text, app.config_editor_cursor);
+            } else if app.config_editor_cursor < app.config_editor_text.len() {
                 let next = next_char_boundary(&app.config_editor_text, app.config_editor_cursor);
                 if app.config_editor_text.as_bytes().get(app.config_editor_cursor) != Some(&b'\n') {
                     app.config_editor_cursor = next.min(app.config_editor_text.len());
                 }
             }
+            reset_config_editor_goal_column(app);
+        }
+        KeyCode::Home => {
+            app.config_editor_cursor = config_editor_line_start(&app.config_editor_text, app.config_editor_cursor);
+            reset_config_editor_goal_column(app);
+        }
+        KeyCode::End => {
+            app.config_editor_cursor = config_editor_line_end(&app.config_editor_text, app.config_editor_cursor);
             reset_config_editor_goal_column(app);
         }
         KeyCode::Up | KeyCode::Char('k') => {
@@ -3590,11 +3708,19 @@ fn handle_config_editor_insert_key(app: &mut App, key: KeyEvent) {
             reset_config_editor_goal_column(app);
         }
         KeyCode::Left => {
-            app.config_editor_cursor = prev_char_boundary(&app.config_editor_text, app.config_editor_cursor);
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                app.config_editor_cursor = prev_word_boundary(&app.config_editor_text, app.config_editor_cursor);
+            } else {
+                app.config_editor_cursor = prev_char_boundary(&app.config_editor_text, app.config_editor_cursor);
+            }
             reset_config_editor_goal_column(app);
         }
         KeyCode::Right => {
-            app.config_editor_cursor = next_char_boundary(&app.config_editor_text, app.config_editor_cursor);
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                app.config_editor_cursor = next_word_boundary(&app.config_editor_text, app.config_editor_cursor);
+            } else {
+                app.config_editor_cursor = next_char_boundary(&app.config_editor_text, app.config_editor_cursor);
+            }
             reset_config_editor_goal_column(app);
         }
         KeyCode::Up => move_config_editor_vertical(app, -1),
@@ -3680,6 +3806,40 @@ mod tests {
         handle_config_editor_insert_key, handle_key, parse_command, refresh_downloads_from_dir,
         PaperTarget,
     };
+
+    #[test]
+    fn test_word_wise_and_line_editing_navigation() {
+        use super::{edit_text, prev_word_boundary, next_word_boundary};
+        
+        let text = "hello world  rust_programming  123";
+        // Test word boundaries
+        assert_eq!(next_word_boundary(text, 0), 6); // start of "world"
+        assert_eq!(next_word_boundary(text, 6), 13); // start of "rust_programming"
+        assert_eq!(next_word_boundary(text, 13), 31); // start of "123"
+        
+        assert_eq!(prev_word_boundary(text, 34), 31); // start of "123"
+        assert_eq!(prev_word_boundary(text, 31), 13); // start of "rust_programming"
+        assert_eq!(prev_word_boundary(text, 13), 6); // start of "world"
+        
+        let mut buffer = "first second\nthird fourth".to_owned();
+        let mut cursor = 6;
+        
+        // Test Home
+        edit_text(&mut buffer, &mut cursor, KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(cursor, 0);
+        
+        // Test End
+        edit_text(&mut buffer, &mut cursor, KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(cursor, 12); // end of "first second"
+        
+        // Test Ctrl + Left
+        edit_text(&mut buffer, &mut cursor, KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL));
+        assert_eq!(cursor, 6); // start of "second"
+        
+        // Test Ctrl + Right
+        edit_text(&mut buffer, &mut cursor, KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL));
+        assert_eq!(cursor, 13);
+    }
 
     #[test]
     fn control_p_opens_palette() {

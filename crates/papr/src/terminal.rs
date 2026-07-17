@@ -59,6 +59,7 @@ impl Drop for TerminalSession {
             let _ = execute!(self.terminal.backend_mut(), DisableMouseCapture);
         }
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = execute!(self.terminal.backend_mut(), crossterm::cursor::SetCursorStyle::BlinkingBlock);
         let _ = self.terminal.show_cursor();
     }
 }

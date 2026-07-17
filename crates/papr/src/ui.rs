@@ -88,6 +88,17 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         AppMode::ConfirmDelete => render_delete_confirmation(frame, app, theme),
         AppMode::Normal | AppMode::Search | AppMode::WorkspaceSearch | AppMode::PdfView => {}
     }
+
+    let cursor_style = if app.page == Page::Settings && app.config_editor_focused {
+        if app.config_editor_insert_mode {
+            crossterm::cursor::SetCursorStyle::BlinkingBar
+        } else {
+            crossterm::cursor::SetCursorStyle::BlinkingBlock
+        }
+    } else {
+        crossterm::cursor::SetCursorStyle::BlinkingBar
+    };
+    let _ = crossterm::execute!(std::io::stdout(), cursor_style);
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {

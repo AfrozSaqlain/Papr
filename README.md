@@ -460,7 +460,7 @@ This architecture makes plugins:
 | `?` | Toggle the help helper screen |
 | `q` | Close active popups, or exit the application |
 
-### Discovery & Details
+### Discovery
 
 | Key | Action |
 | --- | --- |
@@ -468,37 +468,21 @@ This architecture makes plugins:
 | `j` / `k` | Scroll details view |
 | `d` | Download PDF |
 | `o` | Open the paper webpage in your default browser |
-| `n` | Open/edit the Markdown note |
-| `s` | Assign paper to a collection |
-| `B` | Toggle bookmark |
 | `r` | Refresh/retry the current search |
 | `h` / `Esc` | Return to results |
 
-### Library, Reading Queue, Collections, Bookmarks, Authors
+### Library, Reading Queue, Collections, Bookmarks, Authors. Notes and Downloads
 
 | Key | Action |
 | --- | --- |
 | `Enter` / `Right` / `l` | Open the PDF in your default viewer |
-| `r` | Scan library folders for new files |
+| `r` | Scan library folders for new files (specific only to **Library** workspace) |
 | `n` | Edit Markdown note |
 | `s` | Move PDF file to a collection folder |
 | `B` | Toggle bookmark |
 | `>` | Toggle local search |
 | `R` | Rename a PDF file or collection folder |
 | `x` | Delete a PDF file or collection folder |
-| `c` | Copy citation |
-
-### Downloads Tab
-
-| Key | Action |
-| --- | --- |
-| `Enter` / `l` | Open the downloaded PDF (once completed) |
-| `B` | Toggle bookmark on the downloaded paper |
-| `n` | Edit Markdown note for the downloaded paper |
-| `s` | Move the downloaded paper to a collection |
-| `R` | Rename the downloaded PDF |
-| `x` | Delete the downloaded PDF |
-| `>` | Toggle local search |
 | `c` | Copy citation |
 
 ### Internal PDF Viewer
