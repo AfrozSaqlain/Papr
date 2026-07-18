@@ -260,14 +260,14 @@ pub struct DownloadTask {
 }
 
 impl DownloadTask {
-    /// Current filename on disk, falling back to the remote paper title before a path exists.
+    /// Display filename without the PDF extension, falling back to the remote paper title.
     #[must_use]
     pub fn display_name(&self) -> &str {
         self.pdf_path
             .as_deref()
-            .and_then(|path| std::path::Path::new(path).file_name())
+            .and_then(|path| std::path::Path::new(path).file_stem())
             .and_then(|name| name.to_str())
-            .unwrap_or(&self.title)
+            .unwrap_or_else(|| self.title.strip_suffix(".pdf").unwrap_or(&self.title))
     }
 }
 

@@ -1836,7 +1836,7 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
 
         ListItem::new(vec![
             Line::styled(
-                &paper.title,
+                display_paper_title(&paper.title),
                 Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
             ),
             Line::from(spans),
@@ -1943,13 +1943,17 @@ fn paper_detail_source(app: &App) -> (&[RemotePaper], usize) {
     }
 }
 
+fn display_paper_title(title: &str) -> &str {
+    title.strip_suffix(".pdf").unwrap_or(title)
+}
+
 fn paper_detail_lines<'a>(paper: &'a RemotePaper, theme: &Theme, is_downloaded: bool) -> Vec<Line<'a>> {
     let doi = paper.doi.as_deref().unwrap_or("Not available");
     let journal = paper.journal_ref.as_deref().unwrap_or("Not available");
     let pdf = paper.pdf_url.as_deref().unwrap_or("Not available");
     let mut title_spans = vec![
         Span::styled(
-            &paper.title,
+            display_paper_title(&paper.title),
             Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         ),
     ];
@@ -2101,7 +2105,7 @@ fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
 
                 ListItem::new(vec![
                     Line::styled(
-                        &paper.title,
+                        display_paper_title(&paper.title),
                         Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
                     ),
                     Line::styled(
@@ -2728,7 +2732,8 @@ mod tests {
         });
         let theme = Theme::load("gruvbox")?;
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
-        assert!(rendered_text(&terminal).contains("paper.pdf"));
+        assert!(rendered_text(&terminal).contains("paper"));
+        assert!(!rendered_text(&terminal).contains("paper.pdf"));
 
         app.page = Page::Downloads;
         app.downloads.push(DownloadTask {
@@ -2816,7 +2821,8 @@ mod tests {
         });
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
         let rendered = rendered_text(&terminal);
-        assert!(rendered.contains("paper.pdf"));
+        assert!(rendered.contains("paper"));
+        assert!(!rendered.contains("paper.pdf"));
         assert!(rendered.contains("PDF available"));
         Ok(())
     }
@@ -2844,7 +2850,8 @@ mod tests {
         let theme = Theme::load("nord")?;
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
         let rendered = rendered_text(&terminal);
-        assert!(rendered.contains("paper.pdf"));
+        assert!(rendered.contains("paper"));
+        assert!(!rendered.contains("paper.pdf"));
         assert!(rendered.contains("Ada Lovelace, Alan Turing"));
         assert!(rendered.contains("2026"));
         assert!(rendered.contains("Terminal Studies"));
@@ -2907,7 +2914,8 @@ mod tests {
         let mut assert_filename = |app: &mut App| -> Result<(), Box<dyn std::error::Error>> {
             terminal.draw(|frame| render(frame, app, &theme))?;
             let rendered = rendered_text(&terminal);
-            assert!(rendered.contains("renamed-on-disk.pdf"));
+            assert!(rendered.contains("renamed-on-disk"));
+            assert!(!rendered.contains("renamed-on-disk.pdf"));
             assert!(!rendered.contains("Bibliographic Paper Title"));
             Ok(())
         };
