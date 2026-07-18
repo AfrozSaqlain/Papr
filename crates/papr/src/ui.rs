@@ -104,7 +104,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
 
     match app.mode {
         AppMode::CommandPalette => render_palette(frame, app, theme),
-        AppMode::Help => render_help(frame, theme),
+        AppMode::Help => render_help(frame, app, theme),
         AppMode::PaperDetail => render_paper_detail(frame, app, theme),
         AppMode::NoteEdit => render_note_editor(frame, app, theme),
         AppMode::Prompt => render_metadata_prompt(frame, app, theme),
@@ -2153,7 +2153,7 @@ fn render_paper_detail(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         rows[1],
     );
     frame.render_widget(
-        Paragraph::new("j/k scroll  h back  d download  n note  t tag  g group  B bookmark")
+        Paragraph::new("j/k scroll  h back  d download  c cite  o browser")
             .style(Style::default().fg(theme.muted)),
         rows[2],
     );
@@ -2538,10 +2538,14 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     app.palette_scroll = state.offset();
 }
 
-fn render_help(frame: &mut Frame<'_>, theme: &Theme) {
+fn render_help(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let area = centered(64, 20, frame.area());
     frame.render_widget(Clear, area);
-    let help = "j / k        Move selection\nEnter/Right  Open selection\nLeft         Focus navigation\nh / l        Back / open\nCtrl+b       Browse Papr\n/            Search arXiv\no            Open paper in webpage\nCtrl+Right            Browse next page in Discover\nCtrl+Left            Browse previous page in Discover\nR            Rename PDF / group\nu            Set status of a PDF as unread\nd            Download\nr            Retry failed downloads\nc            Copy citation\nn            Notes\ng            Create / Move to Group\nB            Bookmark\nx            Delete PDF or group\na            Queue / dequeue paper\nq            Close / quit\n?            Toggle this help";
+    let help = if matches!(app.page, Page::Dashboard | Page::Discover) {
+        "j / k        Move selection\nEnter/Right  Open selection\nLeft         Focus navigation\nh / l        Back / open\nCtrl+b       Browse Navigation\n/            Search arXiv\no            Open paper in webpage\nCtrl+Right   Browse next page in Discover\nCtrl+Left    Browse previous page in Discover\nR            Rename PDF / group\nu            Set status of a PDF as unread\nd            Download\nr            Retry failed downloads\nc            Copy citation\nx            Delete PDF or group\na            Queue / dequeue paper\nq            Close / quit\n?            Toggle this help"
+    } else {
+        "j / k        Move selection\nEnter/Right  Open selection\nLeft         Focus navigation\nh / l        Back / open\nCtrl+b       Browse Navigation\n/            Search arXiv\no            Open paper in webpage\nCtrl+Right   Browse next page in Discover\nCtrl+Left    Browse previous page in Discover\nR            Rename PDF / group\nu            Set status of a PDF as unread\nd            Download\nr            Retry failed downloads\nc            Copy citation\nn            Notes\ng            Create / Move to Group\nB            Bookmark\nx            Delete PDF or group\na            Queue / dequeue paper\nq            Close / quit\n?            Toggle this help"
+    };
     frame.render_widget(
         Paragraph::new(help)
             .style(Style::default().fg(theme.text))

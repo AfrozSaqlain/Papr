@@ -3531,6 +3531,15 @@ fn handle_modal_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
 }
 
 fn handle_paper_detail_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    if matches!(app.page, papr_core::Page::Dashboard | papr_core::Page::Discover)
+        && matches!(
+            key.code,
+            KeyCode::Char('B' | 'n' | 't' | 'g')
+        )
+    {
+        return None;
+    }
+
     match key.code {
         KeyCode::Esc | KeyCode::Left | KeyCode::Char('h' | 'q') => app.dispatch(Command::Back),
         KeyCode::Char('j') | KeyCode::Down => {
@@ -4158,6 +4167,32 @@ mod tests {
             action,
             Some(UiAction::OpenPaper(paper)) if paper.title == "Selected paper"
         ));
+    }
+
+    #[test]
+    fn remote_workspace_detail_ignores_bookmark_note_tag_and_group_keys() {
+        for page in [Page::Dashboard, Page::Discover] {
+            let mut app = App {
+                page,
+                content_focused: true,
+                mode: AppMode::PaperDetail,
+                today_papers: vec![remote_paper("https://arxiv.org/abs/dashboard", "Dashboard paper")],
+                discovery: DiscoveryState {
+                    results: vec![remote_paper("https://arxiv.org/abs/discover", "Discover paper")],
+                    ..DiscoveryState::default()
+                },
+                ..App::default()
+            };
+
+            for key in ['B', 'n', 't', 'g'] {
+                let action = handle_key(
+                    &mut app,
+                    KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+                );
+                assert!(action.is_none(), "{key} should be ignored in {page:?}");
+                assert_eq!(app.mode, AppMode::PaperDetail);
+            }
+        }
     }
 
     #[test]
