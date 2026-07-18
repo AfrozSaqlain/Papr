@@ -9,6 +9,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
+    sync::Arc,
 };
 
 use anyhow::{Context, Result};
@@ -22,7 +23,7 @@ use papr_core::{
     DownloadEvent, DownloadManager, DownloadStatus, DownloadTask, ImportedPdf, LibraryIndexer,
     LibraryWatcher, MetadataPrompt, PaperNote, Paths, PluginHost, RemotePaper, Theme,
 };
-use tokio::sync::mpsc;
+use tokio::{sync::{mpsc, Semaphore}, task::JoinSet};
 
 use terminal::TerminalSession;
 
@@ -160,6 +161,7 @@ async fn main() -> Result<()> {
     let runtime = Runtime {
         arxiv,
         crossref: papr_core::api::crossref::CrossrefClient::new(),
+        openalex: papr_core::api::openalex::OpenAlexClient::new(),
         downloads,
         database,
         database_file: paths.database_file.clone(),
@@ -285,6 +287,7 @@ pub(crate) struct ConfigEditorView {
 struct Runtime {
     arxiv: ArxivClient,
     crossref: papr_core::api::crossref::CrossrefClient,
+    openalex: papr_core::api::openalex::OpenAlexClient,
     downloads: DownloadManager,
     database: Database,
     database_file: PathBuf,
@@ -574,6 +577,7 @@ struct ActionSenders {
 #[derive(Debug)]
 enum EnrichmentOutcome {
     Success(RemotePaper),
+    Journal(String),
     Failed,
     Unavailable,
 }
@@ -728,6 +732,9 @@ async fn run(
                         &runtime.dashboard_keyword_signature,
                         &app.today_papers,
                     );
+                }
+                EnrichmentOutcome::Journal(ref journal) => {
+                    runtime.database.apply_journal_metadata(paper_id, journal)?;
                 }
                 EnrichmentOutcome::Failed => {
                     runtime.database.update_enrichment_status(paper_id, "failed")?;
@@ -1963,14 +1970,14 @@ fn spawn_enrichment_if_needed(
     senders: &ActionSenders,
     app: &mut App,
 ) -> Result<()> {
-    let all_papers = runtime.database.papers_needing_enrichment()?;
+    let all_papers = runtime.database.papers_needing_enrichment_with_doi()?;
     let papers: Vec<_> = all_papers
         .into_iter()
-        .filter(|(pid, _, _)| !runtime.active_enrichments.contains(pid))
+        .filter(|(pid, _, _, _)| !runtime.active_enrichments.contains(pid))
         .collect();
     for task in &mut app.downloads {
         if task.status == DownloadStatus::ExtractingMetadata {
-            let needs_enrichment = papers.iter().any(|(pid, _, _)| Some(*pid) == task.paper_id);
+            let needs_enrichment = papers.iter().any(|(pid, _, _, _)| Some(*pid) == task.paper_id);
             if !needs_enrichment {
                 task.status = DownloadStatus::Completed;
                 finalize_download_task(task);
@@ -1978,7 +1985,7 @@ fn spawn_enrichment_if_needed(
         }
     }
     if !papers.is_empty() {
-        for (paper_id, _, _) in &papers {
+        for (paper_id, _, _, _) in &papers {
             runtime.active_enrichments.insert(*paper_id);
             if let Some(task) = app.downloads.iter_mut().find(|t| t.paper_id == Some(*paper_id)) {
                 task.status = DownloadStatus::Enriching;
@@ -1986,26 +1993,33 @@ fn spawn_enrichment_if_needed(
         }
         let arxiv_client = runtime.arxiv.clone();
         let crossref_client = runtime.crossref.clone();
+        let openalex_client = runtime.openalex.clone();
         let enrichment_tx = senders.enrichment.clone();
-        let count = papers.len();
         app.enrichment_pending = true;
         let db_file_log = runtime.database_file.clone();
+        let concurrency = Arc::new(Semaphore::new(4));
         tokio::spawn(async move {
-            let mut enriched = 0usize;
-            for (i, (paper_id, mut candidate_arxiv, pdf_path)) in papers.into_iter().enumerate() {
-                let mut candidate_doi = None;
+            let mut jobs = JoinSet::new();
+            for (paper_id, mut candidate_arxiv, mut candidate_doi, pdf_path) in papers {
+                let arxiv_client = arxiv_client.clone();
+                let crossref_client = crossref_client.clone();
+                let openalex_client = openalex_client.clone();
+                let enrichment_tx = enrichment_tx.clone();
+                let db_file_log = db_file_log.clone();
+                let permit = concurrency.clone();
+                jobs.spawn(async move {
+                let _permit = permit.acquire_owned().await.expect("enrichment semaphore closed");
+                if let Some(path) = pdf_path {
+                    if let Ok(output) = tokio::process::Command::new("pdftotext")
+                        .args(["-l", "2", &path, "-"])
+                        .output()
+                        .await
+                    {
+                        if output.status.success() {
+                            let text = String::from_utf8_lossy(&output.stdout);
+                            let lower_text = text.to_lowercase();
 
-                if candidate_arxiv.is_none() {
-                    if let Some(path) = pdf_path {
-                        if let Ok(output) = tokio::process::Command::new("pdftotext")
-                            .args(["-l", "2", &path, "-"])
-                            .output()
-                            .await
-                        {
-                            if output.status.success() {
-                                let text = String::from_utf8_lossy(&output.stdout);
-                                let lower_text = text.to_lowercase();
-
+                            if candidate_arxiv.is_none() {
                                 if let Some(idx) = lower_text.find("arxiv:") {
                                     let substr = &text[idx + 6..];
                                     let end = substr
@@ -2015,12 +2029,15 @@ fn spawn_enrichment_if_needed(
                                     if id.len() >= 7 {
                                         candidate_arxiv = Some(id.to_string());
                                     }
-                                } else if let Some(idx) = lower_text.find("10.") {
+                                }
+                            }
+                            if candidate_doi.is_none() {
+                                if let Some(idx) = lower_text.find("10.") {
                                     let substr = &text[idx..];
                                     let end = substr
                                         .find(|c: char| c.is_whitespace() || c == '\n')
                                         .unwrap_or(substr.len());
-                                    let id = &substr[..end];
+                                    let id = substr[..end].trim_end_matches(['.', ',', ';', ')']);
                                     if id.len() >= 5 {
                                         candidate_doi = Some(id.to_string());
                                     }
@@ -2031,13 +2048,49 @@ fn spawn_enrichment_if_needed(
                 }
 
                 let outcome;
-                if let Some(arxiv_id) = candidate_arxiv {
-                    if i > 0 {
-                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                if let Some(doi) = candidate_doi {
+                    match crossref_client.get_by_doi(&doi).await {
+                        Ok(Some(mut paper)) => {
+                            if paper.journal_ref.is_none() {
+                                if let Ok(Some(journal)) = openalex_client.journal_by_doi(&doi).await {
+                                    paper.journal_ref = Some(journal);
+                                }
+                            }
+                            outcome = EnrichmentOutcome::Success(paper);
+                        }
+                        Ok(None) => {
+                            if let Ok(Some(journal)) = openalex_client.journal_by_doi(&doi).await {
+                                outcome = EnrichmentOutcome::Journal(journal);
+                            } else if let Some(arxiv_id) = candidate_arxiv {
+                                match arxiv_client.get_by_id(&arxiv_id).await {
+                                    Ok(Some(paper)) => {
+                                        outcome = EnrichmentOutcome::Success(paper);
+                                    }
+                                    Ok(None) => outcome = EnrichmentOutcome::Unavailable,
+                                    Err(e) => {
+                                        log_message(
+                                            &db_file_log,
+                                            &format!("arXiv enrichment failed for {arxiv_id}: {e}"),
+                                        );
+                                        outcome = EnrichmentOutcome::Failed;
+                                    }
+                                }
+                            } else {
+                                outcome = EnrichmentOutcome::Unavailable;
+                            }
+                        }
+                        Err(e) => {
+                            let err_msg = format!("Crossref enrichment failed for {doi}: {e}");
+                            log_message(&db_file_log, &err_msg);
+                            outcome = match openalex_client.journal_by_doi(&doi).await {
+                                Ok(Some(journal)) => EnrichmentOutcome::Journal(journal),
+                                _ => EnrichmentOutcome::Failed,
+                            };
+                        }
                     }
+                } else if let Some(arxiv_id) = candidate_arxiv {
                     match arxiv_client.get_by_id(&arxiv_id).await {
                         Ok(Some(paper)) => {
-                            enriched += 1;
                             outcome = EnrichmentOutcome::Success(paper);
                         }
                         Ok(None) => {
@@ -2049,24 +2102,6 @@ fn spawn_enrichment_if_needed(
                             outcome = EnrichmentOutcome::Failed;
                         }
                     }
-                } else if let Some(doi) = candidate_doi {
-                    if i > 0 {
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await; // Crossref rate limit is friendlier
-                    }
-                    match crossref_client.get_by_doi(&doi).await {
-                        Ok(Some(paper)) => {
-                            enriched += 1;
-                            outcome = EnrichmentOutcome::Success(paper);
-                        }
-                        Ok(None) => {
-                            outcome = EnrichmentOutcome::Unavailable;
-                        }
-                        Err(e) => {
-                            let err_msg = format!("Crossref enrichment failed for {doi}: {e}");
-                            log_message(&db_file_log, &err_msg);
-                            outcome = EnrichmentOutcome::Failed;
-                        }
-                    }
                 } else {
                     outcome = EnrichmentOutcome::Unavailable;
                 }
@@ -2074,9 +2109,12 @@ fn spawn_enrichment_if_needed(
                     paper_id,
                     outcome,
                 });
+                });
             }
-            if enriched > 0 {
-                log_message(&db_file_log, &format!("Enriched {enriched}/{count} papers with metadata"));
+            while let Some(result) = jobs.join_next().await {
+                if let Err(error) = result {
+                    log_message(&db_file_log, &format!("Metadata enrichment task failed: {error}"));
+                }
             }
         });
     }
@@ -5117,6 +5155,7 @@ mod tests {
         let mut runtime = Runtime {
             arxiv: papr_core::api::arxiv::ArxivClient::new().unwrap(),
             crossref: papr_core::api::crossref::CrossrefClient::new(),
+            openalex: papr_core::api::openalex::OpenAlexClient::new(),
             downloads: papr_core::downloads::DownloadManager::new().unwrap(),
             database,
             database_file,

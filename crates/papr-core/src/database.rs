@@ -1728,28 +1728,44 @@ impl Database {
         }
         Ok(papers)
     }
-    /// Return local papers that have no author metadata and either have an
-    /// `arxiv_id` already set or a filename that looks like an arXiv ID.
+    /// Return local papers that can be enriched by a scholarly provider.
     ///
-    /// Each entry is `(paper_id, candidate_arxiv_id)` ready for API lookup.
+    /// Each entry is `(paper_id, candidate_arxiv_id, pdf_path)` ready for API lookup.
     ///
     /// # Errors
     /// Returns an error when the query fails.
     pub fn papers_needing_enrichment(
         &self,
     ) -> Result<Vec<(i64, Option<String>, Option<String>)>, DatabaseError> {
+        Ok(self
+            .papers_needing_enrichment_with_doi()?
+            .into_iter()
+            .map(|(id, arxiv_id, _, pdf_path)| (id, arxiv_id, pdf_path))
+            .collect())
+    }
+
+    /// Return enrichable papers including their stored DOI for provider selection.
+    /// Each entry is `(paper_id, candidate_arxiv_id, doi, pdf_path)`.
+    pub fn papers_needing_enrichment_with_doi(
+        &self,
+    ) -> Result<Vec<(i64, Option<String>, Option<String>, Option<String>)>, DatabaseError> {
         let mut statement = self.connection.prepare(
-            "SELECT p.id, p.arxiv_id, p.pdf_path
+            "SELECT p.id, p.arxiv_id, p.doi, p.pdf_path
              FROM papers p
              WHERE p.pdf_path IS NOT NULL
-               AND p.enrichment_status != 'success'
                AND (
-                   p.enrichment_status = 'pending'
-                   OR (p.enrichment_status = 'failed' AND (
-                       p.last_enrichment_attempt IS NULL
-                       OR datetime(p.last_enrichment_attempt) <= datetime('now', '-5 minutes')
+                   (p.enrichment_status != 'success' AND (
+                       p.enrichment_status = 'pending'
+                       OR (p.enrichment_status = 'failed' AND (
+                           p.last_enrichment_attempt IS NULL
+                           OR datetime(p.last_enrichment_attempt) <= datetime('now', '-5 minutes')
+                       ))
+                       OR (p.enrichment_status = 'unavailable' AND (
+                           p.last_enrichment_attempt IS NULL
+                           OR datetime(p.last_enrichment_attempt) <= datetime('now', '-24 hours')
+                       ))
                    ))
-                   OR (p.enrichment_status = 'unavailable' AND (
+                   OR ((p.journal IS NULL OR trim(p.journal) = '') AND (
                        p.last_enrichment_attempt IS NULL
                        OR datetime(p.last_enrichment_attempt) <= datetime('now', '-24 hours')
                    ))
@@ -1758,24 +1774,25 @@ impl Database {
         let rows = statement.query_map([], |row| {
             let id: i64 = row.get(0)?;
             let arxiv_id: Option<String> = row.get(1)?;
-            let pdf_path: Option<String> = row.get(2)?;
-            Ok((id, arxiv_id, pdf_path))
+            let doi: Option<String> = row.get(2)?;
+            let pdf_path: Option<String> = row.get(3)?;
+            Ok((id, arxiv_id, doi, pdf_path))
         })?;
         let mut result = Vec::new();
         for row in rows {
-            let (id, arxiv_id, pdf_path) = row?;
+            let (id, arxiv_id, doi, pdf_path) = row?;
             if let Some(aid) = arxiv_id.filter(|s| !s.is_empty()) {
                 let bare = aid.rsplit('/').next().unwrap_or(&aid);
                 let bare = strip_arxiv_version(bare);
-                result.push((id, Some(bare.to_owned()), pdf_path));
+                result.push((id, Some(bare.to_owned()), doi, pdf_path));
             } else if let Some(path) = &pdf_path {
                 if let Some(extracted) = extract_arxiv_id(path) {
-                    result.push((id, Some(extracted), pdf_path));
+                    result.push((id, Some(extracted), doi, pdf_path));
                 } else {
-                    result.push((id, None, pdf_path));
+                    result.push((id, None, doi, pdf_path));
                 }
             } else {
-                result.push((id, None, pdf_path));
+                result.push((id, None, doi, pdf_path));
             }
         }
         Ok(result)
@@ -1813,7 +1830,7 @@ impl Database {
                     transaction.execute(
                         "UPDATE papers SET pdf_path = ?1, file_size = COALESCE(?2, file_size),
                          title = ?3, abstract = ?4, doi = COALESCE(?5, doi),
-                         published_at = ?6, updated_at = ?7, journal = ?8
+                         published_at = ?6, updated_at = ?7, journal = COALESCE(?8, journal)
                          WHERE id = ?9",
                         params![
                             path, file_size, paper.title, paper.abstract_text, paper.doi,
@@ -1823,7 +1840,7 @@ impl Database {
                 } else {
                     transaction.execute(
                         "UPDATE papers SET title = ?1, abstract = ?2,
-                         doi = COALESCE(?3, doi), published_at = ?4, updated_at = ?5, journal = ?6
+                         doi = COALESCE(?3, doi), published_at = ?4, updated_at = ?5, journal = COALESCE(?6, journal)
                          WHERE id = ?7",
                         params![
                             paper.title, paper.abstract_text, paper.doi,
@@ -1835,7 +1852,7 @@ impl Database {
             } else {
                 transaction.execute(
                     "UPDATE papers SET title = ?1, abstract = ?2, arxiv_id = ?3,
-                     doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6, journal = ?7
+                     doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6, journal = COALESCE(?7, journal)
                      WHERE id = ?8",
                     params![
                         paper.title, paper.abstract_text, paper.id, paper.doi,
@@ -1847,7 +1864,7 @@ impl Database {
         } else {
             transaction.execute(
                 "UPDATE papers SET title = ?1, abstract = ?2, arxiv_id = ?3,
-                 doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6, journal = ?7
+                 doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6, journal = COALESCE(?7, journal)
                  WHERE id = ?8",
                 params![
                     paper.title, paper.abstract_text, paper.id, paper.doi,
@@ -1885,6 +1902,20 @@ impl Database {
             )?;
         }
         transaction.commit()?;
+        Ok(())
+    }
+
+    /// Store a journal discovered by a fallback provider without replacing a valid value.
+    pub fn apply_journal_metadata(
+        &self,
+        paper_id: i64,
+        journal: &str,
+    ) -> Result<(), DatabaseError> {
+        self.connection.execute(
+            "UPDATE papers SET journal = CASE WHEN journal IS NULL OR trim(journal) = '' THEN ?1 ELSE journal END,
+             enrichment_status = 'success' WHERE id = ?2",
+            params![journal.trim(), paper_id],
+        )?;
         Ok(())
     }
 
@@ -2816,6 +2847,19 @@ mod tests {
         database.update_enrichment_status(id1, "unavailable")?;
         let needing = database.papers_needing_enrichment()?;
         assert_eq!(needing.len(), 0);
+        database.connection.execute(
+            "UPDATE papers SET enrichment_status = 'success', journal = NULL,
+             last_enrichment_attempt = datetime('now', '-25 hours') WHERE id = ?1",
+            [id1],
+        )?;
+        assert_eq!(database.papers_needing_enrichment()?.len(), 1);
+        database.apply_journal_metadata(id1, "Astronomy and Computing")?;
+        assert_eq!(database.papers_needing_enrichment()?.len(), 0);
+        database.apply_journal_metadata(id1, "Lower Quality Name")?;
+        let journal: String = database
+            .connection
+            .query_row("SELECT journal FROM papers WHERE id = ?1", [id1], |row| row.get(0))?;
+        assert_eq!(journal, "Astronomy and Computing");
         Ok(())
     }
 

@@ -67,6 +67,10 @@ impl CrossrefClient {
             author: Option<Vec<CrossrefAuthor>>,
             #[serde(rename = "abstract")]
             abstract_text: Option<String>,
+            #[serde(rename = "container-title")]
+            container_title: Option<Vec<String>>,
+            #[serde(rename = "short-container-title")]
+            short_container_title: Option<Vec<String>>,
             published: Option<CrossrefDate>,
             created: Option<CrossrefDate>,
             deposited: Option<CrossrefDate>,
@@ -141,7 +145,10 @@ impl CrossrefClient {
             categories: vec![],
             pdf_url: None,
             doi: work.doi,
-            journal_ref: None,
+            journal_ref: work
+                .container_title
+                .or(work.short_container_title)
+                .and_then(|mut titles| titles.pop()),
         }))
     }
 }
