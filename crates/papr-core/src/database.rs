@@ -1540,11 +1540,7 @@ impl Database {
              JOIN authors a ON a.id = pa.author_id
              GROUP BY a.id ORDER BY COUNT(*) DESC, a.name LIMIT 1",
         )?;
-        let most_read_journal = self.top_history_label(
-            "SELECT p.journal FROM reading_history h JOIN papers p ON p.id = h.paper_id
-             WHERE p.journal IS NOT NULL AND trim(p.journal) != ''
-             GROUP BY p.journal ORDER BY COUNT(*) DESC, p.journal LIMIT 1",
-        )?;
+        let most_read_journal = self.most_read_journal()?;
         Ok(ReadingStatistics {
             current_streak,
             monthly_reading,
@@ -1588,6 +1584,29 @@ impl Database {
             .query_row(sql, [], |row| row.get(0))
             .optional()
             .map_err(Into::into)
+    }
+
+    fn most_read_journal(&self) -> Result<Option<String>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT p.journal FROM reading_history h JOIN papers p ON p.id = h.paper_id
+             WHERE p.journal IS NOT NULL AND trim(p.journal) != ''",
+        )?;
+        let journals = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut counts = HashMap::<String, u64>::new();
+        for journal in journals {
+            let journal = canonical_journal_name(&journal?);
+            if !journal.is_empty() {
+                *counts.entry(journal).or_default() += 1;
+            }
+        }
+        Ok(counts
+            .into_iter()
+            .max_by(|(left_name, left_count), (right_name, right_count)| {
+                left_count
+                    .cmp(right_count)
+                    .then_with(|| right_name.cmp(left_name))
+            })
+            .map(|(name, _)| name))
     }
 
     /// Return recent activity for dashboard and history views.
@@ -1939,6 +1958,33 @@ fn extract_arxiv_id(path: &str) -> Option<String> {
     None
 }
 
+/// Return the venue portion of a journal reference without changing stored metadata.
+///
+/// arXiv commonly provides references such as `Phys. Rev. D 104, 043008 (2021)`.
+/// The first volume-like numeric token marks the end of the journal name; entries
+/// that are already venue names are returned unchanged.
+fn canonical_journal_name(value: &str) -> String {
+    let words = value.split_whitespace().collect::<Vec<_>>();
+    if words.is_empty() {
+        return String::new();
+    }
+    let end = words
+        .iter()
+        .position(|word| {
+            let token = word.trim_matches(|character: char| {
+                matches!(character, ',' | ';' | ':' | '.' | '(' | ')' | '[' | ']')
+            });
+            token.len() >= 2 && token.chars().all(|character| character.is_ascii_digit())
+        })
+        .unwrap_or(words.len());
+    words[..end]
+        .join(" ")
+        .trim_matches(|character: char| {
+            matches!(character, ',' | ';' | ':' | '.' | '(' | ')' | '[' | ']')
+        })
+        .to_owned()
+}
+
 fn reading_streak(dates: &std::collections::HashSet<NaiveDate>, today: NaiveDate) -> u64 {
     let mut cursor = if dates.contains(&today) {
         today
@@ -1973,7 +2019,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use rusqlite::params;
 
-    use super::Database;
+    use super::{Database, canonical_journal_name};
     use crate::{
         library::{CollectionDirectory, ImportedPdf, LibraryIndexer},
         models::{PaperNote, RemotePaper},
@@ -2334,6 +2380,50 @@ mod tests {
         assert_eq!(dashboard.recent_activity.len(), 2);
         assert_eq!(dashboard.recent_activity[0].label, "gravity waves");
         assert_eq!(dashboard.recent_activity[1].label, "History paper");
+        Ok(())
+    }
+
+    #[test]
+    fn most_read_journal_aggregates_canonical_venue_names() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(
+            canonical_journal_name("Phys. Rev. D 104, 043008 (2021)"),
+            "Phys. Rev. D"
+        );
+        assert_eq!(
+            canonical_journal_name("Physical Review Letters 125, 1 (2020)"),
+            "Physical Review Letters"
+        );
+        assert_eq!(
+            canonical_journal_name("Classical and Quantum Gravity"),
+            "Classical and Quantum Gravity"
+        );
+
+        let database = Database::in_memory()?;
+        let first = database.insert_paper("First", None)?;
+        let second = database.insert_paper("Second", None)?;
+        let other = database.insert_paper("Other", None)?;
+        database.connection.execute(
+            "UPDATE papers SET journal = ?1 WHERE id = ?2",
+            params!["Phys. Rev. D 104, 043008 (2021)", first],
+        )?;
+        database.connection.execute(
+            "UPDATE papers SET journal = ?1 WHERE id = ?2",
+            params!["Phys. Rev. D 105, 012345 (2022)", second],
+        )?;
+        database.connection.execute(
+            "UPDATE papers SET journal = ?1 WHERE id = ?2",
+            params!["Physical Review Letters 125, 1 (2020)", other],
+        )?;
+        database.record_open(first, true)?;
+        database.record_open(second, true)?;
+        database.record_open(other, true)?;
+
+        let statistics = database.reading_statistics()?;
+        assert_eq!(statistics.most_read_journal.as_deref(), Some("Phys. Rev. D"));
+        let stored: String = database
+            .connection
+            .query_row("SELECT journal FROM papers WHERE id = ?1", [first], |row| row.get(0))?;
+        assert_eq!(stored, "Phys. Rev. D 104, 043008 (2021)");
         Ok(())
     }
 
