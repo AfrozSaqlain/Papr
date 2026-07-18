@@ -192,11 +192,19 @@ is an executable with its own runtime dependencies. Mount plugin bundles under
 `config.toml`. See [the plugin documentation](docs/PLUGINS.md) for their
 layout and protocol.
 
+For Papr’s pdf_viewer = "internal", the host terminal must support either Kitty graphics or Sixel,
+because Papr sends those image-rendering escape sequences through Docker to the terminal.
+
+Without either protocol, Papr itself still runs normally, but internal PDF pages cannot render.
+Use an external viewer such as Zathura with the Wayland/X11 container setup instead.
+
 ### Optional desktop PDF viewer
 
 The image includes Zathura. Set `pdf_viewer = "zathura {path}"` in the
 container configuration, then pass through the appropriate host display
 socket. On Linux Wayland systems using the standard runtime path:
+
+#### Wayland (Linux)
 
 ```sh
 docker run --rm -it \
