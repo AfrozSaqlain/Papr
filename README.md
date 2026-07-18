@@ -116,64 +116,139 @@ That said, we recommend compiling Papr from source whenever possible. Building t
 
 ## Running with Docker
 
-This project includes a Dockerfile that builds `papr` inside a lightweight Alpine-based build environment and produces a small runtime image containing only the compiled executable.
+The included Dockerfile builds Papr in a disposable Rust build stage and
+provides a runtime image with Poppler PDF tools, Linux clipboard integration,
+and Zathura for optional external PDF viewing. The Rust toolchain is not part
+of the final image. Papr's configuration, database, downloads, notes, and
+plugins are kept in mounts so they survive container removal.
+
+> [!IMPORTANT]
+> Papr still needs a real interactive terminal (`-it`). The built-in PDF viewer
+> additionally needs the **host terminal emulator** to support Kitty or Sixel
+> graphics; Docker cannot add that capability. External GUI viewing needs
+> access to the host's Wayland or X11 display, as shown below.
 
 ### Build the image
 
 From the root of the repository, run:
 
-```bash
+```sh
 docker build \
-    --build-arg USERNAME=$(whoami) \
-    --build-arg UID=$(id -u) \
-    --build-arg GID=$(id -g) \
-    -t papr .
+  --build-arg UID="$(id -u)" \
+  --build-arg GID="$(id -g)" \
+  --tag papr:latest \
+  .
 ```
 
-This will:
+Supplying your host numeric user and group IDs prevents files written to bind
+mounts from being owned by root. The current locked dependencies need a newer
+compiler than Rust 1.85.1; the Dockerfile's `rust:1-bookworm` builder supplies
+the current stable Rust release. For fully reproducible production builds,
+replace it with the current exact Rust version tag after a successful build
+(for example, `rust:1.xx-bookworm`).
 
-* Build `papr` from source inside a Rust/Alpine builder image.
-* Create a lightweight Alpine runtime image.
-* Create a user inside the container with the same UID and GID as your host user, avoiding file permission issues when mounting directories.
+### First run and persistent state
 
-### Start a shell
+Create persistent host directories once:
 
-```bash
+```sh
+mkdir -p .papr/config .papr/data papers
+```
+
+Run Papr in an interactive terminal, storing application state in `.papr/`
+and making the host `papers/` directory available at `/papers`:
+
+```sh
 docker run --rm -it \
-    --hostname qubit \
-    -w /home/$(whoami) \
-    papr \
-    bash
+  --name papr \
+  --mount "type=bind,src=$PWD/.papr/config,dst=/home/papr/.config/papr" \
+  --mount "type=bind,src=$PWD/.papr/data,dst=/home/papr/.local/share/papr" \
+  --mount "type=bind,src=$PWD/papers,dst=/papers" \
+  papr:latest
 ```
 
-Once inside the container, launch `papr` with:
+On first launch, set the container paths in `.papr/config/config.toml`:
 
-```bash
-papr
+```toml
+download_path = "/papers"
+library_folders = ["/papers"]
+pdf_viewer = "internal"
 ```
 
-### Persist your data
+The internal viewer uses the included Poppler tools. It requires the host
+terminal emulator to support Kitty or Sixel graphics. Papr's command-line
+utilities use the same mounts:
 
-By default, any files created inside the container are removed when the container exits because `--rm` deletes the container after it stops.
-
-To keep your PDFs, configuration, and other files on your host machine, mount a directory:
-
-```bash
+```sh
 docker run --rm -it \
-    --hostname papr \
-    -v /path/to/your/data:/home/$(whoami) \
-    -w /home/$(whoami) \
-    papr \
-    bash
+  --mount "type=bind,src=$PWD/.papr/config,dst=/home/papr/.config/papr" \
+  --mount "type=bind,src=$PWD/.papr/data,dst=/home/papr/.local/share/papr" \
+  papr:latest paths
 ```
 
-Replace `/path/to/your/data` with the directory on your host where you want your library and configuration to be stored.
+The image deliberately does not bake in third-party Papr plugins: each plugin
+is an executable with its own runtime dependencies. Mount plugin bundles under
+`.papr/data/plugins/`, then add their IDs to `enabled_plugins` in
+`config.toml`. See [the plugin documentation](docs/PLUGINS.md) for their
+layout and protocol.
 
-### Notes
+### Optional desktop PDF viewer
 
-* The final runtime image is based on Alpine Linux and does **not** include the Rust toolchain.
-* The Rust compiler and build dependencies exist only in the temporary build stage and are not included in the final image.
-* The default Docker hostname is the container ID. Passing `--hostname qubit` gives the container a more readable hostname.
+The image includes Zathura. Set `pdf_viewer = "zathura {path}"` in the
+container configuration, then pass through the appropriate host display
+socket. On Linux Wayland systems using the standard runtime path:
+
+```sh
+docker run --rm -it \
+  --name papr \
+  --env WAYLAND_DISPLAY \
+  --env XDG_RUNTIME_DIR="/run/user/$(id -u)" \
+  --mount "type=bind,src=/run/user/$(id -u),dst=/run/user/$(id -u)" \
+  --mount "type=bind,src=$PWD/.papr/config,dst=/home/papr/.config/papr" \
+  --mount "type=bind,src=$PWD/.papr/data,dst=/home/papr/.local/share/papr" \
+  --mount "type=bind,src=$PWD/papers,dst=/papers" \
+  papr:latest
+```
+
+This mount also enables the included `wl-copy` clipboard tool. For X11,
+provide `DISPLAY` and mount `/tmp/.X11-unix` using your normal Xauthority or
+`xhost` setup. Only use a display socket with an image you trust: it grants the
+container access to your desktop session.
+
+#### X11 (Linux)
+
+Allow the local container user to connect, run Papr, then revoke access:
+
+```sh
+xhost +si:localuser:"$(id -un)"
+docker run --rm -it \
+  --name papr \
+  --env DISPLAY \
+  --mount type=bind,src=/tmp/.X11-unix,dst=/tmp/.X11-unix,readonly \
+  --mount "type=bind,src=$PWD/.papr/config,dst=/home/papr/.config/papr" \
+  --mount "type=bind,src=$PWD/.papr/data,dst=/home/papr/.local/share/papr" \
+  --mount "type=bind,src=$PWD/papers,dst=/papers" \
+  papr:latest
+xhost -si:localuser:"$(id -un)"
+```
+
+For X11 clipboard support, `xclip` needs the same `DISPLAY` and X11 socket.
+If `xhost` access control is insufficient because Docker maps users
+differently, use your usual Xauthority-based Docker setup rather than
+disabling X access control globally.
+
+### Notes and limitations
+
+- Networking is enabled by Docker's default bridge network, which Papr needs
+  for arXiv search, downloads, citation lookup, and metadata enrichment.
+- The container includes all app-side dependencies for the documented
+  features. It cannot supply a graphical terminal protocol, a host desktop
+  socket, or the dependencies of arbitrary third-party plugins.
+- Docker Desktop on macOS and Windows does not normally expose Linux Wayland or
+  X11 sockets to containers. The terminal UI, online features, local library,
+  notes, database, and PDF analysis still work; use `pdf_viewer = "internal"`
+  where the host terminal supports it.
+- Do not use `--network=none` if you want online discovery or downloads.
 
 ---
 
