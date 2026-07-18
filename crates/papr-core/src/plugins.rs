@@ -22,7 +22,7 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 pub enum PluginCapability {
     /// Contribute scholarly metadata providers.
     MetadataProvider,
-    /// Contribute commands to the command palette.
+    /// Contribute commands to Browse Papr.
     Commands,
     /// Receive lifecycle activity events.
     ActivityEvents,

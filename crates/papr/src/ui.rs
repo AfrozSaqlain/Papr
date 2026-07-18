@@ -136,7 +136,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme
     frame.render_widget(Paragraph::new(title).block(block), area);
     let shortcut = Rect::new(area.x + area.width.saturating_sub(18), area.y, 18, 1);
     frame.render_widget(
-        Paragraph::new("Ctrl+P  Commands")
+        Paragraph::new("Ctrl+B  Browse")
             .alignment(Alignment::Right)
             .style(Style::default().fg(theme.muted)),
         shortcut,
@@ -2469,10 +2469,18 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let search_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent))
-        .title(" Search Command ");
+        .title(" BROWSE PAPR ");
     
     let query_text = &app.palette_query;
-    frame.render_widget(Paragraph::new(query_text.as_str()).block(search_block), chunks[0]);
+    frame.render_widget(
+        Paragraph::new(if query_text.is_empty() {
+            "Search workspaces, papers, groups, settings…"
+        } else {
+            query_text.as_str()
+        })
+        .block(search_block),
+        chunks[0],
+    );
 
     // Render text cursor position
     let cursor_offset = app
@@ -2497,7 +2505,7 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let list = List::new(items)
         .block(
             Block::default()
-                .title(" NAVIGATE ")
+                .title(" DESTINATIONS ")
                 .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
                 .style(Style::default().bg(theme.surface))
                 .border_style(Style::default().fg(theme.accent)),
@@ -2519,7 +2527,7 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
 fn render_help(frame: &mut Frame<'_>, theme: &Theme) {
     let area = centered(64, 20, frame.area());
     frame.render_widget(Clear, area);
-    let help = "j / k        Move selection\nEnter/Right  Open selection\nLeft         Focus navigation\nh / l        Back / open\nCtrl+p       Command palette\n/            Search arXiv\no            Open paper in webpage\nR            Rename PDF / group\nu            Set status of a PDF as unread\nd            Download\nr            Retry failed downloads\nc            Copy citation\nn            Notes\ng            Create / Move to Group\nB            Bookmark\nx            Delete PDF or group\na            Queue / dequeue paper\nq            Close / quit\n?            Toggle this help";
+    let help = "j / k        Move selection\nEnter/Right  Open selection\nLeft         Focus navigation\nh / l        Back / open\nCtrl+b       Browse Papr\n/            Search arXiv\no            Open paper in webpage\nR            Rename PDF / group\nu            Set status of a PDF as unread\nd            Download\nr            Retry failed downloads\nc            Copy citation\nn            Notes\ng            Create / Move to Group\nB            Bookmark\nx            Delete PDF or group\na            Queue / dequeue paper\nq            Close / quit\n?            Toggle this help";
     frame.render_widget(
         Paragraph::new(help)
             .style(Style::default().fg(theme.text))

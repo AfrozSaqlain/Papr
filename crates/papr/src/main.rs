@@ -3314,7 +3314,7 @@ fn handle_author_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction>) {
 
 fn navigation_command(key: KeyEvent) -> Option<Command> {
     match (key.code, key.modifiers) {
-        (KeyCode::Char('p'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+        (KeyCode::Char('b'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(Command::TogglePalette)
         }
         (KeyCode::Char('>'), _) => {
@@ -4056,11 +4056,11 @@ mod tests {
     }
 
     #[test]
-    fn control_p_opens_palette() {
+    fn control_b_opens_browse_papr() {
         let mut app = App::default();
         let _ = handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
         );
         assert_eq!(app.mode, AppMode::CommandPalette);
     }

@@ -255,7 +255,7 @@ On Windows, the default PDF viewer is configured as `'cmd /C start msedge ""'`, 
 | `u` | Set the current state of the paper as unread |
 | `a` | Toggle paper queue/dequeue status |
 | `/` | Start a new arXiv search |
-| `Ctrl+P` | Open the command palette |
+| `Ctrl+B` | Open Browse Papr for fast navigation |
 | `?` | Toggle the help helper screen |
 | `q` | Close active popups, or exit the application |
 
@@ -391,7 +391,7 @@ A plugin requests access to specific integration surfaces through its `plugin.to
 | Capability            | Description                                                                           |
 | --------------------- | ------------------------------------------------------------------------------------- |
 | `metadata-provider`   | Contribute scholarly metadata providers (e.g., querying custom library repositories). |
-| `commands`            | Register custom commands that appear in the Command Palette (`Ctrl+P`).               |
+| `commands`            | Register custom commands that appear in Browse Papr (`Ctrl+B`).                       |
 | `activity-events`     | Listen to lifecycle events such as when a paper is opened, imported, or deleted.      |
 | `read-paper-metadata` | Read the metadata of the currently focused paper.                                     |
 

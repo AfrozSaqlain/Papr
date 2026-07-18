@@ -271,7 +271,7 @@ impl DownloadTask {
     }
 }
 
-/// Commands available to keybindings and the command palette.
+/// Commands available to keybindings and Browse Papr.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     /// Move selection up.
@@ -319,13 +319,13 @@ pub struct App {
     pub today_scroll: usize,
     /// Loading state for the latest-paper feed.
     pub today_status: DiscoveryStatus,
-    /// Command palette selected row.
+    /// Browse Papr selected row.
     pub palette_selected: usize,
-    /// Vertical list scroll offset for the command palette.
+    /// Vertical list scroll offset for Browse Papr.
     pub palette_scroll: usize,
-    /// Command palette search query.
+    /// Browse Papr search query.
     pub palette_query: String,
-    /// Cursor position in command palette query.
+    /// Cursor position in Browse Papr query.
     pub palette_query_cursor: usize,
     /// Selected credits item row.
     pub credits_selected: usize,
@@ -784,7 +784,7 @@ impl App {
             .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors, p.doi.as_deref(), p.arxiv_id.as_deref()))
             .collect()
     }
-    /// Get the command palette items filtered by the query.
+    /// Get Browse Papr destinations filtered by the query.
     pub fn filtered_palette_items(&self) -> Vec<Page> {
         let q = self.palette_query.to_lowercase();
         Page::ALL
