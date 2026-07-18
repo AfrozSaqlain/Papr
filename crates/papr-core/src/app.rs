@@ -359,6 +359,8 @@ pub struct App {
     pub note_editor: Option<PaperNote>,
     /// Whether the note overlay shows rendered Markdown instead of source.
     pub note_preview: bool,
+    /// Vertical scroll offset shared by the note source and preview panes.
+    pub note_scroll: u16,
     /// Active collection prompt.
     pub metadata_prompt: Option<MetadataPrompt>,
     /// Collection summaries.
@@ -500,6 +502,7 @@ impl Default for App {
             download_scroll: 0,
             note_editor: None,
             note_preview: false,
+            note_scroll: 0,
             metadata_prompt: None,
             collections: Vec::new(),
             collection_selected: 0,

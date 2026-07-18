@@ -1043,6 +1043,7 @@ fn apply_ui_action(
                 .record_activity("note_opened", Some(paper_id), None)?;
             app.note_editor = Some(runtime.database.paper_note(paper_id)?);
             app.note_preview = false;
+            app.note_scroll = 0;
             app.mode = AppMode::NoteEdit;
         }
         UiAction::SaveNote(note) => {
@@ -3468,12 +3469,22 @@ fn handle_modal_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
     if key.code == KeyCode::Tab {
         app.note_preview = !app.note_preview;
+        app.note_scroll = 0;
         return None;
     }
     if app.note_preview {
-        if key.code == KeyCode::Esc {
-            app.mode = app.modal_return;
-            return app.note_editor.clone().map(UiAction::SaveNote);
+        match key.code {
+            KeyCode::Esc => {
+                app.mode = app.modal_return;
+                return app.note_editor.clone().map(UiAction::SaveNote);
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                app.note_scroll = app.note_scroll.saturating_add(1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                app.note_scroll = app.note_scroll.saturating_sub(1);
+            }
+            _ => {}
         }
         return None;
     }

@@ -23,6 +23,8 @@ serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 toml.workspace = true
+pulldown-cmark = "0.13"
+syntect = { version = "5.2", features = ["default-fancy"] }
 
 [lints]
 workspace = true

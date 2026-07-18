@@ -1,19 +1,34 @@
 //! Ratatui rendering for the application shell.
 
+use std::sync::OnceLock;
+
 use crate::build_config_editor_view;
 use papr_core::{
     App, AppMode, DeletionTarget, DiscoveryStatus, DownloadStatus, Page, RemotePaper, Theme,
 };
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     symbols::border,
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    buffer::Buffer,
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Widget, Wrap},
+};
+use syntect::{
+    easy::HighlightLines,
+    highlighting::{Color as SyntectColor, ThemeSet},
+    parsing::SyntaxSet,
+    util::LinesWithEndings,
 };
 
 const LOGO: &str = "[ P A P R ]";
+
+fn markdown_syntax_assets() -> &'static (SyntaxSet, ThemeSet) {
+    static ASSETS: OnceLock<(SyntaxSet, ThemeSet)> = OnceLock::new();
+    ASSETS.get_or_init(|| (SyntaxSet::load_defaults_newlines(), ThemeSet::load_defaults()))
+}
 
 fn focus_block<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> {
     let border_style = if focused {
@@ -994,19 +1009,36 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
 }
 
 fn render_note_editor(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
-    let area = centered(82, 24, frame.area());
-    frame.render_widget(Clear, area);
     let body = app
         .note_editor
         .as_ref()
         .map_or("", |note| note.body.as_str());
-    let content = if app.note_preview {
-        markdown_preview(body, theme)
+    let preview = app.note_preview.then(|| markdown_preview(body, theme));
+    let content = if let Some(preview) = &preview {
+        preview.lines.clone()
     } else {
         body.split('\n').map(|l| Line::raw(l.to_string())).collect()
     };
+    let min_height = frame.area().height.saturating_sub(6).clamp(16, 32);
+    let desired_height = u16::try_from(content.len().saturating_add(2)).unwrap_or(u16::MAX);
+    let area = centered(
+        frame.area().width.saturating_sub(4),
+        desired_height.max(min_height),
+        frame.area(),
+    );
+    let visible_rows = area.height.saturating_sub(2);
+    if !app.note_preview {
+        let cursor = app.note_editor.as_ref().map_or(0, |note| note.cursor);
+        let cursor_row = u16::try_from(body[..cursor].lines().count().saturating_sub(1)).unwrap_or(0);
+        if cursor_row < app.note_scroll {
+            app.note_scroll = cursor_row;
+        } else if cursor_row >= app.note_scroll.saturating_add(visible_rows) {
+            app.note_scroll = cursor_row.saturating_sub(visible_rows.saturating_sub(1));
+        }
+    }
+    frame.render_widget(Clear, area);
     let title = if app.note_preview {
-        " MARKDOWN PREVIEW - TAB TO EDIT "
+        " MARKDOWN PREVIEW - TAB TO EDIT - j/k SCROLL - CLICK LINKS "
     } else {
         " MARKDOWN NOTE - AUTOSAVED - TAB TO PREVIEW "
     };
@@ -1014,6 +1046,7 @@ fn render_note_editor(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         Paragraph::new(content)
             .style(Style::default().fg(theme.text).bg(theme.surface))
             .wrap(Wrap { trim: false })
+            .scroll((app.note_scroll, 0))
             .block(
                 Block::default()
                     .title(title)
@@ -1022,6 +1055,17 @@ fn render_note_editor(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
             ),
         area,
     );
+    if let Some(preview) = preview {
+        frame.render_widget(
+            MarkdownHyperlinks::new(preview.hyperlinks, app.note_scroll),
+            Rect::new(
+                area.x.saturating_add(1),
+                area.y.saturating_add(1),
+                area.width.saturating_sub(2),
+                area.height.saturating_sub(2),
+            ),
+        );
+    }
     if app.note_preview {
         return;
     }
@@ -1037,258 +1081,409 @@ fn render_note_editor(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     )
     .unwrap_or(0);
     let cursor_x = area.x.saturating_add(1).saturating_add(column);
-    let cursor_y = area.y.saturating_add(1).saturating_add(row);
+    let cursor_y = area
+        .y
+        .saturating_add(1)
+        .saturating_add(row.saturating_sub(app.note_scroll));
     frame.set_cursor_position((
         cursor_x.min(area.right().saturating_sub(2)),
         cursor_y.min(area.bottom().saturating_sub(2)),
     ));
 }
 
-fn parse_inline<'a>(mut text: &'a str, theme: &Theme) -> Vec<Span<'a>> {
-    let mut spans = Vec::new();
-    while !text.is_empty() {
-        let math_idx = text.find('$');
-        let code_idx = text.find('`');
-        let bold_idx = text.find("**");
-        let italic_idx = text.find('*');
-        let link_idx = text.find('[');
-        
-        let mut first: Option<(usize, &str)> = None;
-        if let Some(idx) = math_idx {
-            if first.map_or(true, |(i, _)| idx < i) {
-                first = Some((idx, "$"));
-            }
-        }
-        if let Some(idx) = code_idx {
-            if first.map_or(true, |(i, _)| idx < i) {
-                first = Some((idx, "`"));
-            }
-        }
-        if let Some(idx) = bold_idx {
-            if first.map_or(true, |(i, _)| idx < i) {
-                first = Some((idx, "**"));
-            }
-        }
-        if let Some(idx) = italic_idx {
-            if first.map_or(true, |(i, _)| idx < i) {
-                if bold_idx == Some(idx) {
-                    first = Some((idx, "**"));
-                } else {
-                    first = Some((idx, "*"));
-                }
-            }
-        }
-        if let Some(idx) = link_idx {
-            if first.map_or(true, |(i, _)| idx < i) {
-                first = Some((idx, "["));
-            }
-        }
-        
-        if let Some((idx, marker)) = first {
-            if idx > 0 {
-                spans.push(Span::styled(&text[..idx], Style::default().fg(theme.text)));
-            }
-            let rest = &text[idx + marker.len()..];
-            match marker {
-                "$" => {
-                    if let Some(close_idx) = rest.find('$') {
-                        let math_text = &rest[..close_idx];
-                        spans.push(Span::styled(
-                            math_text,
-                            Style::default().fg(theme.warning).add_modifier(Modifier::ITALIC)
-                        ));
-                        text = &rest[close_idx + 1..];
-                    } else {
-                        spans.push(Span::styled(marker, Style::default().fg(theme.text)));
-                        text = rest;
-                    }
-                }
-                "`" => {
-                    if let Some(close_idx) = rest.find('`') {
-                        let code_text = &rest[..close_idx];
-                        spans.push(Span::styled(
-                            code_text,
-                            Style::default().fg(theme.success).bg(theme.surface)
-                        ));
-                        text = &rest[close_idx + 1..];
-                    } else {
-                        spans.push(Span::styled(marker, Style::default().fg(theme.text)));
-                        text = rest;
-                    }
-                }
-                "**" => {
-                    if let Some(close_idx) = rest.find("**") {
-                        let bold_text = &rest[..close_idx];
-                        spans.push(Span::styled(
-                            bold_text,
-                            Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
-                        ));
-                        text = &rest[close_idx + 2..];
-                    } else {
-                        spans.push(Span::styled(marker, Style::default().fg(theme.text)));
-                        text = rest;
-                    }
-                }
-                "*" => {
-                    if let Some(close_idx) = rest.find('*') {
-                        let italic_text = &rest[..close_idx];
-                        spans.push(Span::styled(
-                            italic_text,
-                            Style::default().fg(theme.text).add_modifier(Modifier::ITALIC)
-                        ));
-                        text = &rest[close_idx + 1..];
-                    } else {
-                        spans.push(Span::styled(marker, Style::default().fg(theme.text)));
-                        text = rest;
-                    }
-                }
-                "[" => {
-                    if let Some(close_text_idx) = rest.find(']') {
-                        let link_text = &rest[..close_text_idx];
-                        let after_text = &rest[close_text_idx + 1..];
-                        if after_text.starts_with('(') {
-                            if let Some(close_url_idx) = after_text.find(')') {
-                                let url = &after_text[1..close_url_idx];
-                                spans.push(Span::styled(
-                                    link_text,
-                                    Style::default().fg(theme.accent).add_modifier(Modifier::UNDERLINED)
-                                ));
-                                spans.push(Span::styled(
-                                    format!(" ({})", url),
-                                    Style::default().fg(theme.muted)
-                                ));
-                                text = &after_text[close_url_idx + 1..];
-                                continue;
-                            }
-                        }
-                    }
-                    spans.push(Span::styled(marker, Style::default().fg(theme.text)));
-                    text = rest;
-                }
-                _ => {
-                    text = rest;
-                }
-            }
-        } else {
-            spans.push(Span::styled(text, Style::default().fg(theme.text)));
-            break;
-        }
-    }
-    spans
+#[derive(Default)]
+struct MarkdownTable {
+    rows: Vec<Vec<String>>,
+    row: Vec<String>,
+    cell: String,
+    in_cell: bool,
 }
 
-fn markdown_preview<'a>(body: &'a str, theme: &Theme) -> Vec<Line<'a>> {
-    let mut lines = Vec::new();
-    let mut in_code_block = false;
-    let mut in_math_block = false;
-    for line in body.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            in_code_block = !in_code_block;
-            lines.push(Line::styled(
-                "── Code Block ──────────────────────────────────",
-                Style::default().fg(theme.muted),
-            ));
-            continue;
-        }
-        if in_code_block {
-            lines.push(Line::styled(
-                line,
-                Style::default().fg(theme.success).bg(theme.surface),
-            ));
-            continue;
-        }
-        if trimmed.starts_with("$$") {
-            in_math_block = !in_math_block;
-            lines.push(Line::styled(
-                "── Display Math ─────────────────────────────────",
-                Style::default().fg(theme.muted),
-            ));
-            continue;
-        }
-        if in_math_block {
-            lines.push(Line::styled(
-                line,
-                Style::default().fg(theme.warning).add_modifier(Modifier::ITALIC),
-            ));
-            continue;
-        }
-        if let Some(h) = line.strip_prefix("# ") {
-            lines.push(Line::styled(
-                format!("# {}", h.trim()),
-                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
-            ));
-            continue;
-        }
-        if let Some(h) = line.strip_prefix("## ") {
-            lines.push(Line::styled(
-                format!("## {}", h.trim()),
-                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
-            ));
-            continue;
-        }
-        if let Some(h) = line.strip_prefix("### ") {
-            lines.push(Line::styled(
-                format!("### {}", h.trim()),
-                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
-            ));
-            continue;
-        }
-        if let Some(quote) = line.strip_prefix("> ") {
-            let mut spans = vec![Span::styled("│ ", Style::default().fg(theme.warning))];
-            spans.extend(parse_inline(quote, theme));
-            lines.push(Line::from(spans));
-            continue;
-        }
-        if let Some(item) = line.strip_prefix("- ") {
-            let mut spans = vec![Span::styled("• ", Style::default().fg(theme.secondary))];
-            spans.extend(parse_inline(item, theme));
-            lines.push(Line::from(spans));
-            continue;
-        }
-        if let Some(item) = line.strip_prefix("* ") {
-            let mut spans = vec![Span::styled("• ", Style::default().fg(theme.secondary))];
-            spans.extend(parse_inline(item, theme));
-            lines.push(Line::from(spans));
-            continue;
-        }
-        let mut is_ordered_list = false;
-        if let Some(dot_idx) = trimmed.find(". ") {
-            if trimmed[..dot_idx].chars().all(|c| c.is_ascii_digit()) {
-                is_ordered_list = true;
+#[derive(Clone)]
+struct MarkdownLink {
+    line: usize,
+    column: u16,
+    width: u16,
+    destination: String,
+}
+
+struct MarkdownPreview {
+    lines: Vec<Line<'static>>,
+    hyperlinks: Vec<MarkdownLink>,
+}
+
+struct MarkdownHyperlinks {
+    links: Vec<MarkdownLink>,
+    scroll: u16,
+}
+
+impl MarkdownHyperlinks {
+    fn new(links: Vec<MarkdownLink>, scroll: u16) -> Self {
+        Self { links, scroll }
+    }
+}
+
+impl Widget for MarkdownHyperlinks {
+    fn render(self, area: Rect, buffer: &mut Buffer) {
+        for link in self.links {
+            let line = u16::try_from(link.line).unwrap_or(u16::MAX);
+            let Some(y) = line.checked_sub(self.scroll) else { continue };
+            if y >= area.height || link.column.saturating_add(link.width) > area.width {
+                continue;
+            }
+            let safe_url = link.destination.replace(['\x1b', '\x07'], "");
+            // Ratatui cells need OSC 8 hyperlinks in small chunks so their display width remains correct.
+            let label = buffer[(area.x.saturating_add(link.column), area.y.saturating_add(y))]
+                .symbol()
+                .to_owned();
+            if label.is_empty() {
+                continue;
+            }
+            let end = link.column.saturating_add(link.width);
+            let mut x = link.column;
+            while x < end {
+                let symbol = buffer[(area.x.saturating_add(x), area.y.saturating_add(y))]
+                    .symbol()
+                    .to_owned();
+                if symbol.is_empty() {
+                    x = x.saturating_add(1);
+                    continue;
+                }
+                let hyperlink = format!("\x1b]8;;{safe_url}\x07{symbol}\x1b]8;;\x07");
+                buffer[(area.x.saturating_add(x), area.y.saturating_add(y))]
+                    .set_symbol(&hyperlink);
+                x = x.saturating_add(1);
             }
         }
-        if is_ordered_list {
-            let dot_idx = trimmed.find(". ").unwrap();
-            let prefix = &trimmed[..dot_idx + 2];
-            let rest = &trimmed[dot_idx + 2..];
-            let mut spans = vec![Span::styled(prefix, Style::default().fg(theme.secondary))];
-            spans.extend(parse_inline(rest, theme));
-            lines.push(Line::from(spans));
-            continue;
+    }
+}
+
+struct MarkdownRenderer<'a> {
+    theme: &'a Theme,
+    lines: Vec<Line<'static>>,
+    current: Vec<Span<'static>>,
+    styles: Vec<Style>,
+    lists: Vec<Option<u64>>,
+    quote_depth: usize,
+    link_destinations: Vec<(String, usize, u16)>,
+    hyperlinks: Vec<MarkdownLink>,
+    image_destinations: Vec<String>,
+    code_block: Option<(String, String)>,
+    table: Option<MarkdownTable>,
+}
+
+impl<'a> MarkdownRenderer<'a> {
+    fn new(theme: &'a Theme) -> Self {
+        Self {
+            theme,
+            lines: Vec::new(),
+            current: Vec::new(),
+            styles: vec![Style::default().fg(theme.text)],
+            lists: Vec::new(),
+            quote_depth: 0,
+            link_destinations: Vec::new(),
+            hyperlinks: Vec::new(),
+            image_destinations: Vec::new(),
+            code_block: None,
+            table: None,
         }
-        if trimmed.starts_with('|') && trimmed.ends_with('|') {
-            let parts: Vec<&str> = trimmed.split('|').collect();
-            let mut spans = Vec::new();
-            for (i, part) in parts.iter().enumerate() {
-                if i > 0 && i < parts.len() - 1 {
-                    spans.push(Span::styled("│", Style::default().fg(theme.accent)));
-                    let text = part.trim();
-                    if text.chars().all(|c| c == '-' || c == ':') && !text.is_empty() {
-                        spans.push(Span::styled(part.to_string(), Style::default().fg(theme.muted)));
-                    } else {
-                        spans.extend(parse_inline(part, theme));
+    }
+
+    fn style(&self) -> Style {
+        self.styles.last().copied().unwrap_or_default()
+    }
+
+    fn push(&mut self, text: impl Into<String>, style: Style) {
+        let text = text.into();
+        if let Some(table) = &mut self.table {
+            if table.in_cell {
+                table.cell.push_str(&text);
+                return;
+            }
+        }
+        self.current.push(Span::styled(text, style));
+    }
+
+    fn text(&mut self, text: &str) {
+        if let Some((_, code)) = &mut self.code_block {
+            code.push_str(text);
+        } else {
+            self.push(text.to_owned(), self.style());
+        }
+    }
+
+    fn finish_line(&mut self) {
+        if !self.current.is_empty() {
+            self.lines.push(Line::from(std::mem::take(&mut self.current)));
+        }
+    }
+
+    fn current_width(&self) -> u16 {
+        self.current.iter().fold(0_u16, |width, span| {
+            width.saturating_add(u16::try_from(span.content.chars().count()).unwrap_or(u16::MAX))
+        })
+    }
+
+    fn block_prefix(&mut self) {
+        if self.quote_depth > 0 {
+            self.push("│ ".repeat(self.quote_depth), Style::default().fg(self.theme.warning));
+        }
+    }
+
+    fn start_item(&mut self) {
+        self.finish_line();
+        self.block_prefix();
+        let indent = "  ".repeat(self.lists.len().saturating_sub(1));
+        let marker = match self.lists.last_mut() {
+            Some(Some(number)) => {
+                let marker = format!("{number}. ");
+                *number += 1;
+                marker
+            }
+            _ => "• ".to_owned(),
+        };
+        self.push(indent, Style::default().fg(self.theme.secondary));
+        self.push(marker, Style::default().fg(self.theme.secondary));
+    }
+
+    fn finish_code_block(&mut self) {
+        let Some((language, source)) = self.code_block.take() else {
+            return;
+        };
+        self.finish_line();
+        let label = if language.is_empty() { "plain text" } else { &language };
+        self.lines.push(Line::styled(
+            format!("── Code ({label}) ─────────────────────────────"),
+            Style::default().fg(self.theme.muted),
+        ));
+        let (syntax_set, theme_set) = markdown_syntax_assets();
+        let syntax = syntax_set
+            .find_syntax_by_token(&language)
+            .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
+        let syntax_theme = theme_set.themes.get("base16-ocean.dark");
+        if let Some(syntax_theme) = syntax_theme {
+            let mut highlighter = HighlightLines::new(syntax, syntax_theme);
+            for line in LinesWithEndings::from(&source) {
+                let spans: Vec<Span<'static>> = highlighter
+                    .highlight_line(line.trim_end_matches(['\r', '\n']), &syntax_set)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(style, text)| {
+                        Span::styled(text.to_owned(), syntect_style(style.foreground, self.theme))
+                    })
+                    .collect();
+                self.lines.push(Line::from(spans));
+            }
+        } else {
+            for line in source.lines() {
+                self.lines.push(Line::styled(line.to_owned(), Style::default().fg(self.theme.success)));
+            }
+        }
+    }
+
+    fn finish_table(&mut self) {
+        let Some(mut table) = self.table.take() else { return };
+        if table.in_cell {
+            table.row.push(std::mem::take(&mut table.cell));
+        }
+        if !table.row.is_empty() {
+            table.rows.push(table.row);
+        }
+        let columns = table.rows.iter().map(Vec::len).max().unwrap_or(0);
+        let mut widths = vec![3; columns];
+        for row in &table.rows {
+            for (index, cell) in row.iter().enumerate() {
+                widths[index] = widths[index].max(cell.chars().count());
+            }
+        }
+        for (row_index, row) in table.rows.iter().enumerate() {
+            let mut rendered = String::from("│");
+            for (index, width) in widths.iter().enumerate() {
+                let cell = row.get(index).map_or("", String::as_str);
+                rendered.push_str(&format!(" {cell:width$} │", width = *width));
+            }
+            self.lines.push(Line::styled(
+                rendered,
+                Style::default()
+                    .fg(if row_index == 0 { self.theme.accent } else { self.theme.text })
+                    .add_modifier(if row_index == 0 { Modifier::BOLD } else { Modifier::empty() }),
+            ));
+            if row_index == 0 {
+                self.lines.push(Line::styled(
+                    format!("├{}┤", widths.iter().map(|width| "─".repeat(width + 2)).collect::<Vec<_>>().join("┼")),
+                    Style::default().fg(self.theme.border),
+                ));
+            }
+        }
+    }
+}
+
+fn syntect_style(color: SyntectColor, theme: &Theme) -> Style {
+    // Some grammars use the default foreground; keep it legible on every Papr theme.
+    let foreground = if color.a == 0 { theme.text } else { ratatui::style::Color::Rgb(color.r, color.g, color.b) };
+    Style::default().fg(foreground)
+}
+
+fn markdown_preview(body: &str, theme: &Theme) -> MarkdownPreview {
+    let options = Options::ENABLE_TABLES
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_MATH
+        | Options::ENABLE_GFM;
+    let mut renderer = MarkdownRenderer::new(theme);
+
+    for event in Parser::new_ext(body, options) {
+        match event {
+            Event::Start(Tag::Paragraph) => {
+                if renderer.lists.is_empty()
+                    && renderer.quote_depth == 0
+                    && renderer.table.is_none()
+                    && renderer.current.is_empty()
+                    && !renderer.lines.is_empty()
+                {
+                    renderer.lines.push(Line::raw(""));
+                }
+                renderer.block_prefix();
+            }
+            Event::End(TagEnd::Paragraph) => renderer.finish_line(),
+            Event::Start(Tag::Heading { level, .. }) => {
+                renderer.finish_line();
+                renderer.block_prefix();
+                renderer.styles.push(renderer.style().fg(theme.accent).add_modifier(Modifier::BOLD));
+                renderer.push(format!("{} ", "━".repeat(level as usize + 1)), renderer.style());
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                renderer.styles.pop();
+                renderer.finish_line();
+            }
+            Event::Start(Tag::Emphasis) => renderer.styles.push(renderer.style().add_modifier(Modifier::ITALIC)),
+            Event::End(TagEnd::Emphasis) => { renderer.styles.pop(); }
+            Event::Start(Tag::Strong) => renderer.styles.push(renderer.style().add_modifier(Modifier::BOLD)),
+            Event::End(TagEnd::Strong) => { renderer.styles.pop(); }
+            Event::Start(Tag::Strikethrough) => renderer.styles.push(renderer.style().add_modifier(Modifier::CROSSED_OUT)),
+            Event::End(TagEnd::Strikethrough) => { renderer.styles.pop(); }
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                renderer.link_destinations.push((
+                    dest_url.to_string(),
+                    renderer.lines.len(),
+                    renderer.current_width(),
+                ));
+                renderer.styles.push(renderer.style().fg(theme.accent).add_modifier(Modifier::UNDERLINED));
+            }
+            Event::End(TagEnd::Link) => {
+                renderer.styles.pop();
+                if let Some((destination, line, column)) = renderer.link_destinations.pop() {
+                    let width = renderer.current_width().saturating_sub(column);
+                    if width > 0 && line == renderer.lines.len() {
+                        renderer.hyperlinks.push(MarkdownLink {
+                            line,
+                            column,
+                            width,
+                            destination: destination.clone(),
+                        });
                     }
+                    renderer.push(format!(" ({destination})"), Style::default().fg(theme.muted));
                 }
             }
-            spans.push(Span::styled("│", Style::default().fg(theme.accent)));
-            lines.push(Line::from(spans));
-            continue;
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                renderer.image_destinations.push(dest_url.to_string());
+                renderer.push("🖼 ", Style::default().fg(theme.secondary));
+                renderer.styles.push(renderer.style().fg(theme.accent).add_modifier(Modifier::UNDERLINED));
+            }
+            Event::End(TagEnd::Image) => {
+                renderer.styles.pop();
+                if let Some(destination) = renderer.image_destinations.pop() {
+                    renderer.push(format!(" ({destination})"), Style::default().fg(theme.muted));
+                }
+            }
+            Event::Start(Tag::BlockQuote(_)) => { renderer.finish_line(); renderer.quote_depth += 1; }
+            Event::End(TagEnd::BlockQuote(_)) => { renderer.finish_line(); renderer.quote_depth = renderer.quote_depth.saturating_sub(1); }
+            Event::Start(Tag::List(first)) => renderer.lists.push(first),
+            Event::End(TagEnd::List(_)) => { renderer.finish_line(); renderer.lists.pop(); }
+            Event::Start(Tag::Item) => renderer.start_item(),
+            Event::End(TagEnd::Item) => renderer.finish_line(),
+            Event::TaskListMarker(done) => renderer.push(if done { "[x] " } else { "[ ] " }, Style::default().fg(if done { theme.success } else { theme.warning })),
+            Event::Start(Tag::CodeBlock(kind)) => {
+                let language = match kind { CodeBlockKind::Fenced(language) => language.to_string(), CodeBlockKind::Indented => String::new() };
+                renderer.code_block = Some((language, String::new()));
+            }
+            Event::End(TagEnd::CodeBlock) => renderer.finish_code_block(),
+            Event::Code(code) => renderer.push(code.to_string(), renderer.style().fg(theme.success).bg(theme.surface)),
+            Event::InlineMath(math) => renderer.push(format_math(&math), renderer.style().fg(theme.warning).add_modifier(Modifier::ITALIC)),
+            Event::DisplayMath(math) => {
+                renderer.finish_line();
+                renderer.lines.push(Line::styled(
+                    format!("  {}", format_math(&math)),
+                    Style::default().fg(theme.warning).add_modifier(Modifier::ITALIC),
+                ));
+            }
+            Event::FootnoteReference(label) => renderer.push(format!("[^{label}]"), Style::default().fg(theme.accent)),
+            Event::Start(Tag::FootnoteDefinition(label)) => {
+                renderer.finish_line();
+                renderer.push(format!("[^{label}]: "), Style::default().fg(theme.accent));
+            }
+            Event::End(TagEnd::FootnoteDefinition) => renderer.finish_line(),
+            Event::Start(Tag::Table(_)) => { renderer.finish_line(); renderer.table = Some(MarkdownTable::default()); }
+            Event::End(TagEnd::Table) => renderer.finish_table(),
+            Event::Start(Tag::TableRow) => {
+                if let Some(table) = &mut renderer.table {
+                    if !table.row.is_empty() { table.rows.push(std::mem::take(&mut table.row)); }
+                }
+            }
+            Event::Start(Tag::TableCell) => {
+                if let Some(table) = &mut renderer.table { table.in_cell = true; }
+            }
+            Event::End(TagEnd::TableCell) => {
+                if let Some(table) = &mut renderer.table {
+                    table.row.push(std::mem::take(&mut table.cell));
+                    table.in_cell = false;
+                }
+            }
+            Event::End(TagEnd::TableRow) => {
+                if let Some(table) = &mut renderer.table { table.rows.push(std::mem::take(&mut table.row)); }
+            }
+            Event::SoftBreak | Event::HardBreak => renderer.finish_line(),
+            Event::Rule => { renderer.finish_line(); renderer.lines.push(Line::styled("────────────────────────────────────────────────", Style::default().fg(theme.border))); }
+            Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => renderer.text(&text),
+            Event::Start(_) | Event::End(_) => {}
         }
-        lines.push(Line::from(parse_inline(line, theme)));
     }
-    lines
+    renderer.finish_code_block();
+    renderer.finish_table();
+    renderer.finish_line();
+    MarkdownPreview {
+        lines: renderer.lines,
+        hyperlinks: renderer.hyperlinks,
+    }
 }
+
+fn format_math(source: &str) -> String {
+    let mut rendered = source.replace("\\,", " ").replace("\\ ", " ");
+    for (latex, symbol) in [
+        ("\\int", "∫"), ("\\sum", "∑"), ("\\prod", "∏"), ("\\sqrt", "√"),
+        ("\\cdot", "·"), ("\\times", "×"), ("\\leq", "≤"), ("\\geq", "≥"),
+        ("\\neq", "≠"), ("\\infty", "∞"), ("\\alpha", "α"), ("\\beta", "β"),
+        ("\\gamma", "γ"), ("\\delta", "δ"), ("\\theta", "θ"), ("\\lambda", "λ"),
+        ("\\mu", "μ"), ("\\pi", "π"), ("\\sigma", "σ"), ("\\phi", "φ"),
+        ("\\omega", "ω"),
+    ] {
+        rendered = rendered.replace(latex, symbol);
+    }
+    while let Some(start) = rendered.find("\\frac{") {
+        let numerator_start = start + "\\frac{".len();
+        let Some(numerator_end) = rendered[numerator_start..].find('}') else { break };
+        let numerator_end = numerator_start + numerator_end;
+        if !rendered[numerator_end..].starts_with("}{") { break; }
+        let denominator_start = numerator_end + 2;
+        let Some(denominator_end) = rendered[denominator_start..].find('}') else { break };
+        let denominator_end = denominator_start + denominator_end;
+        let replacement = format!("({})/({})", &rendered[numerator_start..numerator_end], &rendered[denominator_start..denominator_end]);
+        rendered.replace_range(start..=denominator_end, &replacement);
+    }
+    rendered
+}
+
 
 fn chunk_string(s: &str, size: usize) -> Vec<String> {
     let mut chunks = Vec::new();
@@ -2595,7 +2790,58 @@ mod tests {
     use papr_core::models::AuthorSummary;
     use ratatui::{Terminal, backend::TestBackend};
 
-    use super::render;
+    use super::{markdown_preview, render};
+
+    #[test]
+    fn markdown_preview_supports_gfm_extensions() -> Result<(), Box<dyn std::error::Error>> {
+        let theme = Theme::load("nord")?;
+        let markdown = r#"# Research
+
+| Method | Score |
+| --- | ---: |
+| Baseline | 0.8 |
+
+- [x] complete
+  - nested ~~old~~ item
+
+> quoted [source](https://example.com)
+
+Inline $E = mc^2$ and block:
+
+$$
+\int_0^1 x dx
+$$
+
+```rust
+let answer = 42;
+```
+
+Image: ![plot](plot.png)[^1]
+
+[^1]: A figure.
+"#;
+        let preview = markdown_preview(markdown, &theme);
+        assert!(preview.lines.iter().any(|line| line.spans.is_empty()));
+        assert!(preview
+            .hyperlinks
+            .iter()
+            .any(|link| link.destination == "https://example.com"));
+        let rendered = preview
+            .lines
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter())
+            .map(|span| span.content.into_owned())
+            .collect::<String>();
+
+        for expected in [
+            "Method", "Baseline", "[x]", "nested", "old", "│", "source",
+            "https://example.com", "E = mc^2", "∫_0^1 x dx", "Code (rust)",
+            "let answer = 42;", "🖼", "plot.png", "[^1]", "A figure.",
+        ] {
+            assert!(rendered.contains(expected), "missing {expected:?} in {rendered:?}");
+        }
+        Ok(())
+    }
 
     #[test]
     fn dashboard_renders_at_minimum_size() -> Result<(), Box<dyn std::error::Error>> {
