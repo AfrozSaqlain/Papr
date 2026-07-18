@@ -1489,30 +1489,307 @@ fn markdown_preview(body: &str, theme: &Theme) -> MarkdownPreview {
     }
 }
 
+/// A small, recursive TeX math renderer for terminal previews.
+///
+/// Markdown parsing is delegated to `pulldown-cmark`; this renderer receives only
+/// math tokens. It deliberately understands TeX structure (groups, scripts,
+/// commands, and environments) instead of applying command-by-command string
+/// replacements. Unsupported commands are retained verbatim, and a malformed
+/// expression falls back to its original source.
+struct LatexRenderer {
+    input: Vec<char>,
+    position: usize,
+}
+
+impl LatexRenderer {
+    fn new(source: &str) -> Self {
+        Self {
+            input: source.chars().collect(),
+            position: 0,
+        }
+    }
+
+    fn render(mut self) -> Result<String, ()> {
+        let rendered = self.expression(None)?;
+        (self.position == self.input.len()).then_some(rendered).ok_or(())
+    }
+
+    fn expression(&mut self, stop: Option<char>) -> Result<String, ()> {
+        let mut output = String::new();
+        while let Some(&character) = self.input.get(self.position) {
+            if Some(character) == stop {
+                self.position += 1;
+                return Ok(output);
+            }
+            if character == '}' {
+                return Err(());
+            }
+            self.position += 1;
+            match character {
+                '{' => output.push_str(&self.expression(Some('}'))?),
+                '^' => output.push_str(&superscript(&self.atom()?)),
+                '_' => output.push_str(&subscript(&self.atom()?)),
+                '\\' => output.push_str(&self.command()?),
+                '~' | '&' => output.push(' '),
+                character => output.push(character),
+            }
+        }
+        stop.is_none().then_some(output).ok_or(())
+    }
+
+    fn atom(&mut self) -> Result<String, ()> {
+        let character = *self.input.get(self.position).ok_or(())?;
+        self.position += 1;
+        match character {
+            '{' => self.expression(Some('}')),
+            '\\' => self.command(),
+            '^' => Ok(superscript(&self.atom()?)),
+            '_' => Ok(subscript(&self.atom()?)),
+            '}' => Err(()),
+            character => Ok(character.to_string()),
+        }
+    }
+
+    fn group(&mut self) -> Result<String, ()> {
+        if self.input.get(self.position) != Some(&'{') {
+            return Err(());
+        }
+        self.position += 1;
+        self.expression(Some('}'))
+    }
+
+    fn optional_group(&mut self) -> Result<Option<String>, ()> {
+        if self.input.get(self.position) != Some(&'[') {
+            return Ok(None);
+        }
+        self.position += 1;
+        let mut depth = 1_usize;
+        let start = self.position;
+        while let Some(&character) = self.input.get(self.position) {
+            self.position += 1;
+            match character {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(Some(self.input[start..self.position - 1].iter().collect()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Err(())
+    }
+
+    fn command(&mut self) -> Result<String, ()> {
+        let mut name = String::new();
+        while let Some(character) = self.input.get(self.position).copied() {
+            if !character.is_ascii_alphabetic() {
+                break;
+            }
+            self.position += 1;
+            name.push(character);
+        }
+        if name.is_empty() {
+            let escaped = self.input.get(self.position).copied().ok_or(())?;
+            self.position += 1;
+            return Ok(match escaped {
+                '\\' | ' ' | ',' | ';' | ':' | '!' => " ".to_owned(),
+                '#' | '$' | '%' | '&' | '_' | '{' | '}' | '[' | ']' | '^' | '~' => escaped.to_string(),
+                _ => format!("\\{escaped}"),
+            });
+        }
+
+        if let Some(symbol) = latex_symbol(&name) {
+            return Ok(symbol.to_owned());
+        }
+        match name.as_str() {
+            "frac" | "dfrac" | "tfrac" | "cfrac" | "binom" | "dbinom" | "tbinom" => {
+                let numerator = self.group()?;
+                let denominator = self.group()?;
+                Ok(if name.ends_with("binom") || name == "binom" {
+                    format!("({numerator} choose {denominator})")
+                } else {
+                    format!("({numerator})⁄({denominator})")
+                })
+            }
+            "sqrt" => {
+                let degree = self.optional_group()?;
+                let radicand = self.group()?;
+                Ok(degree.map_or_else(
+                    || format!("√({radicand})"),
+                    |degree| format!("{}√({radicand})", superscript(&degree)),
+                ))
+            }
+            "text" | "textrm" | "textbf" | "textit" | "texttt" | "mathrm" | "mathbf"
+            | "mathcal" | "mathfrak" | "mathsf" | "mathtt" | "mathit"
+            | "boldsymbol" | "bm" | "operatorname" | "operatornamewithlimits" => {
+                if name == "operatorname" && self.input.get(self.position) == Some(&'*') {
+                    self.position += 1;
+                }
+                self.group()
+            }
+            "mathbb" => Ok(mathbb(&self.group()?)),
+            "overline" | "bar" => Ok(format!("{}\u{0305}", self.group()?)),
+            "underline" => Ok(format!("_{}", self.group()?)),
+            "hat" | "widehat" => Ok(format!("{}\u{0302}", self.group()?)),
+            "tilde" | "widetilde" => Ok(format!("{}\u{0303}", self.group()?)),
+            "vec" => Ok(format!("{}\u{20d7}", self.group()?)),
+            "dot" => Ok(format!("{}\u{0307}", self.group()?)),
+            "ddot" => Ok(format!("{}\u{0308}", self.group()?)),
+            "left" | "right" | "middle" => self.delimiter(),
+            "big" | "Big" | "bigg" | "Bigg" | "displaystyle" | "textstyle" | "scriptstyle"
+            | "scriptscriptstyle" | "limits" | "nolimits" | "qquad" | "quad" | "enspace"
+            | "hspace" | "vspace" => {
+                if matches!(name.as_str(), "hspace" | "vspace") {
+                    let _ = self.group()?;
+                }
+                Ok(if matches!(name.as_str(), "qquad" | "quad" | "enspace") { " ".to_owned() } else { String::new() })
+            }
+            "begin" => self.environment(),
+            "end" => Err(()),
+            _ => Ok(format!("\\{name}")),
+        }
+    }
+
+    fn delimiter(&mut self) -> Result<String, ()> {
+        let character = self.input.get(self.position).copied().ok_or(())?;
+        self.position += 1;
+        if character != '\\' {
+            return Ok(match character {
+                '.' => String::new(),
+                '{' => "{".to_owned(),
+                '}' => "}".to_owned(),
+                _ => character.to_string(),
+            });
+        }
+        let mut name = String::new();
+        while let Some(character) = self.input.get(self.position).copied() {
+            if !character.is_ascii_alphabetic() {
+                break;
+            }
+            self.position += 1;
+            name.push(character);
+        }
+        if name.is_empty() {
+            let escaped = self.input.get(self.position).copied().ok_or(())?;
+            self.position += 1;
+            return Ok(match escaped {
+                '{' => "{".to_owned(),
+                '}' => "}".to_owned(),
+                '|' => "|".to_owned(),
+                _ => format!("\\{escaped}"),
+            });
+        }
+        Ok(match name.as_str() {
+            "lbrace" | "rbrace" => if name.starts_with('l') { "{" } else { "}" }.to_owned(),
+            "langle" | "rangle" => if name.starts_with('l') { "⟨" } else { "⟩" }.to_owned(),
+            "lceil" | "rceil" => if name.starts_with('l') { "⌈" } else { "⌉" }.to_owned(),
+            "lfloor" | "rfloor" => if name.starts_with('l') { "⌊" } else { "⌋" }.to_owned(),
+            "vert" | "mid" | "lvert" | "rvert" => "|".to_owned(),
+            "Vert" | "lVert" | "rVert" => "‖".to_owned(),
+            _ => format!("\\{name}"),
+        })
+    }
+
+    fn environment(&mut self) -> Result<String, ()> {
+        let name = self.group()?;
+        let end_marker = format!("\\end{{{name}}}");
+        let remaining: String = self.input[self.position..].iter().collect();
+        let end = remaining.find(&end_marker).ok_or(())?;
+        let body = &remaining[..end];
+        self.position += remaining[..end + end_marker.len()].chars().count();
+        let rows = body
+            .split("\\\\")
+            .map(|row| {
+                row.split('&')
+                    .map(|cell| LatexRenderer::new(cell.trim()).render())
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|cells| cells.join("  "))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .join(" ; ");
+        let (left, right) = match name.as_str() {
+            "pmatrix" => ("(", ")"),
+            "bmatrix" => ("[", "]"),
+            "Bmatrix" => ("{", "}"),
+            "vmatrix" => ("|", "|"),
+            "Vmatrix" => ("‖", "‖"),
+            "cases" => ("{", ""),
+            _ => ("", ""),
+        };
+        Ok(format!("{left}{rows}{right}"))
+    }
+}
+
+fn latex_symbol(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "alpha" => "α", "beta" => "β", "gamma" => "γ", "delta" => "δ", "epsilon" | "varepsilon" => "ε",
+        "zeta" => "ζ", "eta" => "η", "theta" | "vartheta" => "θ", "iota" => "ι", "kappa" | "varkappa" => "κ",
+        "lambda" => "λ", "mu" => "μ", "nu" => "ν", "xi" => "ξ", "pi" | "varpi" => "π", "rho" | "varrho" => "ρ",
+        "sigma" | "varsigma" => "σ", "tau" => "τ", "upsilon" => "υ", "phi" | "varphi" => "φ", "chi" => "χ", "psi" => "ψ", "omega" => "ω",
+        "Gamma" => "Γ", "Delta" => "Δ", "Theta" => "Θ", "Lambda" => "Λ", "Xi" => "Ξ", "Pi" => "Π", "Sigma" => "Σ", "Upsilon" => "Υ", "Phi" => "Φ", "Psi" => "Ψ", "Omega" => "Ω",
+        "sum" => "∑", "prod" | "coprod" => "∏", "int" | "iint" | "iiint" | "oint" => "∫", "lim" => "lim", "limsup" => "lim sup", "liminf" => "lim inf",
+        "infty" => "∞", "partial" => "∂", "nabla" => "∇", "forall" => "∀", "exists" => "∃", "neg" => "¬", "in" => "∈", "notin" => "∉", "ni" => "∋",
+        "to" | "rightarrow" | "longrightarrow" | "mapsto" => "→", "leftarrow" | "longleftarrow" => "←", "leftrightarrow" | "iff" => "↔", "Rightarrow" | "implies" => "⇒", "Leftarrow" => "⇐", "Leftrightarrow" => "⇔",
+        "times" => "×", "cdot" | "bullet" => "·", "ast" => "∗", "circ" => "∘", "pm" => "±", "mp" => "∓", "div" => "÷", "oplus" => "⊕", "otimes" => "⊗", "cup" => "∪", "cap" => "∩",
+        "le" | "leq" | "leqslant" => "≤", "ge" | "geq" | "geqslant" => "≥", "ne" | "neq" => "≠", "equiv" => "≡", "approx" => "≈", "sim" => "∼", "propto" => "∝", "subset" => "⊂", "subseteq" => "⊆", "supset" => "⊃", "supseteq" => "⊇",
+        "land" | "wedge" => "∧", "lor" | "vee" => "∨", "perp" => "⊥", "parallel" => "∥", "angle" => "∠", "degree" => "°", "prime" => "′",
+        "ldots" | "cdots" | "dots" => "…", "vdots" => "⋮", "ddots" => "⋱", "Re" => "ℜ", "Im" => "ℑ", "aleph" => "ℵ", "hbar" => "ℏ", "ell" => "ℓ",
+        "sin" => "sin", "cos" => "cos", "tan" => "tan", "cot" => "cot", "sec" => "sec", "csc" => "csc", "log" => "log", "ln" => "ln", "exp" => "exp", "max" => "max", "min" => "min", "sup" => "sup", "inf" => "inf", "det" => "det", "gcd" => "gcd", "Pr" => "Pr",
+        _ => return None,
+    })
+}
+
+fn mathbb(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            'C' => 'ℂ',
+            'H' => 'ℍ',
+            'N' => 'ℕ',
+            'P' => 'ℙ',
+            'Q' => 'ℚ',
+            'R' => 'ℝ',
+            'Z' => 'ℤ',
+            character => character,
+        })
+        .collect()
+}
+
+fn superscript(value: &str) -> String {
+    script(value, true)
+}
+
+fn subscript(value: &str) -> String {
+    script(value, false)
+}
+
+fn script(value: &str, upper: bool) -> String {
+    let compact = value.chars().filter(|character| !character.is_whitespace()).collect::<String>();
+    let converted: Option<String> = compact.chars().map(|character| match (upper, character) {
+        (true, '0') => Some('⁰'), (true, '1') => Some('¹'), (true, '2') => Some('²'), (true, '3') => Some('³'), (true, '4') => Some('⁴'), (true, '5') => Some('⁵'), (true, '6') => Some('⁶'), (true, '7') => Some('⁷'), (true, '8') => Some('⁸'), (true, '9') => Some('⁹'),
+        (true, '+') => Some('⁺'), (true, '-') => Some('⁻'), (true, '=') => Some('⁼'), (true, '(') => Some('⁽'), (true, ')') => Some('⁾'),
+        (true, 'a') => Some('ᵃ'), (true, 'b') => Some('ᵇ'), (true, 'c') => Some('ᶜ'), (true, 'd') => Some('ᵈ'), (true, 'e') => Some('ᵉ'), (true, 'f') => Some('ᶠ'), (true, 'g') => Some('ᵍ'), (true, 'h') => Some('ʰ'), (true, 'i') => Some('ⁱ'), (true, 'j') => Some('ʲ'), (true, 'k') => Some('ᵏ'), (true, 'l') => Some('ˡ'), (true, 'm') => Some('ᵐ'), (true, 'n') => Some('ⁿ'), (true, 'o') => Some('ᵒ'), (true, 'p') => Some('ᵖ'), (true, 'r') => Some('ʳ'), (true, 's') => Some('ˢ'), (true, 't') => Some('ᵗ'), (true, 'u') => Some('ᵘ'), (true, 'v') => Some('ᵛ'), (true, 'w') => Some('ʷ'), (true, 'x') => Some('ˣ'), (true, 'y') => Some('ʸ'), (true, 'z') => Some('ᶻ'),
+        (false, '0') => Some('₀'), (false, '1') => Some('₁'), (false, '2') => Some('₂'), (false, '3') => Some('₃'), (false, '4') => Some('₄'), (false, '5') => Some('₅'), (false, '6') => Some('₆'), (false, '7') => Some('₇'), (false, '8') => Some('₈'), (false, '9') => Some('₉'),
+        (false, '+') => Some('₊'), (false, '-') => Some('₋'), (false, '=') => Some('₌'), (false, '(') => Some('₍'), (false, ')') => Some('₎'),
+        (false, 'a') => Some('ₐ'), (false, 'e') => Some('ₑ'), (false, 'h') => Some('ₕ'), (false, 'i') => Some('ᵢ'), (false, 'j') => Some('ⱼ'), (false, 'k') => Some('ₖ'), (false, 'l') => Some('ₗ'), (false, 'm') => Some('ₘ'), (false, 'n') => Some('ₙ'), (false, 'o') => Some('ₒ'), (false, 'p') => Some('ₚ'), (false, 'r') => Some('ᵣ'), (false, 's') => Some('ₛ'), (false, 't') => Some('ₜ'), (false, 'u') => Some('ᵤ'), (false, 'v') => Some('ᵥ'), (false, 'x') => Some('ₓ'),
+        _ => None,
+    }).collect();
+    converted.map_or_else(
+        || {
+            if upper {
+                format!("⁽{compact}⁾")
+            } else {
+                format!("₍{compact}₎")
+            }
+        },
+        String::from,
+    )
+}
+
 fn format_math(source: &str) -> String {
-    let mut rendered = source.replace("\\,", " ").replace("\\ ", " ");
-    for (latex, symbol) in [
-        ("\\int", "∫"), ("\\sum", "∑"), ("\\prod", "∏"), ("\\sqrt", "√"),
-        ("\\cdot", "·"), ("\\times", "×"), ("\\leq", "≤"), ("\\geq", "≥"),
-        ("\\neq", "≠"), ("\\infty", "∞"), ("\\alpha", "α"), ("\\beta", "β"),
-        ("\\gamma", "γ"), ("\\delta", "δ"), ("\\theta", "θ"), ("\\lambda", "λ"),
-        ("\\mu", "μ"), ("\\pi", "π"), ("\\sigma", "σ"), ("\\phi", "φ"),
-        ("\\omega", "ω"),
-    ] {
-        rendered = rendered.replace(latex, symbol);
-    }
-    while let Some(start) = rendered.find("\\frac{") {
-        let numerator_start = start + "\\frac{".len();
-        let Some(numerator_end) = rendered[numerator_start..].find('}') else { break };
-        let numerator_end = numerator_start + numerator_end;
-        if !rendered[numerator_end..].starts_with("}{") { break; }
-        let denominator_start = numerator_end + 2;
-        let Some(denominator_end) = rendered[denominator_start..].find('}') else { break };
-        let denominator_end = denominator_start + denominator_end;
-        let replacement = format!("({})/({})", &rendered[numerator_start..numerator_end], &rendered[denominator_start..denominator_end]);
-        rendered.replace_range(start..=denominator_end, &replacement);
-    }
-    rendered
+    LatexRenderer::new(source).render().unwrap_or_else(|()| source.to_owned())
 }
 
 
@@ -2982,13 +3259,29 @@ Image: ![plot](plot.png)[^1]
 
         for expected in [
             "Method", "Baseline", "[x]", "nested", "old", "│", "source",
-            "E = mc^2", "∫_0^1 x dx", "Code (rust)",
+            "E = mc²", "∫₀¹ x dx", "Code (rust)",
             "let answer = 42;", "🖼", "plot.png", "[^1]", "A figure.",
         ] {
             assert!(rendered.contains(expected), "missing {expected:?} in {rendered:?}");
         }
         assert!(!rendered.contains("https://example.com"));
         Ok(())
+    }
+
+    #[test]
+    fn latex_math_renderer_handles_nested_constructs_and_malformed_source() {
+        assert_eq!(
+            super::format_math(r"\frac{\Sigma_{i=1}^{n}}{\sqrt{1+\alpha^2}}"),
+            "(Σᵢ₌₁ⁿ)⁄(√(1+α²))"
+        );
+        assert_eq!(super::format_math(r"\Sigma_{x = 1}^{\infty}"), "Σₓ₌₁⁽∞⁾");
+        assert_eq!(super::format_math(r"\int_0^\infty"), "∫₀⁽∞⁾");
+        assert_eq!(
+            super::format_math(r"\left\langle\begin{bmatrix}a_i & \frac{1}{2}\\\mathbf{v} & \operatorname{rank}(A)\end{bmatrix}\right\rangle"),
+            "⟨[aᵢ  (1)⁄(2) ; v  rank(A)]⟩"
+        );
+        assert_eq!(super::format_math(r"\text{cost: \$5} + \mathbb{R}"), "cost: $5 + ℝ");
+        assert_eq!(super::format_math(r"\frac{a}{b"), r"\frac{a}{b");
     }
 
     #[test]

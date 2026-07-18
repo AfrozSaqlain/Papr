@@ -33,15 +33,51 @@ Papr is implemented in Rust to meet the performance, reliability, and security d
 
 ## Requirements
 
-* A terminal with color and alternate-screen support.
-* Stable Rust toolchain (when building from source).
-* (Optional) For the built-in PDF viewer: a terminal emulator supporting Sixel or Kitty graphics protocols, and the `pdftoppm` command-line utility installed on your system path.
-* A system PDF viewer available through the platform default:
-  * Linux: `xdg-open`
-  * macOS: `open`
-  * Windows: `cmd /C start msedge ""` (Microsoft Edge is pre-installed on Windows; this can be customized to brave, chrome, firefox, etc.)
+### Required to run
 
-*Note: The default PDF viewer command can be overridden in the configuration.*
+* A 64-bit Linux, macOS, or Windows system supported by Rust.
+* A terminal emulator with ANSI color, Unicode, and alternate-screen support. Papr needs at least **58 columns × 18 rows** for the full interface.
+* Read/write access to Papr's configuration and data directories. Papr creates a SQLite database, downloads directory, plugin directory, and log files on first launch; run `papr paths` to see their resolved locations.
+* Internet access for arXiv search, paper downloads, DOI citation lookup, and journal metadata enrichment. Local-library browsing and existing notes remain usable without a connection.
+* A PDF viewer command available on `PATH` if you use the default external viewer:
+  * Linux: `xdg-open` (usually provided by the `xdg-utils` package)
+  * macOS: `open` (included with macOS)
+  * Windows: `cmd /C start msedge ""` by default; configure another installed viewer if preferred
+
+The viewer command is configurable with `pdf_viewer` in `config.toml`.
+
+### Required to build from source
+
+* Rust **1.85 or newer** with Cargo. Install it with [rustup](https://rustup.rs/) if needed.
+* A C compiler and system linker. These are normally installed with your platform's standard build tools.
+* Git, if you clone the repository instead of downloading a source archive.
+
+Typical Linux packages:
+
+```sh
+# Debian/Ubuntu
+sudo apt install build-essential pkg-config xdg-utils
+
+# Fedora
+sudo dnf install gcc make pkgconf-pkg-config xdg-utils
+
+# Arch Linux
+sudo pacman -S base-devel pkgconf xdg-utils
+```
+
+On Windows, install the MSVC C++ Build Tools (or Visual Studio with the **Desktop development with C++** workload) before building with Rust. On macOS, install the Xcode Command Line Tools with `xcode-select --install`.
+
+### Optional feature dependencies
+
+| Feature | Additional requirement |
+| --- | --- |
+| Built-in terminal PDF viewer | A Kitty- or Sixel-capable terminal and Poppler's `pdftoppm` command. |
+| PDF page counts and text-based metadata enrichment | Poppler's `pdfinfo` and `pdftotext` commands. |
+| Copy citations on Linux/Wayland | `wl-copy` from `wl-clipboard` (preferred). |
+| Copy citations on Linux/X11 | `xclip` (used when `wl-copy` is unavailable). |
+| External PDF viewing | The configured viewer command and any desktop integration it requires. |
+
+On Debian/Ubuntu, install the Poppler tools with `sudo apt install poppler-utils`; on Fedora use `sudo dnf install poppler-utils`; on Arch use `sudo pacman -S poppler`. Clipboard support can be added with `wl-clipboard` or `xclip` from the corresponding package manager. Papr has a native clipboard fallback, but availability depends on the active desktop session.
 
 ---
 
