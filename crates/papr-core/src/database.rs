@@ -1538,7 +1538,7 @@ impl Database {
             "SELECT a.name FROM reading_history h
              JOIN paper_authors pa ON pa.paper_id = h.paper_id
              JOIN authors a ON a.id = pa.author_id
-             GROUP BY a.id ORDER BY COUNT(*) DESC, a.name LIMIT 1",
+             GROUP BY a.id ORDER BY COUNT(*) DESC, MIN(pa.position), a.name LIMIT 1",
         )?;
         let most_read_journal = self.most_read_journal()?;
         Ok(ReadingStatistics {
