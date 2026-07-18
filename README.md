@@ -67,6 +67,15 @@ export PATH="$HOME/.cargo/bin:$PATH"
 cargo run --release --bin papr
 ```
 
+
+### Pre-compiled binaries
+
+You can also download precompiled binaries from the [GitHub Releases](https://github.com/AfrozSaqlain/Papr/releases) page.
+
+Depending on your operating system, you may see security warnings the first time you run the application. These warnings are expected because the distributed binaries are not code-signed. They do **not** necessarily indicate that the software is unsafe. The exact steps to bypass these warnings vary across operating systems and are usually straightforward.
+
+That said, we recommend compiling Papr from source whenever possible. Building the application locally avoids platform-specific security prompts, ensures the binary is generated directly on your machine, and allows you to verify exactly what is being built. Instructions for compiling from source are provided below.
+
 ---
 
 ## Running with Docker
@@ -199,6 +208,121 @@ pdf_viewer = "internal"
 ```
 
 On Windows, the default PDF viewer is configured as `'cmd /C start msedge ""'`, which opens PDFs in Microsoft Edge (pre-installed by default). You can customize this command to use other browsers or PDF viewers (e.g., `'cmd /C start chrome ""'`, `'cmd /C start firefox ""'`, or pointing directly to an executable like `'C:\Program Files\SumatraPDF\SumatraPDF.exe'`).
+
+---
+
+## Quick Start
+
+1. Start the application with `papr`.
+2. Press `/` to focus the search bar.
+3. Enter your query (e.g. `author: Einstein`) and press `Enter`.
+4. Use `j`/`k` to select a result and press `Enter` to open the detail view.
+5. Press `d` to download the paper.
+6. Open the **Downloads** tab. Once completed, press `Enter` to open the PDF.
+7. Use `B` to toggle bookmarks, `n` to edit notes, or `g` to assign it to a group.
+
+---
+
+## Interface Workspaces
+
+* **Dashboard:** Displays reading statistics, streaks, storage usage, and a daily feed of new arXiv papers matching your keywords.
+* **Discover:** Search arXiv, explore paper metadata, and queue background downloads.
+* **Library:** View all indexed local PDFs within your configured folders.
+* **Reading Queue:** A prioritized list of papers you plan to read next. Supports reordering/prioritization with `K`/`J` (or Shift/Ctrl + Up/Down) and toggling with `a` key.
+* **Groups:** Paper groups mapping directly to subdirectories in your library.
+* **Bookmarks:** Quick-access list of bookmarked local PDFs.
+* **Authors:** Browse local papers grouped by author name.
+* **Notes:** Search and browse all your paper-linked Markdown notes.
+* **Downloads:** Active, completed, and failed downloads. Supports `B`, `n`, `g`, and `R` actions on completed downloads.
+* **History:** A chronological log of searches, downloads, and paper opens.
+* **Statistics:** Detailed reading streaks, totals, top dimensions, and a 12-week reading heatmap.
+* **Settings:** Quick summary of active paths, configurations, and plugins.
+* **Credits:** Redesigned interactive Credits/About page for Papr.
+
+---
+
+## Keyboard Reference
+
+### Global Navigation
+
+| Key | Action |
+| --- | --- |
+| `j` / `Down` | Move down / select next item |
+| `k` / `Up` | Move up / select previous item |
+| `Enter` / `l` / `Right` | Open the selected item, section, or paper |
+| `Left` | Return focus to the sidebar navigation |
+| `h` | Go back to the previous screen or list |
+| `u` | Set the current state of the paper as unread |
+| `a` | Toggle paper queue/dequeue status |
+| `/` | Start a new arXiv search |
+| `Ctrl+P` | Open the command palette |
+| `?` | Toggle the help helper screen |
+| `q` | Close active popups, or exit the application |
+
+### Discovery
+
+| Key | Action |
+| --- | --- |
+| `Enter` | Open the detail page for the selected search result |
+| `j` / `k` | Scroll details view |
+| `d` | Download PDF |
+| `o` | Open the paper webpage in your default browser |
+| `r` | Refresh/retry the current search |
+| `h` / `Esc` | Return to results |
+
+### Library, Reading Queue, Groups, Bookmarks, Authors. Notes and Downloads
+
+| Key | Action |
+| --- | --- |
+| `Enter` / `Right` / `l` | Open the PDF in your default viewer |
+| `r` | Scan library folders for new files / Retry failed downloads |
+| `n` | Edit Markdown note |
+| `g` | Move PDF file to a group folder |
+| `B` | Toggle bookmark |
+| `>` | Toggle local search |
+| `R` | Rename a PDF file or group folder |
+| `x` | Delete a PDF file or group folder |
+| `c` | Copy citation |
+
+### Internal PDF Viewer
+
+| Key | Action |
+| --- | --- |
+| `Esc` / `q` | Exit the PDF viewer |
+| `j` / `Down` | Scroll down |
+| `k` / `Up` | Scroll up |
+| `PageDown` | Scroll down by a page |
+| `PageUp` | Scroll up by a page |
+
+### Markdown Editor
+
+| Key | Action |
+| --- | --- |
+| *Type* | Add text |
+| `Tab` | Toggle between editor and styled preview |
+| `Esc` | Save note and exit editor |
+
+---
+
+## Common Workflows
+
+### Finding and Downloading
+Press `/` to start searching. You can type keywords or use search field prefixes to narrow down results:
+```text
+author: Saqlain Afroz
+title: gravitational wave inference
+abstract: neural networks
+category: gr-qc
+```
+Open a paper details page and press `d`. Papr automatically downloads the PDF, names it using its sanitized paper title, and saves it. If the paper already exists in your library, Papr automatically merges the records so you don't end up with duplicate metadata.
+
+### Organizing Into Groups
+Groups sync directly with folders on your drive. When you select a paper and press `g`, you can choose a group or type a new name. Papr creates the folder and moves the PDF file there automatically, keeping your physical directories clean.
+
+### Writing Notes
+Press `n` on any paper to open the Markdown editor. Jot down summaries, math, or ideas. Tap `Tab` to preview your formatting, and hit `Esc` to save it straight to the SQLite database.
+
+---
 
 ### Themes
 
@@ -423,122 +547,7 @@ This architecture makes plugins:
 * Safe to distribute independently of the core application
 
 
----
 
-## Quick Start
-
-1. Start the application with `papr`.
-2. Press `/` to focus the search bar.
-3. Enter your query (e.g. `author: Einstein`) and press `Enter`.
-4. Use `j`/`k` to select a result and press `Enter` to open the detail view.
-5. Press `d` to download the paper.
-6. Open the **Downloads** tab. Once completed, press `Enter` to open the PDF.
-7. Use `B` to toggle bookmarks, `n` to edit notes, or `g` to assign it to a group.
-
----
-
-## Interface Workspaces
-
-* **Dashboard:** Displays reading statistics, streaks, storage usage, and a daily feed of new arXiv papers matching your keywords.
-* **Discover:** Search arXiv, explore paper metadata, and queue background downloads.
-* **Library:** View all indexed local PDFs within your configured folders.
-* **Reading Queue:** A prioritized list of papers you plan to read next. Supports reordering/prioritization with `K`/`J` (or Shift/Ctrl + Up/Down) and toggling with `a` key.
-* **Groups:** Paper groups mapping directly to subdirectories in your library.
-* **Bookmarks:** Quick-access list of bookmarked local PDFs.
-* **Authors:** Browse local papers grouped by author name.
-* **Notes:** Search and browse all your paper-linked Markdown notes.
-* **Downloads:** Active, completed, and failed downloads. Supports `B`, `n`, `g`, and `R` actions on completed downloads.
-* **History:** A chronological log of searches, downloads, and paper opens.
-* **Statistics:** Detailed reading streaks, totals, top dimensions, and a 12-week reading heatmap.
-* **Settings:** Quick summary of active paths, configurations, and plugins.
-* **Credits:** Redesigned interactive Credits/About page for Papr.
-
----
-
-## Keyboard Reference
-
-### Global Navigation
-
-| Key | Action |
-| --- | --- |
-| `j` / `Down` | Move down / select next item |
-| `k` / `Up` | Move up / select previous item |
-| `Enter` / `l` / `Right` | Open the selected item, section, or paper |
-| `Left` | Return focus to the sidebar navigation |
-| `h` | Go back to the previous screen or list |
-| `u` | Set the current state of the paper as unread |
-| `a` | Toggle paper queue/dequeue status |
-| `/` | Start a new arXiv search |
-| `Ctrl+P` | Open the command palette |
-| `?` | Toggle the help helper screen |
-| `q` | Close active popups, or exit the application |
-
-### Discovery
-
-| Key | Action |
-| --- | --- |
-| `Enter` | Open the detail page for the selected search result |
-| `j` / `k` | Scroll details view |
-| `d` | Download PDF |
-| `o` | Open the paper webpage in your default browser |
-| `r` | Refresh/retry the current search |
-| `h` / `Esc` | Return to results |
-
-### Library, Reading Queue, Groups, Bookmarks, Authors. Notes and Downloads
-
-| Key | Action |
-| --- | --- |
-| `Enter` / `Right` / `l` | Open the PDF in your default viewer |
-| `r` | Scan library folders for new files / Retry failed downloads |
-| `n` | Edit Markdown note |
-| `g` | Move PDF file to a group folder |
-| `B` | Toggle bookmark |
-| `>` | Toggle local search |
-| `R` | Rename a PDF file or group folder |
-| `x` | Delete a PDF file or group folder |
-| `c` | Copy citation |
-
-### Internal PDF Viewer
-
-| Key | Action |
-| --- | --- |
-| `Esc` / `q` | Exit the PDF viewer |
-| `j` / `Down` | Scroll down |
-| `k` / `Up` | Scroll up |
-| `PageDown` | Scroll down by a page |
-| `PageUp` | Scroll up by a page |
-
-### Markdown Editor
-
-| Key | Action |
-| --- | --- |
-| *Type* | Add text |
-| `Enter` | Insert new line |
-| `Backspace` | Delete character |
-| `Tab` | Toggle between editor and styled preview |
-| `Esc` | Save note and exit editor |
-
----
-
-## Common Workflows
-
-### Finding and Downloading
-Press `/` to start searching. You can type keywords or use search field prefixes to narrow down results:
-```text
-author: Saqlain Afroz
-title: gravitational wave inference
-abstract: neural networks
-category: gr-qc
-```
-Open a paper details page and press `d`. Papr automatically downloads the PDF, names it using its sanitized paper title, and saves it. If the paper already exists in your library, Papr automatically merges the records so you don't end up with duplicate metadata.
-
-### Organizing Into Groups
-Groups sync directly with folders on your drive. When you select a paper and press `g`, you can choose a group or type a new name. Papr creates the folder and moves the PDF file there automatically, keeping your physical directories clean.
-
-### Writing Notes
-Press `n` on any paper to open the Markdown editor. Jot down summaries, math, or ideas. Tap `Tab` to preview your formatting, and hit `Esc` to save it straight to the SQLite database.
-
----
 
 ## Project Structure
 
