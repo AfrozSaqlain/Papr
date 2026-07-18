@@ -1132,27 +1132,29 @@ impl Widget for MarkdownHyperlinks {
                 continue;
             }
             let safe_url = link.destination.replace(['\x1b', '\x07'], "");
-            // Ratatui cells need OSC 8 hyperlinks in small chunks so their display width remains correct.
-            let label = buffer[(area.x.saturating_add(link.column), area.y.saturating_add(y))]
-                .symbol()
-                .to_owned();
-            if label.is_empty() {
-                continue;
-            }
+            // Ratatui calculates ANSI escape-sequence widths correctly only when each OSC 8
+            // hyperlink is written in two-cell chunks (ratatui#902).
             let end = link.column.saturating_add(link.width);
             let mut x = link.column;
             while x < end {
-                let symbol = buffer[(area.x.saturating_add(x), area.y.saturating_add(y))]
+                let first = buffer[(area.x.saturating_add(x), area.y.saturating_add(y))]
                     .symbol()
                     .to_owned();
-                if symbol.is_empty() {
-                    x = x.saturating_add(1);
+                if first.is_empty() {
+                    x = x.saturating_add(2);
                     continue;
                 }
-                let hyperlink = format!("\x1b]8;;{safe_url}\x07{symbol}\x1b]8;;\x07");
+                let second_x = x.saturating_add(1);
+                let second = (second_x < end)
+                    .then(|| {
+                        buffer[(area.x.saturating_add(second_x), area.y.saturating_add(y))]
+                            .symbol()
+                    })
+                    .unwrap_or("");
+                let hyperlink = format!("\x1b]8;;{safe_url}\x07{first}{second}\x1b]8;;\x07");
                 buffer[(area.x.saturating_add(x), area.y.saturating_add(y))]
                     .set_symbol(&hyperlink);
-                x = x.saturating_add(1);
+                x = x.saturating_add(2);
             }
         }
     }
@@ -2809,9 +2811,35 @@ mod tests {
         DiscoveryStatus, DownloadStatus, DownloadTask, LibraryPaper, Page, RemotePaper, Theme,
     };
     use papr_core::models::AuthorSummary;
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{
+        Terminal,
+        backend::TestBackend,
+        buffer::Buffer,
+        layout::Rect,
+        style::Style,
+        widgets::Widget,
+    };
 
-    use super::{markdown_preview, render};
+    use super::{MarkdownHyperlinks, MarkdownLink, markdown_preview, render};
+
+    #[test]
+    fn markdown_hyperlinks_keep_link_text_intact() {
+        let area = Rect::new(0, 0, 32, 1);
+        let mut buffer = Buffer::empty(area);
+        buffer.set_string(0, 0, "A link: Papr on GitHub", Style::default());
+        MarkdownHyperlinks::new(
+            vec![MarkdownLink {
+                line: 0,
+                column: 8,
+                width: 14,
+                destination: "https://github.com/AfrozSaqlain/Papr".into(),
+            }],
+            0,
+        )
+        .render(area, &mut buffer);
+        assert!(buffer[(8, 0)].symbol().contains("\x07Pa\x1b]8;;\x07"));
+        assert!(buffer[(10, 0)].symbol().contains("\x07pr\x1b]8;;\x07"));
+    }
 
     #[test]
     fn markdown_preview_supports_gfm_extensions() -> Result<(), Box<dyn std::error::Error>> {
