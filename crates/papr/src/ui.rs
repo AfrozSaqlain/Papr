@@ -1324,6 +1324,20 @@ fn syntect_style(color: SyntectColor, theme: &Theme) -> Style {
     Style::default().fg(foreground)
 }
 
+fn preserve_source_spacing(renderer: &mut MarkdownRenderer<'_>, body: &str, start: usize) {
+    if !renderer.current.is_empty() || renderer.lines.is_empty() {
+        return;
+    }
+    let blank_lines = body[..start]
+        .lines()
+        .rev()
+        .take_while(|line| line.trim().is_empty())
+        .count();
+    renderer
+        .lines
+        .extend(std::iter::repeat_n(Line::raw(""), blank_lines));
+}
+
 fn markdown_preview(body: &str, theme: &Theme) -> MarkdownPreview {
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_FOOTNOTES
@@ -1333,22 +1347,16 @@ fn markdown_preview(body: &str, theme: &Theme) -> MarkdownPreview {
         | Options::ENABLE_GFM;
     let mut renderer = MarkdownRenderer::new(theme);
 
-    for event in Parser::new_ext(body, options) {
+    for (event, range) in Parser::new_ext(body, options).into_offset_iter() {
         match event {
             Event::Start(Tag::Paragraph) => {
-                if renderer.lists.is_empty()
-                    && renderer.quote_depth == 0
-                    && renderer.table.is_none()
-                    && renderer.current.is_empty()
-                    && !renderer.lines.is_empty()
-                {
-                    renderer.lines.push(Line::raw(""));
-                }
+                preserve_source_spacing(&mut renderer, body, range.start);
                 renderer.block_prefix();
             }
             Event::End(TagEnd::Paragraph) => renderer.finish_line(),
             Event::Start(Tag::Heading { level, .. }) => {
                 renderer.finish_line();
+                preserve_source_spacing(&mut renderer, body, range.start);
                 renderer.block_prefix();
                 renderer.styles.push(renderer.style().fg(theme.accent).add_modifier(Modifier::BOLD));
                 renderer.push(format!("{} ", "━".repeat(level as usize + 1)), renderer.style());
@@ -1383,7 +1391,6 @@ fn markdown_preview(body: &str, theme: &Theme) -> MarkdownPreview {
                             destination: destination.clone(),
                         });
                     }
-                    renderer.push(format!(" ({destination})"), Style::default().fg(theme.muted));
                 }
             }
             Event::Start(Tag::Image { dest_url, .. }) => {
@@ -1397,14 +1404,24 @@ fn markdown_preview(body: &str, theme: &Theme) -> MarkdownPreview {
                     renderer.push(format!(" ({destination})"), Style::default().fg(theme.muted));
                 }
             }
-            Event::Start(Tag::BlockQuote(_)) => { renderer.finish_line(); renderer.quote_depth += 1; }
+            Event::Start(Tag::BlockQuote(_)) => {
+                renderer.finish_line();
+                preserve_source_spacing(&mut renderer, body, range.start);
+                renderer.quote_depth += 1;
+            }
             Event::End(TagEnd::BlockQuote(_)) => { renderer.finish_line(); renderer.quote_depth = renderer.quote_depth.saturating_sub(1); }
-            Event::Start(Tag::List(first)) => renderer.lists.push(first),
+            Event::Start(Tag::List(first)) => {
+                renderer.finish_line();
+                preserve_source_spacing(&mut renderer, body, range.start);
+                renderer.lists.push(first);
+            }
             Event::End(TagEnd::List(_)) => { renderer.finish_line(); renderer.lists.pop(); }
             Event::Start(Tag::Item) => renderer.start_item(),
             Event::End(TagEnd::Item) => renderer.finish_line(),
             Event::TaskListMarker(done) => renderer.push(if done { "[x] " } else { "[ ] " }, Style::default().fg(if done { theme.success } else { theme.warning })),
             Event::Start(Tag::CodeBlock(kind)) => {
+                renderer.finish_line();
+                preserve_source_spacing(&mut renderer, body, range.start);
                 let language = match kind { CodeBlockKind::Fenced(language) => language.to_string(), CodeBlockKind::Indented => String::new() };
                 renderer.code_block = Some((language, String::new()));
             }
@@ -1424,7 +1441,11 @@ fn markdown_preview(body: &str, theme: &Theme) -> MarkdownPreview {
                 renderer.push(format!("[^{label}]: "), Style::default().fg(theme.accent));
             }
             Event::End(TagEnd::FootnoteDefinition) => renderer.finish_line(),
-            Event::Start(Tag::Table(_)) => { renderer.finish_line(); renderer.table = Some(MarkdownTable::default()); }
+            Event::Start(Tag::Table(_)) => {
+                renderer.finish_line();
+                preserve_source_spacing(&mut renderer, body, range.start);
+                renderer.table = Some(MarkdownTable::default());
+            }
             Event::End(TagEnd::Table) => renderer.finish_table(),
             Event::Start(Tag::TableRow) => {
                 if let Some(table) = &mut renderer.table {
@@ -2835,11 +2856,30 @@ Image: ![plot](plot.png)[^1]
 
         for expected in [
             "Method", "Baseline", "[x]", "nested", "old", "│", "source",
-            "https://example.com", "E = mc^2", "∫_0^1 x dx", "Code (rust)",
+            "E = mc^2", "∫_0^1 x dx", "Code (rust)",
             "let answer = 42;", "🖼", "plot.png", "[^1]", "A figure.",
         ] {
             assert!(rendered.contains(expected), "missing {expected:?} in {rendered:?}");
         }
+        assert!(!rendered.contains("https://example.com"));
+        Ok(())
+    }
+
+    #[test]
+    fn markdown_preview_preserves_consecutive_blank_lines() -> Result<(), Box<dyn std::error::Error>> {
+        let theme = Theme::load("nord")?;
+        let preview = markdown_preview("first\n\n\nsecond\n\n\n\nthird", &theme);
+        let lines = preview
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(lines, ["first", "", "", "second", "", "", "", "third"]);
         Ok(())
     }
 
