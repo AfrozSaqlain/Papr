@@ -61,6 +61,14 @@ fn focus_block<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> {
     block
 }
 
+/// Return a list selection only while the Workspace owns keyboard focus.
+///
+/// The selected index remains in the application state at all times; omitting it
+/// here only prevents Ratatui from drawing the selection treatment.
+fn workspace_highlight_selection(app: &App, selected: usize) -> Option<usize> {
+    app.content_focused.then_some(selected)
+}
+
 /// Render the complete application for the current state.
 pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     if app.mode == AppMode::PdfView {
@@ -324,7 +332,7 @@ fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
         .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
         .highlight_symbol("> ");
     let mut state = ListState::default()
-        .with_selected(Some(app.collection_selected))
+        .with_selected(workspace_highlight_selection(app, app.collection_selected))
         .with_offset(app.collection_scroll);
     frame.render_stateful_widget(list, area, &mut state);
     app.collection_scroll = state.offset();
@@ -396,7 +404,7 @@ fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
         .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
         .highlight_symbol("> ");
     let mut state = ListState::default()
-        .with_selected(Some(app.collection_paper_selected))
+        .with_selected(workspace_highlight_selection(app, app.collection_paper_selected))
         .with_offset(app.collection_paper_scroll);
     frame.render_stateful_widget(list, rows[1], &mut state);
     app.collection_paper_scroll = state.offset();
@@ -441,7 +449,7 @@ fn render_authors(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
         .highlight_symbol("> ");
     let mut state = ListState::default()
-        .with_selected(Some(app.author_selected))
+        .with_selected(workspace_highlight_selection(app, app.author_selected))
         .with_offset(app.author_scroll);
     frame.render_stateful_widget(list, area, &mut state);
     app.author_scroll = state.offset();
@@ -513,7 +521,7 @@ fn render_author_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
         .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
         .highlight_symbol("> ");
     let mut state = ListState::default()
-        .with_selected(Some(app.author_paper_selected))
+        .with_selected(workspace_highlight_selection(app, app.author_paper_selected))
         .with_offset(app.author_paper_scroll);
     frame.render_stateful_widget(list, rows[1], &mut state);
     app.author_paper_scroll = state.offset();
@@ -997,7 +1005,7 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
             .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
             .highlight_symbol("> ");
         let mut state = ListState::default()
-            .with_selected(Some(selected_idx))
+            .with_selected(workspace_highlight_selection(app, selected_idx))
             .with_offset(scroll_idx);
         frame.render_stateful_widget(list, area, &mut state);
         match app.page {
@@ -1727,7 +1735,7 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
         .highlight_symbol("> ");
     let mut state = ListState::default()
-        .with_selected(Some(app.library.selected))
+        .with_selected(workspace_highlight_selection(app, app.library.selected))
         .with_offset(app.library.scroll);
     frame.render_stateful_widget(list, rows[1], &mut state);
     app.library.scroll = state.offset();
@@ -1780,7 +1788,7 @@ fn render_reading_queue(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
         .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
         .highlight_symbol("> ");
     let mut state = ListState::default()
-        .with_selected(Some(app.reading_queue_selected))
+        .with_selected(workspace_highlight_selection(app, app.reading_queue_selected))
         .with_offset(app.reading_queue_scroll);
     frame.render_stateful_widget(list, rows[1], &mut state);
     app.reading_queue_scroll = state.offset();
@@ -1883,7 +1891,7 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
         .highlight_style(Style::default().bg(theme.surface))
         .highlight_symbol("> ");
     let mut state = ListState::default()
-        .with_selected(Some(app.download_selected))
+        .with_selected(workspace_highlight_selection(app, app.download_selected))
         .with_offset(app.download_scroll);
     frame.render_stateful_widget(list, area, &mut state);
     app.download_scroll = state.offset();
@@ -2076,7 +2084,7 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
         .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
         .highlight_symbol("> ");
     let mut state = ListState::default()
-        .with_selected(Some(app.discovery.selected))
+        .with_selected(workspace_highlight_selection(app, app.discovery.selected))
         .with_offset(app.discovery.scroll);
     frame.render_stateful_widget(list, area, &mut state);
     app.discovery.scroll = state.offset();
@@ -2653,7 +2661,7 @@ fn render_credits(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
     app.credits_selected = app.credits_selected.min(credits_items.len().saturating_sub(1));
 
     let mut state = ListState::default()
-        .with_selected(Some(app.credits_selected))
+        .with_selected(workspace_highlight_selection(app, app.credits_selected))
         .with_offset(app.credits_scroll);
 
     frame.render_stateful_widget(list, right_chunks[0], &mut state);
@@ -2834,7 +2842,79 @@ mod tests {
         widgets::Widget,
     };
 
-    use super::{MarkdownHyperlinks, MarkdownLink, markdown_preview, render};
+    use super::{MarkdownHyperlinks, MarkdownLink, markdown_preview, render, workspace_highlight_selection};
+
+    #[test]
+    fn workspace_selection_highlight_is_only_rendered_while_content_has_focus() {
+        let mut app = App {
+            content_focused: false,
+            ..App::default()
+        };
+
+        assert_eq!(workspace_highlight_selection(&app, 4), None);
+
+        app.content_focused = true;
+        assert_eq!(workspace_highlight_selection(&app, 4), Some(4));
+    }
+
+    #[test]
+    fn inactive_workspace_hides_the_row_highlight_without_changing_selection_or_scroll()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let backend = TestBackend::new(100, 32);
+        let mut terminal = Terminal::new(backend)?;
+        let theme = Theme::load("nord")?;
+        let mut app = App {
+            page: Page::Library,
+            content_focused: false,
+            library: papr_core::LibraryState {
+                selected: 0,
+                scroll: 0,
+                papers: vec![LibraryPaper {
+                    id: 1,
+                    title: "Focus Aware Paper".into(),
+                    authors: "Test Author".into(),
+                    doi: None,
+                    arxiv_id: None,
+                    pdf_path: None,
+                    file_size: None,
+                    reading_status: "unread".into(),
+                    is_favorite: false,
+                }],
+                ..papr_core::LibraryState::default()
+            },
+            ..App::default()
+        };
+
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let buffer = terminal.backend().buffer();
+        let index = buffer
+            .content
+            .iter()
+            .position(|cell| cell.symbol() == "F")
+            .expect("paper title should be rendered");
+        let x = u16::try_from(index % usize::from(buffer.area.width)).unwrap_or(0);
+        let y = u16::try_from(index / usize::from(buffer.area.width)).unwrap_or(0);
+        assert_ne!(buffer[(x - 2, y)].symbol(), ">");
+        assert_ne!(buffer[(x, y)].style().bg, Some(theme.surface));
+        assert_eq!(app.library.selected, 0);
+        assert_eq!(app.library.scroll, 0);
+
+        app.content_focused = true;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let buffer = terminal.backend().buffer();
+        let index = buffer
+            .content
+            .iter()
+            .position(|cell| cell.symbol() == "F")
+            .expect("paper title should be rendered");
+        let x = u16::try_from(index % usize::from(buffer.area.width)).unwrap_or(0);
+        let y = u16::try_from(index / usize::from(buffer.area.width)).unwrap_or(0);
+        assert_eq!(buffer[(x - 2, y)].symbol(), ">");
+        assert_eq!(buffer[(x, y)].style().bg, Some(theme.surface));
+        assert_eq!(app.library.selected, 0);
+        assert_eq!(app.library.scroll, 0);
+        Ok(())
+    }
 
     #[test]
     fn markdown_hyperlinks_keep_link_text_intact() {
