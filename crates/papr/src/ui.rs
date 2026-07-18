@@ -2002,7 +2002,7 @@ fn render_discover_empty(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
 }
 
 fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
-    let items = app.discovery.results.iter().map(|paper| {
+    let items = app.discovery.current_page_results().iter().map(|paper| {
         let local_status = app.library.papers.iter().find(|p| {
             if let (Some(ldoi), Some(rdoi)) = (&p.doi, &paper.doi) {
                 if ldoi == rdoi {
@@ -2064,7 +2064,12 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
     let list = List::new(items)
         .block(
             Block::default()
-                .title(format!(" {} RESULTS ", app.discovery.results.len()))
+                .title(format!(
+                    " PAGE {} / {}  |  {} RESULTS  |  Ctrl+Left/Right: page ",
+                    app.discovery.page + 1,
+                    app.discovery.page_count(),
+                    app.discovery.results.len(),
+                ))
                 .borders(Borders::TOP)
                 .border_style(Style::default().fg(theme.border)),
         )
@@ -2075,6 +2080,7 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
         .with_offset(app.discovery.scroll);
     frame.render_stateful_widget(list, area, &mut state);
     app.discovery.scroll = state.offset();
+    app.discovery.store_page_view();
 }
 
 fn compact_authors(paper: &RemotePaper) -> String {
@@ -2156,8 +2162,8 @@ fn render_paper_detail(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
 fn paper_detail_source(app: &App) -> (&[RemotePaper], usize) {
     match app.page {
         Page::Dashboard => (&app.today_papers, app.today_selected),
-        Page::Discover => (&app.discovery.results, app.discovery.selected),
-        _ => (&app.discovery.results, app.discovery.selected),
+        Page::Discover => (app.discovery.current_page_results(), app.discovery.selected),
+        _ => (app.discovery.current_page_results(), app.discovery.selected),
     }
 }
 
@@ -2527,7 +2533,7 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
 fn render_help(frame: &mut Frame<'_>, theme: &Theme) {
     let area = centered(64, 20, frame.area());
     frame.render_widget(Clear, area);
-    let help = "j / k        Move selection\nEnter/Right  Open selection\nLeft         Focus navigation\nh / l        Back / open\nCtrl+b       Browse Papr\n/            Search arXiv\no            Open paper in webpage\nR            Rename PDF / group\nu            Set status of a PDF as unread\nd            Download\nr            Retry failed downloads\nc            Copy citation\nn            Notes\ng            Create / Move to Group\nB            Bookmark\nx            Delete PDF or group\na            Queue / dequeue paper\nq            Close / quit\n?            Toggle this help";
+    let help = "j / k        Move selection\nEnter/Right  Open selection\nLeft         Focus navigation\nh / l        Back / open\nCtrl+b       Browse Papr\n/            Search arXiv\no            Open paper in webpage\nCtrl+Right            Browse next page in Discover\nCtrl+Left            Browse previous page in Discover\nR            Rename PDF / group\nu            Set status of a PDF as unread\nd            Download\nr            Retry failed downloads\nc            Copy citation\nn            Notes\ng            Create / Move to Group\nB            Bookmark\nx            Delete PDF or group\na            Queue / dequeue paper\nq            Close / quit\n?            Toggle this help";
     frame.render_widget(
         Paragraph::new(help)
             .style(Style::default().fg(theme.text))

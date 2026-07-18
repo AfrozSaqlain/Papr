@@ -265,6 +265,8 @@ On Windows, the default PDF viewer is configured as `'cmd /C start msedge ""'`, 
 | --- | --- |
 | `Enter` | Open the detail page for the selected search result |
 | `j` / `k` | Scroll details view |
+| `Ctrl+Right` | Browse next page |
+| `Ctrl+Left` | Browse previous page |
 | `d` | Download PDF |
 | `o` | Open the paper webpage in your default browser |
 | `r` | Refresh/retry the current search |

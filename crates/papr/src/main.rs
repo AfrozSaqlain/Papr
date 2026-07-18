@@ -272,6 +272,9 @@ struct SearchResponse {
     result: Result<Vec<RemotePaper>, String>,
 }
 
+const DISCOVERY_CANDIDATE_LIMIT: u16 = 250;
+const DISCOVERY_FETCH_BATCH_SIZE: u16 = 100;
+
 #[derive(Debug)]
 struct TodayResponse {
     feed_date: String,
@@ -688,8 +691,7 @@ async fn run(
             if response.query == app.discovery.query {
                 match response.result {
                     Ok(papers) => {
-                        app.discovery.results = papers;
-                        app.discovery.selected = 0;
+                        app.discovery.set_results(papers);
                         app.discovery.status = DiscoveryStatus::Ready;
                     }
                     Err(error) => app.discovery.status = DiscoveryStatus::Error(error),
@@ -970,7 +972,11 @@ fn apply_ui_action(
             let response_sender = senders.search.clone();
             tokio::spawn(async move {
                 let result = client
-                    .search(&query, 50)
+                    .search_ranked_candidates(
+                        &query,
+                        DISCOVERY_CANDIDATE_LIMIT,
+                        DISCOVERY_FETCH_BATCH_SIZE,
+                    )
                     .await
                     .map_err(|error| error.to_string());
                 let _ = response_sender.send(SearchResponse { query, result });
@@ -2563,6 +2569,20 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.mode == AppMode::WorkspaceSearch {
         return handle_workspace_search_key(app, key);
     }
+    if app.page == papr_core::Page::Discover
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.code == KeyCode::Right
+    {
+        app.discovery.next_page();
+        return None;
+    }
+    if app.page == papr_core::Page::Discover
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.code == KeyCode::Left
+    {
+        app.discovery.previous_page();
+        return None;
+    }
     let key = normalize_panel_navigation(key);
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         if let Some(command) = navigation_command(key) {
@@ -2659,15 +2679,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.page == papr_core::Page::Discover && key.code == KeyCode::Char('o') {
         return app
             .discovery
-            .results
-            .get(app.discovery.selected)
+            .selected_paper()
             .map(|paper| UiAction::OpenBrowser(paper.id.clone()));
     }
     if app.page == papr_core::Page::Discover && key.code == KeyCode::Char('c') {
         return app
             .discovery
-            .results
-            .get(app.discovery.selected)
+            .selected_paper()
             .cloned()
             .map(|paper| UiAction::CopyCitation(PaperTarget::Remote(Box::new(paper))));
     }
@@ -2679,8 +2697,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     {
         return app
             .discovery
-            .results
-            .get(app.discovery.selected)
+            .selected_paper()
             .cloned()
             .map(UiAction::OpenPaper);
     }
@@ -3576,9 +3593,9 @@ fn selected_remote_target(app: &App) -> Option<PaperTarget> {
 
 fn selected_remote_paper(app: &App) -> Option<&RemotePaper> {
     let (results, selected) = match app.page {
-        papr_core::Page::Dashboard => (&app.today_papers, app.today_selected),
-        papr_core::Page::Discover => (&app.discovery.results, app.discovery.selected),
-        _ => (&app.discovery.results, app.discovery.selected),
+        papr_core::Page::Dashboard => (app.today_papers.as_slice(), app.today_selected),
+        papr_core::Page::Discover => (app.discovery.current_page_results(), app.discovery.selected),
+        _ => (app.discovery.current_page_results(), app.discovery.selected),
     };
     results.get(selected)
 }
@@ -4272,6 +4289,32 @@ mod tests {
     }
 
     #[test]
+    fn discover_control_arrows_switch_cached_result_pages() {
+        let mut app = App {
+            page: Page::Discover,
+            content_focused: true,
+            ..App::default()
+        };
+        app.discovery.set_results(
+            (0..51)
+                .map(|index| {
+                    remote_paper(
+                        &format!("https://arxiv.org/abs/{index}"),
+                        &format!("Paper {index}"),
+                    )
+                })
+                .collect(),
+        );
+
+        assert!(handle_key(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL)).is_none());
+        assert_eq!(app.discovery.page, 1);
+        assert_eq!(app.discovery.current_page_results()[0].title, "Paper 50");
+        assert!(handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL)).is_none());
+        assert_eq!(app.discovery.page, 0);
+        assert_eq!(app.discovery.current_page_results()[0].title, "Paper 0");
+    }
+
+    #[test]
     fn test_workspace_search_greater_than_and_arrow_keys() {
         for page in [
             Page::Library,
@@ -4822,6 +4865,7 @@ mod tests {
                 scroll: 3,
                 status: papr_core::DiscoveryStatus::Ready,
                 detail_scroll: 11,
+                ..papr_core::DiscoveryState::default()
             },
             ..App::default()
         };

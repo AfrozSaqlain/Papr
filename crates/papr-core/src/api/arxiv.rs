@@ -74,8 +74,45 @@ impl ArxivClient {
             }
         }
         let mut papers = self
-            .query(&build_search_query(query), limit, "relevance")
+            .query(&build_search_query(query), 0, limit, "relevance")
             .await?;
+        rank_by_query_relevance(query, &mut papers);
+        Ok(papers)
+    }
+
+    /// Search a larger arXiv candidate set in batches, then rank it once globally.
+    ///
+    /// The returned vector is suitable for client-side pagination: its order is final
+    /// until the caller starts a new search.
+    pub async fn search_ranked_candidates(
+        &self,
+        query: &str,
+        candidate_limit: u16,
+        batch_size: u16,
+    ) -> Result<Vec<RemotePaper>, ArxivError> {
+        if let Some(arxiv_id) = parse_arxiv_id(query) {
+            if let Some(paper) = self.get_by_id(&arxiv_id).await? {
+                return Ok(vec![paper]);
+            }
+        }
+
+        let search_query = build_search_query(query);
+        let total = candidate_limit.clamp(1, 1_000);
+        let batch_size = batch_size.clamp(1, 100);
+        let mut papers = Vec::with_capacity(usize::from(total));
+        let mut start = 0_u16;
+
+        while start < total {
+            let requested = batch_size.min(total - start);
+            let mut batch = self.query(&search_query, start, requested, "relevance").await?;
+            let received = u16::try_from(batch.len()).unwrap_or(u16::MAX);
+            papers.append(&mut batch);
+            if received < requested {
+                break;
+            }
+            start = start.saturating_add(requested);
+        }
+
         rank_by_query_relevance(query, &mut papers);
         Ok(papers)
     }
@@ -86,7 +123,7 @@ impl ArxivClient {
     ///
     /// Returns an error when the request fails or Atom content is malformed.
     pub async fn latest(&self, limit: u16) -> Result<Vec<RemotePaper>, ArxivError> {
-        self.query(LATEST_QUERY, limit, "submittedDate").await
+        self.query(LATEST_QUERY, 0, limit, "submittedDate").await
     }
 
     /// Search arXiv and return the newest matching submissions first.
@@ -104,7 +141,7 @@ impl ArxivClient {
                 return Ok(vec![paper]);
             }
         }
-        self.query(&build_search_query(query), limit, "submittedDate")
+        self.query(&build_search_query(query), 0, limit, "submittedDate")
             .await
     }
 
@@ -129,6 +166,7 @@ impl ArxivClient {
     async fn query(
         &self,
         search_query: &str,
+        start: u16,
         limit: u16,
         sort_by: &str,
     ) -> Result<Vec<RemotePaper>, ArxivError> {
@@ -137,7 +175,7 @@ impl ArxivClient {
             .get(self.endpoint.clone())
             .query(&[
                 ("search_query", search_query.to_owned()),
-                ("start", "0".to_owned()),
+                ("start", start.to_string()),
                 ("max_results", limit.clamp(1, 100).to_string()),
                 ("sortBy", sort_by.to_owned()),
                 ("sortOrder", "descending".to_owned()),

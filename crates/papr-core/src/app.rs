@@ -182,14 +182,93 @@ pub struct DiscoveryState {
     pub query_cursor: usize,
     /// Papers returned by the most recent request.
     pub results: Vec<RemotePaper>,
+    /// Zero-based page in the globally ranked result cache.
+    pub page: usize,
     /// Selected result row.
     pub selected: usize,
     /// Vertical list scroll offset.
     pub scroll: usize,
+    /// Remembered selection for each cached page.
+    pub page_selections: Vec<usize>,
+    /// Remembered scroll offset for each cached page.
+    pub page_scrolls: Vec<usize>,
     /// Network request state.
     pub status: DiscoveryStatus,
     /// Vertical detail-page scroll offset.
     pub detail_scroll: u16,
+}
+
+impl DiscoveryState {
+    /// Number of results displayed on one Discover page.
+    pub const PAGE_SIZE: usize = 50;
+
+    /// Number of available pages in the globally ranked result cache.
+    #[must_use]
+    pub fn page_count(&self) -> usize {
+        self.results.len().div_ceil(Self::PAGE_SIZE)
+    }
+
+    /// Results belonging to the currently visible page.
+    #[must_use]
+    pub fn current_page_results(&self) -> &[RemotePaper] {
+        let start = self.page.saturating_mul(Self::PAGE_SIZE).min(self.results.len());
+        let end = (start + Self::PAGE_SIZE).min(self.results.len());
+        &self.results[start..end]
+    }
+
+    /// Selected paper on the currently visible page.
+    #[must_use]
+    pub fn selected_paper(&self) -> Option<&RemotePaper> {
+        self.current_page_results().get(self.selected)
+    }
+
+    /// Replace the cached result set after one globally ranked search.
+    pub fn set_results(&mut self, results: Vec<RemotePaper>) {
+        self.results = results;
+        self.page = 0;
+        self.selected = 0;
+        self.scroll = 0;
+        self.page_selections = vec![0; self.page_count()];
+        self.page_scrolls = vec![0; self.page_count()];
+    }
+
+    /// Move to the next cached page, preserving the current page view state.
+    pub fn next_page(&mut self) -> bool {
+        if self.page + 1 >= self.page_count() {
+            return false;
+        }
+        self.store_page_view();
+        self.page += 1;
+        self.restore_page_view();
+        true
+    }
+
+    /// Move to the previous cached page, preserving the current page view state.
+    pub fn previous_page(&mut self) -> bool {
+        if self.page == 0 {
+            return false;
+        }
+        self.store_page_view();
+        self.page -= 1;
+        self.restore_page_view();
+        true
+    }
+
+    /// Save the current page's selection and scroll offset after rendering.
+    pub fn store_page_view(&mut self) {
+        if let Some(selection) = self.page_selections.get_mut(self.page) {
+            *selection = self.selected;
+        }
+        if let Some(scroll) = self.page_scrolls.get_mut(self.page) {
+            *scroll = self.scroll;
+        }
+    }
+
+    fn restore_page_view(&mut self) {
+        self.selected = self.page_selections.get(self.page).copied().unwrap_or(0);
+        self.scroll = self.page_scrolls.get(self.page).copied().unwrap_or(0);
+        self.selected = self.selected.min(self.current_page_results().len().saturating_sub(1));
+    }
 }
 
 /// An item in the hierarchical collection search view.
@@ -805,6 +884,7 @@ impl App {
                     self.today_selected = self.today_selected.saturating_sub(1);
                 } else if self.page == Page::Discover {
                     self.discovery.selected = self.discovery.selected.saturating_sub(1);
+                    self.discovery.store_page_view();
                 } else if self.page == Page::Library {
                     if self.library.selected == 0 {
                         self.mode = AppMode::WorkspaceSearch;
@@ -880,7 +960,8 @@ impl App {
                         (self.today_selected + 1).min(self.today_papers.len().saturating_sub(1));
                 } else if self.page == Page::Discover {
                     self.discovery.selected = (self.discovery.selected + 1)
-                        .min(self.discovery.results.len().saturating_sub(1));
+                        .min(self.discovery.current_page_results().len().saturating_sub(1));
+                    self.discovery.store_page_view();
                 } else if self.page == Page::Library {
                     self.library.selected = (self.library.selected + 1)
                         .min(self.filtered_library_papers().len().saturating_sub(1));
@@ -1052,7 +1133,26 @@ fn parse_arxiv_id(s: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, Command, Page};
+    use chrono::Utc;
+
+    use crate::models::RemotePaper;
+
+    use super::{App, Command, DiscoveryState, Page};
+
+    fn remote_paper(index: usize) -> RemotePaper {
+        RemotePaper {
+            id: format!("https://arxiv.org/abs/2501.{index:05}"),
+            title: format!("Paper {index}"),
+            authors: Vec::new(),
+            abstract_text: String::new(),
+            published: Utc::now(),
+            updated: Utc::now(),
+            categories: Vec::new(),
+            pdf_url: None,
+            doi: None,
+            journal_ref: None,
+        }
+    }
 
     #[test]
     fn navigation_is_bounded_and_opens_selection() {
@@ -1062,6 +1162,32 @@ mod tests {
         app.dispatch(Command::MoveDown);
         app.dispatch(Command::Open);
         assert_eq!(app.page, Page::Discover);
+    }
+
+    #[test]
+    fn discovery_pages_cache_results_and_restore_each_page_view() {
+        let mut discovery = DiscoveryState::default();
+        discovery.set_results((0..101).map(remote_paper).collect());
+
+        assert_eq!(discovery.page_count(), 3);
+        assert_eq!(discovery.current_page_results().len(), 50);
+        assert_eq!(discovery.current_page_results()[0].title, "Paper 0");
+
+        discovery.selected = 17;
+        discovery.scroll = 9;
+        assert!(discovery.next_page());
+        assert_eq!(discovery.page, 1);
+        assert_eq!(discovery.selected, 0);
+        assert_eq!(discovery.scroll, 0);
+        assert_eq!(discovery.current_page_results()[0].title, "Paper 50");
+
+        discovery.selected = 4;
+        discovery.scroll = 2;
+        assert!(discovery.previous_page());
+        assert_eq!((discovery.page, discovery.selected, discovery.scroll), (0, 17, 9));
+        assert!(discovery.next_page());
+        assert_eq!((discovery.page, discovery.selected, discovery.scroll), (1, 4, 2));
+        assert_eq!(discovery.results.len(), 101);
     }
 
     #[test]
