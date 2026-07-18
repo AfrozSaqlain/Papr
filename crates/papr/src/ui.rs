@@ -261,7 +261,7 @@ fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
     let collections = app.filtered_collections();
     if collections.is_empty() {
         frame.render_widget(
-            Paragraph::new("No collections yet. Select a paper and press s to create one.")
+            Paragraph::new("No groups yet. Select a paper and press g to create one.")
                 .alignment(Alignment::Center)
                 .style(Style::default().fg(theme.muted)),
             area,
@@ -302,7 +302,7 @@ fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
     let list = List::new(items)
         .block(
             Block::default()
-                .title(" COLLECTIONS - ENTER VIEW  c NEW  R RENAME ")
+                .title(" GROUPS - ENTER VIEW  g NEW  R RENAME x Delete")
                 .borders(Borders::TOP)
                 .border_style(Style::default().fg(theme.border)),
         )
@@ -323,7 +323,7 @@ fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
     let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(4)]).split(area);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("Collections / ", Style::default().fg(theme.muted)),
+            Span::styled("Groups / ", Style::default().fg(theme.muted)),
             Span::styled(
                 &collection.name,
                 Style::default()
@@ -339,7 +339,7 @@ fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
     );
     if papers.is_empty() {
         frame.render_widget(
-            Paragraph::new("No papers are assigned to this collection.")
+            Paragraph::new("No papers are assigned to this group.")
                 .alignment(Alignment::Center)
                 .style(Style::default().fg(theme.muted)),
             rows[1],
@@ -891,7 +891,7 @@ fn activity_kind(kind: &str) -> &str {
         "downloaded" => "Downloaded",
         "bookmarked" => "Bookmark changed",
         "tagged" => "Legacy organization event",
-        "collected" => "Added to collection",
+        "collected" => "Added to group",
         _ => kind,
     }
 }
@@ -1318,8 +1318,8 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
             title.as_str(),
         ),
         DeletionTarget::Collection { name, .. } => (
-            " CONFIRM DELETE COLLECTION ",
-            "Are you sure you want to permanently delete this collection (subdirectory) and ALL of its contents?",
+            " CONFIRM DELETE GROUP ",
+            "Are you sure you want to permanently delete this group (subdirectory) and ALL of its contents?",
             name.as_str(),
         ),
     };
@@ -1356,11 +1356,11 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let title = if renaming_pdf {
         " RENAME PDF "
     } else if renaming {
-        " RENAME COLLECTION "
+        " RENAME GROUP "
     } else if creating {
-        " CREATE COLLECTION "
+        " CREATE GROUP "
     } else {
-        " CHOOSE OR CREATE COLLECTION "
+        " CHOOSE OR CREATE GROUP "
     };
     let prefix = if renaming || creating || renaming_pdf {
         "> "
@@ -1392,7 +1392,7 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     if has_current {
         lines.push(Line::styled(
             format!(
-                "Current collection: {}",
+                "Current group: {}",
                 prompt.current_collection.as_ref().unwrap()
             ),
             Style::default().fg(theme.muted),
@@ -1409,7 +1409,7 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
 
     if !renaming && !creating && !renaming_pdf {
         lines.push(Line::styled(
-            "Or select an existing collection:",
+            "Or select an existing group:",
             Style::default().fg(theme.muted),
         ));
         let start = prompt.selected.saturating_sub(5);
@@ -1921,7 +1921,7 @@ fn render_paper_detail(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         rows[1],
     );
     frame.render_widget(
-        Paragraph::new("j/k scroll  h back  d download  n note  t tag  s collection  B bookmark")
+        Paragraph::new("j/k scroll  h back  d download  n note  t tag  g group  B bookmark")
             .style(Style::default().fg(theme.muted)),
         rows[2],
     );
@@ -2197,7 +2197,7 @@ fn render_dashboard_details(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
                 Style::default().fg(theme.accent),
             ),
             Line::styled(
-                format!("Collections  {}", app.dashboard.collections),
+                format!("Groups  {}", app.dashboard.collections),
                 Style::default().fg(theme.muted),
             ),
         ]),
@@ -2297,7 +2297,7 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
 fn render_help(frame: &mut Frame<'_>, theme: &Theme) {
     let area = centered(64, 20, frame.area());
     frame.render_widget(Clear, area);
-    let help = "j / k        Move selection\nEnter/Right  Open selection\nLeft         Focus navigation\nh / l        Back / open\nCtrl+p       Command palette\n/            Search arXiv\no            Open paper in webpage\nR            Rename PDF / collection\nu            Set status of a PDF as unread\nd            Download\nr            Retry failed downloads\nc            Copy citation\nn            Notes\ns            Create / Move to Collection\nB            Bookmark\nx            Delete PDF or collection\na            Queue / dequeue paper\nq            Close / quit\n?            Toggle this help";
+    let help = "j / k        Move selection\nEnter/Right  Open selection\nLeft         Focus navigation\nh / l        Back / open\nCtrl+p       Command palette\n/            Search arXiv\no            Open paper in webpage\nR            Rename PDF / group\nu            Set status of a PDF as unread\nd            Download\nr            Retry failed downloads\nc            Copy citation\nn            Notes\ng            Create / Move to Group\nB            Bookmark\nx            Delete PDF or group\na            Queue / dequeue paper\nq            Close / quit\n?            Toggle this help";
     frame.render_widget(
         Paragraph::new(help)
             .style(Style::default().fg(theme.text))
@@ -2499,7 +2499,7 @@ fn build_paper_lines<'a>(
         stats_spans.push(Span::styled(format!("page {page}"), Style::default().fg(theme.muted)));
     }
 
-    // 3. Collection (if any)
+    // 3. Group (if any)
     let collection_name = paper_id.and_then(|id| get_paper_collection_name(app, id));
     if let Some(col_name) = collection_name {
         if !stats_spans.is_empty() {

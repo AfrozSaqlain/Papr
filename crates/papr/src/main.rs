@@ -1248,7 +1248,7 @@ fn apply_ui_action(
             refresh_organization(&runtime.database, &runtime.library_roots, app)?;
             refresh_dashboard(runtime, app)?;
             refresh_downloads(runtime, app);
-            app.toast = Some("Collection permanently deleted".into());
+            app.toast = Some("Group permanently deleted".into());
         }
     }
     Ok(())
@@ -1327,7 +1327,7 @@ fn apply_collection_prompt(
             .collections
             .iter()
             .find(|item| item.id == collection_id)
-            .context("collection no longer exists")?;
+            .context("group no longer exists")?;
         let old = collection.folder_path.as_ref().map_or_else(
             || runtime.primary_library_root.join(&collection.name),
             PathBuf::from,
@@ -1336,7 +1336,7 @@ fn apply_collection_prompt(
             .parent()
             .unwrap_or(&runtime.primary_library_root)
             .join(name);
-        std::fs::rename(&old, &new).context("failed to rename collection directory")?;
+        std::fs::rename(&old, &new).context("failed to rename group directory")?;
         if let Err(error) = runtime
             .database
             .rename_collection(collection_id, name, &old, &new)
@@ -1360,10 +1360,10 @@ fn apply_collection_prompt(
             .iter()
             .any(|collection| collection.name.eq_ignore_ascii_case(name))
         {
-            anyhow::bail!("a collection with this name already exists");
+            anyhow::bail!("a group with this name already exists");
         }
         let folder = runtime.primary_library_root.join(name);
-        std::fs::create_dir(&folder).context("failed to create collection directory")?;
+        std::fs::create_dir(&folder).context("failed to create group directory")?;
         if let Err(error) = runtime.database.create_collection(name, &folder) {
             let _ = std::fs::remove_dir(&folder);
             return Err(error.into());
@@ -1372,13 +1372,13 @@ fn apply_collection_prompt(
     }
     let paper_id = prompt
         .paper_id
-        .context("collection assignment has no paper")?;
+        .context("group assignment has no paper")?;
     let paper = app
         .library
         .papers
         .iter()
         .find(|paper| paper.id == paper_id)
-        .context("paper must have a local PDF before collection assignment")?;
+        .context("paper must have a local PDF before group assignment")?;
     let source = PathBuf::from(paper.pdf_path.as_ref().context("paper has no local PDF")?);
     let existing = app
         .collections
@@ -1402,7 +1402,7 @@ fn apply_collection_prompt(
     let destination = folder.join(source.file_name().context("PDF path has no filename")?);
     if source != destination {
         if destination.exists() {
-            anyhow::bail!("a PDF with this filename already exists in the collection");
+            anyhow::bail!("a PDF with this filename already exists in the group");
         }
         move_pdf_file(&source, &destination)?;
     }
@@ -1456,7 +1456,7 @@ fn move_pdf_file(source: &Path, destination: &Path) -> Result<()> {
 
 fn validate_collection_name(name: &str) -> Result<()> {
     if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
-        anyhow::bail!("collection name must be one safe directory name");
+        anyhow::bail!("group name must be one safe directory name");
     }
     Ok(())
 }
@@ -2812,7 +2812,7 @@ fn bookmark_action(app: &App, key: KeyEvent) -> Option<UiAction> {
             path: PathBuf::from(&bookmark.pdf_path),
         }),
         KeyCode::Char('n') => Some(UiAction::OpenNote(PaperTarget::Local(bookmark.paper_id))),
-        KeyCode::Char('s') => Some(UiAction::Prompt(PaperTarget::Local(bookmark.paper_id))),
+        KeyCode::Char('g') => Some(UiAction::Prompt(PaperTarget::Local(bookmark.paper_id))),
         KeyCode::Char('R') => Some(UiAction::RenamePdf(bookmark.paper_id)),
         KeyCode::Char('x') => Some(UiAction::ConfirmDeletePaper {
             paper_id: bookmark.paper_id,
@@ -2853,7 +2853,7 @@ fn handle_notes_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         }
         KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(paper.id))),
         KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(paper.id))),
-        KeyCode::Char('s') => Some(UiAction::Prompt(PaperTarget::Local(paper.id))),
+        KeyCode::Char('g') => Some(UiAction::Prompt(PaperTarget::Local(paper.id))),
         KeyCode::Char('R') => Some(UiAction::RenamePdf(paper.id)),
         KeyCode::Char('x') => Some(UiAction::ConfirmDeletePaper {
             paper_id: paper.id,
@@ -2895,7 +2895,7 @@ fn handle_reading_queue_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(paper.id))),
         KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(paper.id))),
         KeyCode::Char('n') => Some(UiAction::OpenNote(PaperTarget::Local(paper.id))),
-        KeyCode::Char('s') => Some(UiAction::Prompt(PaperTarget::Local(paper.id))),
+        KeyCode::Char('g') => Some(UiAction::Prompt(PaperTarget::Local(paper.id))),
         KeyCode::Char('R') => Some(UiAction::RenamePdf(paper.id)),
         KeyCode::Char('x') => Some(UiAction::ConfirmDeletePaper {
             paper_id: paper.id,
@@ -2934,7 +2934,7 @@ fn handle_downloads_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
     if matches!(
         key.code,
-        KeyCode::Char('R') | KeyCode::Char('s') | KeyCode::Char('B') | KeyCode::Char('n') | KeyCode::Char('c') | KeyCode::Char('x')
+        KeyCode::Char('R') | KeyCode::Char('g') | KeyCode::Char('B') | KeyCode::Char('n') | KeyCode::Char('c') | KeyCode::Char('x')
     ) {
         if let Some(task) = app.filtered_downloads().get(app.download_selected).cloned().cloned() {
             if matches!(task.status, DownloadStatus::Completed) {
@@ -2960,7 +2960,7 @@ fn handle_downloads_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                     app.modal_return = AppMode::Normal;
                     return match key.code {
                         KeyCode::Char('R') => Some(UiAction::RenamePdf(paper_id)),
-                        KeyCode::Char('s') => Some(UiAction::Prompt(PaperTarget::Local(paper_id))),
+                        KeyCode::Char('g') => Some(UiAction::Prompt(PaperTarget::Local(paper_id))),
                         KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(paper_id))),
                         KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(paper_id))),
                         KeyCode::Char('n') => Some(UiAction::OpenNote(PaperTarget::Local(paper_id))),
@@ -3080,7 +3080,7 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
                         .map(|&paper| UiAction::RenamePdf(paper.id)),
                 );
             }
-            KeyCode::Char('s') => {
+            KeyCode::Char('g') => {
                 return (
                     true,
                     app.filtered_collection_papers()
@@ -3156,7 +3156,7 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
                 if key.code == KeyCode::Char('R') {
                     return (true, Some(UiAction::RenamePdf(paper.id)));
                 }
-                if key.code == KeyCode::Char('s') {
+                if key.code == KeyCode::Char('g') {
                     return (true, Some(UiAction::Prompt(PaperTarget::Local(paper.id))));
                 }
                 if key.code == KeyCode::Char('n') {
@@ -3175,7 +3175,7 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
             }
         }
     }
-    if matches!(key.code, KeyCode::Char('c' | 'n')) {
+    if key.code == KeyCode::Char('g') {
         return (true, Some(UiAction::CreateCollection));
     }
     (false, None)
@@ -3229,7 +3229,7 @@ fn handle_author_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction>) {
                         .map(|&paper| UiAction::RenamePdf(paper.id)),
                 );
             }
-            KeyCode::Char('s') => {
+            KeyCode::Char('g') => {
                 return (
                     true,
                     app.filtered_author_papers()
@@ -3482,7 +3482,7 @@ fn handle_paper_detail_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         KeyCode::Char('o') => {
             return selected_remote_paper(app).map(|paper| UiAction::OpenBrowser(paper.id.clone()));
         }
-        KeyCode::Char('n' | 's') => {
+        KeyCode::Char('n' | 'g') => {
             app.modal_return = AppMode::PaperDetail;
             let target = selected_remote_target(app)?;
             return Some(match key.code {
@@ -3504,7 +3504,7 @@ fn handle_library_metadata_key(app: &mut App, key: KeyEvent) -> Option<UiAction>
     app.modal_return = AppMode::Normal;
     match key.code {
         KeyCode::Char('n') => Some(UiAction::OpenNote(target)),
-        KeyCode::Char('s') => Some(UiAction::Prompt(target)),
+        KeyCode::Char('g') => Some(UiAction::Prompt(target)),
         KeyCode::Char('B') => Some(UiAction::Bookmark(target)),
         KeyCode::Char('c') => Some(UiAction::CopyCitation(target)),
         KeyCode::Char('R') => {
@@ -4683,7 +4683,7 @@ mod tests {
     }
 
     #[test]
-    fn downloads_keybinding_s_assigns_to_collection() {
+    fn downloads_keybinding_g_assigns_to_group() {
         let library_paper = LibraryPaper {
             id: 11,
             title: "Library Paper".into(),
@@ -4719,7 +4719,7 @@ mod tests {
         assert!(matches!(
             handle_key(
                 &mut downloads_app,
-                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)
+                KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)
             ),
             Some(UiAction::Prompt(PaperTarget::Local(11)))
         ));

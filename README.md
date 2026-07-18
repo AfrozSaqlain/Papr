@@ -22,9 +22,9 @@ Papr is implemented in Rust to meet the performance, reliability, and security d
 * **arXiv Explorer:** Search the arXiv repository by title, author, category, abstract, or DOI. View full metadata, category listings, and journal references directly.
 * **Automatic Title Sanitization:** Downloads PDFs in the background and automatically names them using their sanitized, cross-platform paper titles rather than legacy arXiv identifiers.
 * **Duplicate Merging:** Automatically resolves SQLite unique constraint conflicts (`arxiv_id`, `pdf_path`, `doi`) by merging duplicate entries (preserves notes, bookmarks, and progress) during downloads and scans.
-* **Consistent Workspace Actions:** Manage notes (`n`), bookmarks (`B`), collections (`s`), and file renames (`R`) uniformly across the Library, Collections, Bookmarks, and Downloads tabs.
+* **Consistent Workspace Actions:** Manage notes (`n`), bookmarks (`B`), groups (`g`), and file renames (`R`) uniformly across the Library, Groups, Bookmarks, and Downloads tabs.
 * **Accurate Storage Statistics:** Monitor reading statistics, active streaks, and disk usage. Folders are canonicalized to prevent duplicate PDF counts, even if your downloads folder is nested within a library path.
-* **Filesystem-Synced Collections:** Move papers into collections inside the TUI to automatically rename and migrate files on your disk.
+* **Filesystem-Synced Groups:** Move papers into groups inside the TUI to automatically rename and migrate files on your disk.
 * **Markdown Annotation:** Take dedicated, auto-saved notes per paper. Features a styled Markdown live preview accessible with the `Tab` key.
 * **Built-in PDF Viewer:** View PDFs directly inside the terminal using high-performance Sixel or Kitty graphics protocols, with smooth physics-based scrolling.
 * **Process-Isolated Plugins:** Extend the application through process-isolated plugins using a versioned JSON RPC protocol.
@@ -282,7 +282,7 @@ Currently supported actions include:
 | Action              | Description                                         |
 | ------------------- | --------------------------------------------------- |
 | `notify`            | Display a non-blocking notification toast.          |
-| `add_to_collection` | Automatically assign a paper to a named collection. |
+| `add_to_collection` | Automatically assign a paper to a named group. |
 
 This request-response model keeps plugins simple while allowing the core application to remain in control.
 
@@ -290,7 +290,7 @@ This request-response model keeps plugins simple while allowing the core applica
 
 #### Auto Tagger (Python)
 
-Automatically categorizes newly added papers into collections based on title or abstract keywords.
+Automatically categorizes newly added papers into groups based on title or abstract keywords.
 
 **Capabilities**
 
@@ -329,7 +329,7 @@ name = "Auto Tagger"
 version = "1.0.0"
 api_version = 1
 
-description = "Automatically categorizes papers into collections based on keyword rules"
+description = "Automatically categorizes papers into groups based on keyword rules"
 
 executable = "tagger.py"
 
@@ -433,7 +433,7 @@ This architecture makes plugins:
 4. Use `j`/`k` to select a result and press `Enter` to open the detail view.
 5. Press `d` to download the paper.
 6. Open the **Downloads** tab. Once completed, press `Enter` to open the PDF.
-7. Use `B` to toggle bookmarks, `n` to edit notes, or `s` to categorize it into a collection.
+7. Use `B` to toggle bookmarks, `n` to edit notes, or `g` to assign it to a group.
 
 ---
 
@@ -443,11 +443,11 @@ This architecture makes plugins:
 * **Discover:** Search arXiv, explore paper metadata, and queue background downloads.
 * **Library:** View all indexed local PDFs within your configured folders.
 * **Reading Queue:** A prioritized list of papers you plan to read next. Supports reordering/prioritization with `K`/`J` (or Shift/Ctrl + Up/Down) and toggling with `a` key.
-* **Collections:** Paper groups mapping directly to subdirectories in your library.
+* **Groups:** Paper groups mapping directly to subdirectories in your library.
 * **Bookmarks:** Quick-access list of bookmarked local PDFs.
 * **Authors:** Browse local papers grouped by author name.
 * **Notes:** Search and browse all your paper-linked Markdown notes.
-* **Downloads:** Active, completed, and failed downloads. Supports `B`, `n`, `s`, and `R` actions on completed downloads.
+* **Downloads:** Active, completed, and failed downloads. Supports `B`, `n`, `g`, and `R` actions on completed downloads.
 * **History:** A chronological log of searches, downloads, and paper opens.
 * **Statistics:** Detailed reading streaks, totals, top dimensions, and a 12-week reading heatmap.
 * **Settings:** Quick summary of active paths, configurations, and plugins.
@@ -484,18 +484,18 @@ This architecture makes plugins:
 | `r` | Refresh/retry the current search |
 | `h` / `Esc` | Return to results |
 
-### Library, Reading Queue, Collections, Bookmarks, Authors. Notes and Downloads
+### Library, Reading Queue, Groups, Bookmarks, Authors. Notes and Downloads
 
 | Key | Action |
 | --- | --- |
 | `Enter` / `Right` / `l` | Open the PDF in your default viewer |
 | `r` | Scan library folders for new files / Retry failed downloads |
 | `n` | Edit Markdown note |
-| `s` | Move PDF file to a collection folder |
+| `g` | Move PDF file to a group folder |
 | `B` | Toggle bookmark |
 | `>` | Toggle local search |
-| `R` | Rename a PDF file or collection folder |
-| `x` | Delete a PDF file or collection folder |
+| `R` | Rename a PDF file or group folder |
+| `x` | Delete a PDF file or group folder |
 | `c` | Copy citation |
 
 ### Internal PDF Viewer
@@ -532,8 +532,8 @@ category: gr-qc
 ```
 Open a paper details page and press `d`. Papr automatically downloads the PDF, names it using its sanitized paper title, and saves it. If the paper already exists in your library, Papr automatically merges the records so you don't end up with duplicate metadata.
 
-### Organizing Into Collections
-Collections sync directly with folders on your drive. When you select a paper and press `s`, you can choose a collection or type a new name. Papr creates the folder and moves the PDF file there automatically, keeping your physical directories clean.
+### Organizing Into Groups
+Groups sync directly with folders on your drive. When you select a paper and press `g`, you can choose a group or type a new name. Papr creates the folder and moves the PDF file there automatically, keeping your physical directories clean.
 
 ### Writing Notes
 Press `n` on any paper to open the Markdown editor. Jot down summaries, math, or ideas. Tap `Tab` to preview your formatting, and hit `Esc` to save it straight to the SQLite database.

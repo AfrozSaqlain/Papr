@@ -17,7 +17,7 @@ pub enum Page {
     Library,
     /// Prioritized reading lists.
     ReadingQueue,
-    /// User-defined paper collections.
+    /// User-defined paper groups.
     Collections,
     /// Saved papers and locations.
     Bookmarks,
@@ -78,7 +78,7 @@ impl Page {
             Self::Discover => "Discover",
             Self::Library => "Library",
             Self::ReadingQueue => "Reading Queue",
-            Self::Collections => "Collections",
+            Self::Collections => "Groups",
             Self::Bookmarks => "Bookmarks",
             Self::Authors => "Authors",
             Self::Notes => "Notes",

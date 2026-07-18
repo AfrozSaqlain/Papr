@@ -42,7 +42,7 @@ Response:
 
 Supported capabilities are metadata-provider, commands, activity-events, and
 read-paper-metadata. Supported response actions are notify and
-add_to_collection.
+add_to_collection (assign the paper to a Group).
 
 Plugins must treat requests as independent and should finish quickly. The host
 enforces an invocation timeout and rejects output larger than 1 MiB.
