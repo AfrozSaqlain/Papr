@@ -1874,7 +1874,8 @@ impl Database {
             paper_id
         };
         transaction.execute(
-            "UPDATE papers SET enrichment_status = 'success' WHERE id = ?1",
+            "UPDATE papers SET enrichment_status = 'success',
+             last_enrichment_attempt = CURRENT_TIMESTAMP WHERE id = ?1",
             [target_id],
         )?;
         transaction.execute("DELETE FROM paper_authors WHERE paper_id = ?1", [target_id])?;
@@ -1913,7 +1914,7 @@ impl Database {
     ) -> Result<(), DatabaseError> {
         self.connection.execute(
             "UPDATE papers SET journal = CASE WHEN journal IS NULL OR trim(journal) = '' THEN ?1 ELSE journal END,
-             enrichment_status = 'success' WHERE id = ?2",
+             enrichment_status = 'success', last_enrichment_attempt = CURRENT_TIMESTAMP WHERE id = ?2",
             params![journal.trim(), paper_id],
         )?;
         Ok(())
@@ -2847,6 +2848,12 @@ mod tests {
         database.update_enrichment_status(id1, "unavailable")?;
         let needing = database.papers_needing_enrichment()?;
         assert_eq!(needing.len(), 0);
+        database.connection.execute(
+            "UPDATE papers SET enrichment_status = 'success', journal = NULL,
+             last_enrichment_attempt = CURRENT_TIMESTAMP WHERE id = ?1",
+            [id1],
+        )?;
+        assert_eq!(database.papers_needing_enrichment()?.len(), 0);
         database.connection.execute(
             "UPDATE papers SET enrichment_status = 'success', journal = NULL,
              last_enrichment_attempt = datetime('now', '-25 hours') WHERE id = ?1",
