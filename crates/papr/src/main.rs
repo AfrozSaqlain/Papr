@@ -972,14 +972,8 @@ fn apply_ui_action(
         UiAction::OpenPaper(paper) => {
             let paper_id = runtime.database.ensure_remote_paper(&paper)?;
             runtime.database.record_activity("paper_browsed", Some(paper_id), None)?;
-            if app.page == papr_core::Page::Dashboard {
-                app.discovery.results.clone_from(&app.today_papers);
-                app.discovery.selected = app
-                    .today_selected
-                    .min(app.discovery.results.len().saturating_sub(1));
-            }
             app.mode = AppMode::PaperDetail;
-            app.discovery.detail_scroll = 0;
+            app.paper_detail_scroll = 0;
             refresh_paper_views(runtime, app)?;
         }
         UiAction::OpenBrowser(url) => open_browser(&url, app),
@@ -2278,6 +2272,32 @@ fn discover_local_downloads(
     }
 }
 
+fn sanitize_download_filename_component(title: &str) -> String {
+    let sanitized: String = title
+        .chars()
+        .map(|c| match c {
+            '/' => '_',
+            '\n' | '\r' | '\t' => ' ',
+            #[cfg(windows)]
+            ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            #[cfg(windows)]
+            c if c.is_control() => ' ',
+            #[cfg(not(windows))]
+            c if c.is_control() => c,
+            c => c,
+        })
+        .collect();
+    let sanitized = sanitized.trim();
+    #[cfg(windows)]
+    {
+        sanitized.trim_end_matches(['.', ' ']).to_owned()
+    }
+    #[cfg(not(windows))]
+    {
+        sanitized.to_owned()
+    }
+}
+
 fn start_download(
     paper: RemotePaper,
     directory: &std::path::Path,
@@ -2307,25 +2327,18 @@ fn start_download(
     if pending.contains_key(&paper.id) {
         return;
     }
-    let sanitized_title: String = paper
-        .title
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            '\n' | '\r' | '\t' => ' ',
-            c => c,
-        })
-        .collect();
-    let sanitized_title = sanitized_title.trim();
+    let sanitized_title = sanitize_download_filename_component(&paper.title);
     let filename = if sanitized_title.is_empty() {
         paper
             .id
             .rsplit('/')
             .next()
             .unwrap_or("paper")
-            .replace(['/', '\\'], "_")
+            .chars()
+            .map(|c| if c == '/' { '_' } else { c })
+            .collect()
     } else {
-        sanitized_title.to_string()
+        sanitized_title
     };
     let destination = directory.join(format!("{filename}.pdf"));
     let id = paper.id.clone();
@@ -3455,28 +3468,19 @@ fn handle_paper_detail_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     match key.code {
         KeyCode::Esc | KeyCode::Left | KeyCode::Char('h' | 'q') => app.dispatch(Command::Back),
         KeyCode::Char('j') | KeyCode::Down => {
-            app.discovery.detail_scroll = app.discovery.detail_scroll.saturating_add(1);
+            app.paper_detail_scroll = app.paper_detail_scroll.saturating_add(1);
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            app.discovery.detail_scroll = app.discovery.detail_scroll.saturating_sub(1);
+            app.paper_detail_scroll = app.paper_detail_scroll.saturating_sub(1);
         }
         KeyCode::Char('d') => {
-            return app
-                .discovery
-                .results
-                .get(app.discovery.selected)
-                .cloned()
-                .map(UiAction::Download);
+            return selected_remote_paper(app).cloned().map(UiAction::Download);
         }
         KeyCode::Char('c') => {
             return selected_remote_target(app).map(UiAction::CopyCitation);
         }
         KeyCode::Char('o') => {
-            return app
-                .discovery
-                .results
-                .get(app.discovery.selected)
-                .map(|paper| UiAction::OpenBrowser(paper.id.clone()));
+            return selected_remote_paper(app).map(|paper| UiAction::OpenBrowser(paper.id.clone()));
         }
         KeyCode::Char('n' | 's') => {
             app.modal_return = AppMode::PaperDetail;
@@ -3515,12 +3519,19 @@ fn handle_library_metadata_key(app: &mut App, key: KeyEvent) -> Option<UiAction>
 }
 
 fn selected_remote_target(app: &App) -> Option<PaperTarget> {
-    app.discovery
-        .results
-        .get(app.discovery.selected)
+    selected_remote_paper(app)
         .cloned()
         .map(Box::new)
         .map(PaperTarget::Remote)
+}
+
+fn selected_remote_paper(app: &App) -> Option<&RemotePaper> {
+    let (results, selected) = match app.page {
+        papr_core::Page::Dashboard => (&app.today_papers, app.today_selected),
+        papr_core::Page::Discover => (&app.discovery.results, app.discovery.selected),
+        _ => (&app.discovery.results, app.discovery.selected),
+    };
+    results.get(selected)
 }
 
 fn selected_library_pdf(app: &App) -> Option<(i64, PathBuf)> {
@@ -4747,6 +4758,39 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_open_keeps_discover_results_independent() {
+        let dashboard_paper = remote_paper("https://arxiv.org/abs/dashboard", "Dashboard Paper");
+        let discover_paper = remote_paper("https://arxiv.org/abs/discover", "Discover Paper");
+        let mut app = App {
+            page: Page::Dashboard,
+            content_focused: true,
+            today_papers: vec![dashboard_paper],
+            discovery: papr_core::DiscoveryState {
+                query: "search".into(),
+                query_cursor: 6,
+                results: vec![discover_paper],
+                selected: 0,
+                scroll: 3,
+                status: papr_core::DiscoveryStatus::Ready,
+                detail_scroll: 11,
+            },
+            ..App::default()
+        };
+
+        app.dispatch(papr_core::Command::Open);
+
+        assert_eq!(app.mode, AppMode::PaperDetail);
+        assert_eq!(app.paper_detail_scroll, 0);
+        assert_eq!(app.discovery.query, "search");
+        assert_eq!(app.discovery.query_cursor, 6);
+        assert_eq!(app.discovery.scroll, 3);
+        assert_eq!(app.discovery.selected, 0);
+        assert_eq!(app.discovery.detail_scroll, 11);
+        assert_eq!(app.discovery.results.len(), 1);
+        assert_eq!(app.discovery.results[0].title, "Discover Paper");
+    }
+
+    #[test]
     fn note_editor_emits_autosave_action() {
         let mut app = App {
             mode: AppMode::NoteEdit,
@@ -5031,5 +5075,132 @@ mod tests {
         // Enter key should trigger UiAction::OpenBrowser(url)
         let action = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(action, Some(UiAction::OpenBrowser(ref url)) if url == "https://github.com/AfrozSaqlain/Papr"));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn download_filename_preserves_colon_on_supported_platforms() {
+        let sanitized = super::sanitize_download_filename_component("AntiGlitch: Better / Faster");
+        assert_eq!(sanitized, "AntiGlitch: Better _ Faster");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn download_filename_sanitizes_colon_on_windows() {
+        let sanitized = super::sanitize_download_filename_component("AntiGlitch: Better / Faster");
+        assert_eq!(sanitized, "AntiGlitch_ Better _ Faster");
+    }
+
+    #[tokio::test]
+    async fn test_pdf_rename_flow_full() -> Result<(), Box<dyn std::error::Error>> {
+        use std::collections::HashSet;
+        use tokio::sync::mpsc;
+        use super::{Runtime, apply_collection_prompt, ActionSenders};
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "papr-rename-flow-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir)?;
+        let database_file = temp_dir.join("papr.db");
+        let database = Database::open(&database_file)?;
+        let library_roots = vec![temp_dir.clone()];
+        let collection_roots = vec![temp_dir.clone()];
+        let download_dir = temp_dir.clone();
+
+        let (watch_sender, watch_receiver) = mpsc::unbounded_channel();
+        let watcher = papr_core::library::LibraryWatcher::start(&[], || {}).unwrap();
+
+        let mut runtime = Runtime {
+            arxiv: papr_core::api::arxiv::ArxivClient::new().unwrap(),
+            crossref: papr_core::api::crossref::CrossrefClient::new(),
+            downloads: papr_core::downloads::DownloadManager::new().unwrap(),
+            database,
+            database_file,
+            config_file: temp_dir.join("papr.toml"),
+            default_downloads_dir: temp_dir.clone(),
+            download_dir,
+            pdf_viewer: "xdg-open".into(),
+            primary_library_root: temp_dir.clone(),
+            library_roots,
+            collection_roots,
+            dashboard_keywords: vec![],
+            dashboard_keyword_signature: "".into(),
+            dashboard_feed_date: "".into(),
+            watch_sender,
+            watch_receiver,
+            _watcher: watcher,
+            active_enrichments: HashSet::new(),
+        };
+
+        let old_pdf_path = temp_dir.join("my_old_paper.pdf");
+        std::fs::write(&old_pdf_path, "%PDF-1.4 old")?;
+
+        let pdf = papr_core::library::LibraryIndexer::inspect_in_roots(
+            &old_pdf_path,
+            std::slice::from_ref(&temp_dir),
+        )?;
+        runtime.database.import_pdf(&pdf)?;
+
+        let papers = runtime.database.library_papers()?;
+        let paper_id = papers[0].id;
+
+        let mut app = App::default();
+        app.library.papers = vec![LibraryPaper {
+            id: paper_id,
+            title: "my_old_paper".into(),
+            authors: "".into(),
+            doi: None,
+            arxiv_id: None,
+            pdf_path: Some(old_pdf_path.to_string_lossy().into_owned()),
+            file_size: Some(12),
+            reading_status: "unread".into(),
+            is_favorite: false,
+        }];
+
+        let prompt = papr_core::MetadataPrompt {
+            paper_id: Some(paper_id),
+            rename_collection_id: None,
+            rename_paper_id: Some(paper_id),
+            value: "my_new_paper".into(),
+            cursor: 0,
+            selected: 0,
+            current_collection: None,
+        };
+
+        apply_collection_prompt(&mut runtime, &mut app, &prompt)?;
+
+        assert_eq!(app.library.papers[0].title, "my old paper");
+        assert_eq!(app.library.papers[0].pdf_path, Some(temp_dir.join("my_new_paper.pdf").to_string_lossy().into_owned()));
+
+        let index_res = papr_core::library::LibraryIndexer::scan(&[temp_dir.clone()]);
+        let response = crate::IndexResponse::Scan {
+            pdfs: index_res,
+            directories: vec![],
+        };
+
+        let (search_tx, _) = mpsc::unbounded_channel();
+        let (index_tx, _) = mpsc::unbounded_channel();
+        let (enrich_tx, _) = mpsc::unbounded_channel();
+        let (download_tx, _) = mpsc::unbounded_channel();
+        let (today_tx, _) = mpsc::unbounded_channel();
+        let (app_events_tx, _) = mpsc::unbounded_channel();
+        let senders = ActionSenders {
+            search: search_tx,
+            index: index_tx,
+            enrichment: enrich_tx,
+            download: download_tx,
+            today: today_tx,
+            app_events: app_events_tx,
+        };
+
+        super::apply_index_response(response, &mut runtime, &senders, &mut app)?;
+        assert_eq!(app.library.papers[0].title, "my old paper");
+
+        std::fs::remove_dir_all(&temp_dir)?;
+        Ok(())
     }
 }

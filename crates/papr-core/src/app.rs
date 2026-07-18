@@ -259,6 +259,18 @@ pub struct DownloadTask {
     pub failed_at: Option<std::time::Instant>,
 }
 
+impl DownloadTask {
+    /// Current filename on disk, falling back to the remote paper title before a path exists.
+    #[must_use]
+    pub fn display_name(&self) -> &str {
+        self.pdf_path
+            .as_deref()
+            .and_then(|path| std::path::Path::new(path).file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or(&self.title)
+    }
+}
+
 /// Commands available to keybindings and the command palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
@@ -327,6 +339,8 @@ pub struct App {
     pub active_search_workspaces: std::collections::HashSet<Page>,
     /// Remote paper discovery state.
     pub discovery: DiscoveryState,
+    /// Scroll offset within the currently open paper detail view.
+    pub paper_detail_scroll: u16,
     /// Local paper catalog state.
     pub library: LibraryState,
     /// Papers in the reading queue.
@@ -476,6 +490,7 @@ impl Default for App {
             workspace_query_cursor: 0,
             active_search_workspaces: std::collections::HashSet::new(),
             discovery: DiscoveryState::default(),
+            paper_detail_scroll: 0,
             library: LibraryState::default(),
             reading_queue_papers: Vec::new(),
             reading_queue_selected: 0,
@@ -909,15 +924,11 @@ impl App {
                         self.mode = AppMode::Normal;
                     }
                 } else if self.page == Page::Dashboard && !self.today_papers.is_empty() {
-                    self.discovery.results.clone_from(&self.today_papers);
-                    self.discovery.selected = self
-                        .today_selected
-                        .min(self.discovery.results.len().saturating_sub(1));
                     self.mode = AppMode::PaperDetail;
-                    self.discovery.detail_scroll = 0;
+                    self.paper_detail_scroll = 0;
                 } else if self.page == Page::Discover && !self.discovery.results.is_empty() {
                     self.mode = AppMode::PaperDetail;
-                    self.discovery.detail_scroll = 0;
+                    self.paper_detail_scroll = 0;
                 }
             }
             Command::Back => {

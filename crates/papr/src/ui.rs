@@ -288,7 +288,7 @@ fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
             CollectionSearchItem::Paper(paper, _) => {
                 ListItem::new(vec![
                     Line::styled(
-                        format!("  {}", paper.title),
+                        format!("  {}", paper.display_name()),
                         Style::default().fg(theme.text),
                     ),
                     Line::styled(
@@ -357,7 +357,7 @@ fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
             app,
             theme,
             Some(paper.id),
-            &paper.title,
+            paper.display_name(),
             &paper.authors,
             &paper.reading_status,
             paper.file_size,
@@ -474,7 +474,7 @@ fn render_author_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
             app,
             theme,
             Some(paper.id),
-            &paper.title,
+            paper.display_name(),
             &paper.authors,
             &paper.reading_status,
             paper.file_size,
@@ -910,7 +910,7 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
                     app,
                     theme,
                     Some(item.paper_id),
-                    &item.paper_title,
+                    item.display_name(),
                     &item.authors,
                     reading_status,
                     file_size,
@@ -933,7 +933,7 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
                     app,
                     theme,
                     Some(paper.id),
-                    &paper.title,
+                    paper.display_name(),
                     &paper.authors,
                     &paper.reading_status,
                     paper.file_size,
@@ -1485,7 +1485,7 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
             app,
             theme,
             Some(paper.id),
-            &paper.title,
+            paper.display_name(),
             &paper.authors,
             &paper.reading_status,
             paper.file_size,
@@ -1538,7 +1538,7 @@ fn render_reading_queue(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
             app,
             theme,
             Some(paper.id),
-            &paper.title,
+            paper.display_name(),
             &paper.authors,
             &paper.reading_status,
             paper.file_size,
@@ -1616,7 +1616,7 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
                 app,
                 theme,
                 Some(paper.id),
-                &paper.title,
+                paper.display_name(),
                 &paper.authors,
                 &paper.reading_status,
                 paper.file_size,
@@ -1636,7 +1636,7 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
                 app,
                 theme,
                 None,
-                &download.title,
+                download.display_name(),
                 "",
                 "",
                 None,
@@ -1869,7 +1869,8 @@ fn compact_authors(paper: &RemotePaper) -> String {
 }
 
 fn render_paper_detail(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
-    let Some(paper) = app.discovery.results.get(app.discovery.selected) else {
+    let (papers, selected) = paper_detail_source(app);
+    let Some(paper) = papers.get(selected) else {
         return;
     };
     let area = frame.area();
@@ -1916,7 +1917,7 @@ fn render_paper_detail(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     frame.render_widget(
         Paragraph::new(paper_detail_lines(paper, theme, is_downloaded))
             .wrap(Wrap { trim: true })
-            .scroll((app.discovery.detail_scroll, 0)),
+            .scroll((app.paper_detail_scroll, 0)),
         rows[1],
     );
     frame.render_widget(
@@ -1931,6 +1932,14 @@ fn render_paper_detail(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
                 .style(Style::default().fg(theme.success)),
             rows[2],
         );
+    }
+}
+
+fn paper_detail_source(app: &App) -> (&[RemotePaper], usize) {
+    match app.page {
+        Page::Dashboard => (&app.today_papers, app.today_selected),
+        Page::Discover => (&app.discovery.results, app.discovery.selected),
+        _ => (&app.discovery.results, app.discovery.selected),
     }
 }
 
@@ -2576,9 +2585,10 @@ fn build_paper_lines<'a>(
 mod tests {
     use chrono::{TimeZone, Utc};
     use papr_core::{
-        ActivityItem, App, AppMode, BookmarkSummary, CollectionSummary, DiscoveryStatus,
-        DownloadStatus, DownloadTask, LibraryPaper, Page, RemotePaper, Theme,
+        ActivityItem, App, AppMode, BookmarkSummary, CollectionSummary, DiscoveryState,
+        DiscoveryStatus, DownloadStatus, DownloadTask, LibraryPaper, Page, RemotePaper, Theme,
     };
+    use papr_core::models::AuthorSummary;
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::render;
@@ -2643,6 +2653,61 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_paper_detail_does_not_reuse_discover_results() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let backend = TestBackend::new(100, 32);
+        let mut terminal = Terminal::new(backend)?;
+        let published = Utc
+            .with_ymd_and_hms(2026, 1, 3, 0, 0, 0)
+            .single()
+            .ok_or("invalid test date")?;
+        let dashboard_paper = RemotePaper {
+            id: "https://arxiv.org/abs/dashboard".into(),
+            title: "Dashboard Detail Paper".into(),
+            authors: vec!["Ada Lovelace".into()],
+            abstract_text: "Dashboard detail abstract.".into(),
+            published,
+            updated: published,
+            categories: vec!["cs.HC".into()],
+            pdf_url: Some("https://arxiv.org/pdf/dashboard".into()),
+            doi: Some("10.1000/dashboard".into()),
+            journal_ref: Some("Dashboard Journal".into()),
+        };
+        let discover_paper = RemotePaper {
+            id: "https://arxiv.org/abs/discover".into(),
+            title: "Discover Result Paper".into(),
+            authors: vec!["Alan Turing".into()],
+            abstract_text: "Discover result abstract.".into(),
+            published,
+            updated: published,
+            categories: vec!["cs.DL".into()],
+            pdf_url: Some("https://arxiv.org/pdf/discover".into()),
+            doi: Some("10.1000/discover".into()),
+            journal_ref: Some("Discover Journal".into()),
+        };
+        let mut app = App {
+            page: Page::Dashboard,
+            mode: AppMode::PaperDetail,
+            today_papers: vec![dashboard_paper],
+            today_selected: 0,
+            discovery: DiscoveryState {
+                results: vec![discover_paper],
+                selected: 0,
+                status: DiscoveryStatus::Ready,
+                ..DiscoveryState::default()
+            },
+            ..App::default()
+        };
+        let theme = Theme::load("nord")?;
+
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let rendered = rendered_text(&terminal);
+        assert!(rendered.contains("Dashboard Detail Paper"));
+        assert!(!rendered.contains("Discover Result Paper"));
+        Ok(())
+    }
+
+    #[test]
     fn library_and_downloads_render() -> Result<(), Box<dyn std::error::Error>> {
         let backend = TestBackend::new(100, 32);
         let mut terminal = Terminal::new(backend)?;
@@ -2663,7 +2728,7 @@ mod tests {
         });
         let theme = Theme::load("gruvbox")?;
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
-        assert!(rendered_text(&terminal).contains("A Local Research Paper"));
+        assert!(rendered_text(&terminal).contains("paper.pdf"));
 
         app.page = Page::Downloads;
         app.downloads.push(DownloadTask {
@@ -2751,7 +2816,7 @@ mod tests {
         });
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
         let rendered = rendered_text(&terminal);
-        assert!(rendered.contains("Paper In Collection"));
+        assert!(rendered.contains("paper.pdf"));
         assert!(rendered.contains("PDF available"));
         Ok(())
     }
@@ -2779,10 +2844,106 @@ mod tests {
         let theme = Theme::load("nord")?;
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
         let rendered = rendered_text(&terminal);
-        assert!(rendered.contains("Bookmarked Research"));
+        assert!(rendered.contains("paper.pdf"));
         assert!(rendered.contains("Ada Lovelace, Alan Turing"));
         assert!(rendered.contains("2026"));
         assert!(rendered.contains("Terminal Studies"));
+        Ok(())
+    }
+
+    #[test]
+    fn local_workspaces_render_the_current_pdf_filename() -> Result<(), Box<dyn std::error::Error>> {
+        let backend = TestBackend::new(100, 32);
+        let mut terminal = Terminal::new(backend)?;
+        let theme = Theme::load("nord")?;
+        let paper = LibraryPaper {
+            id: 1,
+            title: "Bibliographic Paper Title".into(),
+            authors: "Researcher".into(),
+            doi: None,
+            arxiv_id: None,
+            pdf_path: Some("/library/renamed-on-disk.pdf".into()),
+            file_size: Some(1024),
+            reading_status: "unread".into(),
+            is_favorite: false,
+        };
+        let collection = CollectionSummary {
+            id: 1,
+            name: "Research".into(),
+            paper_count: 1,
+            folder_path: Some("/library/Research".into()),
+        };
+        let bookmark = BookmarkSummary {
+            id: 1,
+            paper_id: paper.id,
+            paper_title: paper.title.clone(),
+            authors: paper.authors.clone(),
+            year: None,
+            journal: None,
+            doi: None,
+            pdf_path: paper.pdf_path.clone().unwrap_or_default(),
+            page: None,
+            label: None,
+        };
+        let download = DownloadTask {
+            id: "local".into(),
+            title: paper.title.clone(),
+            downloaded: 1024,
+            total: Some(1024),
+            paper_id: Some(paper.id),
+            pdf_path: paper.pdf_path.clone(),
+            status: DownloadStatus::Completed,
+            remote_paper: None,
+            failed_at: None,
+        };
+        let mut app = App {
+            library: papr_core::LibraryState {
+                papers: vec![paper.clone()],
+                ..papr_core::LibraryState::default()
+            },
+            ..App::default()
+        };
+
+        let mut assert_filename = |app: &mut App| -> Result<(), Box<dyn std::error::Error>> {
+            terminal.draw(|frame| render(frame, app, &theme))?;
+            let rendered = rendered_text(&terminal);
+            assert!(rendered.contains("renamed-on-disk.pdf"));
+            assert!(!rendered.contains("Bibliographic Paper Title"));
+            Ok(())
+        };
+
+        app.page = Page::Library;
+        assert_filename(&mut app)?;
+
+        app.page = Page::Collections;
+        app.active_collection = Some(collection);
+        app.collection_papers = vec![paper.clone()];
+        assert_filename(&mut app)?;
+
+        app.page = Page::Authors;
+        app.active_author = Some(AuthorSummary {
+            id: 1,
+            name: "Researcher".into(),
+            paper_count: 1,
+        });
+        app.author_papers = vec![paper.clone()];
+        assert_filename(&mut app)?;
+
+        app.page = Page::Notes;
+        app.notes_papers = vec![paper.clone()];
+        assert_filename(&mut app)?;
+
+        app.page = Page::ReadingQueue;
+        app.reading_queue_papers = vec![paper.clone()];
+        assert_filename(&mut app)?;
+
+        app.page = Page::Bookmarks;
+        app.bookmarks = vec![bookmark];
+        assert_filename(&mut app)?;
+
+        app.page = Page::Downloads;
+        app.downloads = vec![download];
+        assert_filename(&mut app)?;
         Ok(())
     }
 

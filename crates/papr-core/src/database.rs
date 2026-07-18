@@ -2744,4 +2744,96 @@ mod tests {
         assert_eq!(dashboard.reading.average_reading_seconds, 30);
         Ok(())
     }
+
+    #[test]
+    fn rename_pdf_updates_path_and_preserves_metadata() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        let root = std::env::temp_dir().join(format!("papr-rename-{}-{}", std::process::id(), Utc::now().timestamp_micros()));
+        fs::create_dir_all(&root)?;
+        let old_path = root.join("old_paper_name.pdf");
+        fs::write(&old_path, "%PDF-1.4 old")?;
+
+        let mut pdf = imported_pdf(&old_path.to_string_lossy());
+        pdf.title = "Old Paper Name".into();
+        database.import_pdf(&pdf)?;
+
+        let papers = database.library_papers()?;
+        let paper_id = papers[0].id;
+        assert_eq!(papers[0].title, "Old Paper Name");
+
+        database.add_to_queue(paper_id)?;
+        database.add_to_collection(paper_id, "Research")?;
+        database.toggle_bookmark(paper_id)?;
+        database.save_note(&PaperNote {
+            paper_id,
+            title: "Note".into(),
+            body: "Body".into(),
+            cursor: 4,
+        })?;
+
+        let new_path = root.join("new_paper_name.pdf");
+        fs::rename(&old_path, &new_path)?;
+        database.rename_pdf(paper_id, &new_path)?;
+
+        let papers = database.library_papers()?;
+        assert_eq!(papers.len(), 1);
+        assert_eq!(papers[0].title, "Old Paper Name");
+        assert_eq!(papers[0].pdf_path.as_deref(), Some(new_path.to_str().unwrap()));
+
+        let queue = database.reading_queue_papers()?;
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].id, paper_id);
+        assert_eq!(queue[0].title, "Old Paper Name");
+
+        let collection = database.collections()?.pop().ok_or("missing collection")?;
+        let collection_papers = database.papers_for_collection(collection.id)?;
+        assert_eq!(collection_papers.len(), 1);
+        assert_eq!(collection_papers[0].id, paper_id);
+        assert_eq!(collection_papers[0].title, "Old Paper Name");
+
+        let bookmarks = database.bookmarks(std::slice::from_ref(&root))?;
+        assert_eq!(bookmarks.len(), 1);
+        assert_eq!(bookmarks[0].paper_id, paper_id);
+        assert_eq!(bookmarks[0].paper_title, "Old Paper Name");
+
+        let notes = database.papers_with_notes(std::slice::from_ref(&root))?;
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].id, paper_id);
+        assert_eq!(notes[0].title, "Old Paper Name");
+
+        fs::remove_file(&new_path)?;
+        fs::remove_dir(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn scan_after_external_rename_preserves_a_local_paper_title() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        let root = std::env::temp_dir().join(format!(
+            "papr-external-rename-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_micros()
+        ));
+        fs::create_dir_all(&root)?;
+        let old_path = root.join("old_name.pdf");
+        fs::write(&old_path, "%PDF-1.4 old")?;
+        let old_pdf = LibraryIndexer::inspect(&old_path)?;
+        database.import_pdf(&old_pdf)?;
+        let paper_id = database.library_papers()?[0].id;
+
+        let new_path = root.join("new_name.pdf");
+        fs::rename(&old_path, &new_path)?;
+        let renamed_pdf = LibraryIndexer::inspect(&new_path)?;
+        assert!(database.import_pdf(&renamed_pdf)?);
+
+        let papers = database.library_papers()?;
+        assert_eq!(papers.len(), 1);
+        assert_eq!(papers[0].id, paper_id);
+        assert_eq!(papers[0].title, "old name");
+        assert_eq!(papers[0].pdf_path.as_deref(), new_path.to_str());
+
+        fs::remove_file(&new_path)?;
+        fs::remove_dir(&root)?;
+        Ok(())
+    }
 }

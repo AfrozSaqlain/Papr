@@ -84,7 +84,7 @@ pub struct CitationMetadata {
 pub struct LibraryPaper {
     /// Stable database identifier.
     pub id: i64,
-    /// Display title.
+    /// Bibliographic title.
     pub title: String,
     /// Comma-separated authors when known.
     pub authors: String,
@@ -100,6 +100,18 @@ pub struct LibraryPaper {
     pub reading_status: String,
     /// Whether the paper is a favorite.
     pub is_favorite: bool,
+}
+
+impl LibraryPaper {
+    /// Current filename on disk, falling back to the paper title for metadata-only records.
+    #[must_use]
+    pub fn display_name(&self) -> &str {
+        self.pdf_path
+            .as_deref()
+            .and_then(|path| std::path::Path::new(path).file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or(&self.title)
+    }
 }
 
 /// A Markdown note associated with one paper.
@@ -146,7 +158,7 @@ pub struct BookmarkSummary {
     pub id: i64,
     /// Parent paper identifier.
     pub paper_id: i64,
-    /// Paper title.
+    /// Bibliographic paper title.
     pub paper_title: String,
     /// Comma-separated paper authors when available.
     pub authors: String,
@@ -162,6 +174,17 @@ pub struct BookmarkSummary {
     pub page: Option<u32>,
     /// Optional user label.
     pub label: Option<String>,
+}
+
+impl BookmarkSummary {
+    /// Current filename on disk, falling back to the stored title when unavailable.
+    #[must_use]
+    pub fn display_name(&self) -> &str {
+        std::path::Path::new(&self.pdf_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&self.paper_title)
+    }
 }
 
 /// One human-readable research activity event.
