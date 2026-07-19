@@ -1,6 +1,6 @@
 //! TOML-backed application configuration.
 
-use std::{fs, path::PathBuf};
+use std::{collections::HashSet, fs, path::PathBuf};
 
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -171,11 +171,12 @@ enabled_plugins = []
     /// Return configured dashboard recommendation terms.
     #[must_use]
     pub fn dashboard_keyword_list(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
         self.dashboard_keywords
             .split(',')
-            .map(str::trim)
-            .filter(|keyword| !keyword.is_empty())
-            .map(str::to_owned)
+            .map(|keyword| keyword.split_whitespace().collect::<Vec<_>>().join(" "))
+            .map(|keyword| keyword.to_lowercase())
+            .filter(|keyword| !keyword.is_empty() && seen.insert(keyword.clone()))
             .collect()
     }
 }
@@ -197,6 +198,18 @@ mod tests {
     fn dashboard_keywords_parse_as_comma_separated_terms() -> Result<(), toml::de::Error> {
         let config: Config =
             toml::from_str("dashboard_keywords = 'machine learning, gravitational waves,  '")?;
+        assert_eq!(
+            config.dashboard_keyword_list(),
+            ["machine learning", "gravitational waves"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dashboard_keywords_normalize_spacing_and_remove_duplicates() -> Result<(), toml::de::Error> {
+        let config: Config = toml::from_str(
+            "dashboard_keywords = 'Machine   Learning, machine learning, GRAVITATIONAL WAVES'",
+        )?;
         assert_eq!(
             config.dashboard_keyword_list(),
             ["machine learning", "gravitational waves"]
