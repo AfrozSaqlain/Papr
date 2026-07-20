@@ -542,8 +542,39 @@ fn move_config_editor_vertical(app: &mut App, row_delta: isize) {
     app.config_editor_goal_column = Some(goal_col);
 }
 
+fn move_config_editor_page(app: &mut App, direction: isize) {
+    move_config_editor_vertical(
+        app,
+        direction * app.config_editor_viewport_height.max(1) as isize,
+    );
+}
+
 fn reset_config_editor_goal_column(app: &mut App) {
     app.config_editor_goal_column = None;
+}
+
+/// Replaces every mutable editor state with the supplied on-disk buffer.
+fn reset_config_editor_buffer(app: &mut App, text: String) {
+    app.config_editor_text = text;
+    app.config_editor_cursor = 0;
+    app.config_editor_scroll = 0;
+    app.config_editor_history = vec![app.config_editor_text.clone()];
+    app.config_editor_history_idx = 0;
+    app.config_editor_command = None;
+    app.config_editor_insert_mode = false;
+    app.config_editor_error = None;
+    reset_config_editor_goal_column(app);
+}
+
+/// Reloads the configuration editor from its authoritative source on disk.
+fn reload_config_editor_buffer(app: &mut App, config_file: &std::path::Path) {
+    match std::fs::read_to_string(config_file) {
+        Ok(text) => reset_config_editor_buffer(app, text),
+        Err(error) => {
+            reset_config_editor_buffer(app, String::new());
+            app.config_editor_error = Some(format!("Could not reload configuration: {error}"));
+        }
+    }
 }
 
 pub(crate) fn build_config_editor_view(
@@ -4181,6 +4212,9 @@ fn handle_config_editor_key(
                     }
                 }
                 if trimmed == "q" || (trimmed == "wq" && app.config_editor_error.is_none()) {
+                    if trimmed == "q" {
+                        reload_config_editor_buffer(app, &runtime.config_file);
+                    }
                     app.config_editor_focused = false;
                     app.content_focused = false;
                 }
@@ -4282,6 +4316,8 @@ fn handle_config_editor_key(
             }
             reset_config_editor_goal_column(app);
         }
+        KeyCode::PageUp => move_config_editor_page(app, -1),
+        KeyCode::PageDown => move_config_editor_page(app, 1),
         KeyCode::Char('x') => {
             if app.config_editor_cursor < app.config_editor_text.len() {
                 record_config_history(app);
@@ -4347,14 +4383,8 @@ fn handle_config_editor_insert_key(app: &mut App, key: KeyEvent) {
             app.config_editor_cursor = config_editor_line_end(&app.config_editor_text, app.config_editor_cursor);
             reset_config_editor_goal_column(app);
         }
-        KeyCode::PageUp => move_config_editor_vertical(
-            app,
-            -(app.config_editor_viewport_height.max(1) as isize),
-        ),
-        KeyCode::PageDown => move_config_editor_vertical(
-            app,
-            app.config_editor_viewport_height.max(1) as isize,
-        ),
+        KeyCode::PageUp => move_config_editor_page(app, -1),
+        KeyCode::PageDown => move_config_editor_page(app, 1),
         KeyCode::Backspace => {
             if app.config_editor_cursor > 0 {
                 record_config_history(app);
@@ -4418,8 +4448,8 @@ mod tests {
     use super::{
         UiAction, build_config_editor_view, cursor_visual_position,
         handle_config_editor_insert_key, handle_downloads_key, handle_key, parse_command,
-        keyword_representation_targets, refresh_downloads_from_dir, select_dashboard_papers,
-        shuffle_daily_bucket, PaperTarget,
+        keyword_representation_targets, move_config_editor_page, refresh_downloads_from_dir,
+        reload_config_editor_buffer, select_dashboard_papers, shuffle_daily_bucket, PaperTarget,
     };
 
     #[test]
@@ -4961,6 +4991,60 @@ mod tests {
 
         handle_config_editor_insert_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(app.config_editor_cursor, 7);
+    }
+
+    #[test]
+    fn editor_page_navigation_moves_by_the_visible_row_count() {
+        let mut app = App {
+            config_editor_text: "abcdefghijklmnop".into(),
+            config_editor_wrap_width: 4,
+            config_editor_viewport_height: 3,
+            ..App::default()
+        };
+
+        move_config_editor_page(&mut app, 1);
+        assert_eq!(app.config_editor_cursor, 12);
+
+        move_config_editor_page(&mut app, -1);
+        assert_eq!(app.config_editor_cursor, 0);
+    }
+
+    #[test]
+    fn reloading_config_editor_discards_the_entire_unsaved_buffer_state() {
+        let config_file = std::env::temp_dir().join(format!(
+            "papr-config-editor-reload-{}-{}-{}.toml",
+            std::process::id(),
+            Utc::now().timestamp_micros(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        fs::write(&config_file, "theme = \"paper\"\n").unwrap();
+
+        let mut app = App {
+            config_editor_text: "unsaved = true".into(),
+            config_editor_cursor: 7,
+            config_editor_insert_mode: true,
+            config_editor_error: Some("Invalid TOML".into()),
+            config_editor_scroll: 4,
+            config_editor_history: vec!["original = true".into(), "unsaved = true".into()],
+            config_editor_history_idx: 1,
+            config_editor_command: Some("q".into()),
+            config_editor_goal_column: Some(3),
+            ..App::default()
+        };
+
+        reload_config_editor_buffer(&mut app, &config_file);
+
+        assert_eq!(app.config_editor_text, "theme = \"paper\"\n");
+        assert_eq!(app.config_editor_cursor, 0);
+        assert_eq!(app.config_editor_scroll, 0);
+        assert_eq!(app.config_editor_history, vec!["theme = \"paper\"\n"]);
+        assert_eq!(app.config_editor_history_idx, 0);
+        assert!(!app.config_editor_insert_mode);
+        assert!(app.config_editor_command.is_none());
+        assert!(app.config_editor_error.is_none());
+        assert!(app.config_editor_goal_column.is_none());
+
+        fs::remove_file(config_file).unwrap();
     }
 
     #[test]
