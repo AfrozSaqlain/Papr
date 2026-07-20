@@ -684,6 +684,25 @@ pub struct InteractiveCreditItem {
 }
 
 impl App {
+    /// Returns the local PDF record for a remote paper when it has been downloaded.
+    #[must_use]
+    pub fn downloaded_remote_paper(&self, remote: &RemotePaper) -> Option<&LibraryPaper> {
+        self.library.papers.iter().find(|local| {
+            if local.pdf_path.is_none() {
+                return false;
+            }
+            if local.arxiv_id.as_deref() == Some(remote.id.as_str()) {
+                return true;
+            }
+            if let (Some(local_doi), Some(remote_doi)) = (&local.doi, &remote.doi) {
+                if local_doi.eq_ignore_ascii_case(remote_doi) {
+                    return true;
+                }
+            }
+            local.title.eq_ignore_ascii_case(&remote.title)
+        })
+    }
+
     /// Get dependencies parsed from Cargo.toml.
     pub fn get_dependencies(&self) -> Vec<(String, String)> {
         let mut deps = Vec::new();

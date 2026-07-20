@@ -2302,26 +2302,11 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
         format!("{progress}  ")
     };
     let items = app.discovery.current_page_results().iter().map(|paper| {
-        let local_status = app.library.papers.iter().find(|p| {
-            if let (Some(ldoi), Some(rdoi)) = (&p.doi, &paper.doi) {
-                if ldoi == rdoi {
-                    return true;
-                }
-            }
-            p.title.to_lowercase() == paper.title.to_lowercase()
-        }).map(|p| p.reading_status.as_str());
+        let local_status = app
+            .downloaded_remote_paper(paper)
+            .map(|local| local.reading_status.as_str());
 
-        let has_local = app.library.papers.iter().any(|p| {
-            if p.pdf_path.is_none() {
-                return false;
-            }
-            if let (Some(ldoi), Some(rdoi)) = (&p.doi, &paper.doi) {
-                if ldoi == rdoi {
-                    return true;
-                }
-            }
-            p.title.to_lowercase() == paper.title.to_lowercase()
-        });
+        let has_local = app.downloaded_remote_paper(paper).is_some();
 
         let mut spans = vec![
             Span::styled(
@@ -2427,17 +2412,7 @@ fn render_paper_detail(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
             ),
         rows[0],
     );
-    let is_downloaded = app.library.papers.iter().any(|p| {
-        if p.pdf_path.is_none() {
-            return false;
-        }
-        if let (Some(ldoi), Some(rdoi)) = (&p.doi, &paper.doi) {
-            if ldoi == rdoi {
-                return true;
-            }
-        }
-        p.title.to_lowercase() == paper.title.to_lowercase()
-    });
+    let is_downloaded = app.downloaded_remote_paper(paper).is_some();
     frame.render_widget(
         Paragraph::new(paper_detail_lines(paper, theme, is_downloaded))
             .wrap(Wrap { trim: true })
@@ -2445,7 +2420,11 @@ fn render_paper_detail(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         rows[1],
     );
     frame.render_widget(
-        Paragraph::new("j/k scroll  h back  d download  c cite  o browser")
+        Paragraph::new(if is_downloaded {
+            "j/k scroll  h back  Enter open PDF  d download  c cite  o browser"
+        } else {
+            "j/k scroll  h back  d download  c cite  o browser"
+        })
             .style(Style::default().fg(theme.muted)),
         rows[2],
     );
@@ -2608,14 +2587,8 @@ fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
             .take(10)
             .map(|paper| {
                 let abstract_preview = compact_text(&paper.abstract_text, preview_width);
-                let local_status = app.library.papers.iter().find(|p| {
-                    if let (Some(ldoi), Some(rdoi)) = (&p.doi, &paper.doi) {
-                        if ldoi == rdoi {
-                            return true;
-                        }
-                    }
-                    p.title.to_lowercase() == paper.title.to_lowercase()
-                }).map(|p| p.reading_status.as_str());
+                let downloaded = app.downloaded_remote_paper(paper);
+                let local_status = downloaded.map(|local| local.reading_status.as_str());
 
                 let mut meta_str = format!(
                     "{}  |  {}",
@@ -2626,16 +2599,24 @@ fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
                     meta_str.push_str("  |  ");
                     meta_str.push_str(status);
                 }
+                let mut meta_spans = vec![Span::styled(meta_str, Style::default().fg(theme.accent))];
+                if downloaded.is_some() {
+                    meta_spans.push(Span::raw(" "));
+                    meta_spans.push(Span::styled(
+                        " (Downloaded) ",
+                        Style::default()
+                            .fg(theme.success)
+                            .bg(theme.surface)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                }
 
                 ListItem::new(vec![
                     Line::styled(
                         display_paper_title(&paper.title),
                         Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
                     ),
-                    Line::styled(
-                        meta_str,
-                        Style::default().fg(theme.accent),
-                    ),
+                    Line::from(meta_spans),
                     Line::styled(abstract_preview, Style::default().fg(theme.muted)),
                     Line::raw(""),
                 ])

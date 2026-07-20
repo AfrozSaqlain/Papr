@@ -2753,18 +2753,7 @@ fn start_download(
     let Some(url) = paper.pdf_url.clone() else {
         return;
     };
-    let is_downloaded = app.library.papers.iter().any(|p| {
-        if p.pdf_path.is_none() {
-            return false;
-        }
-        if let (Some(ldoi), Some(rdoi)) = (&p.doi, &paper.doi) {
-            if ldoi == rdoi {
-                return true;
-            }
-        }
-        p.title.to_lowercase() == paper.title.to_lowercase()
-    });
-    if is_downloaded {
+    if app.downloaded_remote_paper(&paper).is_some() {
         app.toast = Some("Paper already available. Skipping download...".to_owned());
         return;
     }
@@ -2866,8 +2855,11 @@ fn apply_download_event(
                 )?;
             }
 
+            // Project the completed download into every workspace before the next
+            // render, so remote views immediately expose their local-PDF actions.
             spawn_enrichment_if_needed(runtime, senders, app)?;
             refresh_paper_views(runtime, app)?;
+            app.toast = Some("Download complete. Press Enter to open the PDF.".to_owned());
         }
         DownloadEvent::Failed { id, error } => {
             pending.remove(&id);
@@ -3961,6 +3953,15 @@ fn handle_paper_detail_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         }
         KeyCode::Char('o') => {
             return selected_remote_paper(app).map(|paper| UiAction::OpenBrowser(paper.id.clone()));
+        }
+        KeyCode::Enter => {
+            let remote = selected_remote_paper(app)?;
+            let local = app.downloaded_remote_paper(remote)?;
+            let path = local.pdf_path.as_ref()?;
+            return Some(UiAction::OpenPdf {
+                paper_id: local.id,
+                path: PathBuf::from(path),
+            });
         }
         KeyCode::Char('n' | 'g') => {
             app.modal_return = AppMode::PaperDetail;
@@ -5341,6 +5342,51 @@ mod tests {
             search,
             Some(UiAction::OpenBrowser(url)) if url.ends_with("/search")
         ));
+    }
+
+    #[test]
+    fn downloaded_remote_paper_opens_from_metadata_without_changing_browser_shortcut() {
+        for page in [Page::Dashboard, Page::Discover] {
+            let remote = remote_paper("https://arxiv.org/abs/downloaded", "Downloaded paper");
+            let mut app = App {
+                page,
+                content_focused: true,
+                mode: AppMode::PaperDetail,
+                today_papers: (page == Page::Dashboard).then_some(remote.clone()).into_iter().collect(),
+                discovery: DiscoveryState {
+                    results: (page == Page::Discover).then_some(remote).into_iter().collect(),
+                    ..DiscoveryState::default()
+                },
+                library: papr_core::LibraryState {
+                    papers: vec![LibraryPaper {
+                        id: 42,
+                        title: "Downloaded paper".into(),
+                        authors: String::new(),
+                        doi: None,
+                        arxiv_id: Some("https://arxiv.org/abs/downloaded".into()),
+                        pdf_path: Some("/tmp/downloaded.pdf".into()),
+                        file_size: None,
+                        reading_status: "unread".into(),
+                        is_favorite: false,
+                    }],
+                    ..papr_core::LibraryState::default()
+                },
+                ..App::default()
+            };
+
+            let open = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert!(matches!(
+                open,
+                Some(UiAction::OpenPdf { paper_id: 42, path })
+                    if path == std::path::Path::new("/tmp/downloaded.pdf")
+            ));
+
+            let browser = handle_key(&mut app, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+            assert!(matches!(
+                browser,
+                Some(UiAction::OpenBrowser(url)) if url.ends_with("/downloaded")
+            ));
+        }
     }
 
     #[test]
