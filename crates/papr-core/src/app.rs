@@ -451,6 +451,10 @@ pub struct App {
     pub content_focused: bool,
     /// Current modal input mode.
     pub mode: AppMode,
+    /// First visible row in the complete keyboard reference.
+    pub help_scroll: usize,
+    /// Mode to restore after dismissing the keyboard reference.
+    pub help_return_mode: AppMode,
     /// Whether the event loop should stop.
     pub should_quit: bool,
     /// Summary metrics loaded from persistence.
@@ -661,6 +665,8 @@ impl Default for App {
             sidebar_scroll: 0,
             content_focused: false,
             mode: AppMode::Normal,
+            help_scroll: 0,
+            help_return_mode: AppMode::Normal,
             should_quit: false,
             stats: DashboardStats::default(),
             dashboard: ResearchDashboard::default(),
@@ -1181,9 +1187,11 @@ impl App {
             }
             Command::ToggleHelp => {
                 if self.mode == AppMode::Help {
-                    self.mode = AppMode::Normal;
+                    self.mode = self.help_return_mode;
                 } else {
+                    self.help_return_mode = self.mode;
                     self.mode = AppMode::Help;
+                    self.help_scroll = 0;
                 }
             }
             Command::ToggleWorkspaceSearch => {

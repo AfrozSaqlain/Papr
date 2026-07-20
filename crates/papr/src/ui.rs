@@ -2910,26 +2910,167 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     app.palette_scroll = state.offset();
 }
 
-fn render_help(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
-    let area = centered(64, 20, frame.area());
+fn render_help(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
+    let area = centered(132, 32, frame.area());
     frame.render_widget(Clear, area);
-    let help = if matches!(app.page, Page::Dashboard | Page::Discover) {
-        "j / k        Move selection\nEnter/Right  Open selection\nLeft         Focus navigation\nh / l        Back / open\nCtrl+b       Browse Navigation\n/            Search arXiv\no            Open paper in webpage\nCtrl+Right   Browse next page in Discover\nCtrl+Left    Browse previous page in Discover\nR            Rename PDF / group\nu            Set status of a PDF as unread\nd            Download\nr            Retry failed downloads\nc            Copy citation\nx            Delete PDF or group\na            Queue / dequeue paper\nq            Close / quit\n?            Toggle this help"
-    } else {
-        "j / k        Move selection\nEnter/Right  Open selection\nLeft         Focus navigation\nh / l        Back / open\nCtrl+b       Browse Navigation\n/            Search arXiv\no            Open paper in webpage\nCtrl+Right   Browse next page in Discover\nCtrl+Left    Browse previous page in Discover\nR            Rename PDF / group\nu            Set status of a PDF as unread\nd            Download\nr            Retry failed downloads\nc            Copy citation\nn            Notes\ng            Create / Move to Group\nB            Bookmark\nx            Delete PDF or group\na            Queue / dequeue paper\nq            Close / quit\n?            Toggle this help"
-    };
+    let block = Block::default()
+        .title(" KEYBOARD REFERENCE — ↑/↓ SCROLL  PGUP/PGDN PAGE  HOME/END JUMP  ?/ESC/q CLOSE ")
+        .borders(Borders::ALL)
+        .style(Style::default().bg(theme.surface))
+        .border_style(Style::default().fg(theme.secondary));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let columns = Layout::horizontal([
+        Constraint::Percentage(34),
+        Constraint::Percentage(33),
+        Constraint::Percentage(33),
+    ])
+        .split(inner);
+    let (left, middle, right) = keyboard_reference(theme);
+    let total_rows = left.len().max(middle.len()).max(right.len());
+    let viewport_rows = inner.height as usize;
+    app.help_scroll = app
+        .help_scroll
+        .min(total_rows.saturating_sub(viewport_rows));
     frame.render_widget(
-        Paragraph::new(help)
-            .style(Style::default().fg(theme.text))
-            .block(
-                Block::default()
-                    .title(" KEYBOARD REFERENCE ")
-                    .borders(Borders::ALL)
-                    .style(Style::default().bg(theme.surface))
-                    .border_style(Style::default().fg(theme.secondary)),
-            ),
-        area,
+        Paragraph::new(left.into_iter().skip(app.help_scroll).take(viewport_rows).collect::<Vec<_>>())
+            .style(Style::default().fg(theme.text)),
+        columns[0],
     );
+    frame.render_widget(
+        Paragraph::new(middle.into_iter().skip(app.help_scroll).take(viewport_rows).collect::<Vec<_>>())
+            .style(Style::default().fg(theme.text)),
+        columns[1],
+    );
+    frame.render_widget(
+        Paragraph::new(right.into_iter().skip(app.help_scroll).take(viewport_rows).collect::<Vec<_>>())
+            .style(Style::default().fg(theme.text)),
+        columns[2],
+    );
+}
+
+/// The help overlay is deliberately organized by input behavior rather than
+/// by destination. Each row has one command or one pair of equivalent keys,
+/// making the reference readable without sacrificing accuracy.
+fn keyboard_reference(theme: &Theme) -> (Vec<Line<'static>>, Vec<Line<'static>>, Vec<Line<'static>>) {
+    let section = |title: &'static str, entries: &[(&'static str, &'static str)]| {
+        let mut lines = vec![Line::styled(
+            title,
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        )];
+        lines.extend(entries.iter().map(|(key, description)| {
+            Line::from(vec![
+                Span::styled(format!("  {key:<20}"), Style::default().fg(theme.secondary)),
+                Span::styled(*description, Style::default().fg(theme.text)),
+            ])
+        }));
+        lines.push(Line::raw(""));
+        lines
+    };
+    let scoped_section = |title: &'static str,
+                          scope: &[&'static str],
+                          entries: &[(&'static str, &'static str)]| {
+        let mut lines = section(title, entries);
+        for (offset, line) in scope.iter().enumerate() {
+            lines.insert(
+                1 + offset,
+                Line::styled(format!("  {line}"), Style::default().fg(theme.muted)),
+            );
+        }
+        lines
+    };
+
+    let mut first = section("GLOBAL & NAVIGATION", &[
+        ("?", "toggle reference"),
+        ("Ctrl+b", "toggle navigator"),
+        ("Esc", "close local search"),
+        ("Enter / → / l", "open selected item"),
+        ("← / h", "return one level"),
+        ("q", "quit outside text input"),
+    ]);
+    first.extend(scoped_section(
+        "PAPER ACTIONS",
+        &[
+            "Paper rows: Library, Downloads, Bookmarks, Notes,",
+            "Reading Queue, and paper rows in Groups or Authors.",
+        ],
+        &[
+            ("Enter / → / l", "open local PDF"),
+            ("B", "toggle bookmark"),
+            (">", "toggle local search"),
+            ("n", "open note"),
+            ("g", "assign to group"),
+            ("R", "rename PDF"),
+            ("c", "copy citation"),
+            ("x", "confirm then delete PDF"),
+            ("a", "toggle reading queue"),
+            ("u", "mark PDF unread"),
+        ],
+    ));
+    first.extend(section("NOTES & PDF VIEWER", &[
+        ("Tab", "toggle edit / preview"),
+        ("Esc", "save and leave note"),
+        ("PDF Esc / q", "close internal viewer"),
+    ]));
+    first.extend(section("CREDITS", &[("Enter", "open selected link")]));
+
+    let mut middle = section("DISCOVER & DASHBOARD", &[
+        ("/", "toggle arXiv search"),
+        ("o", "open paper online"),
+        ("c", "copy citation"),
+        ("d", "download paper"),
+        ("Enter", "open downloaded PDF"),
+        ("Discover Ctrl+←", "previous cached page"),
+        ("Discover Ctrl+→", "next cached page"),
+        ("Discover r", "retry loading failure"),
+    ]);
+    middle.extend(section("GROUPS", &[
+        ("Groups g", "create a group"),
+    ]));
+    middle.extend(section("QUEUE & DOWNLOADS", &[
+        ("Shift/Ctrl+↑", "move queued paper up"),
+        ("Shift/Ctrl+↓", "move queued paper down"),
+        ("K / J", "move queued paper up / down"),
+        ("Downloads r", "retry failed download"),
+    ]));
+    middle.extend(section("SETTINGS EDITOR — NORMAL", &[
+        ("i", "enter Insert mode"),
+        (":", "begin Ex command"),
+        (":w", "validate, save, apply"),
+        (":wq", "save, apply, leave"),
+        (":q", "discard buffer, leave"),
+        ("0 / $", "line start / end"),
+        ("x", "delete character"),
+        ("u", "undo"),
+        ("Ctrl+r", "redo"),
+        ("Esc", "leave editor focus"),
+        ("q", "leave editor"),
+    ]));
+
+    let mut third = section("PROJECT LIST & FILE TREE", &[
+        ("n", "create named project"),
+        ("r", "refresh project list"),
+        ("R", "rename selected project"),
+        ("x", "delete selected project"),
+    ]);
+    third.extend(section("PROJECT PANES & PREVIEW", &[
+        ("Alt+1", "focus file tree"),
+        ("Alt+2", "focus editor"),
+        ("Alt+3", "focus PDF preview"),
+        ("Alt+4", "focus compiler output"),
+    ]));
+    third.extend(section("PROJECT EDITOR — NORMAL", &[
+        ("i", "enter Insert mode"),
+        ("h / j / k / l", "move cursor"),
+        ("w / b", "next / previous word"),
+        ("0 / $", "line start / end"),
+        ("x / Delete", "delete character"),
+        ("Backspace", "move cursor left"),
+        ("PgUp / PgDn", "move by editor page"),
+        ("Esc", "focus file tree"),
+        ("Ctrl+s", "save current source"),
+    ]));
+    (first, middle, third)
 }
 
 fn render_too_small(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {

@@ -1175,7 +1175,10 @@ async fn run(
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                 {
-                    if app.page == papr_core::Page::Settings && app.config_editor_focused {
+                    if app.page == papr_core::Page::Settings
+                        && app.config_editor_focused
+                        && app.mode != AppMode::Help
+                    {
                         if let Some(action) =
                             handle_config_editor_key(app, key, &mut runtime, &mut theme, &senders)
                         {
@@ -1210,7 +1213,10 @@ async fn run(
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                 {
-                    if app.page == papr_core::Page::Settings && app.config_editor_focused {
+                    if app.page == papr_core::Page::Settings
+                        && app.config_editor_focused
+                        && app.mode != AppMode::Help
+                    {
                         if let Some(action) =
                             handle_config_editor_key(app, key, &mut runtime, &mut theme, &senders)
                         {
@@ -3247,6 +3253,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         }
         return None;
     }
+    // Help is a global command. Resolve it before any view-specific handler
+    // (notably PaperDetail) can interpret the key as navigation. Text-entry
+    // contexts retain the character as normal input.
+    if key.code == KeyCode::Char('?') && !has_active_text_input(app) {
+        app.dispatch(Command::ToggleHelp);
+        return None;
+    }
     if matches!(app.mode, AppMode::ProjectRename | AppMode::ProjectCreate) {
         match key.code {
             KeyCode::Esc => {
@@ -3318,8 +3331,19 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         return None;
     }
     if app.mode == AppMode::Help {
-        if matches!(key.code, KeyCode::Esc | KeyCode::Char('?' | 'q')) {
-            app.dispatch(Command::ToggleHelp);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('?' | 'q') => app.dispatch(Command::ToggleHelp),
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.help_scroll = app.help_scroll.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.help_scroll = app.help_scroll.saturating_add(1);
+            }
+            KeyCode::PageUp => app.help_scroll = app.help_scroll.saturating_sub(10),
+            KeyCode::PageDown => app.help_scroll = app.help_scroll.saturating_add(10),
+            KeyCode::Home => app.help_scroll = 0,
+            KeyCode::End => app.help_scroll = usize::MAX,
+            _ => {}
         }
         return None;
     }
@@ -3353,6 +3377,21 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         app.dispatch(Command::TogglePalette);
         return None;
     }
+    // Project panes normally own their input, so route search before handing
+    // them the key. Insert mode remains the sole editor exception above.
+    if key.code == KeyCode::Char('/')
+        && !(app.content_focused
+            && app.page == papr_core::Page::Projects
+            && app.project_pane == ProjectPane::Editor
+            && app.project_editor_insert_mode)
+    {
+        app.page = papr_core::Page::Discover;
+        app.sidebar_index = 1;
+        app.content_focused = true;
+        app.mode = AppMode::Search;
+        app.discovery.query_cursor = app.discovery.query.len();
+        return None;
+    }
     // Projects owns its raw key events. In particular, do not normalize arrow
     // keys into h/j/k/l before the currently focused pane sees them.
     if app.page == papr_core::Page::Projects
@@ -3371,14 +3410,6 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         return handle_paper_detail_key(app, key);
     }
 
-    if key.code == KeyCode::Char('/') {
-        app.page = papr_core::Page::Discover;
-        app.sidebar_index = 1;
-        app.content_focused = true;
-        app.mode = AppMode::Search;
-        app.discovery.query_cursor = app.discovery.query.len();
-        return None;
-    }
     if !app.content_focused {
         if app.page == papr_core::Page::Settings && matches!(key.code, KeyCode::Right | KeyCode::Char('l')) {
             app.content_focused = true;
@@ -3500,6 +3531,22 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         app.dispatch(command);
     }
     None
+}
+
+fn has_active_text_input(app: &App) -> bool {
+    matches!(
+        app.mode,
+        AppMode::ProjectRename
+            | AppMode::ProjectCreate
+            | AppMode::CommandPalette
+            | AppMode::NoteEdit
+            | AppMode::Prompt
+            | AppMode::Search
+            | AppMode::WorkspaceSearch
+    ) || (app.page == papr_core::Page::Projects
+        && app.content_focused
+        && app.project_pane == ProjectPane::Editor
+        && app.project_editor_insert_mode)
 }
 
 fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
@@ -4649,6 +4696,12 @@ fn handle_modal_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
 }
 
 fn handle_paper_detail_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    // Keep the detail view self-contained even if its handler is invoked from
+    // a future input path: help must never fall through to detail navigation.
+    if key.code == KeyCode::Char('?') {
+        app.dispatch(Command::ToggleHelp);
+        return None;
+    }
     if matches!(app.page, papr_core::Page::Dashboard | papr_core::Page::Discover)
         && matches!(
             key.code,
@@ -4961,6 +5014,11 @@ fn handle_config_editor_key(
         return None;
     }
 
+    if key.code == KeyCode::Char('?') {
+        app.dispatch(Command::ToggleHelp);
+        return None;
+    }
+
     match key.code {
         KeyCode::Esc => {
             app.config_editor_focused = false;
@@ -5140,7 +5198,7 @@ mod tests {
 
     use super::{
         UiAction, build_config_editor_view, cursor_visual_position,
-        handle_config_editor_insert_key, handle_downloads_key, handle_key, parse_command,
+        handle_config_editor_insert_key, handle_downloads_key, handle_key, handle_paper_detail_key, parse_command,
         keyword_representation_targets, move_config_editor_page, refresh_downloads_from_dir,
         reload_config_editor_buffer, select_dashboard_papers, shuffle_daily_bucket, PaperTarget,
     };
@@ -5673,6 +5731,142 @@ mod tests {
         assert_eq!(app.project_editor_cursor, 3);
         assert!(app.project_editor_insert_mode);
         assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn help_shortcut_is_global_and_editor_insert_mode_keeps_question_mark() {
+        let mut library = App {
+            page: Page::Library,
+            content_focused: true,
+            ..App::default()
+        };
+        let _ = handle_key(
+            &mut library,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+        );
+        assert_eq!(library.mode, AppMode::Help);
+
+        let mut projects = project_editor_app("", 0);
+        projects.project_editor_insert_mode = false;
+        let _ = handle_key(
+            &mut projects,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+        );
+        assert_eq!(projects.mode, AppMode::Help);
+
+        let mut insert = project_editor_app("", 0);
+        let _ = handle_key(
+            &mut insert,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+        );
+        assert_eq!(insert.mode, AppMode::Normal);
+        assert_eq!(insert.project_editor_text, "?");
+    }
+
+    #[test]
+    fn help_opens_without_navigating_from_dashboard_or_discover() {
+        let mut dashboard = App {
+            page: Page::Dashboard,
+            content_focused: false,
+            sidebar_index: 0,
+            ..App::default()
+        };
+        let _ = handle_key(
+            &mut dashboard,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+        );
+        assert_eq!(dashboard.mode, AppMode::Help);
+        assert_eq!(dashboard.page, Page::Dashboard);
+        assert!(!dashboard.content_focused);
+        assert_eq!(dashboard.sidebar_index, 0);
+
+        let mut discover = App {
+            page: Page::Discover,
+            content_focused: true,
+            sidebar_index: 1,
+            ..App::default()
+        };
+        discover.discovery.selected = 3;
+        let _ = handle_key(
+            &mut discover,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+        );
+        assert_eq!(discover.mode, AppMode::Help);
+        assert_eq!(discover.page, Page::Discover);
+        assert_eq!(discover.discovery.selected, 3);
+        assert_eq!(discover.sidebar_index, 1);
+    }
+
+    #[test]
+    fn help_preserves_dashboard_and_discover_paper_detail_views() {
+        for page in [Page::Dashboard, Page::Discover] {
+            let mut app = App {
+                page,
+                content_focused: true,
+                mode: AppMode::PaperDetail,
+                paper_detail_scroll: 9,
+                ..App::default()
+            };
+
+            let _ = handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+            );
+            assert_eq!(app.mode, AppMode::Help);
+            assert_eq!(app.page, page);
+            assert_eq!(app.paper_detail_scroll, 9);
+
+            let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert_eq!(app.mode, AppMode::PaperDetail);
+            assert_eq!(app.page, page);
+            assert_eq!(app.paper_detail_scroll, 9);
+        }
+    }
+
+    #[test]
+    fn paper_detail_handler_never_routes_help_to_back_navigation() {
+        let mut app = App {
+            page: Page::Discover,
+            content_focused: true,
+            mode: AppMode::PaperDetail,
+            paper_detail_scroll: 4,
+            discovery: DiscoveryState {
+                selected: 2,
+                ..DiscoveryState::default()
+            },
+            ..App::default()
+        };
+
+        let action = handle_paper_detail_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT),
+        );
+        assert!(action.is_none());
+        assert_eq!(app.mode, AppMode::Help);
+        assert_eq!(app.help_return_mode, AppMode::PaperDetail);
+        assert_eq!(app.paper_detail_scroll, 4);
+        assert_eq!(app.discovery.selected, 2);
+    }
+
+    #[test]
+    fn slash_opens_discover_search_from_projects_but_inserts_in_editor_insert_mode() {
+        let mut projects = project_editor_app("", 0);
+        projects.project_editor_insert_mode = false;
+        let _ = handle_key(
+            &mut projects,
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+        );
+        assert_eq!(projects.page, Page::Discover);
+        assert_eq!(projects.mode, AppMode::Search);
+
+        let mut insert = project_editor_app("", 0);
+        let _ = handle_key(
+            &mut insert,
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+        );
+        assert_eq!(insert.page, Page::Projects);
+        assert_eq!(insert.mode, AppMode::Normal);
+        assert_eq!(insert.project_editor_text, "/");
     }
 
     #[test]
