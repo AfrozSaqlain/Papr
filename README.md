@@ -1,5 +1,9 @@
 # papr
 
+<p align="center">
+  <img src="assets/papr.gif" alt="Demo" width="900">
+</p>
+
 **Papr** is a fast terminal-based research paper explorer in Rust. Search, discover, and download papers directly from arXiv. Organize your library, manage reading queues, take notes, and track stats to keep your research organized all without leaving your terminal.
 
 By merging online arXiv discovery with local file organization, Papr provides a unified, keyboard-driven environment designed for focused academic research. The application is built using Ratatui, Tokio, Reqwest, and SQLite, delivering a lightweight, offline-capable utility that operates entirely under your control.
