@@ -230,6 +230,7 @@ async fn handle_plugin_cli(command: Option<&CliCommand>, plugin_host: &PluginHos
 #[derive(Debug)]
 enum UiAction {
     Search(String),
+    RetryDiscoverMore,
     OpenPaper(RemotePaper),
     OpenBrowser(String),
     Download(RemotePaper),
@@ -274,11 +275,23 @@ enum PaperTarget {
 #[derive(Debug)]
 struct SearchResponse {
     query: String,
-    result: Result<Vec<RemotePaper>, String>,
+    request_id: u64,
+    update: SearchUpdate,
+}
+
+#[derive(Debug)]
+enum SearchUpdate {
+    Partial { papers: Vec<RemotePaper>, next_start: Option<u16> },
+    Retrying { attempt: u8, max_attempts: u8 },
+    Complete(Vec<RemotePaper>),
+    InitialFailure(String),
+    PartialFailure { next_start: u16 },
 }
 
 const DISCOVERY_CANDIDATE_LIMIT: u16 = 250;
 const DISCOVERY_FETCH_BATCH_SIZE: u16 = 100;
+const DISCOVERY_PAGE_RETRY_ATTEMPTS: u8 = 3;
+const DISCOVERY_PAGE_RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Debug)]
 struct TodayResponse {
@@ -693,13 +706,37 @@ async fn run(
         }
         while let Ok(response) = receiver.try_recv() {
             state_changed = true;
-            if response.query == app.discovery.query {
-                match response.result {
-                    Ok(papers) => {
-                        app.discovery.set_results(papers);
+            if response.query == app.discovery.query && response.request_id == app.discovery.request_id {
+                match response.update {
+                    SearchUpdate::Partial { papers, next_start } => {
+                        app.discovery.update_results(papers);
+                        app.discovery.next_batch_start = next_start;
+                        app.discovery.progress_message = next_start
+                            .map(|_| "Loading more results...".to_owned());
+                        app.discovery.status = DiscoveryStatus::Loading;
+                    }
+                    SearchUpdate::Retrying { attempt, max_attempts } => {
+                        app.discovery.progress_message = Some(format!(
+                            "Retrying more results ({attempt}/{max_attempts})..."
+                        ));
+                        app.discovery.status = DiscoveryStatus::Loading;
+                    }
+                    SearchUpdate::Complete(papers) => {
+                        app.discovery.update_results(papers);
+                        app.discovery.next_batch_start = None;
+                        app.discovery.progress_message = None;
                         app.discovery.status = DiscoveryStatus::Ready;
                     }
-                    Err(error) => app.discovery.status = DiscoveryStatus::Error(error),
+                    SearchUpdate::InitialFailure(error) => {
+                        app.discovery.status = DiscoveryStatus::Error(error);
+                    }
+                    SearchUpdate::PartialFailure { next_start } => {
+                        app.discovery.next_batch_start = Some(next_start);
+                        app.discovery.progress_message = Some(
+                            "More results could not be loaded. Press r to retry.".to_owned(),
+                        );
+                        app.discovery.status = DiscoveryStatus::Ready;
+                    }
                 }
             }
         }
@@ -959,6 +996,88 @@ async fn run(
     Ok(())
 }
 
+async fn fetch_discovery_pages(
+    client: ArxivClient,
+    query: String,
+    request_id: u64,
+    mut papers: Vec<RemotePaper>,
+    mut start: u16,
+    response_sender: mpsc::UnboundedSender<SearchResponse>,
+) {
+    loop {
+        let mut page = None;
+        for retry in 0..=DISCOVERY_PAGE_RETRY_ATTEMPTS {
+            match client
+                .search_ranked_candidate_page(
+                    &query,
+                    &papers,
+                    start,
+                    DISCOVERY_CANDIDATE_LIMIT,
+                    DISCOVERY_FETCH_BATCH_SIZE,
+                )
+                .await
+            {
+                Ok(result) => {
+                    page = Some(result);
+                    break;
+                }
+                Err(error) if retry == DISCOVERY_PAGE_RETRY_ATTEMPTS => {
+                    let update = if papers.is_empty() {
+                        SearchUpdate::InitialFailure(error.to_string())
+                    } else {
+                        SearchUpdate::PartialFailure { next_start: start }
+                    };
+                    let _ = response_sender.send(SearchResponse {
+                        query,
+                        request_id,
+                        update,
+                    });
+                    return;
+                }
+                Err(_) => {
+                    let attempt = retry + 1;
+                    let _ = response_sender.send(SearchResponse {
+                        query: query.clone(),
+                        request_id,
+                        update: SearchUpdate::Retrying {
+                            attempt,
+                            max_attempts: DISCOVERY_PAGE_RETRY_ATTEMPTS,
+                        },
+                    });
+                    let multiplier = 1_u32 << u32::from(retry);
+                    tokio::time::sleep(DISCOVERY_PAGE_RETRY_BASE_DELAY * multiplier).await;
+                }
+            }
+        }
+
+        let Some(page) = page else {
+            return;
+        };
+        papers = page.papers;
+        match page.next_start {
+            Some(next_start) => {
+                let _ = response_sender.send(SearchResponse {
+                    query: query.clone(),
+                    request_id,
+                    update: SearchUpdate::Partial {
+                        papers: papers.clone(),
+                        next_start: Some(next_start),
+                    },
+                });
+                start = next_start;
+            }
+            None => {
+                let _ = response_sender.send(SearchResponse {
+                    query,
+                    request_id,
+                    update: SearchUpdate::Complete(papers),
+                });
+                return;
+            }
+        }
+    }
+}
+
 fn apply_ui_action(
     action: UiAction,
     runtime: &mut Runtime,
@@ -972,19 +1091,26 @@ fn apply_ui_action(
             runtime
                 .database
                 .record_activity("search", None, Some(&query))?;
-            app.discovery.status = DiscoveryStatus::Loading;
+            let request_id = app.discovery.begin_search();
             let client = runtime.arxiv.clone();
             let response_sender = senders.search.clone();
             tokio::spawn(async move {
-                let result = client
-                    .search_ranked_candidates(
-                        &query,
-                        DISCOVERY_CANDIDATE_LIMIT,
-                        DISCOVERY_FETCH_BATCH_SIZE,
-                    )
-                    .await
-                    .map_err(|error| error.to_string());
-                let _ = response_sender.send(SearchResponse { query, result });
+                fetch_discovery_pages(client, query, request_id, Vec::new(), 0, response_sender).await;
+            });
+        }
+        UiAction::RetryDiscoverMore => {
+            let Some(start) = app.discovery.next_batch_start else {
+                return Ok(());
+            };
+            app.discovery.status = DiscoveryStatus::Loading;
+            app.discovery.progress_message = Some("Loading more results...".to_owned());
+            let client = runtime.arxiv.clone();
+            let response_sender = senders.search.clone();
+            let query = app.discovery.query.clone();
+            let request_id = app.discovery.request_id;
+            let papers = app.discovery.results.clone();
+            tokio::spawn(async move {
+                fetch_discovery_pages(client, query, request_id, papers, start, response_sender).await;
             });
         }
         UiAction::OpenPaper(paper) => {
@@ -2869,6 +2995,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         && app.page == papr_core::Page::Discover
         && !app.discovery.query.trim().is_empty()
     {
+        if app.discovery.next_batch_start.is_some()
+            && app.discovery.progress_message.as_deref()
+                == Some("More results could not be loaded. Press r to retry.")
+        {
+            return Some(UiAction::RetryDiscoverMore);
+        }
         let query = app.discovery.query.trim().to_owned();
         app.discovery.query.clone_from(&query);
         return Some(UiAction::Search(query));

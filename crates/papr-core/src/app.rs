@@ -194,6 +194,12 @@ pub struct DiscoveryState {
     pub page_scrolls: Vec<usize>,
     /// Network request state.
     pub status: DiscoveryStatus,
+    /// Monotonically increasing identifier for ignoring superseded searches.
+    pub request_id: u64,
+    /// Offset of the next remote candidate batch, when more results remain.
+    pub next_batch_start: Option<u16>,
+    /// Non-blocking progress or partial-failure message shown above the results.
+    pub progress_message: Option<String>,
     /// Vertical detail-page scroll offset.
     pub detail_scroll: u16,
 }
@@ -230,6 +236,37 @@ impl DiscoveryState {
         self.scroll = 0;
         self.page_selections = vec![0; self.page_count()];
         self.page_scrolls = vec![0; self.page_count()];
+    }
+
+    /// Start a new search and discard results belonging to the previous query.
+    pub fn begin_search(&mut self) -> u64 {
+        self.request_id = self.request_id.wrapping_add(1);
+        self.set_results(Vec::new());
+        self.status = DiscoveryStatus::Loading;
+        self.next_batch_start = None;
+        self.progress_message = None;
+        self.request_id
+    }
+
+    /// Replace an in-progress result snapshot without discarding the paper the user selected.
+    pub fn update_results(&mut self, results: Vec<RemotePaper>) {
+        let selected_id = self.selected_paper().map(|paper| paper.id.clone());
+        self.results = results;
+        let page_count = self.page_count();
+        self.page_selections.resize(page_count, 0);
+        self.page_scrolls.resize(page_count, 0);
+
+        if let Some(selected_id) = selected_id {
+            if let Some(index) = self.results.iter().position(|paper| paper.id == selected_id) {
+                self.page = index / Self::PAGE_SIZE;
+                self.selected = index % Self::PAGE_SIZE;
+                return;
+            }
+        }
+        self.page = self.page.min(page_count.saturating_sub(1));
+        self.selected = self
+            .selected
+            .min(self.current_page_results().len().saturating_sub(1));
     }
 
     /// Move to the next cached page, preserving the current page view state.
@@ -1188,6 +1225,24 @@ mod tests {
         assert!(discovery.next_page());
         assert_eq!((discovery.page, discovery.selected, discovery.scroll), (1, 4, 2));
         assert_eq!(discovery.results.len(), 101);
+    }
+
+    #[test]
+    fn incremental_discovery_updates_keep_the_selected_paper() {
+        let mut discovery = DiscoveryState::default();
+        discovery.set_results((0..100).map(remote_paper).collect());
+        discovery.selected = 23;
+
+        let mut updated = (100..150).map(remote_paper).collect::<Vec<_>>();
+        updated.push(remote_paper(23));
+        discovery.update_results(updated);
+
+        assert_eq!(
+            discovery.selected_paper().map(|paper| paper.title.as_str()),
+            Some("Paper 23")
+        );
+        assert_eq!(discovery.begin_search(), 1);
+        assert!(discovery.results.is_empty());
     }
 
     #[test]

@@ -27,6 +27,9 @@ pub enum ArxivError {
     /// A response timestamp was invalid.
     #[error("invalid arXiv timestamp: {0}")]
     Timestamp(#[from] chrono::ParseError),
+    /// A CPU-bound response processing task did not complete.
+    #[error("arXiv response processing task failed: {0}")]
+    Background(String),
 }
 
 /// Configured, reusable arXiv API client.
@@ -34,6 +37,15 @@ pub enum ArxivError {
 pub struct ArxivClient {
     client: Client,
     endpoint: Url,
+}
+
+/// One ranked page in an incremental arXiv candidate search.
+#[derive(Debug, Clone)]
+pub struct RankedCandidatePage {
+    /// All successfully loaded candidates, ranked globally so far.
+    pub papers: Vec<RemotePaper>,
+    /// Offset of the next batch, or `None` when the result set is complete.
+    pub next_start: Option<u16>,
 }
 
 impl ArxivClient {
@@ -73,11 +85,10 @@ impl ArxivClient {
                 return Ok(vec![paper]);
             }
         }
-        let mut papers = self
+        let papers = self
             .query(&build_search_query(query), 0, limit, "relevance")
             .await?;
-        rank_by_query_relevance(query, &mut papers);
-        Ok(papers)
+        rank_papers(query.to_owned(), papers).await
     }
 
     /// Search a larger arXiv candidate set in batches, then rank it once globally.
@@ -113,8 +124,98 @@ impl ArxivClient {
             start = start.saturating_add(requested);
         }
 
-        rank_by_query_relevance(query, &mut papers);
-        Ok(papers)
+        rank_papers(query.to_owned(), papers).await
+    }
+
+    /// Search candidate batches and publish ranked snapshots before the final batch.
+    ///
+    /// Each snapshot is ranked against every candidate received so far. The final
+    /// batch is ranked once, for the returned authoritative result suitable for
+    /// caching and pagination.
+    pub async fn search_ranked_candidates_incremental<F>(
+        &self,
+        query: &str,
+        candidate_limit: u16,
+        batch_size: u16,
+        mut on_batch: F,
+    ) -> Result<Vec<RemotePaper>, ArxivError>
+    where
+        F: FnMut(Vec<RemotePaper>),
+    {
+        if let Some(arxiv_id) = parse_arxiv_id(query) {
+            if let Some(paper) = self.get_by_id(&arxiv_id).await? {
+                return Ok(vec![paper]);
+            }
+        }
+
+        let search_query = build_search_query(query);
+        let total = candidate_limit.clamp(1, 1_000);
+        let batch_size = batch_size.clamp(1, 100);
+        let mut papers = Vec::with_capacity(usize::from(total));
+        let mut start = 0_u16;
+
+        while start < total {
+            let requested = batch_size.min(total - start);
+            let mut batch = self.query(&search_query, start, requested, "relevance").await?;
+            let received = u16::try_from(batch.len()).unwrap_or(u16::MAX);
+            papers.append(&mut batch);
+            let final_batch = received < requested || start.saturating_add(requested) >= total;
+            if !final_batch {
+                on_batch(rank_papers(query.to_owned(), papers.clone()).await?);
+            }
+            if final_batch {
+                break;
+            }
+            start = start.saturating_add(requested);
+        }
+
+        rank_papers(query.to_owned(), papers).await
+    }
+
+    /// Fetch one candidate page and rank it with all previously loaded pages.
+    ///
+    /// Callers retain the returned page state and can retry the same `start` offset
+    /// without losing already loaded papers.
+    pub async fn search_ranked_candidate_page(
+        &self,
+        query: &str,
+        existing: &[RemotePaper],
+        start: u16,
+        candidate_limit: u16,
+        batch_size: u16,
+    ) -> Result<RankedCandidatePage, ArxivError> {
+        if start == 0 {
+            if let Some(arxiv_id) = parse_arxiv_id(query) {
+                if let Some(paper) = self.get_by_id(&arxiv_id).await? {
+                    return Ok(RankedCandidatePage {
+                        papers: vec![paper],
+                        next_start: None,
+                    });
+                }
+            }
+        }
+
+        let total = candidate_limit.clamp(1, 1_000);
+        if start >= total {
+            return Ok(RankedCandidatePage {
+                papers: rank_papers(query.to_owned(), existing.to_vec()).await?,
+                next_start: None,
+            });
+        }
+        let requested = batch_size.clamp(1, 100).min(total - start);
+        let mut papers = existing.to_vec();
+        let mut batch = self
+            .query(&build_search_query(query), start, requested, "relevance")
+            .await?;
+        let received = u16::try_from(batch.len()).unwrap_or(u16::MAX);
+        papers.append(&mut batch);
+        let next_start = (received == requested && start.saturating_add(requested) < total)
+            .then_some(start.saturating_add(requested));
+
+        Ok(RankedCandidatePage {
+            papers: rank_papers(query.to_owned(), papers).await?,
+            next_start,
+        })
     }
 
     /// Load the newest submissions across arXiv for the dashboard.
@@ -159,7 +260,7 @@ impl ArxivClient {
             .error_for_status()?
             .text()
             .await?;
-        let mut papers = parse_feed(&response)?;
+        let mut papers = parse_response(response).await?;
         Ok(papers.pop())
     }
 
@@ -185,8 +286,23 @@ impl ArxivClient {
             .error_for_status()?
             .text()
             .await?;
-        parse_feed(&response)
+        parse_response(response).await
     }
+}
+
+async fn parse_response(response: String) -> Result<Vec<RemotePaper>, ArxivError> {
+    tokio::task::spawn_blocking(move || parse_feed(&response))
+        .await
+        .map_err(|error| ArxivError::Background(error.to_string()))?
+}
+
+async fn rank_papers(input: String, mut papers: Vec<RemotePaper>) -> Result<Vec<RemotePaper>, ArxivError> {
+    tokio::task::spawn_blocking(move || {
+        rank_by_query_relevance(&input, &mut papers);
+        papers
+    })
+    .await
+    .map_err(|error| ArxivError::Background(error.to_string()))
 }
 
 #[derive(Debug, Deserialize)]

@@ -2236,7 +2236,7 @@ fn render_discover(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
 
     match &app.discovery.status {
         DiscoveryStatus::Idle => render_discover_empty(frame, rows[1], theme),
-        DiscoveryStatus::Loading => {
+        DiscoveryStatus::Loading if app.discovery.results.is_empty() => {
             frame.render_widget(
                 Paragraph::new("Searching arXiv...")
                     .style(Style::default().fg(theme.accent))
@@ -2244,7 +2244,8 @@ fn render_discover(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
                 rows[1],
             );
         }
-        DiscoveryStatus::Error(_) => {
+        DiscoveryStatus::Loading => render_search_results(frame, rows[1], app, theme),
+        DiscoveryStatus::Error(_) if app.discovery.results.is_empty() => {
             frame.render_widget(
                 Paragraph::new(vec![
                     Line::styled("Search failed", Style::default().fg(theme.error)),
@@ -2264,6 +2265,7 @@ fn render_discover(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
                 rows[1],
             );
         }
+        DiscoveryStatus::Error(_) => render_search_results(frame, rows[1], app, theme),
         DiscoveryStatus::Ready => render_search_results(frame, rows[1], app, theme),
     }
 }
@@ -2287,6 +2289,18 @@ fn render_discover_empty(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
 }
 
 fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+    let progress = app.discovery.progress_message.as_deref().unwrap_or_else(|| {
+        if app.discovery.status == DiscoveryStatus::Loading {
+            "Loading more results..."
+        } else {
+            ""
+        }
+    });
+    let progress_prefix = if progress.is_empty() {
+        String::new()
+    } else {
+        format!("{progress}  ")
+    };
     let items = app.discovery.current_page_results().iter().map(|paper| {
         let local_status = app.library.papers.iter().find(|p| {
             if let (Some(ldoi), Some(rdoi)) = (&p.doi, &paper.doi) {
@@ -2350,7 +2364,8 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
         .block(
             Block::default()
                 .title(format!(
-                    " PAGE {} / {}  |  {} RESULTS  |  Ctrl+Left/Right: page ",
+                    " {}PAGE {} / {}  |  {} RESULTS  |  Ctrl+Left/Right: page ",
+                    progress_prefix,
                     app.discovery.page + 1,
                     app.discovery.page_count(),
                     app.discovery.results.len(),
