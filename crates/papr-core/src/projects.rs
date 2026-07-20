@@ -160,6 +160,7 @@ mod tests {
         let manager = ProjectManager::new(root.clone())?;
         let created = manager.create("paper")?;
         assert!(created.path.join("main.tex").exists());
+        assert!(fs::read_to_string(created.path.join("main.tex"))?.contains("\\title{paper}"));
         assert_eq!(manager.list()?.len(), 1);
         let external = root.parent().unwrap().join(format!("papr-external-{}", now()));
         fs::create_dir_all(&external)?;

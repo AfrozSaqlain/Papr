@@ -270,10 +270,12 @@ enum UiAction {
     ClosePdf,
     RetryDownload { id: String, paper: RemotePaper },
     RefreshProjects,
-    CreateProject,
+    CreateProject(String),
     OpenProject(Project),
     OpenProjectFile(PathBuf),
     RenameProject { project: Project, name: String },
+    ConfirmDeleteProject(Project),
+    DeleteProject(Project),
 }
 
 enum KeyHandling {
@@ -1434,20 +1436,24 @@ fn apply_ui_action(
             app.projects = runtime.project_manager.list().map_err(|e| anyhow::anyhow!(e))?;
             app.projects_selected = app.projects_selected.min(app.projects.len().saturating_sub(1));
         }
-        UiAction::CreateProject => {
-            let mut n = 1_usize;
-            let project = loop {
-                let name = if n == 1 { "untitled".to_owned() } else { format!("untitled-{n}") };
-                match runtime.project_manager.create(&name) {
-                    Ok(project) => break project,
-                    Err(papr_core::ProjectError::AlreadyExists(_)) => n += 1,
-                    Err(error) => return Err(anyhow::anyhow!(error)),
+        UiAction::CreateProject(name) => {
+            let name = name.trim();
+            let project = match runtime.project_manager.create(name) {
+                Ok(project) => project,
+                Err(error) => {
+                    app.toast = Some(format!("Could not create project: {error}"));
+                    return Ok(());
                 }
             };
-            open_project_workspace(app, project);
+            open_project_workspace(app, project.clone());
             start_project_compiler(runtime, app);
             app.projects = runtime.project_manager.list().unwrap_or_default();
-            app.toast = Some("Created project; rename its directory when ready.".into());
+            app.projects_selected = app
+                .projects
+                .iter()
+                .position(|candidate| candidate.path == project.path)
+                .unwrap_or(0);
+            app.toast = Some(format!("Created project {}", project.name));
         }
         UiAction::OpenProject(project) => {
             let project = runtime.project_manager.open(project.path).map_err(|e| anyhow::anyhow!(e))?;
@@ -1493,6 +1499,45 @@ fn apply_ui_action(
                 }
                 Err(error) => app.toast = Some(format!("Could not rename project: {error}")),
             }
+        }
+        UiAction::ConfirmDeleteProject(project) => {
+            app.delete_confirmation = Some(papr_core::DeletionTarget::Project { project });
+            app.mode = AppMode::ConfirmDelete;
+        }
+        UiAction::DeleteProject(project) => {
+            let was_active = app
+                .active_project
+                .as_ref()
+                .is_some_and(|active| active.path == project.path);
+            if let Err(error) = runtime.project_manager.delete(&project) {
+                app.toast = Some(format!("Could not delete project: {error}"));
+                return Ok(());
+            }
+            if was_active {
+                if let Some(mut compiler) = runtime.project_compiler.take() {
+                    compiler.stop();
+                }
+                app.active_project = None;
+                app.project_files.clear();
+                app.project_file_selected = 0;
+                app.project_editor_path = None;
+                app.project_editor_text.clear();
+                app.project_editor_dirty = false;
+                app.project_editor_cursor = 0;
+                app.project_editor_insert_mode = false;
+                app.project_editor_scroll = 0;
+                app.project_build_status = "Idle".into();
+                app.project_build_errors.clear();
+                app.project_build_scroll = 0;
+                app.pdf_viewer_path = None;
+                app.pdf_viewer_page = 1;
+                app.pdf_viewer_total_pages = 1;
+                app.pdf_viewer_scroll_y = 0;
+            }
+            app.project_pane = ProjectPane::ProjectList;
+            app.projects = runtime.project_manager.list().unwrap_or_default();
+            app.projects_selected = app.projects_selected.min(app.projects.len().saturating_sub(1));
+            app.toast = Some(format!("Deleted project {}", project.name));
         }
         UiAction::OpenPdf { paper_id, path } => {
             let session_id = runtime.database.record_open(paper_id, true)?;
@@ -3202,19 +3247,32 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         }
         return None;
     }
-    if app.mode == AppMode::ProjectRename {
+    if matches!(app.mode, AppMode::ProjectRename | AppMode::ProjectCreate) {
         match key.code {
-            KeyCode::Esc => app.mode = AppMode::Normal,
+            KeyCode::Esc => {
+                app.project_rename_input.clear();
+                app.project_rename_cursor = 0;
+                app.mode = AppMode::Normal;
+            }
             KeyCode::Enter => {
+                let creating = app.mode == AppMode::ProjectCreate;
                 app.mode = AppMode::Normal;
                 let name = app.project_rename_input.trim().to_owned();
-                let project = app.active_project.clone().or_else(|| app.projects.get(app.projects_selected).cloned());
                 app.project_rename_input.clear();
+                app.project_rename_cursor = 0;
+                if creating {
+                    return Some(UiAction::CreateProject(name));
+                }
+                let project = app.active_project.clone().or_else(|| app.projects.get(app.projects_selected).cloned());
                 return project.map(|project| UiAction::RenameProject { project, name });
             }
-            KeyCode::Backspace => { app.project_rename_input.pop(); }
-            KeyCode::Char(c) => app.project_rename_input.push(c),
-            _ => {}
+            _ => {
+                let _ = edit_text(
+                    &mut app.project_rename_input,
+                    &mut app.project_rename_cursor,
+                    key,
+                );
+            }
         }
         return None;
     }
@@ -3445,23 +3503,44 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
 }
 
 fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    // Pane shortcuts deliberately do nothing in Insert mode. They are still
+    // consumed so an Alt sequence can never become editor text.
+    if app.project_pane == ProjectPane::Editor
+        && app.project_editor_insert_mode
+        && is_project_pane_shortcut(key)
+    {
+        return None;
+    }
     if handle_project_pane_shortcut(app, key) {
         return None;
     }
     if app.active_project.is_none() || app.project_pane == ProjectPane::ProjectList {
         match key.code {
             KeyCode::Char('q') => app.dispatch(Command::Quit),
-            KeyCode::Char('n') => return Some(UiAction::CreateProject),
+            KeyCode::Left => app.content_focused = false,
+            KeyCode::Char('n') => {
+                app.project_rename_input.clear();
+                app.project_rename_cursor = 0;
+                app.mode = AppMode::ProjectCreate;
+            }
             KeyCode::Char('r') => return Some(UiAction::RefreshProjects),
             KeyCode::Char('R') => {
                 if let Some(project) = app.projects.get(app.projects_selected) {
                     app.project_rename_input = project.name.clone();
+                    app.project_rename_cursor = app.project_rename_input.len();
                     app.mode = AppMode::ProjectRename;
                 }
             }
+            KeyCode::Char('x') => {
+                return app
+                    .projects
+                    .get(app.projects_selected)
+                    .cloned()
+                    .map(UiAction::ConfirmDeleteProject);
+            }
             KeyCode::Up | KeyCode::Char('k') => app.projects_selected = app.projects_selected.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => app.projects_selected = (app.projects_selected + 1).min(app.projects.len().saturating_sub(1)),
-            KeyCode::Enter | KeyCode::Char('l') => return app.projects.get(app.projects_selected).cloned().map(UiAction::OpenProject),
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => return app.projects.get(app.projects_selected).cloned().map(UiAction::OpenProject),
             _ => {}
         }
         return None;
@@ -3502,10 +3581,18 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             KeyCode::Char('R') => {
                 if let Some(project) = &app.active_project {
                     app.project_rename_input = project.name.clone();
+                    app.project_rename_cursor = app.project_rename_input.len();
                     app.mode = AppMode::ProjectRename;
                 }
             }
-            KeyCode::Esc => app.project_pane = ProjectPane::ProjectList,
+            KeyCode::Esc | KeyCode::Left => {
+                if let Some(active) = &app.active_project
+                    && let Some(selected) = app.projects.iter().position(|project| project.path == active.path)
+                {
+                    app.projects_selected = selected;
+                }
+                app.project_pane = ProjectPane::ProjectList;
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 app.project_file_selected = app.project_file_selected.saturating_sub(1);
             }
@@ -3520,7 +3607,7 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                     .cloned()
                     .map(UiAction::OpenProjectFile);
             }
-            KeyCode::Left | KeyCode::Right => {}
+            KeyCode::Right => {}
             _ => {}
         },
         ProjectPane::Build => handle_project_build_key(app, key),
@@ -3533,15 +3620,14 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
 /// Direct focus selection is resolved before any pane consumes its own keys.
 /// Alt combinations never reach the editor buffer, including in Insert mode.
 fn handle_project_pane_shortcut(app: &mut App, key: KeyEvent) -> bool {
-    if !key.modifiers.contains(KeyModifiers::ALT) {
+    if !is_project_pane_shortcut(key) {
         return false;
     }
     let pane = match key.code {
-        KeyCode::Char('1') => ProjectPane::ProjectList,
-        KeyCode::Char('2') => ProjectPane::FileTree,
-        KeyCode::Char('3') => ProjectPane::Editor,
+        KeyCode::Char('1') => ProjectPane::FileTree,
+        KeyCode::Char('2') => ProjectPane::Editor,
+        KeyCode::Char('3') => ProjectPane::Preview,
         KeyCode::Char('4') => ProjectPane::Build,
-        KeyCode::Char('5') => ProjectPane::Preview,
         _ => return false,
     };
     let available = match pane {
@@ -3564,6 +3650,11 @@ fn handle_project_pane_shortcut(app: &mut App, key: KeyEvent) -> bool {
         .into());
     }
     true
+}
+
+fn is_project_pane_shortcut(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::ALT)
+        && matches!(key.code, KeyCode::Char('1' | '2' | '3' | '4'))
 }
 
 fn handle_project_build_key(app: &mut App, key: KeyEvent) {
@@ -3809,6 +3900,7 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             let target = app.delete_confirmation.take()?;
             app.mode = AppMode::Normal;
             match target {
+                DeletionTarget::Project { project } => Some(UiAction::DeleteProject(project)),
                 DeletionTarget::Paper { id, path, .. } => {
                     Some(UiAction::DeletePaper { paper_id: id, path })
                 }
@@ -5632,11 +5724,13 @@ mod tests {
     fn project_alt_number_shortcuts_select_available_panes_directly() {
         let mut app = project_editor_app("unchanged", 4);
         app.project_editor_path = Some(std::path::PathBuf::from("keyboard-test/main.tex"));
+        app.project_editor_insert_mode = false;
+        app.pdf_viewer_path = Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"));
 
         for (number, expected) in [
-            ('1', ProjectPane::ProjectList),
-            ('2', ProjectPane::FileTree),
-            ('3', ProjectPane::Editor),
+            ('1', ProjectPane::FileTree),
+            ('2', ProjectPane::Editor),
+            ('3', ProjectPane::Preview),
             ('4', ProjectPane::Build),
         ] {
             let _ = handle_key(
@@ -5648,7 +5742,7 @@ mod tests {
     }
 
     #[test]
-    fn project_alt_shortcuts_never_enter_text_and_unavailable_panes_are_safe() {
+    fn project_alt_shortcuts_are_inactive_in_insert_mode_and_unavailable_panes_are_safe() {
         let mut app = project_editor_app("abc", 1);
         app.project_editor_path = Some(std::path::PathBuf::from("keyboard-test/main.tex"));
 
@@ -5656,33 +5750,86 @@ mod tests {
             &mut app,
             KeyEvent::new(KeyCode::Char('4'), KeyModifiers::ALT),
         );
-        assert_eq!(app.project_pane, ProjectPane::Build);
+        assert_eq!(app.project_pane, ProjectPane::Editor);
         assert_eq!(app.project_editor_text, "abc");
         assert_eq!(app.project_editor_cursor, 1);
         assert!(app.project_editor_insert_mode);
-
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(app.project_editor_text, "abc");
 
         app.active_project = None;
         app.project_pane = ProjectPane::ProjectList;
         let _ = handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT),
         );
         assert_eq!(app.project_pane, ProjectPane::ProjectList);
         assert!(app.toast.as_deref().is_some_and(|message| message.contains("Open a project")));
     }
 
     #[test]
-    fn project_list_arrows_do_not_escape_to_sidebar_navigation() {
+    fn project_list_right_opens_and_x_requests_confirmed_deletion() {
         let mut app = project_editor_app("", 0);
         app.project_pane = ProjectPane::ProjectList;
-        app.projects = vec![app.active_project.clone().unwrap()];
+        let project = app.active_project.clone().unwrap();
+        app.projects = vec![project.clone()];
+
+        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(matches!(action, Some(UiAction::OpenProject(opened)) if opened == project));
+
+        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(matches!(action, Some(UiAction::ConfirmDeleteProject(selected)) if selected == project));
+    }
+
+    #[test]
+    fn project_creation_uses_a_named_modal_with_standard_text_editing() {
+        let mut app = App {
+            page: Page::Projects,
+            content_focused: true,
+            project_pane: ProjectPane::ProjectList,
+            ..App::default()
+        };
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::ProjectCreate);
+        for character in ['p', 'a', 'p', 'r'] {
+            let _ = handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(app.project_rename_input, "pap");
+
+        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(action, Some(UiAction::CreateProject(name)) if name == "pap"));
+        assert_eq!(app.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn project_left_navigation_follows_file_tree_then_project_list_hierarchy() {
+        let mut app = project_editor_app("", 0);
+        let active = app.active_project.clone().unwrap();
+        app.projects = vec![
+            Project { name: "other".into(), path: "other".into(), opened_at: 0 },
+            active,
+        ];
+        app.projects_selected = 0;
+        app.project_pane = ProjectPane::FileTree;
 
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         assert!(app.content_focused);
         assert_eq!(app.project_pane, ProjectPane::ProjectList);
+        assert_eq!(app.projects_selected, 1);
+        assert!(app.active_project.is_some());
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert!(!app.content_focused);
+        assert_eq!(app.project_pane, ProjectPane::ProjectList);
+        assert_eq!(app.projects_selected, 1);
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert!(!app.content_focused);
+        assert_eq!(app.projects_selected, 1);
     }
 
     #[test]

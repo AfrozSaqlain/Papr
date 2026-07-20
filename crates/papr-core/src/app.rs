@@ -122,6 +122,8 @@ pub enum AppMode {
     PdfView,
     /// One-line project rename input.
     ProjectRename,
+    /// One-line project creation input.
+    ProjectCreate,
 }
 
 /// Logical focus target within the Projects workspace.
@@ -143,6 +145,11 @@ pub enum ProjectPane {
 /// Target to delete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeletionTarget {
+    /// A LaTex project directory.
+    Project {
+        /// Project metadata and directory to remove.
+        project: Project,
+    },
     /// A paper to delete.
     Paper {
         /// ID of the paper in DB.
@@ -514,6 +521,8 @@ pub struct App {
     pub project_pane: ProjectPane,
     /// Pending project name while the rename prompt is open.
     pub project_rename_input: String,
+    /// Byte cursor within the project name modal input.
+    pub project_rename_cursor: usize,
     /// Remote paper discovery state.
     pub discovery: DiscoveryState,
     /// Scroll offset within the currently open paper detail view.
@@ -687,6 +696,7 @@ impl Default for App {
             project_build_viewport_height: 0,
             project_pane: ProjectPane::ProjectList,
             project_rename_input: String::new(),
+            project_rename_cursor: 0,
             discovery: DiscoveryState::default(),
             paper_detail_scroll: 0,
             library: LibraryState::default(),

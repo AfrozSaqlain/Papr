@@ -109,7 +109,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         AppMode::NoteEdit => render_note_editor(frame, app, theme),
         AppMode::Prompt => render_metadata_prompt(frame, app, theme),
         AppMode::ConfirmDelete => render_delete_confirmation(frame, app, theme),
-        AppMode::ProjectRename => render_project_rename_prompt(frame, app, theme),
+        AppMode::ProjectRename | AppMode::ProjectCreate => render_project_name_prompt(frame, app, theme),
         AppMode::Normal | AppMode::Search | AppMode::WorkspaceSearch | AppMode::PdfView => {}
     }
 
@@ -128,12 +128,20 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let _ = crossterm::execute!(std::io::stdout(), cursor_style);
 }
 
-fn render_project_rename_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
+fn render_project_name_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let area = frame.area();
     let popup = Rect::new(area.x + area.width / 4, area.y + area.height / 2 - 2, area.width / 2, 4);
+    let title = if app.mode == AppMode::ProjectCreate {
+        " NEW PROJECT — ENTER CREATE  ESC CANCEL "
+    } else {
+        " RENAME PROJECT — ENTER SAVE  ESC CANCEL "
+    };
     frame.render_widget(Clear, popup);
-    frame.render_widget(Paragraph::new(app.project_rename_input.as_str()).block(focus_block(" RENAME PROJECT — ENTER SAVE  ESC CANCEL ", true, theme)), popup);
-    frame.set_cursor_position((popup.x.saturating_add(1 + app.project_rename_input.chars().count() as u16), popup.y + 1));
+    frame.render_widget(Paragraph::new(app.project_rename_input.as_str()).block(focus_block(title, true, theme)), popup);
+    let cursor_columns = app.project_rename_input[..app.project_rename_cursor.min(app.project_rename_input.len())]
+        .chars()
+        .count() as u16;
+    frame.set_cursor_position((popup.x.saturating_add(1 + cursor_columns), popup.y + 1));
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
@@ -263,7 +271,7 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
             ])
         });
         let list = List::new(items)
-            .block(focus_block(" PROJECTS [ALT+1] — n NEW  ENTER OPEN  r REFRESH ", app.content_focused, theme))
+            .block(focus_block(" PROJECTS — n NEW  ENTER/RIGHT OPEN  x DELETE  r REFRESH ", app.content_focused, theme))
             .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
             .highlight_symbol("> ");
         let mut state = ListState::default().with_selected(workspace_highlight_selection(app, app.projects_selected));
@@ -281,7 +289,7 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
         ListItem::new(label)
     });
     let tree = List::new(files)
-        .block(focus_block(" FILES [ALT+2] — ENTER OPEN  ESC PROJECTS ", app.content_focused && app.project_pane == ProjectPane::FileTree, theme))
+        .block(focus_block(" FILES [ALT+1] — ENTER OPEN  ESC PROJECTS ", app.content_focused && app.project_pane == ProjectPane::FileTree, theme))
         .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
         .highlight_symbol("› ");
     let mut state = ListState::default().with_selected(Some(app.project_file_selected));
@@ -301,7 +309,7 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
         let (prefix, content) = line.split_at(4.min(line.len()));
         Line::from(vec![Span::styled(prefix.to_owned(), Style::default().fg(theme.muted)), Span::styled(content.to_owned(), Style::default().fg(theme.text))])
     }).collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(editor_lines).wrap(Wrap { trim: false }).block(focus_block(&format!(" EDITOR [ALT+3] — {editor_title}{} ", if app.project_editor_dirty { " •" } else { "" }), app.content_focused && app.project_pane == ProjectPane::Editor, theme)), left[1]);
+    frame.render_widget(Paragraph::new(editor_lines).wrap(Wrap { trim: false }).block(focus_block(&format!(" EDITOR [ALT+2] — {editor_title}{} ", if app.project_editor_dirty { " •" } else { "" }), app.content_focused && app.project_pane == ProjectPane::Editor, theme)), left[1]);
     if app.content_focused && app.project_pane == ProjectPane::Editor {
         frame.set_cursor_position((
             left[1].x.saturating_add(5).saturating_add(u16::try_from(editor_view.cursor_col).unwrap_or(0)),
@@ -317,12 +325,12 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
     frame.render_widget(Paragraph::new(diagnostics).scroll((u16::try_from(app.project_build_scroll).unwrap_or(u16::MAX), 0)).wrap(Wrap { trim: true }).block(focus_block(&format!(" BUILD [ALT+4]: {} ", app.project_build_status), app.content_focused && app.project_pane == ProjectPane::Build, theme)), left[2]);
     let preview = project.path.join("main.pdf");
     if preview.exists() && app.pdf_viewer_path.as_deref() == Some(preview.as_path()) {
-        let preview_block = focus_block(" PDF PREVIEW [ALT+5] ", app.content_focused && app.project_pane == ProjectPane::Preview, theme);
+        let preview_block = focus_block(" PDF PREVIEW [ALT+3] ", app.content_focused && app.project_pane == ProjectPane::Preview, theme);
         let preview_area = preview_block.inner(panes[1]);
         frame.render_widget(preview_block, panes[1]);
         crate::pdf_viewer::draw_pdf_viewer_in(frame, app, preview_area);
     } else {
-        frame.render_widget(Paragraph::new("Live PDF preview\nWaiting for the first successful build…").alignment(Alignment::Center).wrap(Wrap { trim: true }).block(focus_block(" PDF PREVIEW [ALT+5] ", app.content_focused && app.project_pane == ProjectPane::Preview, theme)), panes[1]);
+        frame.render_widget(Paragraph::new("Live PDF preview\nWaiting for the first successful build…").alignment(Alignment::Center).wrap(Wrap { trim: true }).block(focus_block(" PDF PREVIEW [ALT+3] ", app.content_focused && app.project_pane == ProjectPane::Preview, theme)), panes[1]);
     }
 }
 
@@ -1901,6 +1909,11 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     };
     
     let (title, message, item_name) = match target {
+        DeletionTarget::Project { project } => (
+            " CONFIRM DELETE PROJECT ",
+            "Are you sure you want to permanently delete this project directory and all of its files?",
+            project.name.as_str(),
+        ),
         DeletionTarget::Paper { title, .. } => (
             " CONFIRM DELETE PDF ",
             "Are you sure you want to permanently delete this PDF file from your disk?",
