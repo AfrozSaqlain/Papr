@@ -1876,6 +1876,7 @@ dependencies = [
  "clap_complete",
  "crossterm",
  "image",
+ "notify",
  "papr-core",
  "pulldown-cmark",
  "ratatui",

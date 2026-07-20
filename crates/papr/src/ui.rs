@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 
 use crate::build_config_editor_view;
 use papr_core::{
-    App, AppMode, DeletionTarget, DiscoveryStatus, DownloadStatus, Page, RemotePaper, Theme,
+    App, AppMode, DeletionTarget, DiscoveryStatus, DownloadStatus, Page, ProjectPane, RemotePaper, Theme,
 };
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::{
@@ -109,11 +109,15 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         AppMode::NoteEdit => render_note_editor(frame, app, theme),
         AppMode::Prompt => render_metadata_prompt(frame, app, theme),
         AppMode::ConfirmDelete => render_delete_confirmation(frame, app, theme),
+        AppMode::ProjectRename => render_project_rename_prompt(frame, app, theme),
         AppMode::Normal | AppMode::Search | AppMode::WorkspaceSearch | AppMode::PdfView => {}
     }
 
-    let cursor_style = if app.page == Page::Settings && app.config_editor_focused {
-        if app.config_editor_insert_mode {
+    let project_editor_focused = app.page == Page::Projects
+        && app.content_focused
+        && app.project_pane == ProjectPane::Editor;
+    let cursor_style = if (app.page == Page::Settings && app.config_editor_focused) || project_editor_focused {
+        if app.config_editor_insert_mode || (project_editor_focused && app.project_editor_insert_mode) {
             crossterm::cursor::SetCursorStyle::BlinkingBar
         } else {
             crossterm::cursor::SetCursorStyle::BlinkingBlock
@@ -122,6 +126,14 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         crossterm::cursor::SetCursorStyle::BlinkingBar
     };
     let _ = crossterm::execute!(std::io::stdout(), cursor_style);
+}
+
+fn render_project_rename_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
+    let area = frame.area();
+    let popup = Rect::new(area.x + area.width / 4, area.y + area.height / 2 - 2, area.width / 2, 4);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(Paragraph::new(app.project_rename_input.as_str()).block(focus_block(" RENAME PROJECT — ENTER SAVE  ESC CANCEL ", true, theme)), popup);
+    frame.set_cursor_position((popup.x.saturating_add(1 + app.project_rename_input.chars().count() as u16), popup.y + 1));
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
@@ -202,6 +214,8 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
 
     if app.page == Page::Dashboard {
         render_dashboard(frame, inset, app, theme);
+    } else if app.page == Page::Projects {
+        render_projects(frame, inset, app, theme);
     } else if app.page == Page::Discover {
         render_discover(frame, inset, app, theme);
     } else if app.page == Page::Library {
@@ -237,6 +251,78 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
             ),
         ];
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inset);
+    }
+}
+
+fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+    if app.active_project.is_none() || app.project_pane == ProjectPane::ProjectList {
+        let items = app.projects.iter().map(|project| {
+            ListItem::new(vec![
+                Line::styled(&project.name, Style::default().fg(theme.text).add_modifier(Modifier::BOLD)),
+                Line::styled(project.path.display().to_string(), Style::default().fg(theme.muted)),
+            ])
+        });
+        let list = List::new(items)
+            .block(focus_block(" PROJECTS [ALT+1] — n NEW  ENTER OPEN  r REFRESH ", app.content_focused, theme))
+            .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
+            .highlight_symbol("> ");
+        let mut state = ListState::default().with_selected(workspace_highlight_selection(app, app.projects_selected));
+        frame.render_stateful_widget(list, area, &mut state);
+        if app.projects.is_empty() {
+            frame.render_widget(Paragraph::new("No projects yet. Press n to create one.").alignment(Alignment::Center).style(Style::default().fg(theme.muted)), area);
+        }
+        return;
+    }
+    let project = app.active_project.as_ref().expect("active project checked above");
+    let panes = Layout::horizontal([Constraint::Percentage(52), Constraint::Percentage(48)]).split(area);
+    let left = Layout::vertical([Constraint::Percentage(32), Constraint::Min(5), Constraint::Length(4)]).split(panes[0]);
+    let files = app.project_files.iter().map(|path| {
+        let label = path.strip_prefix(&project.path).unwrap_or(path).display().to_string();
+        ListItem::new(label)
+    });
+    let tree = List::new(files)
+        .block(focus_block(" FILES [ALT+2] — ENTER OPEN  ESC PROJECTS ", app.content_focused && app.project_pane == ProjectPane::FileTree, theme))
+        .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
+        .highlight_symbol("› ");
+    let mut state = ListState::default().with_selected(Some(app.project_file_selected));
+    frame.render_stateful_widget(tree, left[0], &mut state);
+    let editor_title = app.project_editor_path.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("Editor");
+    let editor_height = left[1].height.saturating_sub(2) as usize;
+    app.project_editor_wrap_width = left[1].width.saturating_sub(6).max(1) as usize;
+    app.project_editor_viewport_height = editor_height;
+    let editor_view = build_config_editor_view(
+        &app.project_editor_text,
+        app.project_editor_cursor,
+        app.project_editor_wrap_width,
+        editor_height,
+        &mut app.project_editor_scroll,
+    );
+    let editor_lines = editor_view.lines.iter().skip(app.project_editor_scroll).take(editor_height).map(|line| {
+        let (prefix, content) = line.split_at(4.min(line.len()));
+        Line::from(vec![Span::styled(prefix.to_owned(), Style::default().fg(theme.muted)), Span::styled(content.to_owned(), Style::default().fg(theme.text))])
+    }).collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(editor_lines).wrap(Wrap { trim: false }).block(focus_block(&format!(" EDITOR [ALT+3] — {editor_title}{} ", if app.project_editor_dirty { " •" } else { "" }), app.content_focused && app.project_pane == ProjectPane::Editor, theme)), left[1]);
+    if app.content_focused && app.project_pane == ProjectPane::Editor {
+        frame.set_cursor_position((
+            left[1].x.saturating_add(5).saturating_add(u16::try_from(editor_view.cursor_col).unwrap_or(0)),
+            left[1].y.saturating_add(1).saturating_add(u16::try_from(editor_view.cursor_row.saturating_sub(app.project_editor_scroll)).unwrap_or(0)),
+        ));
+    }
+    let diagnostics = if app.project_build_errors.is_empty() { "No compiler errors.".to_owned() } else { app.project_build_errors.join("\n") };
+    app.project_build_viewport_height = left[2].height.saturating_sub(2) as usize;
+    let build_line_count = app.project_build_errors.len().max(1);
+    app.project_build_scroll = app.project_build_scroll.min(
+        build_line_count.saturating_sub(app.project_build_viewport_height.max(1)),
+    );
+    frame.render_widget(Paragraph::new(diagnostics).scroll((u16::try_from(app.project_build_scroll).unwrap_or(u16::MAX), 0)).wrap(Wrap { trim: true }).block(focus_block(&format!(" BUILD [ALT+4]: {} ", app.project_build_status), app.content_focused && app.project_pane == ProjectPane::Build, theme)), left[2]);
+    let preview = project.path.join("main.pdf");
+    if preview.exists() && app.pdf_viewer_path.as_deref() == Some(preview.as_path()) {
+        let preview_block = focus_block(" PDF PREVIEW [ALT+5] ", app.content_focused && app.project_pane == ProjectPane::Preview, theme);
+        let preview_area = preview_block.inner(panes[1]);
+        frame.render_widget(preview_block, panes[1]);
+        crate::pdf_viewer::draw_pdf_viewer_in(frame, app, preview_area);
+    } else {
+        frame.render_widget(Paragraph::new("Live PDF preview\nWaiting for the first successful build…").alignment(Alignment::Center).wrap(Wrap { trim: true }).block(focus_block(" PDF PREVIEW [ALT+5] ", app.content_focused && app.project_pane == ProjectPane::Preview, theme)), panes[1]);
     }
 }
 

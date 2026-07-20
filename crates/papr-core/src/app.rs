@@ -5,6 +5,7 @@ use crate::models::{
     RemotePaper, ResearchDashboard,
 };
 use crate::plugins::PluginInfo;
+use crate::projects::Project;
 
 /// Top-level application pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -27,6 +28,8 @@ pub enum Page {
     Notes,
     /// Background transfers.
     Downloads,
+    /// Integrated LaTeX writing projects.
+    Projects,
     /// Reading activity timeline.
     History,
     /// Reading analytics.
@@ -54,7 +57,7 @@ impl Page {
     }
 
     /// All pages in sidebar order.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Dashboard,
         Self::Discover,
         Self::Library,
@@ -64,6 +67,7 @@ impl Page {
         Self::Authors,
         Self::Notes,
         Self::Downloads,
+        Self::Projects,
         Self::History,
         Self::Statistics,
         Self::Settings,
@@ -75,6 +79,7 @@ impl Page {
     pub const fn title(self) -> &'static str {
         match self {
             Self::Dashboard => "Dashboard",
+            Self::Projects => "Projects",
             Self::Discover => "Discover",
             Self::Library => "Library",
             Self::ReadingQueue => "Reading Queue",
@@ -115,6 +120,24 @@ pub enum AppMode {
     ConfirmDelete,
     /// Internal PDF viewer.
     PdfView,
+    /// One-line project rename input.
+    ProjectRename,
+}
+
+/// Logical focus target within the Projects workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProjectPane {
+    /// Project browser before a project is opened.
+    #[default]
+    ProjectList,
+    /// Project file tree.
+    FileTree,
+    /// Source editor.
+    Editor,
+    /// Compiler diagnostics.
+    Build,
+    /// Live PDF preview.
+    Preview,
 }
 
 /// Target to delete.
@@ -453,6 +476,44 @@ pub struct App {
     pub workspace_query_cursor: usize,
     /// Active search mode for each supported workspace page.
     pub active_search_workspaces: std::collections::HashSet<Page>,
+    /// Projects discovered in the configured projects directory and registry.
+    pub projects: Vec<Project>,
+    /// Selected project in the browser.
+    pub projects_selected: usize,
+    /// Open project, if the split writing workspace is active.
+    pub active_project: Option<Project>,
+    /// Files shown in the active project's tree.
+    pub project_files: Vec<std::path::PathBuf>,
+    /// Selected file in the project tree.
+    pub project_file_selected: usize,
+    /// Text buffer for the selected source file.
+    pub project_editor_text: String,
+    /// Source file backing the current editor buffer.
+    pub project_editor_path: Option<std::path::PathBuf>,
+    /// Whether the project editor has unsaved changes.
+    pub project_editor_dirty: bool,
+    /// Byte cursor in the project editor buffer.
+    pub project_editor_cursor: usize,
+    /// Vim insert-mode state for the project editor.
+    pub project_editor_insert_mode: bool,
+    /// Vertical visual-row offset for the project editor.
+    pub project_editor_scroll: usize,
+    /// Cached wrapped width of the project editor viewport.
+    pub project_editor_wrap_width: usize,
+    /// Cached height of the project editor viewport.
+    pub project_editor_viewport_height: usize,
+    /// Last compiler status shown in the writing workspace.
+    pub project_build_status: String,
+    /// Latest compiler diagnostics, preserving the last good PDF on failure.
+    pub project_build_errors: Vec<String>,
+    /// First visible compiler-output line in the Projects build pane.
+    pub project_build_scroll: usize,
+    /// Cached content height of the Projects build pane.
+    pub project_build_viewport_height: usize,
+    /// Current logical Projects workspace focus.
+    pub project_pane: ProjectPane,
+    /// Pending project name while the rename prompt is open.
+    pub project_rename_input: String,
     /// Remote paper discovery state.
     pub discovery: DiscoveryState,
     /// Scroll offset within the currently open paper detail view.
@@ -607,6 +668,25 @@ impl Default for App {
             workspace_query: String::new(),
             workspace_query_cursor: 0,
             active_search_workspaces: std::collections::HashSet::new(),
+            projects: Vec::new(),
+            projects_selected: 0,
+            active_project: None,
+            project_files: Vec::new(),
+            project_file_selected: 0,
+            project_editor_text: String::new(),
+            project_editor_path: None,
+            project_editor_dirty: false,
+            project_editor_cursor: 0,
+            project_editor_insert_mode: false,
+            project_editor_scroll: 0,
+            project_editor_wrap_width: 1,
+            project_editor_viewport_height: 0,
+            project_build_status: "Idle".into(),
+            project_build_errors: Vec::new(),
+            project_build_scroll: 0,
+            project_build_viewport_height: 0,
+            project_pane: ProjectPane::ProjectList,
+            project_rename_input: String::new(),
             discovery: DiscoveryState::default(),
             paper_detail_scroll: 0,
             library: LibraryState::default(),

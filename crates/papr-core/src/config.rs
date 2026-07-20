@@ -36,6 +36,8 @@ pub struct Paths {
     pub plugins_dir: PathBuf,
     /// Plugin configuration file.
     pub plugins_config_file: PathBuf,
+    /// Default directory for managed LaTeX projects.
+    pub projects_dir: PathBuf,
 }
 
 impl Paths {
@@ -53,6 +55,7 @@ impl Paths {
             downloads_dir: dirs.data_dir().join("papers"),
             plugins_dir: dirs.data_dir().join("plugins"),
             plugins_config_file: dirs.config_dir().join("plugins.toml"),
+            projects_dir: dirs.data_dir().join("projects"),
         })
     }
 }
@@ -75,6 +78,8 @@ pub struct Config {
     pub dashboard_keywords: String,
     /// Plugin identifiers explicitly allowed to execute.
     pub enabled_plugins: Vec<String>,
+    /// Default directory used to create and discover writing projects.
+    pub projects_directory: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -87,6 +92,7 @@ impl Default for Config {
             download_path: None,
             dashboard_keywords: String::new(),
             enabled_plugins: Vec::new(),
+            projects_directory: None,
         }
     }
 }
@@ -99,7 +105,15 @@ impl Config {
     /// Returns an error when the file cannot be read, written, or parsed.
     pub fn load_or_create(paths: &Paths) -> Result<Self, ConfigError> {
         if paths.config_file.exists() {
-            return Ok(toml::from_str(&fs::read_to_string(&paths.config_file)?)?);
+            let mut config: Self = toml::from_str(&fs::read_to_string(&paths.config_file)?)?;
+            // Upgrade older configurations in place so the setting remains
+            // visible and editable through Papr's normal settings workflow.
+            if config.projects_directory.is_none() {
+                config.projects_directory = Some(paths.projects_dir.clone());
+                fs::write(&paths.config_file, toml::to_string_pretty(&config)?)?;
+            }
+            fs::create_dir_all(config.projects_directory(paths))?;
+            return Ok(config);
         }
         if let Some(parent) = paths.config_file.parent() {
             fs::create_dir_all(parent)?;
@@ -121,6 +135,11 @@ impl Config {
         let downloads_dir_str = serialized_path
             .strip_prefix("val = ")
             .unwrap_or(&serialized_path)
+            .trim_end();
+        let serialized_projects_path = toml::to_string(&PathValue { val: paths.projects_dir.clone() })?;
+        let projects_dir_str = serialized_projects_path
+            .strip_prefix("val = ")
+            .unwrap_or(&serialized_projects_path)
             .trim_end();
 
         #[derive(Serialize)]
@@ -156,6 +175,9 @@ dashboard_keywords = ""
 
 # Plugin identifiers explicitly allowed to execute.
 enabled_plugins = []
+
+# Default directory for LaTeX writing projects.
+projects_directory = {projects_dir_str}
 "#
         );
 
@@ -164,8 +186,19 @@ enabled_plugins = []
         let mut config = Self::default();
         config.library_folders = vec![paths.downloads_dir.clone()];
         config.download_path = Some(paths.downloads_dir.clone());
+        config.projects_directory = Some(paths.projects_dir.clone());
         config.pdf_viewer = Some(default_pdf_viewer.to_string());
+        fs::create_dir_all(&paths.projects_dir)?;
         Ok(config)
+    }
+
+    /// Resolve the projects directory, retaining a platform-default for older
+    /// configuration files that predate `projects_directory`.
+    #[must_use]
+    pub fn projects_directory(&self, paths: &Paths) -> PathBuf {
+        self.projects_directory
+            .clone()
+            .unwrap_or_else(|| paths.projects_dir.clone())
     }
 
     /// Return configured dashboard recommendation terms.
@@ -231,6 +264,7 @@ mod tests {
             downloads_dir: temp_dir.join("papers"),
             plugins_dir: temp_dir.join("plugins"),
             plugins_config_file: temp_dir.join("plugins.toml"),
+            projects_dir: temp_dir.join("projects"),
         };
 
         let config = Config::load_or_create(&paths)?;
@@ -244,6 +278,7 @@ mod tests {
         assert!(content.contains("download_path ="));
         assert!(content.contains("dashboard_keywords ="));
         assert!(content.contains("enabled_plugins ="));
+        assert!(content.contains("projects_directory ="));
         
         let parsed: Config = toml::from_str(&content)?;
         assert_eq!(parsed.theme, config.theme);

@@ -7,12 +7,15 @@ mod pdf_viewer;
 
 use std::{
     collections::HashMap,
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
+    sync::mpsc::{self as std_mpsc, TryRecvError},
     sync::Arc,
 };
 
 use anyhow::{Context, Result};
+use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use toml;
 use chrono::Local;
 use clap::{CommandFactory, Parser, Subcommand};
@@ -21,7 +24,8 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use papr_core::{
     App, AppMode, ArxivClient, CollectionDirectory, Command, Config, Database, DiscoveryStatus,
     DownloadEvent, DownloadManager, DownloadStatus, DownloadTask, ImportedPdf, LibraryIndexer,
-    LibraryWatcher, MetadataPrompt, PaperNote, Paths, PluginHost, RemotePaper, Theme,
+    LibraryWatcher, MetadataPrompt, PaperNote, Paths, PluginHost, RemotePaper, Theme, Project,
+    ProjectManager, ProjectPane,
 };
 use sha2::{Digest, Sha256};
 use tokio::{sync::{mpsc, Semaphore}, task::JoinSet};
@@ -77,10 +81,13 @@ async fn main() -> Result<()> {
         println!("database: {}", paths.database_file.display());
         println!("downloads: {}", paths.downloads_dir.display());
         println!("plugins: {}", paths.plugins_dir.display());
+        println!("projects: {}", paths.projects_dir.display());
         return Ok(());
     }
 
     let config = Config::load_or_create(&paths).context("failed to load configuration")?;
+    let project_manager = ProjectManager::new(config.projects_directory(&paths))
+        .context("failed to initialize projects directory")?;
     let plugin_host = PluginHost::discover(&paths.plugins_dir, &config.enabled_plugins)
         .context("failed to discover plugins")?;
     if handle_plugin_cli(cli.command.as_ref(), &plugin_host).await? {
@@ -147,6 +154,7 @@ async fn main() -> Result<()> {
     app.plugins = plugin_host.plugins();
     app.plugin_diagnostics = plugin_host.diagnostics().len();
     app.config_editor_text = std::fs::read_to_string(&paths.config_file).unwrap_or_default();
+    app.projects = project_manager.list().unwrap_or_default();
 
     discover_local_downloads(&mut app, &download_dir, &database);
 
@@ -171,6 +179,8 @@ async fn main() -> Result<()> {
         database,
         database_file: paths.database_file.clone(),
         config_file: paths.config_file.clone(),
+        project_manager,
+        project_compiler: None,
         default_downloads_dir: paths.downloads_dir.clone(),
         download_dir,
         pdf_viewer: config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer),
@@ -259,6 +269,11 @@ enum UiAction {
     MoveQueueItemDown(i64),
     ClosePdf,
     RetryDownload { id: String, paper: RemotePaper },
+    RefreshProjects,
+    CreateProject,
+    OpenProject(Project),
+    OpenProjectFile(PathBuf),
+    RenameProject { project: Project, name: String },
 }
 
 enum KeyHandling {
@@ -313,6 +328,8 @@ struct Runtime {
     database: Database,
     database_file: PathBuf,
     config_file: PathBuf,
+    project_manager: ProjectManager,
+    project_compiler: Option<ProjectCompiler>,
     default_downloads_dir: PathBuf,
     download_dir: PathBuf,
     pdf_viewer: String,
@@ -328,12 +345,183 @@ struct Runtime {
     active_enrichments: std::collections::HashSet<i64>,
 }
 
+/// Cross-platform lifecycle wrapper for the persistent latexmk watcher.
+struct ProjectCompiler {
+    project: Project,
+    child: std::process::Child,
+    events: std_mpsc::Receiver<ProjectBuildEvent>,
+    _watcher: RecommendedWatcher,
+    pdf_changed: bool,
+    build_succeeded: bool,
+}
+
+#[derive(Debug)]
+enum ProjectBuildEvent {
+    PdfChanged,
+    Succeeded,
+    Failed(String),
+}
+
+impl ProjectCompiler {
+    fn start(project: Project) -> Result<Self> {
+        let mut child = ProcessCommand::new("latexmk")
+            .args(["-pdf", "-pvc", "main.tex"])
+            .current_dir(&project.path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("latexmk is not available; install a TeX distribution and latexmk")?;
+        let (sender, events) = std_mpsc::channel();
+        if let Some(stdout) = child.stdout.take() {
+            spawn_latexmk_reader(stdout, sender.clone());
+        }
+        if let Some(stderr) = child.stderr.take() {
+            spawn_latexmk_reader(stderr, sender.clone());
+        }
+        let watch_sender = sender;
+        let mut watcher = RecommendedWatcher::new(
+            move |event: notify::Result<notify::Event>| {
+                if let Ok(event) = event
+                    // The watcher is non-recursive and scoped to this project;
+                    // matching the basename tolerates canonical-path differences
+                    // reported by platform backends.
+                    && event.paths.iter().any(|path| path.file_name().is_some_and(|name| name == "main.pdf"))
+                {
+                    let _ = watch_sender.send(ProjectBuildEvent::PdfChanged);
+                }
+            },
+            NotifyConfig::default(),
+        )?;
+        watcher.watch(&project.path, RecursiveMode::NonRecursive)?;
+        Ok(Self { project, child, events, _watcher: watcher, pdf_changed: false, build_succeeded: false })
+    }
+
+    fn stop(&mut self) { let _ = self.child.kill(); let _ = self.child.wait(); }
+
+    /// Consume build and filesystem events. No filesystem metadata is polled.
+    fn drain_events(&mut self, app: &mut App) -> bool {
+        let mut changed = false;
+        loop {
+            match self.events.try_recv() {
+                Ok(ProjectBuildEvent::PdfChanged) => self.pdf_changed = true,
+                Ok(ProjectBuildEvent::Succeeded) => self.build_succeeded = true,
+                Ok(ProjectBuildEvent::Failed(error)) => {
+                    self.build_succeeded = false;
+                    self.pdf_changed = false;
+                    app.project_build_status = "Build failed (editing continues)".into();
+                    app.project_build_errors = vec![error];
+                    changed = true;
+                }
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        }
+        if self.pdf_changed && self.build_succeeded {
+            self.pdf_changed = false;
+            self.build_succeeded = false;
+            let pdf = self.project.path.join("main.pdf");
+            if pdf.exists() {
+                app.project_build_status = "Built successfully".into();
+                app.project_build_errors.clear();
+                let page = app.pdf_viewer_page;
+                app.pdf_viewer_total_pages = get_pdf_page_count(&pdf);
+                app.pdf_viewer_page = page.min(app.pdf_viewer_total_pages.max(1));
+                if app.pdf_viewer_path.as_deref() == Some(pdf.as_path()) {
+                    pdf_viewer::invalidate_document(&pdf);
+                } else {
+                    pdf_viewer::reset_for_new_document(&pdf);
+                    app.pdf_viewer_path = Some(pdf);
+                }
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
+fn spawn_latexmk_reader<R: std::io::Read + Send + 'static>(reader: R, sender: std_mpsc::Sender<ProjectBuildEvent>) {
+    std::thread::spawn(move || {
+        for line in BufReader::new(reader).lines().map_while(Result::ok) {
+            let normalized = line.to_ascii_lowercase();
+            if normalized.contains("all targets") && normalized.contains("up-to-date") {
+                let _ = sender.send(ProjectBuildEvent::Succeeded);
+            } else if normalized.contains("errors, so i did not complete") {
+                let _ = sender.send(ProjectBuildEvent::Failed(line));
+            }
+        }
+    });
+}
+
 fn config_editor_wrap_rows(char_len: usize, wrap_width: usize) -> usize {
     if char_len == 0 {
         1
     } else {
         char_len.div_ceil(wrap_width.max(1))
     }
+}
+
+fn open_project_workspace(app: &mut App, project: Project) {
+    app.project_files = project_files(&project.path);
+    app.project_file_selected = 0;
+    app.project_editor_path = None;
+    app.project_editor_text.clear();
+    app.project_editor_dirty = false;
+    app.project_editor_cursor = 0;
+    app.project_editor_insert_mode = false;
+    app.project_editor_scroll = 0;
+    app.project_build_status = "Starting latexmk…".into();
+    app.project_build_errors.clear();
+    app.project_build_scroll = 0;
+    app.project_pane = ProjectPane::FileTree;
+    app.active_project = Some(project);
+    if let Some(project) = &app.active_project {
+        let pdf = project.path.join("main.pdf");
+        if pdf.exists() {
+            pdf_viewer::reset_for_new_document(&pdf);
+            app.pdf_viewer_path = Some(pdf.clone());
+            app.pdf_viewer_total_pages = get_pdf_page_count(&pdf);
+            app.pdf_viewer_page = 1;
+            app.pdf_viewer_scroll_y = 0;
+        }
+    }
+    if let Some(main) = app.project_files.iter().find(|p| p.file_name().is_some_and(|n| n == "main.tex")).cloned() {
+        if let Ok(text) = std::fs::read_to_string(&main) {
+            app.project_editor_text = text;
+            app.project_editor_path = Some(main);
+            app.project_editor_cursor = 0;
+        }
+    }
+}
+
+fn start_project_compiler(runtime: &mut Runtime, app: &mut App) {
+    if let Some(mut compiler) = runtime.project_compiler.take() { compiler.stop(); }
+    let Some(project) = app.active_project.clone() else { return; };
+    match ProjectCompiler::start(project) {
+        Ok(compiler) => runtime.project_compiler = Some(compiler),
+        Err(error) => {
+            app.project_build_status = "Compiler unavailable".into();
+            app.project_build_errors = vec![error.to_string()];
+        }
+    }
+}
+
+fn project_files(root: &std::path::Path) -> Vec<PathBuf> {
+    fn visit(root: &std::path::Path, path: &std::path::Path, files: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(path) else { return; };
+        let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let entry_path = entry.path();
+            if entry_path.file_name().is_some_and(|name| name == ".git") { continue; }
+            if entry_path.is_dir() { visit(root, &entry_path, files); }
+            else if entry_path.extension().is_some_and(|ext| matches!(ext.to_str(), Some("tex" | "bib" | "sty" | "cls" | "md"))) {
+                files.push(entry_path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    visit(root, root, &mut files);
+    files
 }
 
 fn config_editor_line_start(text: &str, cursor: usize) -> usize {
@@ -585,7 +773,8 @@ pub(crate) fn build_config_editor_view(
     scroll: &mut usize,
 ) -> ConfigEditorView {
     let wrap_width = wrap_width.max(1);
-    let (cursor_row, cursor_col) = cursor_visual_position(text, cursor, wrap_width);
+    let (display_text, display_cursor) = expand_tabs_for_editor_view(text, cursor, 4);
+    let (cursor_row, cursor_col) = cursor_visual_position(&display_text, display_cursor, wrap_width);
 
     if cursor_row < *scroll {
         *scroll = cursor_row;
@@ -594,7 +783,7 @@ pub(crate) fn build_config_editor_view(
     }
 
     let mut lines = Vec::new();
-    for (line_idx, line) in text.split('\n').enumerate() {
+    for (line_idx, line) in display_text.split('\n').enumerate() {
         let chars: Vec<char> = line.chars().collect();
         let row_count = config_editor_wrap_rows(chars.len(), wrap_width);
         for row in 0..row_count {
@@ -615,6 +804,40 @@ pub(crate) fn build_config_editor_view(
         cursor_row,
         cursor_col,
     }
+}
+
+/// Expand stored tab characters only for display. The buffer remains byte-for-
+/// byte unchanged while cursor geometry and wrapping use terminal cell widths.
+fn expand_tabs_for_editor_view(text: &str, cursor: usize, tab_width: usize) -> (String, usize) {
+    let tab_width = tab_width.max(1);
+    let cursor = cursor.min(text.len());
+    let mut display = String::with_capacity(text.len());
+    let mut display_cursor = 0;
+    let mut column = 0_usize;
+    for (byte_index, character) in text.char_indices() {
+        if byte_index == cursor {
+            display_cursor = display.len();
+        }
+        match character {
+            '\t' => {
+                let spaces = tab_width - (column % tab_width);
+                display.extend(std::iter::repeat_n(' ', spaces));
+                column += spaces;
+            }
+            '\n' => {
+                display.push(character);
+                column = 0;
+            }
+            _ => {
+                display.push(character);
+                column += 1;
+            }
+        }
+    }
+    if cursor == text.len() {
+        display_cursor = display.len();
+    }
+    (display, display_cursor)
 }
 
 struct ActionSenders {
@@ -693,7 +916,16 @@ async fn run(
         // is consumed and reset at the bottom of the loop after drawing.
         let mut state_changed = force_redraw;
 
-        if app.mode == AppMode::PdfView {
+        if let Some(compiler) = runtime.project_compiler.as_mut() {
+            let previous = (app.project_build_status.clone(), app.project_build_errors.clone());
+            let preview_changed = compiler.drain_events(app);
+            if preview_changed || previous.0 != app.project_build_status || previous.1 != app.project_build_errors { state_changed = true; }
+        }
+
+        let project_preview_active = app.page == papr_core::Page::Projects
+            && app.active_project.is_some()
+            && app.pdf_viewer_path.is_some();
+        if app.mode == AppMode::PdfView || project_preview_active {
             let pdf_page_cached = pdf_viewer::is_current_page_cached(app);
             if pdf_page_cached != last_pdf_page_cached {
                 state_changed = true;
@@ -915,8 +1147,12 @@ async fn run(
 
         // Use a dynamic timeout based on cache and animation status.
         // Only call is_animating() once per iteration (it acquires a mutex).
-        let animating = app.mode == AppMode::PdfView && pdf_viewer::is_animating();
-        let poll_timeout = if app.mode == AppMode::PdfView {
+        let preview_active = app.mode == AppMode::PdfView
+            || (app.page == papr_core::Page::Projects
+                && app.active_project.is_some()
+                && app.pdf_viewer_path.is_some());
+        let animating = preview_active && pdf_viewer::is_animating();
+        let poll_timeout = if preview_active {
             if animating {
                 std::time::Duration::from_millis(8)  // ~120fps cap while animating
             } else if pdf_viewer::is_current_page_cached(app) {
@@ -1023,6 +1259,7 @@ async fn run(
 
         tokio::task::yield_now().await;
     }
+    if let Some(mut compiler) = runtime.project_compiler.take() { compiler.stop(); }
     pdf_viewer::cleanup_temp_files();
     Ok(())
 }
@@ -1193,6 +1430,70 @@ fn apply_ui_action(
             }
         }
         UiAction::Reindex => start_runtime_scan(runtime, senders, app),
+        UiAction::RefreshProjects => {
+            app.projects = runtime.project_manager.list().map_err(|e| anyhow::anyhow!(e))?;
+            app.projects_selected = app.projects_selected.min(app.projects.len().saturating_sub(1));
+        }
+        UiAction::CreateProject => {
+            let mut n = 1_usize;
+            let project = loop {
+                let name = if n == 1 { "untitled".to_owned() } else { format!("untitled-{n}") };
+                match runtime.project_manager.create(&name) {
+                    Ok(project) => break project,
+                    Err(papr_core::ProjectError::AlreadyExists(_)) => n += 1,
+                    Err(error) => return Err(anyhow::anyhow!(error)),
+                }
+            };
+            open_project_workspace(app, project);
+            start_project_compiler(runtime, app);
+            app.projects = runtime.project_manager.list().unwrap_or_default();
+            app.toast = Some("Created project; rename its directory when ready.".into());
+        }
+        UiAction::OpenProject(project) => {
+            let project = runtime.project_manager.open(project.path).map_err(|e| anyhow::anyhow!(e))?;
+            open_project_workspace(app, project);
+            start_project_compiler(runtime, app);
+        }
+        UiAction::OpenProjectFile(path) => {
+            match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    app.project_editor_text = text;
+                    app.project_editor_path = Some(path);
+                    app.project_editor_dirty = false;
+                    app.project_editor_cursor = 0;
+                    app.project_editor_insert_mode = false;
+                    app.project_editor_scroll = 0;
+                    app.project_pane = ProjectPane::Editor;
+                }
+                Err(error) => app.toast = Some(format!("Could not open file: {error}")),
+            }
+        }
+        UiAction::RenameProject { project, name } => {
+            match runtime.project_manager.rename(&project, &name) {
+                Ok(renamed) => {
+                    if app.active_project.as_ref().is_some_and(|active| active.path == project.path) {
+                        let old_root = project.path;
+                        let old_editor = app.project_editor_path.clone();
+                        open_project_workspace(app, renamed.clone());
+                        if let Some(old_editor) = old_editor {
+                            if let Ok(relative) = old_editor.strip_prefix(&old_root) {
+                                let new_editor = renamed.path.join(relative);
+                                if let Ok(text) = std::fs::read_to_string(&new_editor) {
+                                    app.project_editor_path = Some(new_editor);
+                                    app.project_editor_text = text;
+                                    app.project_pane = ProjectPane::Editor;
+                                }
+                            }
+                        }
+                        start_project_compiler(runtime, app);
+                    }
+                    app.projects = runtime.project_manager.list().unwrap_or_default();
+                    app.projects_selected = app.projects.iter().position(|p| p.path == renamed.path).unwrap_or(0);
+                    app.toast = Some(format!("Renamed project to {}", renamed.name));
+                }
+                Err(error) => app.toast = Some(format!("Could not rename project: {error}")),
+            }
+        }
         UiAction::OpenPdf { paper_id, path } => {
             let session_id = runtime.database.record_open(paper_id, true)?;
             open_pdf(
@@ -2901,6 +3202,22 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         }
         return None;
     }
+    if app.mode == AppMode::ProjectRename {
+        match key.code {
+            KeyCode::Esc => app.mode = AppMode::Normal,
+            KeyCode::Enter => {
+                app.mode = AppMode::Normal;
+                let name = app.project_rename_input.trim().to_owned();
+                let project = app.active_project.clone().or_else(|| app.projects.get(app.projects_selected).cloned());
+                app.project_rename_input.clear();
+                return project.map(|project| UiAction::RenameProject { project, name });
+            }
+            KeyCode::Backspace => { app.project_rename_input.pop(); }
+            KeyCode::Char(c) => app.project_rename_input.push(c),
+            _ => {}
+        }
+        return None;
+    }
     if app.mode == AppMode::CommandPalette {
         match key.code {
             KeyCode::Esc => app.dispatch(Command::TogglePalette),
@@ -2973,6 +3290,17 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     {
         app.discovery.previous_page();
         return None;
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('b') {
+        app.dispatch(Command::TogglePalette);
+        return None;
+    }
+    // Projects owns its raw key events. In particular, do not normalize arrow
+    // keys into h/j/k/l before the currently focused pane sees them.
+    if app.page == papr_core::Page::Projects
+        && app.content_focused
+    {
+        return handle_projects_key(app, key);
     }
     let key = normalize_panel_navigation(key);
     if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -3115,6 +3443,252 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
     None
 }
+
+fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    if handle_project_pane_shortcut(app, key) {
+        return None;
+    }
+    if app.active_project.is_none() || app.project_pane == ProjectPane::ProjectList {
+        match key.code {
+            KeyCode::Char('q') => app.dispatch(Command::Quit),
+            KeyCode::Char('n') => return Some(UiAction::CreateProject),
+            KeyCode::Char('r') => return Some(UiAction::RefreshProjects),
+            KeyCode::Char('R') => {
+                if let Some(project) = app.projects.get(app.projects_selected) {
+                    app.project_rename_input = project.name.clone();
+                    app.mode = AppMode::ProjectRename;
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => app.projects_selected = app.projects_selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => app.projects_selected = (app.projects_selected + 1).min(app.projects.len().saturating_sub(1)),
+            KeyCode::Enter | KeyCode::Char('l') => return app.projects.get(app.projects_selected).cloned().map(UiAction::OpenProject),
+            _ => {}
+        }
+        return None;
+    }
+    // Save is mode-independent: handle it before Insert-mode text dispatch.
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
+        save_project_editor(app);
+        return None;
+    }
+    if app.project_pane == ProjectPane::Editor && app.project_editor_insert_mode {
+        if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
+            move_project_editor_page(app, if key.code == KeyCode::PageUp { -1 } else { 1 });
+            return None;
+        }
+        match apply_editor_insert_key(
+            &mut app.project_editor_text,
+            &mut app.project_editor_cursor,
+            key,
+        ) {
+            EditorInsertResult::ExitInsert => app.project_editor_insert_mode = false,
+            EditorInsertResult::Changed => app.project_editor_dirty = true,
+            EditorInsertResult::Ignored | EditorInsertResult::Moved => {}
+        }
+        return None;
+    }
+    // Match the shared workspace command map in every non-text-input Projects
+    // context. Insert mode returned above, so its `q` remains ordinary text.
+    if key.code == KeyCode::Char('q') {
+        app.dispatch(Command::Quit);
+        return None;
+    }
+    if app.project_pane == ProjectPane::Editor {
+        handle_project_editor_normal_key(app, key);
+        return None;
+    }
+    match app.project_pane {
+        ProjectPane::FileTree => match key.code {
+            KeyCode::Char('R') => {
+                if let Some(project) = &app.active_project {
+                    app.project_rename_input = project.name.clone();
+                    app.mode = AppMode::ProjectRename;
+                }
+            }
+            KeyCode::Esc => app.project_pane = ProjectPane::ProjectList,
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.project_file_selected = app.project_file_selected.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.project_file_selected = (app.project_file_selected + 1)
+                    .min(app.project_files.len().saturating_sub(1));
+            }
+            KeyCode::Enter => {
+                return app
+                    .project_files
+                    .get(app.project_file_selected)
+                    .cloned()
+                    .map(UiAction::OpenProjectFile);
+            }
+            KeyCode::Left | KeyCode::Right => {}
+            _ => {}
+        },
+        ProjectPane::Build => handle_project_build_key(app, key),
+        ProjectPane::Preview => handle_project_preview_key(app, key),
+        ProjectPane::ProjectList | ProjectPane::Editor => {}
+    }
+    None
+}
+
+/// Direct focus selection is resolved before any pane consumes its own keys.
+/// Alt combinations never reach the editor buffer, including in Insert mode.
+fn handle_project_pane_shortcut(app: &mut App, key: KeyEvent) -> bool {
+    if !key.modifiers.contains(KeyModifiers::ALT) {
+        return false;
+    }
+    let pane = match key.code {
+        KeyCode::Char('1') => ProjectPane::ProjectList,
+        KeyCode::Char('2') => ProjectPane::FileTree,
+        KeyCode::Char('3') => ProjectPane::Editor,
+        KeyCode::Char('4') => ProjectPane::Build,
+        KeyCode::Char('5') => ProjectPane::Preview,
+        _ => return false,
+    };
+    let available = match pane {
+        ProjectPane::ProjectList => true,
+        ProjectPane::FileTree | ProjectPane::Build => app.active_project.is_some(),
+        ProjectPane::Editor => app.active_project.is_some() && app.project_editor_path.is_some(),
+        ProjectPane::Preview => {
+            app.active_project.is_some()
+                && app.pdf_viewer_path.as_ref().is_some_and(|path| path.exists())
+        }
+    };
+    if available {
+        app.project_pane = pane;
+    } else {
+        app.toast = Some(match pane {
+            ProjectPane::Editor => "Open a source file before focusing the editor.",
+            ProjectPane::Preview => "PDF preview is unavailable until the first successful build.",
+            _ => "Open a project before focusing this pane.",
+        }
+        .into());
+    }
+    true
+}
+
+fn handle_project_build_key(app: &mut App, key: KeyEvent) {
+    let line_count = app.project_build_errors.len().max(1);
+    let max_scroll = line_count.saturating_sub(app.project_build_viewport_height.max(1));
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.project_build_scroll = app.project_build_scroll.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.project_build_scroll = (app.project_build_scroll + 1).min(max_scroll);
+        }
+        KeyCode::PageUp => {
+            app.project_build_scroll = app
+                .project_build_scroll
+                .saturating_sub(app.project_build_viewport_height.max(1));
+        }
+        KeyCode::PageDown => {
+            app.project_build_scroll = (app.project_build_scroll
+                + app.project_build_viewport_height.max(1))
+                .min(max_scroll);
+        }
+        KeyCode::Home => app.project_build_scroll = 0,
+        KeyCode::End => app.project_build_scroll = max_scroll,
+        _ => {}
+    }
+}
+
+fn handle_project_preview_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Up => pdf_viewer::jump_to_page(app, app.pdf_viewer_page.saturating_sub(1)),
+        KeyCode::Down => pdf_viewer::jump_to_page(
+            app,
+            (app.pdf_viewer_page + 1).min(app.pdf_viewer_total_pages.max(1)),
+        ),
+        KeyCode::Home => pdf_viewer::jump_to_page(app, 1),
+        KeyCode::End => pdf_viewer::jump_to_page(app, app.pdf_viewer_total_pages.max(1)),
+        KeyCode::Left | KeyCode::Right => {}
+        _ => {}
+    }
+}
+
+fn move_project_editor_page(app: &mut App, direction: isize) {
+    let wrap_width = app.project_editor_wrap_width.max(1);
+    let (row, column) = cursor_visual_position(
+        &app.project_editor_text,
+        app.project_editor_cursor,
+        wrap_width,
+    );
+    let total_rows = app
+        .project_editor_text
+        .split('\n')
+        .map(|line| config_editor_wrap_rows(line.chars().count(), wrap_width))
+        .sum::<usize>()
+        .max(1);
+    let target = row
+        .saturating_add_signed(direction * app.project_editor_viewport_height.max(1) as isize)
+        .min(total_rows.saturating_sub(1));
+    app.project_editor_cursor = cursor_from_visual_position(
+        &app.project_editor_text,
+        target,
+        column,
+        wrap_width,
+    );
+}
+
+fn save_project_editor(app: &mut App) {
+    let Some(path) = app.project_editor_path.as_ref() else { return; };
+    match std::fs::write(path, &app.project_editor_text) {
+        Ok(()) => {
+            app.project_editor_dirty = false;
+            app.project_build_status = "Saved; latexmk watching…".into();
+            app.toast = Some("Saved".into());
+        }
+        Err(error) => app.toast = Some(format!("Could not save file: {error}")),
+    }
+}
+
+/// Projects intentionally uses the same movement primitives as Settings.  The
+/// only project-specific concern is persistence, handled by Ctrl+S above.
+fn handle_project_editor_normal_key(app: &mut App, key: KeyEvent) {
+    let movement = match key.code {
+        KeyCode::Left | KeyCode::Char('h') => Some(KeyCode::Left),
+        KeyCode::Right | KeyCode::Char('l') => Some(KeyCode::Right),
+        KeyCode::Up | KeyCode::Char('k') => Some(KeyCode::Up),
+        KeyCode::Down | KeyCode::Char('j') => Some(KeyCode::Down),
+        _ => None,
+    };
+    if let Some(code) = movement {
+        let mut movement_key = KeyEvent::new(code, key.modifiers);
+        movement_key.kind = key.kind;
+        let _ = edit_text(&mut app.project_editor_text, &mut app.project_editor_cursor, movement_key);
+        return;
+    }
+    match key.code {
+        KeyCode::Char('i') => app.project_editor_insert_mode = true,
+        KeyCode::Char('w') => app.project_editor_cursor = next_word_boundary(&app.project_editor_text, app.project_editor_cursor),
+        KeyCode::Char('b') => app.project_editor_cursor = prev_word_boundary(&app.project_editor_text, app.project_editor_cursor),
+        KeyCode::Char('0') | KeyCode::Home => app.project_editor_cursor = config_editor_line_start(&app.project_editor_text, app.project_editor_cursor),
+        KeyCode::Char('$') | KeyCode::End => app.project_editor_cursor = config_editor_line_end(&app.project_editor_text, app.project_editor_cursor),
+        KeyCode::Backspace => {
+            app.project_editor_cursor = prev_char_boundary(
+                &app.project_editor_text,
+                app.project_editor_cursor,
+            );
+        }
+        KeyCode::Delete | KeyCode::Char('x') => {
+            if app.project_editor_cursor < app.project_editor_text.len() {
+                let next = next_char_boundary(
+                    &app.project_editor_text,
+                    app.project_editor_cursor,
+                );
+                app.project_editor_text
+                    .drain(app.project_editor_cursor..next);
+                app.project_editor_dirty = true;
+            }
+        }
+        KeyCode::PageUp | KeyCode::PageDown => {
+            move_project_editor_page(app, if key.code == KeyCode::PageUp { -1 } else { 1 });
+        }
+        KeyCode::Esc => app.project_pane = ProjectPane::FileTree,
+        _ => {}
+    }
+}
+
 
 fn normalize_panel_navigation(mut key: KeyEvent) -> KeyEvent {
     key.code = match key.code {
@@ -3842,6 +4416,61 @@ fn edit_text(text: &mut String, cursor: &mut usize, key: KeyEvent) -> bool {
     changed
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditorInsertResult {
+    Ignored,
+    Moved,
+    Changed,
+    ExitInsert,
+}
+
+/// Shared Insert-mode input engine for every embedded Papr editor.
+fn apply_editor_insert_key(text: &mut String, cursor: &mut usize, key: KeyEvent) -> EditorInsertResult {
+    match key.code {
+        KeyCode::Esc => EditorInsertResult::ExitInsert,
+        KeyCode::Enter => {
+            text.insert(*cursor, '\n');
+            *cursor += 1;
+            EditorInsertResult::Changed
+        }
+        KeyCode::Tab => {
+            text.insert(*cursor, '\t');
+            *cursor += 1;
+            EditorInsertResult::Changed
+        }
+        KeyCode::BackTab => EditorInsertResult::Ignored,
+        KeyCode::Backspace => {
+            if *cursor == 0 {
+                return EditorInsertResult::Ignored;
+            }
+            let previous = prev_char_boundary(text, *cursor);
+            text.drain(previous..*cursor);
+            *cursor = previous;
+            EditorInsertResult::Changed
+        }
+        KeyCode::Delete => {
+            if *cursor >= text.len() {
+                return EditorInsertResult::Ignored;
+            }
+            let next = next_char_boundary(text, *cursor);
+            text.drain(*cursor..next);
+            EditorInsertResult::Changed
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End => {
+            let _ = edit_text(text, cursor, key);
+            EditorInsertResult::Moved
+        }
+        KeyCode::Char(character)
+            if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            text.insert(*cursor, character);
+            *cursor += character.len_utf8();
+            EditorInsertResult::Changed
+        }
+        _ => EditorInsertResult::Ignored,
+    }
+}
+
 fn handle_modal_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.mode == AppMode::Prompt {
         match key.code {
@@ -4088,6 +4717,7 @@ fn selected_local_paper_id(app: &App) -> Option<i64> {
             .get(app.reading_queue_selected)
             .map(|paper| paper.id),
         papr_core::Page::Dashboard
+        | papr_core::Page::Projects
         | papr_core::Page::Discover
         | papr_core::Page::History
         | papr_core::Page::Statistics
@@ -4118,6 +4748,12 @@ fn apply_config_update(
     *theme = new_theme;
 
     runtime.pdf_viewer = config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer);
+    if let Some(projects_directory) = config.projects_directory.clone() {
+        runtime.project_manager = ProjectManager::new(projects_directory)
+            .map_err(|e| anyhow::anyhow!("projects directory: {e}"))?;
+        app.projects = runtime.project_manager.list().unwrap_or_default();
+        app.projects_selected = app.projects_selected.min(app.projects.len().saturating_sub(1));
+    }
 
     let download_dir = config.download_path.clone().unwrap_or_else(|| runtime.default_downloads_dir.clone());
     let _ = std::fs::create_dir_all(&download_dir);
@@ -4354,74 +4990,38 @@ fn handle_config_editor_key(
 
 fn handle_config_editor_insert_key(app: &mut App, key: KeyEvent) {
     match key.code {
-        KeyCode::Esc => {
-            app.config_editor_insert_mode = false;
-            reset_config_editor_goal_column(app);
+        KeyCode::Up => {
+            move_config_editor_vertical(app, -1);
+            return;
         }
-        KeyCode::Left => {
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                app.config_editor_cursor = prev_word_boundary(&app.config_editor_text, app.config_editor_cursor);
-            } else {
-                app.config_editor_cursor = prev_char_boundary(&app.config_editor_text, app.config_editor_cursor);
-            }
-            reset_config_editor_goal_column(app);
+        KeyCode::Down => {
+            move_config_editor_vertical(app, 1);
+            return;
         }
-        KeyCode::Right => {
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                app.config_editor_cursor = next_word_boundary(&app.config_editor_text, app.config_editor_cursor);
-            } else {
-                app.config_editor_cursor = next_char_boundary(&app.config_editor_text, app.config_editor_cursor);
-            }
-            reset_config_editor_goal_column(app);
+        KeyCode::PageUp => {
+            move_config_editor_page(app, -1);
+            return;
         }
-        KeyCode::Up => move_config_editor_vertical(app, -1),
-        KeyCode::Down => move_config_editor_vertical(app, 1),
-        KeyCode::Home => {
-            app.config_editor_cursor = config_editor_line_start(&app.config_editor_text, app.config_editor_cursor);
-            reset_config_editor_goal_column(app);
-        }
-        KeyCode::End => {
-            app.config_editor_cursor = config_editor_line_end(&app.config_editor_text, app.config_editor_cursor);
-            reset_config_editor_goal_column(app);
-        }
-        KeyCode::PageUp => move_config_editor_page(app, -1),
-        KeyCode::PageDown => move_config_editor_page(app, 1),
-        KeyCode::Backspace => {
-            if app.config_editor_cursor > 0 {
-                record_config_history(app);
-                let prev = prev_char_boundary(&app.config_editor_text, app.config_editor_cursor);
-                app.config_editor_text.remove(prev);
-                app.config_editor_cursor = prev;
-            }
-            reset_config_editor_goal_column(app);
-        }
-        KeyCode::Delete => {
-            if app.config_editor_cursor < app.config_editor_text.len() {
-                record_config_history(app);
-                app.config_editor_text.remove(app.config_editor_cursor);
-            }
-            reset_config_editor_goal_column(app);
-        }
-        KeyCode::Enter => {
-            record_config_history(app);
-            app.config_editor_text.insert(app.config_editor_cursor, '\n');
-            app.config_editor_cursor += 1;
-            reset_config_editor_goal_column(app);
-        }
-        KeyCode::Tab => {
-            record_config_history(app);
-            app.config_editor_text.insert(app.config_editor_cursor, '\t');
-            app.config_editor_cursor += 1;
-            reset_config_editor_goal_column(app);
-        }
-        KeyCode::Char(c) => {
-            record_config_history(app);
-            app.config_editor_text.insert(app.config_editor_cursor, c);
-            app.config_editor_cursor += c.len_utf8();
-            reset_config_editor_goal_column(app);
+        KeyCode::PageDown => {
+            move_config_editor_page(app, 1);
+            return;
         }
         _ => {}
     }
+    if matches!(key.code, KeyCode::Backspace | KeyCode::Delete | KeyCode::Enter | KeyCode::Tab)
+        || matches!(key.code, KeyCode::Char(_))
+    {
+        record_config_history(app);
+    }
+    match apply_editor_insert_key(
+        &mut app.config_editor_text,
+        &mut app.config_editor_cursor,
+        key,
+    ) {
+        EditorInsertResult::ExitInsert => app.config_editor_insert_mode = false,
+        EditorInsertResult::Ignored | EditorInsertResult::Moved | EditorInsertResult::Changed => {}
+    }
+    reset_config_editor_goal_column(app);
 }
 
 fn finalize_download_task(task: &mut DownloadTask) {
@@ -4442,7 +5042,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use papr_core::{
         App, AppMode, BookmarkSummary, CollectionSummary, Database, DiscoveryState, DownloadStatus,
-        DownloadTask, LibraryPaper, Page, PaperNote, RemotePaper,
+        DownloadTask, LibraryPaper, Page, PaperNote, Project, ProjectPane, RemotePaper,
     };
     use papr_core::models::AuthorSummary;
 
@@ -4619,7 +5219,11 @@ mod tests {
 
     #[test]
     fn left_returns_to_navigation_without_changing_selection() {
-        for (index, page) in Page::ALL.into_iter().enumerate() {
+        for (index, page) in Page::ALL
+            .into_iter()
+            .enumerate()
+            .filter(|(_, page)| *page != Page::Projects)
+        {
             let mut app = App {
                 page,
                 sidebar_index: index,
@@ -4931,6 +5535,182 @@ mod tests {
         handle_config_editor_insert_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert!(app.config_editor_insert_mode);
         assert_eq!(app.config_editor_cursor, 1);
+    }
+
+    fn project_editor_app(text: &str, cursor: usize) -> App {
+        App {
+            page: Page::Projects,
+            content_focused: true,
+            active_project: Some(Project {
+                name: "keyboard-test".into(),
+                path: std::path::PathBuf::from("keyboard-test"),
+                opened_at: 0,
+            }),
+            project_pane: ProjectPane::Editor,
+            project_editor_text: text.into(),
+            project_editor_cursor: cursor,
+            project_editor_insert_mode: true,
+            project_editor_wrap_width: 80,
+            project_editor_viewport_height: 20,
+            ..App::default()
+        }
+    }
+
+    #[test]
+    fn project_editor_insert_mode_handles_editing_keys_without_workspace_interception() {
+        let mut app = project_editor_app("ab", 1);
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.project_editor_text, "a\tb");
+        assert_eq!(app.project_editor_cursor, 2);
+        assert!(app.project_editor_dirty);
+
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        );
+        assert_eq!(app.project_editor_text, "ab");
+        assert_eq!(app.project_editor_cursor, 1);
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.project_editor_text, "a\nqb");
+        assert_eq!(app.project_editor_cursor, 3);
+        assert!(app.project_editor_insert_mode);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn project_editor_backspace_and_delete_remove_complete_unicode_characters() {
+        let mut backspace = project_editor_app("aéb", 3);
+        let _ = handle_key(
+            &mut backspace,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        );
+        assert_eq!(backspace.project_editor_text, "ab");
+        assert_eq!(backspace.project_editor_cursor, 1);
+
+        let mut delete = project_editor_app("aéb", 1);
+        let _ = handle_key(
+            &mut delete,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
+        );
+        assert_eq!(delete.project_editor_text, "ab");
+        assert_eq!(delete.project_editor_cursor, 1);
+    }
+
+    #[test]
+    fn project_editor_navigation_keys_move_without_mutating_the_buffer() {
+        let mut app = project_editor_app("abc\ndef", 2);
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.project_editor_cursor, 1);
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(app.project_editor_cursor, 3);
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.project_editor_cursor, 7);
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(app.project_editor_cursor, 4);
+        assert_eq!(app.project_editor_text, "abc\ndef");
+        assert!(!app.project_editor_dirty);
+    }
+
+    #[test]
+    fn editor_view_expands_tabs_and_maps_the_cursor_to_the_visible_tab_stop() {
+        let mut scroll = 0;
+        let view = build_config_editor_view("\tX", 1, 20, 4, &mut scroll);
+
+        assert_eq!(view.cursor_row, 0);
+        assert_eq!(view.cursor_col, 4);
+        assert_eq!(view.lines, vec!["  1     X"]);
+    }
+
+    #[test]
+    fn project_alt_number_shortcuts_select_available_panes_directly() {
+        let mut app = project_editor_app("unchanged", 4);
+        app.project_editor_path = Some(std::path::PathBuf::from("keyboard-test/main.tex"));
+
+        for (number, expected) in [
+            ('1', ProjectPane::ProjectList),
+            ('2', ProjectPane::FileTree),
+            ('3', ProjectPane::Editor),
+            ('4', ProjectPane::Build),
+        ] {
+            let _ = handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(number), KeyModifiers::ALT),
+            );
+            assert_eq!(app.project_pane, expected);
+        }
+    }
+
+    #[test]
+    fn project_alt_shortcuts_never_enter_text_and_unavailable_panes_are_safe() {
+        let mut app = project_editor_app("abc", 1);
+        app.project_editor_path = Some(std::path::PathBuf::from("keyboard-test/main.tex"));
+
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('4'), KeyModifiers::ALT),
+        );
+        assert_eq!(app.project_pane, ProjectPane::Build);
+        assert_eq!(app.project_editor_text, "abc");
+        assert_eq!(app.project_editor_cursor, 1);
+        assert!(app.project_editor_insert_mode);
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.project_editor_text, "abc");
+
+        app.active_project = None;
+        app.project_pane = ProjectPane::ProjectList;
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT),
+        );
+        assert_eq!(app.project_pane, ProjectPane::ProjectList);
+        assert!(app.toast.as_deref().is_some_and(|message| message.contains("Open a project")));
+    }
+
+    #[test]
+    fn project_list_arrows_do_not_escape_to_sidebar_navigation() {
+        let mut app = project_editor_app("", 0);
+        app.project_pane = ProjectPane::ProjectList;
+        app.projects = vec![app.active_project.clone().unwrap()];
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert!(app.content_focused);
+        assert_eq!(app.project_pane, ProjectPane::ProjectList);
+    }
+
+    #[test]
+    fn project_build_and_preview_arrows_only_navigate_their_content() {
+        let mut app = project_editor_app("abc", 1);
+        app.project_editor_insert_mode = false;
+        app.project_build_errors = (0..8).map(|line| format!("error {line}")).collect();
+        app.project_build_viewport_height = 2;
+        app.project_pane = ProjectPane::Build;
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.project_build_scroll, 1);
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.project_build_scroll, 3);
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(app.project_build_scroll, 0);
+
+        app.project_pane = ProjectPane::Preview;
+        app.pdf_viewer_total_pages = 5;
+        app.pdf_viewer_page = 3;
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.pdf_viewer_page, 2);
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.pdf_viewer_page, 3);
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(app.pdf_viewer_page, 5);
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.pdf_viewer_page, 5);
     }
 
     #[test]
@@ -5947,6 +6727,8 @@ mod tests {
             database,
             database_file,
             config_file: temp_dir.join("papr.toml"),
+            project_manager: papr_core::ProjectManager::new(temp_dir.join("projects"))?,
+            project_compiler: None,
             default_downloads_dir: temp_dir.clone(),
             download_dir,
             pdf_viewer: "xdg-open".into(),

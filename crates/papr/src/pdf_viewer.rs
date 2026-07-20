@@ -48,7 +48,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Widget},
+    widgets::{Block, Clear, Paragraph, Widget},
     Frame,
 };
 use ratatui_image::picker::Picker;
@@ -83,7 +83,10 @@ struct RenderedPage {
 // Cache
 // ---------------------------------------------------------------------------
 
-type PageKey = (PathBuf, usize, u32, u32); // (path, page, dpi, pixel_w)
+// (path, document generation, page, dpi, pixel_w). The generation prevents
+// render jobs for an old on-disk PDF from repopulating a freshly invalidated
+// cache entry after a live LaTeX rebuild.
+type PageKey = (PathBuf, u64, usize, u32, u32);
 
 /// Identifies the currently displayed crop.  When this is unchanged between
 /// frames we skip ALL encoding work and only re-draw the unicode placeholders.
@@ -118,6 +121,7 @@ struct PageCache {
     picker: Option<Picker>,
     pages: HashMap<PageKey, RenderedPage>,
     in_flight: std::collections::HashSet<PageKey>,
+    document_generations: HashMap<PathBuf, u64>,
     temp_files: Vec<PathBuf>,
 
     // ── Scroll state ─────────────────────────────────────────────────────
@@ -133,8 +137,9 @@ struct PageCache {
     last_crop_key: Option<CropKey>,
     /// The encoded frame ready to blit; `None` until first render.
     last_encoded: Option<EncodedFrame>,
-    /// Monotonically-increasing counter used to assign unique Kitty IDs.
-    next_kitty_id: u32,
+    /// Stable Kitty image identifier. Reusing it replaces terminal-side image
+    /// data while Unicode placeholders control the visible placement.
+    kitty_image_id: u32,
 }
 
 static CACHE: OnceLock<Arc<Mutex<PageCache>>> = OnceLock::new();
@@ -146,6 +151,7 @@ fn get_cache() -> Arc<Mutex<PageCache>> {
                 picker: Picker::from_query_stdio().ok(),
                 pages: HashMap::new(),
                 in_flight: std::collections::HashSet::new(),
+                document_generations: HashMap::new(),
                 temp_files: Vec::new(),
                 last_viewport_h: 600,
                 target_page: 1,
@@ -155,7 +161,7 @@ fn get_cache() -> Arc<Mutex<PageCache>> {
                 last_update: None,
                 last_crop_key: None,
                 last_encoded: None,
-                next_kitty_id: 1,
+                kitty_image_id: 1,
             }))
         })
         .clone()
@@ -170,8 +176,8 @@ fn get_cache() -> Arc<Mutex<PageCache>> {
 pub fn reset_for_new_document(new_path: &Path) {
     let cache = get_cache();
     if let Ok(mut g) = cache.lock() {
-        g.pages.retain(|(p, _, _, _), _| p.as_path() == new_path);
-        g.in_flight.retain(|(p, _, _, _)| p.as_path() == new_path);
+        g.pages.retain(|(p, _, _, _, _), _| p.as_path() == new_path);
+        g.in_flight.retain(|(p, _, _, _, _)| p.as_path() == new_path);
         g.last_crop_key = None;
         g.last_encoded = None;
 
@@ -180,6 +186,20 @@ pub fn reset_for_new_document(new_path: &Path) {
         g.current_page = 1;
         g.current_scroll_px = 0.0;
         g.last_update = None;
+    }
+}
+
+/// Discard cached raster pages after a writer replaces a PDF in place while
+/// preserving the reader's page and scroll position.
+pub fn invalidate_document(path: &Path) {
+    let cache = get_cache();
+    if let Ok(mut g) = cache.lock() {
+        let generation = g.document_generations.entry(path.to_path_buf()).or_default();
+        *generation = generation.wrapping_add(1);
+        g.pages.retain(|(cached, _, _, _, _), _| cached.as_path() != path);
+        g.in_flight.retain(|(cached, _, _, _, _)| cached.as_path() != path);
+        g.last_crop_key = None;
+        g.last_encoded = None;
     }
 }
 
@@ -198,7 +218,7 @@ pub fn cleanup_temp_files() {
 pub fn evict_distant_pages(current_page: usize) {
     if let Some(arc) = CACHE.get() {
         if let Ok(mut g) = arc.lock() {
-            g.pages.retain(|(_, page, _, _), _| {
+            g.pages.retain(|(_, _, page, _, _), _| {
                 (*page as isize - current_page as isize).abs() <= 3
             });
         }
@@ -214,8 +234,9 @@ const DPI: u32 = 150;
 /// Submit a background render job if the result isn't already cached or
 /// in-flight.  Uses a single lock acquisition to check-and-mark atomically.
 fn request_page(pdf_path: &Path, page: usize, dpi: u32, pixel_w: u32) {
-    let key: PageKey = (pdf_path.to_path_buf(), page, dpi, pixel_w);
     let cache = get_cache();
+    let generation;
+    let key;
 
     // Single lock: check presence and mark in-flight atomically.
     {
@@ -223,6 +244,8 @@ fn request_page(pdf_path: &Path, page: usize, dpi: u32, pixel_w: u32) {
             Ok(g) => g,
             Err(_) => return,
         };
+        generation = *g.document_generations.get(pdf_path).unwrap_or(&0);
+        key = (pdf_path.to_path_buf(), generation, page, dpi, pixel_w);
         if g.pages.contains_key(&key) || g.in_flight.contains(&key) {
             return;
         }
@@ -234,9 +257,10 @@ fn request_page(pdf_path: &Path, page: usize, dpi: u32, pixel_w: u32) {
         let fp = path_fingerprint(&pdf_path);
         let temp_dir = std::env::temp_dir();
         let prefix = temp_dir.join(format!(
-            "papr_pdf_{}_fp{:x}_p{}_d{}",
+            "papr_pdf_{}_fp{:x}_g{}_p{}_d{}",
             std::process::id(),
             fp,
+            generation,
             page,
             dpi,
         ));
@@ -246,7 +270,9 @@ fn request_page(pdf_path: &Path, page: usize, dpi: u32, pixel_w: u32) {
 
         if let Ok(mut g) = cache.lock() {
             g.in_flight.remove(&key);
+            let current_generation = *g.document_generations.get(&pdf_path).unwrap_or(&0);
             match result {
+                _ if current_generation != generation => {},
                 Ok(page_data) => {
                     g.pages.insert(key, page_data);
                 }
@@ -481,6 +507,11 @@ fn render_kitty_placeholders(
             }
         }
 
+        // Ratatui writes the whole placeholder row from one buffer cell. The
+        // terminal cursor must be restored and advanced to the end of the
+        // widget, exactly as the upstream ratatui-image Kitty protocol does;
+        // otherwise subsequent split-pane cells are emitted at the wrong
+        // terminal coordinates and leave rectangular gaps.
         let right = area.width.saturating_sub(1);
         let down = area.height.saturating_sub(1);
         write!(symbol, "\x1b[u\x1b[{right}C\x1b[{down}B").unwrap();
@@ -507,8 +538,15 @@ impl Widget for KittyBlit<'_> {
 // ---------------------------------------------------------------------------
 
 pub fn draw_pdf_viewer(frame: &mut Frame<'_>, app: &mut App) {
-    let area = frame.area();
+    draw_pdf_viewer_in(frame, app, frame.area());
+}
 
+/// Draw the cached, asynchronous PDF renderer inside a workspace pane.
+pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    // Kitty placeholders mark cells as skipped. Clear the entire pane before
+    // every blit so an invalidated image cannot leave skipped/stale cells in a
+    // neighbouring split-pane region.
+    frame.render_widget(Clear, area);
     frame.render_widget(
         Block::default().style(Style::default().bg(Color::Rgb(20, 20, 20))),
         area,
@@ -574,7 +612,7 @@ pub fn draw_pdf_viewer(frame: &mut Frame<'_>, app: &mut App) {
 
         // Evict distant pages to bound memory
         let current_page_val = app.pdf_viewer_page;
-        g.pages.retain(|(_, page, _, _), _| {
+        g.pages.retain(|(_, _, page, _, _), _| {
             (*page as isize - current_page_val as isize).abs() <= 3
         });
 
@@ -611,9 +649,10 @@ pub fn draw_pdf_viewer(frame: &mut Frame<'_>, app: &mut App) {
         app.pdf_viewer_scroll_y = (g.current_scroll_px / font_h as f64) as u32;
 
         let dpi = DPI;
-        let key: PageKey = (pdf_path.clone(), g.current_page, dpi, pixel_w);
+        let generation = *g.document_generations.get(&pdf_path).unwrap_or(&0);
+        let key: PageKey = (pdf_path.clone(), generation, g.current_page, dpi, pixel_w);
         let page_data = g.pages.get(&key).cloned();
-        let next_key: PageKey = (pdf_path.clone(), g.current_page + 1, dpi, pixel_w);
+        let next_key: PageKey = (pdf_path.clone(), generation, g.current_page + 1, dpi, pixel_w);
         let next_page_data = g.pages.get(&next_key).cloned();
 
         let last_crop_key = g.last_crop_key.clone();
@@ -712,8 +751,7 @@ pub fn draw_pdf_viewer(frame: &mut Frame<'_>, app: &mut App) {
             // Encode directly with our own Kitty encoder — zero redundant work
             let cache_arc = get_cache();
             if let Ok(mut g) = cache_arc.lock() {
-                let id = g.next_kitty_id;
-                g.next_kitty_id = g.next_kitty_id.wrapping_add(1).max(1);
+                let id = g.kitty_image_id;
                 let transmit_seq = kitty_transmit(&cropped, id);
                 let [_id_extra, id_r, id_g, id_b] = id.to_be_bytes();
                 let id_color = format!("\x1b[38;2;{id_r};{id_g};{id_b}m");
@@ -845,7 +883,10 @@ pub fn is_current_page_cached(app: &App) -> bool {
     let dpi = DPI;
     if let Some(arc) = CACHE.get() {
         if let Ok(g) = arc.lock() {
-            return g.pages.keys().any(|(p, pg, d, _)| p == pdf_path && *pg == page && *d == dpi);
+            let generation = *g.document_generations.get(pdf_path).unwrap_or(&0);
+            return g.pages.keys().any(|(p, doc_generation, pg, d, _)| {
+                p == pdf_path && *doc_generation == generation && *pg == page && *d == dpi
+            });
         }
     }
     false
@@ -870,7 +911,7 @@ pub fn is_animating() -> bool {
 
 fn get_page_height_helper(page: usize, pages: &HashMap<PageKey, RenderedPage>, default_h: f64) -> f64 {
     for (key, val) in pages {
-        if key.1 == page {
+        if key.2 == page {
             return val.pixel_h as f64;
         }
     }
@@ -951,6 +992,23 @@ pub fn scroll_by_rows(app: &App, delta_rows: i64) {
             g.target_scroll_px = max_scroll;
         }
     }
+}
+
+/// Select a whole PDF page without changing renderer scale. Projects uses
+/// this for deterministic pane-local navigation rather than continuous scroll.
+pub fn jump_to_page(app: &mut App, page: usize) {
+    let page = page.clamp(1, app.pdf_viewer_total_pages.max(1));
+    let cache_arc = get_cache();
+    if let Ok(mut g) = cache_arc.lock() {
+        g.target_page = page;
+        g.target_scroll_px = 0.0;
+        g.current_page = page;
+        g.current_scroll_px = 0.0;
+        g.last_update = None;
+        g.last_crop_key = None;
+    }
+    app.pdf_viewer_page = page;
+    app.pdf_viewer_scroll_y = 0;
 }
 
 pub fn page_up(app: &App) {

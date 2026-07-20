@@ -8,12 +8,13 @@ pub mod downloads;
 pub mod library;
 pub mod models;
 pub mod plugins;
+pub mod projects;
 pub mod theme;
 
 pub use api::arxiv::ArxivClient;
 pub use app::{
     App, AppMode, CollectionSearchItem, Command, DeletionTarget, DiscoveryState, DiscoveryStatus, DownloadStatus, DownloadTask,
-    LibraryState, MetadataPrompt, Page,
+    LibraryState, MetadataPrompt, Page, ProjectPane,
 };
 pub use config::{Config, Paths};
 pub use database::Database;
@@ -27,4 +28,5 @@ pub use plugins::{
     PluginAction, PluginCapability, PluginDiagnostic, PluginHost, PluginInfo, PluginManifest,
     PluginRequest, PluginResponse,
 };
+pub use projects::{Project, ProjectError, ProjectManager};
 pub use theme::Theme;
