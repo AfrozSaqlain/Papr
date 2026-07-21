@@ -54,6 +54,14 @@ const MIGRATIONS: &[(i64, &str)] = &[
         11,
         include_str!("../migrations/0011_activity_kind_paper_browsed.sql"),
     ),
+    (
+        12,
+        include_str!("../migrations/0012_activity_kind_project_events.sql"),
+    ),
+    (
+        13,
+        include_str!("../migrations/0013_activity_kind_paper_creation_modification.sql"),
+    ),
 ];
 
 /// Database initialization and query errors.
@@ -173,7 +181,9 @@ impl Database {
             "INSERT INTO papers (title, doi) VALUES (?1, ?2)",
             params![title, doi],
         )?;
-        Ok(self.connection.last_insert_rowid())
+        let paper_id = self.connection.last_insert_rowid();
+        self.record_paper_activity("paper_created", Some(paper_id), Some(title))?;
+        Ok(paper_id)
     }
 
     /// Import a locally discovered PDF unless its content hash already exists.
@@ -243,6 +253,10 @@ impl Database {
                 pdf.content_hash,
             ],
         )?;
+        if changed > 0 && existing.is_none() {
+            let paper_id = self.connection.last_insert_rowid();
+            self.record_paper_activity("paper_created", Some(paper_id), Some(&pdf.title))?;
+        }
         Ok(changed > 0)
     }
 
@@ -1198,6 +1212,18 @@ impl Database {
     /// # Errors
     /// Returns an error when the deletion fails.
     pub fn delete_paper(&self, paper_id: i64) -> Result<(), DatabaseError> {
+        let title: Option<String> = self.connection
+            .query_row(
+                "SELECT title FROM papers WHERE id = ?1",
+                [paper_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if let Some(t) = title {
+            self.record_paper_activity("paper_deleted", None, Some(&t))?;
+        }
+
         self.connection.execute("DELETE FROM papers WHERE id = ?1", [paper_id])?;
         Ok(())
     }
@@ -1259,6 +1285,26 @@ impl Database {
     /// # Errors
     /// Returns an error when the database cannot be updated.
     pub fn rename_pdf(&self, paper_id: i64, new_path: &Path) -> Result<(), DatabaseError> {
+        let old_path: Option<String> = self.connection
+            .query_row(
+                "SELECT pdf_path FROM papers WHERE id = ?1",
+                [paper_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if let Some(ref op) = old_path {
+            let old_name = Path::new(op).file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let new_name = new_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if old_name != new_name {
+                self.record_paper_activity(
+                    "paper_renamed",
+                    Some(paper_id),
+                    Some(&format!("{} -> {}", old_name, new_name)),
+                )?;
+            }
+        }
+
         self.connection.execute(
             "UPDATE papers SET pdf_path = ?1 WHERE id = ?2",
             params![new_path.to_string_lossy(), paper_id],
@@ -1459,6 +1505,96 @@ impl Database {
         paper_id: Option<i64>,
         detail: Option<&str>,
     ) -> Result<(), DatabaseError> {
+        self.connection.execute(
+            "INSERT INTO activity_log (kind, paper_id, detail) VALUES (?1, ?2, ?3)",
+            params![kind, paper_id, detail],
+        )?;
+        Ok(())
+    }
+
+    /// Record a project-specific activity, avoiding consecutive duplicates for 'project_opened' within 5 minutes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when database operations fail.
+    pub fn record_project_activity(&self, kind: &str, name: &str) -> Result<(), DatabaseError> {
+        if kind == "project_opened" {
+            let recent: Option<(i64, String, String, NaiveDateTime)> = self.connection.query_row(
+                "SELECT id, kind, COALESCE(detail, ''), occurred_at
+                 FROM activity_log
+                 ORDER BY occurred_at DESC, id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            ).optional()?;
+
+            if let Some((id, last_kind, last_detail, occurred_at)) = recent {
+                if last_kind == "project_opened" && last_detail == name {
+                    let now = chrono::Utc::now().naive_utc();
+                    let diff = now.signed_duration_since(occurred_at);
+                    if diff.num_seconds() >= 0 && diff.num_seconds() < 300 {
+                        self.connection.execute(
+                            "UPDATE activity_log SET occurred_at = CURRENT_TIMESTAMP WHERE id = ?1",
+                            [id],
+                        )?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        self.connection.execute(
+            "INSERT INTO activity_log (kind, detail) VALUES (?1, ?2)",
+            params![kind, name],
+        )?;
+        Ok(())
+    }
+
+    /// Record a paper-specific activity, avoiding consecutive duplicates for the same kind and paper within 5 minutes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when database operations fail.
+    pub fn record_paper_activity(
+        &self,
+        kind: &str,
+        paper_id: Option<i64>,
+        detail: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        let recent: Option<(i64, String, Option<i64>, String, NaiveDateTime)> = self.connection.query_row(
+            "SELECT id, kind, paper_id, COALESCE(detail, ''), occurred_at
+             FROM activity_log
+             ORDER BY occurred_at DESC, id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        ).optional()?;
+
+        if let Some((id, last_kind, last_paper_id, last_detail, occurred_at)) = recent {
+            let same_paper = match (paper_id, last_paper_id) {
+                (Some(pid), Some(lpid)) => pid == lpid,
+                (None, None) => detail.unwrap_or("") == last_detail,
+                _ => false,
+            };
+
+            if last_kind == kind && same_paper {
+                let now = chrono::Utc::now().naive_utc();
+                let diff = now.signed_duration_since(occurred_at);
+                if diff.num_seconds() >= 0 && diff.num_seconds() < 300 {
+                    if let Some(det) = detail {
+                        self.connection.execute(
+                            "UPDATE activity_log SET occurred_at = CURRENT_TIMESTAMP, detail = ?1 WHERE id = ?2",
+                            params![det, id],
+                        )?;
+                    } else {
+                        self.connection.execute(
+                            "UPDATE activity_log SET occurred_at = CURRENT_TIMESTAMP WHERE id = ?1",
+                            [id],
+                        )?;
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
         self.connection.execute(
             "INSERT INTO activity_log (kind, paper_id, detail) VALUES (?1, ?2, ?3)",
             params![kind, paper_id, detail],
@@ -2409,9 +2545,10 @@ mod tests {
         assert_eq!(dashboard.reading.current_streak, 1);
         assert_eq!(dashboard.reading.most_read_journal.as_deref(), Some("Nature"));
         assert_eq!(dashboard.reading.heatmap.len(), 84);
-        assert_eq!(dashboard.recent_activity.len(), 2);
+        assert_eq!(dashboard.recent_activity.len(), 3);
         assert_eq!(dashboard.recent_activity[0].label, "gravity waves");
         assert_eq!(dashboard.recent_activity[1].label, "History paper");
+        assert_eq!(dashboard.recent_activity[2].label, "History paper");
         Ok(())
     }
 
@@ -2883,6 +3020,72 @@ mod tests {
         let dashboard = database.research_dashboard()?;
         assert_eq!(dashboard.reading.sessions, 1);
         assert_eq!(dashboard.reading.average_reading_seconds, 30);
+        Ok(())
+    }
+
+    #[test]
+    fn project_activity_logging_and_deduplication() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        database.record_project_activity("project_created", "Project A")?;
+        let dashboard = database.research_dashboard()?;
+        assert_eq!(dashboard.recent_activity.len(), 1);
+        assert_eq!(dashboard.recent_activity[0].kind, "project_created");
+        assert_eq!(dashboard.recent_activity[0].label, "Project A");
+
+        database.record_project_activity("project_opened", "Project A")?;
+        let dashboard = database.research_dashboard()?;
+        assert_eq!(dashboard.recent_activity.len(), 2);
+        assert_eq!(dashboard.recent_activity[0].kind, "project_opened");
+        assert_eq!(dashboard.recent_activity[0].label, "Project A");
+
+        database.record_project_activity("project_opened", "Project A")?;
+        let dashboard = database.research_dashboard()?;
+        assert_eq!(dashboard.recent_activity.len(), 2);
+
+        database.record_project_activity("project_opened", "Project B")?;
+        let dashboard = database.research_dashboard()?;
+        assert_eq!(dashboard.recent_activity.len(), 3);
+        assert_eq!(dashboard.recent_activity[0].kind, "project_opened");
+        assert_eq!(dashboard.recent_activity[0].label, "Project B");
+
+        database.record_project_activity("project_renamed", "Project B -> Project C")?;
+        let dashboard = database.research_dashboard()?;
+        assert_eq!(dashboard.recent_activity.len(), 4);
+        assert_eq!(dashboard.recent_activity[0].kind, "project_renamed");
+        assert_eq!(dashboard.recent_activity[0].label, "Project B -> Project C");
+
+        Ok(())
+    }
+
+    #[test]
+    fn paper_activity_logging_and_deduplication() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        let id1 = database.insert_paper("Paper A", None)?;
+        let dashboard = database.research_dashboard()?;
+        assert_eq!(dashboard.recent_activity.len(), 1);
+        assert_eq!(dashboard.recent_activity[0].kind, "paper_created");
+        assert_eq!(dashboard.recent_activity[0].label, "Paper A");
+
+        database.connection.execute(
+            "UPDATE papers SET pdf_path = 'old_name.pdf' WHERE id = ?1",
+            [id1],
+        )?;
+        database.rename_pdf(id1, std::path::Path::new("new_name.pdf"))?;
+        let dashboard = database.research_dashboard()?;
+        assert_eq!(dashboard.recent_activity.len(), 2);
+        assert_eq!(dashboard.recent_activity[0].kind, "paper_renamed");
+        assert_eq!(dashboard.recent_activity[0].label, "Paper A");
+
+        database.rename_pdf(id1, std::path::Path::new("new_name.pdf"))?;
+        let dashboard = database.research_dashboard()?;
+        assert_eq!(dashboard.recent_activity.len(), 2);
+
+        database.delete_paper(id1)?;
+        let dashboard = database.research_dashboard()?;
+        assert_eq!(dashboard.recent_activity.len(), 1);
+        assert_eq!(dashboard.recent_activity[0].kind, "paper_deleted");
+        assert_eq!(dashboard.recent_activity[0].label, "Paper A");
+
         Ok(())
     }
 

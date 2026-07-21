@@ -1459,6 +1459,9 @@ fn apply_ui_action(
                     return Ok(());
                 }
             };
+            runtime.database.record_project_activity("project_created", &project.name)?;
+            runtime.database.record_project_activity("project_opened", &project.name)?;
+            refresh_dashboard(runtime, app)?;
             open_project_workspace(app, project.clone());
             start_project_compiler(runtime, app);
             app.projects = runtime.project_manager.list().unwrap_or_default();
@@ -1471,6 +1474,8 @@ fn apply_ui_action(
         }
         UiAction::OpenProject(project) => {
             let project = runtime.project_manager.open(project.path).map_err(|e| anyhow::anyhow!(e))?;
+            runtime.database.record_project_activity("project_opened", &project.name)?;
+            refresh_dashboard(runtime, app)?;
             open_project_workspace(app, project);
             start_project_compiler(runtime, app);
         }
@@ -1491,6 +1496,8 @@ fn apply_ui_action(
         UiAction::RenameProject { project, name } => {
             match runtime.project_manager.rename(&project, &name) {
                 Ok(renamed) => {
+                    runtime.database.record_project_activity("project_renamed", &format!("{} -> {}", project.name, renamed.name))?;
+                    refresh_dashboard(runtime, app)?;
                     if app.active_project.as_ref().is_some_and(|active| active.path == project.path) {
                         let old_root = project.path;
                         let old_editor = app.project_editor_path.clone();
@@ -1527,6 +1534,8 @@ fn apply_ui_action(
                 app.toast = Some(format!("Could not delete project: {error}"));
                 return Ok(());
             }
+            runtime.database.record_project_activity("project_deleted", &project.name)?;
+            refresh_dashboard(runtime, app)?;
             if was_active {
                 if let Some(mut compiler) = runtime.project_compiler.take() {
                     compiler.stop();

@@ -1009,6 +1009,13 @@ fn activity_kind(kind: &str) -> &str {
         "bookmarked" => "Bookmark changed",
         "tagged" => "Legacy organization event",
         "collected" => "Added to group",
+        "project_opened" => "Worked on",
+        "project_created" => "Project created",
+        "project_renamed" => "Project renamed",
+        "project_deleted" => "Project deleted",
+        "paper_created" => "Paper created",
+        "paper_renamed" => "Paper renamed",
+        "paper_deleted" => "Paper deleted",
         _ => kind,
     }
 }
@@ -3923,5 +3930,16 @@ Image: ![plot](plot.png)[^1]
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect()
+    }
+
+    #[test]
+    fn test_project_activity_formatting_and_rendering() {
+        assert_eq!(super::activity_kind("project_opened"), "Worked on");
+        assert_eq!(super::activity_kind("project_created"), "Project created");
+        assert_eq!(super::activity_kind("project_renamed"), "Project renamed");
+        assert_eq!(super::activity_kind("project_deleted"), "Project deleted");
+        assert_eq!(super::activity_kind("paper_created"), "Paper created");
+        assert_eq!(super::activity_kind("paper_renamed"), "Paper renamed");
+        assert_eq!(super::activity_kind("paper_deleted"), "Paper deleted");
     }
 }
