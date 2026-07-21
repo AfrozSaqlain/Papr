@@ -31,6 +31,7 @@ Papr is implemented in Rust to meet the performance, reliability, and security d
 * **Filesystem-Synced Groups:** Move papers into groups inside the TUI to automatically rename and migrate files on your disk.
 * **Markdown Annotation:** Take dedicated, auto-saved notes per paper. Features a styled Markdown live preview accessible with the `Tab` key.
 * **Built-in PDF Viewer:** View PDFs directly inside the terminal using high-performance Sixel or Kitty graphics protocols, with smooth physics-based scrolling.
+* **LaTeX Project Workspace:** Create, edit, and compile LaTeX manuscripts directly inside the TUI with an integrated Vim-style editor, real-time background compilation via `latexmk`, compilation log output, and a split-pane terminal PDF preview.
 * **Process-Isolated Plugins:** Extend the application through process-isolated plugins using a versioned JSON RPC protocol.
 
 ---
@@ -77,6 +78,7 @@ On Windows, install the MSVC C++ Build Tools (or Visual Studio with the **Deskto
 | --- | --- |
 | Built-in terminal PDF viewer | A Kitty- or Sixel-capable terminal and Poppler's `pdftoppm` command. |
 | PDF page counts and text-based metadata enrichment | Poppler's `pdfinfo` and `pdftotext` commands. |
+| LaTeX project compilation and preview | `latexmk` and a TeX distribution (e.g. TeX Live). |
 | Copy citations on Linux/Wayland | `wl-copy` from `wl-clipboard` (preferred). |
 | Copy citations on Linux/X11 | `xclip` (used when `wl-copy` is unavailable). |
 | External PDF viewing | The configured viewer command and any desktop integration it requires. |
@@ -121,10 +123,11 @@ That said, we recommend compiling Papr from source whenever possible. Building t
 ## Running with Docker
 
 The included Dockerfile builds Papr in a disposable Rust build stage and
-provides a runtime image with Poppler PDF tools, Linux clipboard integration,
-and Zathura for optional external PDF viewing. The Rust toolchain is not part
-of the final image. Papr's configuration, database, downloads, notes, and
-plugins are kept in mounts so they survive container removal.
+provides a runtime image with LaTeX compilation tools (latexmk + TeX Live),
+Poppler PDF tools, Linux clipboard integration, and Zathura for optional
+external PDF viewing. The Rust toolchain is not part of the final image.
+Papr's configuration, database, downloads, notes, projects, and plugins
+are kept in mounts so they survive container removal.
 
 > [!IMPORTANT]
 > Papr still needs a real interactive terminal (`-it`). The built-in PDF viewer
@@ -156,11 +159,11 @@ replace it with the current exact Rust version tag after a successful build
 Create persistent host directories once:
 
 ```sh
-mkdir -p .papr/config .papr/data papers
+mkdir -p .papr/config .papr/data papers projects
 ```
 
 Run Papr in an interactive terminal, storing application state in `.papr/`
-and making the host `papers/` directory available at `/papers`:
+and making the host directories available at `/papers` and `/projects`:
 
 ```sh
 docker run --rm -it \
@@ -168,6 +171,7 @@ docker run --rm -it \
   --mount "type=bind,src=$PWD/.papr/config,dst=/home/papr/.config/papr" \
   --mount "type=bind,src=$PWD/.papr/data,dst=/home/papr/.local/share/papr" \
   --mount "type=bind,src=$PWD/papers,dst=/papers" \
+  --mount "type=bind,src=$PWD/projects,dst=/projects" \
   papr:latest
 ```
 
@@ -176,6 +180,7 @@ On first launch, set the container paths in `.papr/config/config.toml`:
 ```toml
 download_path = "/papers"
 library_folders = ["/papers"]
+projects_directory = "/projects"
 pdf_viewer = "internal"
 ```
 
@@ -274,11 +279,11 @@ papr paths
 
 ### Path Locations
 
-| OS | Configuration File | SQLite Database & Assets |
-| --- | --- | --- |
-| **Linux** | `~/.config/papr/config.toml` | `~/.local/share/papr/` |
-| **macOS** | `~/Library/Application Support/papr/config.toml` | `~/Library/Application Support/papr/` |
-| **Windows** | `%APPDATA%\papr\config.toml` | `%APPDATA%\papr\` |
+| OS | Configuration File | SQLite Database & Assets | Default Projects Directory |
+| --- | --- | --- | --- |
+| **Linux** | `~/.config/papr/config.toml` | `~/.local/share/papr/` | `~/.local/share/papr/projects/` |
+| **macOS** | `~/Library/Application Support/papr/config.toml` | `~/Library/Application Support/papr/` | `~/Library/Application Support/papr/projects/` |
+| **Windows** | `%APPDATA%\papr\config.toml` | `%APPDATA%\papr\` | `%APPDATA%\papr\projects\` |
 
 ### Configuration Example (`config.toml`)
 
@@ -297,6 +302,9 @@ library_folders = [
 
 # Destination directory for new downloads
 download_path = "/home/user/Documents/papers"
+
+# Default directory used to create and discover LaTeX writing projects
+projects_directory = "/home/user/Documents/projects"
 
 # Comma-separated interests to populate the Dashboard arXiv feed
 dashboard_keywords = "machine learning, gravitational waves, astrophysics"
@@ -357,7 +365,8 @@ On Windows, the default PDF viewer is configured as `'cmd /C start msedge ""'`, 
 * **Authors:** Browse local papers grouped by author name.
 * **Notes:** Search and browse all your paper-linked Markdown notes.
 * **Downloads:** Active, completed, and failed downloads. Supports `B`, `n`, `g`, and `R` actions on completed downloads.
-* **History:** A chronological log of searches, downloads, and paper opens.
+* **Projects:** Create and manage compilable LaTeX papers with real-time background compilation and side-by-side terminal PDF preview.
+* **History:** A chronological log of searches, downloads, paper opens, and project activities.
 * **Statistics:** Detailed reading streaks, totals, top dimensions, and a 12-week reading heatmap.
 * **Settings:** Quick summary of active paths, configurations, and plugins.
 * **Credits:** Redesigned interactive Credits/About page for Papr.
@@ -418,6 +427,63 @@ On Windows, the default PDF viewer is configured as `'cmd /C start msedge ""'`, 
 | `k` / `Up` | Scroll up |
 | `PageDown` | Scroll down by a page |
 | `PageUp` | Scroll up by a page |
+
+### LaTeX Projects Workspace
+
+#### Project List / Creation Mode
+| Key | Action |
+| --- | --- |
+| `n` | Create a new LaTeX project |
+| `r` | Refresh the list of projects from disk |
+| `R` | Rename the selected project |
+| `x` | Delete the selected project (requires confirmation) |
+| `Enter` / `Right` / `l` | Open the selected project |
+| `Up` / `Down` / `k` / `j` | Navigate the project list |
+| `Left` | Focus sidebar navigation menu |
+
+#### Workspace Panes (Focused via Alt + 1/2/3/4)
+| Key | Action |
+| --- | --- |
+| `Alt+1` | Focus **File Tree** pane (navigate files in the project) |
+| `Alt+2` | Focus **Editor** pane (edit LaTeX source code) |
+| `Alt+3` | Focus **PDF Preview** pane (scroll the compiled PDF preview) |
+| `Alt+4` | Focus **Build Logs** pane (scroll compilation outputs/errors) |
+
+#### File Tree Pane (`Alt+1`)
+| Key | Action |
+| --- | --- |
+| `Up` / `Down` / `k` / `j` | Select files |
+| `Enter` | Open the selected file in the Editor |
+| `R` | Rename the current project |
+| `Esc` / `Left` | Close current project and return to the Project List |
+
+#### Editor Pane (`Alt+2`)
+| Key | Action |
+| --- | --- |
+| `i` | Enter Insert mode to edit text |
+| `Esc` | Return to Normal mode (or exit Editor back to File Tree) |
+| `h` / `j` / `k` / `l` / Arrow keys | Move cursor (Normal mode) |
+| `w` / `b` | Move cursor forward/backward word-wise (Normal mode) |
+| `0` / `Home` | Jump to the beginning of the line (Normal mode) |
+| `$` / `End` | Jump to the end of the line (Normal mode) |
+| `Backspace` / `Delete` / `x` | Delete character before/under cursor (Normal mode) |
+| `PageUp` / `PageDown` | Scroll the editor page by page (Normal/Insert mode) |
+| `Ctrl+S` | Save current file changes to disk (Global inside Editor) |
+
+#### PDF Preview Pane (`Alt+3`)
+| Key | Action |
+| --- | --- |
+| `Up` | Go to the previous page of the PDF preview |
+| `Down` | Go to the next page of the PDF preview |
+| `Home` | Jump to the first page |
+| `End` | Jump to the last page |
+
+#### Build Logs Pane (`Alt+4`)
+| Key | Action |
+| --- | --- |
+| `Up` / `Down` / `k` / `j` | Scroll build output lines |
+| `PageUp` / `PageDown` | Scroll output page-by-page |
+| `Home` / `End` | Jump to the start/end of build logs |
 
 ### Markdown Editor
 

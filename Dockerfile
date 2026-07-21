@@ -45,6 +45,9 @@ RUN apt-get update \
         zathura-pdf-poppler \
         fontconfig \
         fonts-dejavu-core \
+        latexmk \
+        texlive-latex-recommended \
+        texlive-fonts-recommended \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid "${GID}" "${USERNAME}" \
     && useradd --uid "${UID}" --gid "${GID}" --create-home \
