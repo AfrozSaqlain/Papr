@@ -1100,6 +1100,12 @@ async fn run(
         if app.page != last_page {
             app.workspace_query.clear();
             app.workspace_query_cursor = 0;
+            if matches!(
+                app.page,
+                papr_core::Page::Dashboard | papr_core::Page::History | papr_core::Page::Statistics
+            ) {
+                refresh_dashboard(&runtime, app)?;
+            }
             last_page = app.page;
             state_changed = true;
         }
@@ -1173,7 +1179,7 @@ async fn run(
             got_event = true;
             match event::read()? {
                 Event::Key(key)
-                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                    if key.kind == KeyEventKind::Press || (app.mode == AppMode::PdfView && key.kind == KeyEventKind::Repeat) =>
                 {
                     if app.page == papr_core::Page::Settings
                         && app.config_editor_focused
@@ -1211,7 +1217,7 @@ async fn run(
             got_event = true;
             match event::read()? {
                 Event::Key(key)
-                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                    if key.kind == KeyEventKind::Press || (app.mode == AppMode::PdfView && key.kind == KeyEventKind::Repeat) =>
                 {
                     if app.page == papr_core::Page::Settings
                         && app.config_editor_focused
@@ -1367,6 +1373,7 @@ fn apply_ui_action(
             runtime
                 .database
                 .record_activity("search", None, Some(&query))?;
+            refresh_dashboard(runtime, app)?;
             let request_id = app.discovery.begin_search();
             let client = runtime.arxiv.clone();
             let response_sender = senders.search.clone();
@@ -1392,6 +1399,7 @@ fn apply_ui_action(
         UiAction::OpenPaper(paper) => {
             let paper_id = runtime.database.ensure_remote_paper(&paper)?;
             runtime.database.record_activity("paper_browsed", Some(paper_id), None)?;
+            refresh_dashboard(runtime, app)?;
             app.mode = AppMode::PaperDetail;
             app.paper_detail_scroll = 0;
             refresh_paper_views(runtime, app)?;
@@ -1561,6 +1569,7 @@ fn apply_ui_action(
             runtime
                 .database
                 .record_activity("note_opened", Some(paper_id), None)?;
+            refresh_dashboard(runtime, app)?;
             app.note_editor = Some(runtime.database.paper_note(paper_id)?);
             app.note_preview = false;
             app.note_scroll = 0;
@@ -3211,6 +3220,7 @@ fn apply_download_event(
             // render, so remote views immediately expose their local-PDF actions.
             spawn_enrichment_if_needed(runtime, senders, app)?;
             refresh_paper_views(runtime, app)?;
+            refresh_dashboard(runtime, app)?;
             app.toast = Some("Download complete. Press Enter to open the PDF.".to_owned());
         }
         DownloadEvent::Failed { id, error } => {
