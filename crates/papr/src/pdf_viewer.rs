@@ -137,9 +137,8 @@ struct PageCache {
     last_crop_key: Option<CropKey>,
     /// The encoded frame ready to blit; `None` until first render.
     last_encoded: Option<EncodedFrame>,
-    /// Stable Kitty image identifier. Reusing it replaces terminal-side image
-    /// data while Unicode placeholders control the visible placement.
-    kitty_image_id: u32,
+    /// Monotonically-increasing counter used to assign unique Kitty IDs.
+    next_kitty_id: u32,
 }
 
 static CACHE: OnceLock<Arc<Mutex<PageCache>>> = OnceLock::new();
@@ -161,7 +160,7 @@ fn get_cache() -> Arc<Mutex<PageCache>> {
                 last_update: None,
                 last_crop_key: None,
                 last_encoded: None,
-                kitty_image_id: 1,
+                next_kitty_id: 1,
             }))
         })
         .clone()
@@ -751,7 +750,8 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             // Encode directly with our own Kitty encoder — zero redundant work
             let cache_arc = get_cache();
             if let Ok(mut g) = cache_arc.lock() {
-                let id = g.kitty_image_id;
+                let id = g.next_kitty_id;
+                g.next_kitty_id = g.next_kitty_id.wrapping_add(1).max(1);
                 let transmit_seq = kitty_transmit(&cropped, id);
                 let [_id_extra, id_r, id_g, id_b] = id.to_be_bytes();
                 let id_color = format!("\x1b[38;2;{id_r};{id_g};{id_b}m");
