@@ -655,6 +655,8 @@ pub struct App {
     pub active_pdf_session_id: Option<i64>,
     /// Active internal reading session start time.
     pub active_pdf_session_start: Option<std::time::Instant>,
+    /// Configured PDF viewer name.
+    pub pdf_viewer: String,
 }
 
 impl Default for App {
@@ -766,6 +768,7 @@ impl Default for App {
             pdf_viewer_max_scroll_y: 0,
             active_pdf_session_id: None,
             active_pdf_session_start: None,
+            pdf_viewer: "internal".to_string(),
         }
     }
 }

@@ -282,8 +282,16 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
         return;
     }
     let project = app.active_project.as_ref().expect("active project checked above");
-    let panes = Layout::horizontal([Constraint::Percentage(52), Constraint::Percentage(48)]).split(area);
-    let left = Layout::vertical([Constraint::Percentage(32), Constraint::Min(5), Constraint::Length(4)]).split(panes[0]);
+    let (file_tree_area, editor_area, build_area, preview_area) = if app.pdf_viewer == "internal" {
+        let panes = Layout::horizontal([Constraint::Percentage(52), Constraint::Percentage(48)]).split(area);
+        let left = Layout::vertical([Constraint::Percentage(32), Constraint::Min(5), Constraint::Length(4)]).split(panes[0]);
+        (left[0], left[1], left[2], Some(panes[1]))
+    } else {
+        let panes = Layout::horizontal([Constraint::Length(30), Constraint::Min(10)]).split(area);
+        let right = Layout::vertical([Constraint::Min(5), Constraint::Length(4)]).split(panes[1]);
+        (panes[0], right[0], right[1], None)
+    };
+
     let files = app.project_files.iter().map(|path| {
         let label = path.strip_prefix(&project.path).unwrap_or(path).display().to_string();
         ListItem::new(label)
@@ -293,10 +301,10 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
         .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
         .highlight_symbol("› ");
     let mut state = ListState::default().with_selected(Some(app.project_file_selected));
-    frame.render_stateful_widget(tree, left[0], &mut state);
+    frame.render_stateful_widget(tree, file_tree_area, &mut state);
     let editor_title = app.project_editor_path.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("Editor");
-    let editor_height = left[1].height.saturating_sub(2) as usize;
-    app.project_editor_wrap_width = left[1].width.saturating_sub(6).max(1) as usize;
+    let editor_height = editor_area.height.saturating_sub(2) as usize;
+    app.project_editor_wrap_width = editor_area.width.saturating_sub(6).max(1) as usize;
     app.project_editor_viewport_height = editor_height;
     let editor_view = build_config_editor_view(
         &app.project_editor_text,
@@ -309,28 +317,31 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
         let (prefix, content) = line.split_at(4.min(line.len()));
         Line::from(vec![Span::styled(prefix.to_owned(), Style::default().fg(theme.muted)), Span::styled(content.to_owned(), Style::default().fg(theme.text))])
     }).collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(editor_lines).wrap(Wrap { trim: false }).block(focus_block(&format!(" EDITOR [ALT+2] — {editor_title}{} ", if app.project_editor_dirty { " •" } else { "" }), app.content_focused && app.project_pane == ProjectPane::Editor, theme)), left[1]);
+    frame.render_widget(Paragraph::new(editor_lines).wrap(Wrap { trim: false }).block(focus_block(&format!(" EDITOR [ALT+2] — {editor_title}{} ", if app.project_editor_dirty { " •" } else { "" }), app.content_focused && app.project_pane == ProjectPane::Editor, theme)), editor_area);
     if app.content_focused && app.project_pane == ProjectPane::Editor {
         frame.set_cursor_position((
-            left[1].x.saturating_add(5).saturating_add(u16::try_from(editor_view.cursor_col).unwrap_or(0)),
-            left[1].y.saturating_add(1).saturating_add(u16::try_from(editor_view.cursor_row.saturating_sub(app.project_editor_scroll)).unwrap_or(0)),
+            editor_area.x.saturating_add(5).saturating_add(u16::try_from(editor_view.cursor_col).unwrap_or(0)),
+            editor_area.y.saturating_add(1).saturating_add(u16::try_from(editor_view.cursor_row.saturating_sub(app.project_editor_scroll)).unwrap_or(0)),
         ));
     }
     let diagnostics = if app.project_build_errors.is_empty() { "No compiler errors.".to_owned() } else { app.project_build_errors.join("\n") };
-    app.project_build_viewport_height = left[2].height.saturating_sub(2) as usize;
+    app.project_build_viewport_height = build_area.height.saturating_sub(2) as usize;
     let build_line_count = app.project_build_errors.len().max(1);
     app.project_build_scroll = app.project_build_scroll.min(
         build_line_count.saturating_sub(app.project_build_viewport_height.max(1)),
     );
-    frame.render_widget(Paragraph::new(diagnostics).scroll((u16::try_from(app.project_build_scroll).unwrap_or(u16::MAX), 0)).wrap(Wrap { trim: true }).block(focus_block(&format!(" BUILD [ALT+4]: {} ", app.project_build_status), app.content_focused && app.project_pane == ProjectPane::Build, theme)), left[2]);
-    let preview = project.path.join("main.pdf");
-    if preview.exists() && app.pdf_viewer_path.as_deref() == Some(preview.as_path()) {
-        let preview_block = focus_block(" PDF PREVIEW [ALT+3] ", app.content_focused && app.project_pane == ProjectPane::Preview, theme);
-        let preview_area = preview_block.inner(panes[1]);
-        frame.render_widget(preview_block, panes[1]);
-        crate::pdf_viewer::draw_pdf_viewer_in(frame, app, preview_area);
-    } else {
-        frame.render_widget(Paragraph::new("Live PDF preview\nWaiting for the first successful build…").alignment(Alignment::Center).wrap(Wrap { trim: true }).block(focus_block(" PDF PREVIEW [ALT+3] ", app.content_focused && app.project_pane == ProjectPane::Preview, theme)), panes[1]);
+    frame.render_widget(Paragraph::new(diagnostics).scroll((u16::try_from(app.project_build_scroll).unwrap_or(u16::MAX), 0)).wrap(Wrap { trim: true }).block(focus_block(&format!(" BUILD [ALT+4]: {} ", app.project_build_status), app.content_focused && app.project_pane == ProjectPane::Build, theme)), build_area);
+    
+    if let Some(preview_area) = preview_area {
+        let preview = project.path.join("main.pdf");
+        if preview.exists() && app.pdf_viewer_path.as_deref() == Some(preview.as_path()) {
+            let preview_block = focus_block(" PDF PREVIEW [ALT+3] ", app.content_focused && app.project_pane == ProjectPane::Preview, theme);
+            let p_area = preview_block.inner(preview_area);
+            frame.render_widget(preview_block, preview_area);
+            crate::pdf_viewer::draw_pdf_viewer_in(frame, app, p_area);
+        } else {
+            frame.render_widget(Paragraph::new("Live PDF preview\nWaiting for the first successful build…").alignment(Alignment::Center).wrap(Wrap { trim: true }).block(focus_block(" PDF PREVIEW [ALT+3] ", app.content_focused && app.project_pane == ProjectPane::Preview, theme)), preview_area);
+        }
     }
 }
 

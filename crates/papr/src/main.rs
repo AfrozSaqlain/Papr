@@ -149,6 +149,7 @@ async fn main() -> Result<()> {
     let mut app = App {
         stats: dashboard.counts,
         dashboard,
+        pdf_viewer: config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer),
         ..App::default()
     };
     app.plugins = plugin_host.plugins();
@@ -367,7 +368,7 @@ enum ProjectBuildEvent {
 impl ProjectCompiler {
     fn start(project: Project) -> Result<Self> {
         let mut child = ProcessCommand::new("latexmk")
-            .args(["-pdf", "-pvc", "main.tex"])
+            .args(["-pdf", "-pvc", "-view=none", "main.tex"])
             .current_dir(&project.path)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -432,7 +433,11 @@ impl ProjectCompiler {
                     pdf_viewer::invalidate_document(&pdf);
                 } else {
                     pdf_viewer::reset_for_new_document(&pdf);
-                    app.pdf_viewer_path = Some(pdf);
+                    app.pdf_viewer_path = Some(pdf.clone());
+                    if app.pdf_viewer != "internal" {
+                        let viewer = app.pdf_viewer.clone();
+                        let _ = open_pdf(&viewer, &pdf, app, None, None);
+                    }
                 }
                 changed = true;
             }
@@ -484,6 +489,10 @@ fn open_project_workspace(app: &mut App, project: Project) {
             app.pdf_viewer_total_pages = get_pdf_page_count(&pdf);
             app.pdf_viewer_page = 1;
             app.pdf_viewer_scroll_y = 0;
+            if app.pdf_viewer != "internal" {
+                let viewer = app.pdf_viewer.clone();
+                let _ = open_pdf(&viewer, &pdf, app, None, None);
+            }
         }
     }
     if let Some(main) = app.project_files.iter().find(|p| p.file_name().is_some_and(|n| n == "main.tex")).cloned() {
@@ -3701,7 +3710,8 @@ fn handle_project_pane_shortcut(app: &mut App, key: KeyEvent) -> bool {
         ProjectPane::FileTree | ProjectPane::Build => app.active_project.is_some(),
         ProjectPane::Editor => app.active_project.is_some() && app.project_editor_path.is_some(),
         ProjectPane::Preview => {
-            app.active_project.is_some()
+            app.pdf_viewer == "internal"
+                && app.active_project.is_some()
                 && app.pdf_viewer_path.as_ref().is_some_and(|path| path.exists())
         }
     };
@@ -3710,7 +3720,13 @@ fn handle_project_pane_shortcut(app: &mut App, key: KeyEvent) -> bool {
     } else {
         app.toast = Some(match pane {
             ProjectPane::Editor => "Open a source file before focusing the editor.",
-            ProjectPane::Preview => "PDF preview is unavailable until the first successful build.",
+            ProjectPane::Preview => {
+                if app.pdf_viewer != "internal" {
+                    "PDF preview is disabled when using an external viewer."
+                } else {
+                    "PDF preview is unavailable until the first successful build."
+                }
+            }
             _ => "Open a project before focusing this pane.",
         }
         .into());
@@ -4912,6 +4928,10 @@ fn apply_config_update(
     *theme = new_theme;
 
     runtime.pdf_viewer = config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer);
+    app.pdf_viewer = runtime.pdf_viewer.clone();
+    if app.pdf_viewer != "internal" && app.project_pane == ProjectPane::Preview {
+        app.project_pane = ProjectPane::FileTree;
+    }
     if let Some(projects_directory) = config.projects_directory.clone() {
         runtime.project_manager = ProjectManager::new(projects_directory)
             .map_err(|e| anyhow::anyhow!("projects directory: {e}"))?;
