@@ -74,10 +74,10 @@ pub struct Config {
     pub library_folders: Vec<PathBuf>,
     /// Destination for downloaded papers.
     pub download_path: Option<PathBuf>,
-    /// Comma-separated search terms used for dashboard recommendations.
-    pub dashboard_keywords: String,
     /// Default directory used to create and discover writing projects.
     pub projects_directory: Option<PathBuf>,
+    /// Comma-separated search terms used for dashboard recommendations.
+    pub dashboard_keywords: String,
     /// Plugin identifiers explicitly allowed to execute.
     pub enabled_plugins: Vec<String>,
 }
@@ -90,8 +90,8 @@ impl Default for Config {
             pdf_viewer: None,
             library_folders: Vec::new(),
             download_path: None,
-            dashboard_keywords: String::new(),
             projects_directory: None,
+            dashboard_keywords: String::new(),
             enabled_plugins: Vec::new(),
         }
     }
@@ -170,11 +170,11 @@ library_folders = [
 # Destination for downloaded papers.
 download_path = {downloads_dir_str}
 
-# Comma-separated search terms used for dashboard recommendations.
-dashboard_keywords = ""
-
 # Default directory for LaTeX writing projects.
 projects_directory = {projects_dir_str}
+
+# Comma-separated search terms used for dashboard recommendations.
+dashboard_keywords = ""
 
 # Plugin identifiers explicitly allowed to execute.
 enabled_plugins = []
@@ -279,7 +279,8 @@ mod tests {
         assert!(content.contains("dashboard_keywords ="));
         assert!(content.contains("enabled_plugins ="));
         assert!(content.contains("projects_directory ="));
-        assert!(content.find("projects_directory =").unwrap() < content.find("enabled_plugins =").unwrap());
+        assert!(content.find("download_path =").unwrap() < content.find("projects_directory =").unwrap());
+        assert!(content.find("projects_directory =").unwrap() < content.find("dashboard_keywords =").unwrap());
         
         let parsed: Config = toml::from_str(&content)?;
         assert_eq!(parsed.theme, config.theme);
@@ -293,6 +294,10 @@ mod tests {
             "xdg-open".to_string()
         };
         assert_eq!(parsed.pdf_viewer, Some(expected_viewer));
+
+        let rewritten = toml::to_string_pretty(&parsed)?;
+        assert!(rewritten.find("download_path =").unwrap() < rewritten.find("projects_directory =").unwrap());
+        assert!(rewritten.find("projects_directory =").unwrap() < rewritten.find("dashboard_keywords =").unwrap());
 
         std::fs::remove_dir_all(&temp_dir)?;
         Ok(())

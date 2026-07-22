@@ -5119,9 +5119,17 @@ fn handle_config_editor_key(
                     let toml_str = &app.config_editor_text;
                     match toml::from_str::<Config>(toml_str) {
                         Ok(new_config) => {
-                            if let Err(e) = std::fs::write(&runtime.config_file, toml_str) {
+                            let canonical_toml = match toml::to_string_pretty(&new_config) {
+                                Ok(toml) => toml,
+                                Err(e) => {
+                                    app.config_editor_error = Some(format!("Serialization failed: {e}"));
+                                    return None;
+                                }
+                            };
+                            if let Err(e) = std::fs::write(&runtime.config_file, &canonical_toml) {
                                 app.config_editor_error = Some(format!("Write failed: {e}"));
                             } else {
+                                reset_config_editor_buffer(app, canonical_toml);
                                 app.config_editor_error = None;
                                 app.toast = Some("Configuration saved and applied.".to_owned());
                                 if let Err(e) = apply_config_update(runtime, app, &new_config, theme, senders) {
