@@ -922,7 +922,6 @@ async fn run(
     let mut force_redraw = true;
 
     while !app.should_quit {
-        let loop_start = std::time::Instant::now();
         // state_changed drives non-PDF redraws; force_redraw (for PDF/animation)
         // is consumed and reset at the bottom of the loop after drawing.
         let mut state_changed = force_redraw;
@@ -1274,10 +1273,6 @@ async fn run(
             if draw_start.elapsed() > std::time::Duration::from_millis(16) {
                 log_message(&runtime.database_file, &format!("Slow draw: {:?}", draw_start.elapsed()));
             }
-        }
-
-        if loop_start.elapsed() > std::time::Duration::from_millis(50) {
-            log_message(&runtime.database_file, &format!("Slow main loop iteration: {:?}", loop_start.elapsed()));
         }
 
         tokio::task::yield_now().await;
