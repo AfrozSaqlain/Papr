@@ -323,6 +323,28 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
             editor_area.x.saturating_add(5).saturating_add(u16::try_from(editor_view.cursor_col).unwrap_or(0)),
             editor_area.y.saturating_add(1).saturating_add(u16::try_from(editor_view.cursor_row.saturating_sub(app.project_editor_scroll)).unwrap_or(0)),
         ));
+        if !app.project_completions.is_empty() {
+            let width = editor_area.width.saturating_sub(8).min(68).max(24);
+            let height = (app.project_completions.len() as u16 + 2).min(10);
+            let popup = Rect::new(
+                editor_area.x.saturating_add(4),
+                editor_area.y.saturating_add(2).saturating_add(u16::try_from(editor_view.cursor_row.saturating_sub(app.project_editor_scroll)).unwrap_or(0)).min(editor_area.height.saturating_sub(height)),
+                width,
+                height,
+            );
+            let items = app.project_completions.iter().map(|item| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{}  ", item.label), Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+                    Span::styled(&item.detail, Style::default().fg(theme.text)),
+                ]))
+            });
+            let list = List::new(items)
+                .block(focus_block(" CITATIONS — ENTER/TAB INSERT ", true, theme))
+                .highlight_style(Style::default().bg(theme.surface).fg(theme.accent));
+            let mut state = ListState::default().with_selected(Some(app.project_completion_selected));
+            frame.render_widget(Clear, popup);
+            frame.render_stateful_widget(list, popup, &mut state);
+        }
     }
     let diagnostics = if app.project_build_errors.is_empty() { "No compiler errors.".to_owned() } else { app.project_build_errors.join("\n") };
     app.project_build_viewport_height = build_area.height.saturating_sub(2) as usize;

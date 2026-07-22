@@ -3,6 +3,7 @@
 pub mod api;
 pub mod app;
 pub mod config;
+pub mod completions;
 pub mod database;
 pub mod downloads;
 pub mod library;
@@ -17,6 +18,7 @@ pub use app::{
     LibraryState, MetadataPrompt, Page, ProjectPane,
 };
 pub use config::{Config, Paths};
+pub use completions::{CitationEntry, CitationSource, CompletionItem, CompletionSource};
 pub use database::Database;
 pub use downloads::{DownloadEvent, DownloadManager};
 pub use library::{CollectionDirectory, ImportedPdf, LibraryIndexer, LibraryWatcher};

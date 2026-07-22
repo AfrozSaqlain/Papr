@@ -25,7 +25,7 @@ use papr_core::{
     App, AppMode, ArxivClient, CollectionDirectory, Command, Config, Database, DiscoveryStatus,
     DownloadEvent, DownloadManager, DownloadStatus, DownloadTask, ImportedPdf, LibraryIndexer,
     LibraryWatcher, MetadataPrompt, PaperNote, Paths, PluginHost, RemotePaper, Theme, Project,
-    ProjectManager, ProjectPane,
+    CitationSource, CompletionSource, ProjectManager, ProjectPane,
 };
 use sha2::{Digest, Sha256};
 use tokio::{sync::{mpsc, Semaphore}, task::JoinSet};
@@ -196,6 +196,8 @@ async fn main() -> Result<()> {
         watch_receiver,
         _watcher: watcher,
         active_enrichments: std::collections::HashSet::new(),
+        citation_index: None,
+        citation_source: CitationSource::default(),
     };
     run(&mut session, &mut app, theme, runtime).await
 }
@@ -347,6 +349,65 @@ struct Runtime {
     watch_receiver: mpsc::UnboundedReceiver<()>,
     _watcher: LibraryWatcher,
     active_enrichments: std::collections::HashSet<i64>,
+    citation_index: Option<CitationIndexer>,
+    citation_source: CitationSource,
+}
+
+/// Background BibTeX indexer. It watches only the active project and sends a
+/// fresh immutable source to the UI thread, keeping typing non-blocking.
+struct CitationIndexer {
+    events: std_mpsc::Receiver<CitationSource>,
+    _watcher: RecommendedWatcher,
+}
+
+impl CitationIndexer {
+    fn start(project: &Project) -> Result<Self> {
+        let (sender, events) = std_mpsc::channel();
+        refresh_citation_index(project.path.clone(), sender.clone());
+        let root = project.path.clone();
+        let mut watcher = RecommendedWatcher::new(move |event: notify::Result<notify::Event>| {
+            if let Ok(event) = event
+                && event.paths.iter().any(|path| path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bib")))
+            {
+                refresh_citation_index(root.clone(), sender.clone());
+            }
+        }, NotifyConfig::default())?;
+        watcher.watch(&project.path, RecursiveMode::Recursive)?;
+        Ok(Self { events, _watcher: watcher })
+    }
+
+    fn drain(&self) -> Option<CitationSource> {
+        let mut newest = None;
+        while let Ok(source) = self.events.try_recv() { newest = Some(source); }
+        newest
+    }
+}
+
+fn refresh_citation_index(root: PathBuf, sender: std_mpsc::Sender<CitationSource>) {
+    std::thread::spawn(move || {
+        let entries = walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bib")))
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            .flat_map(|contents| CitationSource::parse_bibtex(&contents)).collect();
+        let _ = sender.send(CitationSource::new(entries));
+    });
+}
+
+fn update_project_completions(app: &mut App, source: Option<&CitationSource>) {
+    let items = source.map_or_else(Vec::new, |source| source.complete(&app.project_editor_text, app.project_editor_cursor));
+    app.project_completions = items;
+    app.project_completion_selected = app.project_completion_selected.min(app.project_completions.len().saturating_sub(1));
+}
+
+fn accept_project_completion(app: &mut App) -> bool {
+    let Some(item) = app.project_completions.get(app.project_completion_selected).cloned() else { return false; };
+    let Some(query) = papr_core::completions::citation_query(&app.project_editor_text, app.project_editor_cursor) else { return false; };
+    let start = app.project_editor_cursor.saturating_sub(query.len());
+    app.project_editor_text.replace_range(start..app.project_editor_cursor, &item.insert_text);
+    app.project_editor_cursor = start + item.insert_text.len();
+    app.project_editor_dirty = true;
+    app.project_completions.clear();
+    true
 }
 
 /// Cross-platform lifecycle wrapper for the persistent latexmk watcher.
@@ -515,6 +576,13 @@ fn start_project_compiler(runtime: &mut Runtime, app: &mut App) {
             app.project_build_errors = vec![error.to_string()];
         }
     }
+}
+
+fn start_citation_indexer(runtime: &mut Runtime, app: &mut App) {
+    runtime.citation_index = app.active_project.as_ref().and_then(|project| CitationIndexer::start(project).ok());
+    runtime.citation_source = CitationSource::default();
+    app.project_completions.clear();
+    app.project_completion_selected = 0;
 }
 
 fn project_files(root: &std::path::Path) -> Vec<PathBuf> {
@@ -932,6 +1000,13 @@ async fn run(
             let preview_changed = compiler.drain_events(app);
             if preview_changed || previous.0 != app.project_build_status || previous.1 != app.project_build_errors { state_changed = true; }
         }
+        if let Some(indexer) = runtime.citation_index.as_ref()
+            && let Some(source) = indexer.drain()
+        {
+            runtime.citation_source = source;
+            update_project_completions(app, Some(&runtime.citation_source));
+            state_changed = true;
+        }
 
         let project_preview_active = app.page == papr_core::Page::Projects
             && app.active_project.is_some()
@@ -1262,6 +1337,11 @@ async fn run(
         if got_event || animating {
             force_redraw = true;
         }
+        if got_event && app.page == papr_core::Page::Projects {
+            let previous = app.project_completions.clone();
+            update_project_completions(app, Some(&runtime.citation_source));
+            state_changed |= previous != app.project_completions;
+        }
 
         // Step 3: draw with the fully-updated state (key effects are visible
         // in THIS iteration, not the next one).
@@ -1469,6 +1549,7 @@ fn apply_ui_action(
             refresh_dashboard(runtime, app)?;
             open_project_workspace(app, project.clone());
             start_project_compiler(runtime, app);
+            start_citation_indexer(runtime, app);
             app.projects = runtime.project_manager.list().unwrap_or_default();
             app.projects_selected = app
                 .projects
@@ -1483,6 +1564,7 @@ fn apply_ui_action(
             refresh_dashboard(runtime, app)?;
             open_project_workspace(app, project);
             start_project_compiler(runtime, app);
+            start_citation_indexer(runtime, app);
         }
         UiAction::OpenProjectFile(path) => {
             match std::fs::read_to_string(&path) {
@@ -1518,6 +1600,7 @@ fn apply_ui_action(
                             }
                         }
                         start_project_compiler(runtime, app);
+                        start_citation_indexer(runtime, app);
                     }
                     app.projects = runtime.project_manager.list().unwrap_or_default();
                     app.projects_selected = app.projects.iter().position(|p| p.path == renamed.path).unwrap_or(0);
@@ -1554,6 +1637,9 @@ fn apply_ui_action(
                 app.project_editor_cursor = 0;
                 app.project_editor_insert_mode = false;
                 app.project_editor_scroll = 0;
+                app.project_completions.clear();
+                runtime.citation_index = None;
+                runtime.citation_source = CitationSource::default();
                 app.project_build_status = "Idle".into();
                 app.project_build_errors.clear();
                 app.project_build_scroll = 0;
@@ -3624,6 +3710,26 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         return None;
     }
     if app.project_pane == ProjectPane::Editor && app.project_editor_insert_mode {
+        if !app.project_completions.is_empty() {
+            match key.code {
+                KeyCode::Up => {
+                    app.project_completion_selected = app.project_completion_selected.saturating_sub(1);
+                    return None;
+                }
+                KeyCode::Down => {
+                    app.project_completion_selected = (app.project_completion_selected + 1).min(app.project_completions.len().saturating_sub(1));
+                    return None;
+                }
+                KeyCode::Tab | KeyCode::Enter => {
+                    if accept_project_completion(app) { return None; }
+                }
+                KeyCode::Esc => {
+                    app.project_completions.clear();
+                    return None;
+                }
+                _ => {}
+            }
+        }
         if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
             move_project_editor_page(app, if key.code == KeyCode::PageUp { -1 } else { 1 });
             return None;
@@ -5229,7 +5335,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use papr_core::{
         App, AppMode, BookmarkSummary, CollectionSummary, Database, DiscoveryState, DownloadStatus,
-        DownloadTask, LibraryPaper, Page, PaperNote, Project, ProjectPane, RemotePaper,
+        CitationEntry, CitationSource, DownloadTask, LibraryPaper, Page, PaperNote, Project, ProjectPane, RemotePaper,
     };
     use papr_core::models::AuthorSummary;
 
@@ -5237,7 +5343,7 @@ mod tests {
         UiAction, build_config_editor_view, cursor_visual_position,
         handle_config_editor_insert_key, handle_downloads_key, handle_key, handle_paper_detail_key, parse_command,
         keyword_representation_targets, move_config_editor_page, refresh_downloads_from_dir,
-        reload_config_editor_buffer, select_dashboard_papers, shuffle_daily_bucket, PaperTarget,
+        accept_project_completion, reload_config_editor_buffer, select_dashboard_papers, shuffle_daily_bucket, update_project_completions, PaperTarget,
     };
 
     #[test]
@@ -5741,6 +5847,18 @@ mod tests {
             project_editor_viewport_height: 20,
             ..App::default()
         }
+    }
+
+    #[test]
+    fn citation_completion_replaces_only_the_current_key() {
+        let mut app = project_editor_app("\\cite{newton1687, eins}", 22);
+        let source = CitationSource::new(vec![CitationEntry {
+            key: "einstein1905".into(), author: "Albert Einstein".into(),
+            title: "Moving Bodies".into(), year: "1905".into(),
+        }]);
+        update_project_completions(&mut app, Some(&source));
+        assert!(accept_project_completion(&mut app));
+        assert_eq!(app.project_editor_text, "\\cite{newton1687, einstein1905}");
     }
 
     #[test]
@@ -7120,6 +7238,8 @@ mod tests {
             watch_receiver,
             _watcher: watcher,
             active_enrichments: HashSet::new(),
+            citation_index: None,
+            citation_source: papr_core::CitationSource::default(),
         };
 
         let old_pdf_path = temp_dir.join("my_old_paper.pdf");

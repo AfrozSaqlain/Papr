@@ -513,6 +513,10 @@ pub struct App {
     pub project_editor_wrap_width: usize,
     /// Cached height of the project editor viewport.
     pub project_editor_viewport_height: usize,
+    /// Items currently offered by the editor completion engine.
+    pub project_completions: Vec<crate::completions::CompletionItem>,
+    /// Selected item in the completion popup.
+    pub project_completion_selected: usize,
     /// Last compiler status shown in the writing workspace.
     pub project_build_status: String,
     /// Latest compiler diagnostics, preserving the last good PDF on failure.
@@ -698,6 +702,8 @@ impl Default for App {
             project_editor_scroll: 0,
             project_editor_wrap_width: 1,
             project_editor_viewport_height: 0,
+            project_completions: Vec::new(),
+            project_completion_selected: 0,
             project_build_status: "Idle".into(),
             project_build_errors: Vec::new(),
             project_build_scroll: 0,

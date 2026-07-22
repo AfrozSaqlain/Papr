@@ -26,6 +26,7 @@ toml.workspace = true
 pulldown-cmark = "0.13"
 syntect = { version = "5.2", features = ["default-fancy"] }
 notify.workspace = true
+walkdir.workspace = true
 
 [lints]
 workspace = true
