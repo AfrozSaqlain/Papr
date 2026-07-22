@@ -35,6 +35,7 @@ use terminal::TerminalSession;
 const DASHBOARD_CANDIDATE_LIMIT: u16 = 30;
 const DASHBOARD_DISPLAY_LIMIT: usize = 10;
 const DASHBOARD_FEED_ALGORITHM_VERSION: &str = "balanced-v2";
+const METADATA_ENRICHMENT_CONCURRENCY: usize = 1;
 
 #[derive(Debug, Parser)]
 #[command(name = "papr", version, about)]
@@ -2777,7 +2778,9 @@ fn spawn_enrichment_if_needed(
         let enrichment_tx = senders.enrichment.clone();
         app.enrichment_pending = true;
         let db_file_log = runtime.database_file.clone();
-        let concurrency = Arc::new(Semaphore::new(4));
+        // arXiv asks API clients to pause between requests; serial enrichment
+        // prevents background metadata work from monopolizing the shared client.
+        let concurrency = Arc::new(Semaphore::new(METADATA_ENRICHMENT_CONCURRENCY));
         tokio::spawn(async move {
             let mut jobs = JoinSet::new();
             for (paper_id, mut candidate_arxiv, mut candidate_doi, pdf_path) in papers {

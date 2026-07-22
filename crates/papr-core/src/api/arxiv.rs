@@ -2,13 +2,22 @@
 
 use chrono::{DateTime, Utc};
 use quick_xml::de::from_str;
-use reqwest::{Client, Url};
+use reqwest::{Client, RequestBuilder, Response, StatusCode, Url, header::RETRY_AFTER};
 use serde::Deserialize;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 use crate::models::RemotePaper;
 
 const API_URL: &str = "https://export.arxiv.org/api/query";
+/// arXiv asks API clients to pause for three seconds between consecutive calls.
+const REQUEST_INTERVAL: Duration = Duration::from_secs(3);
+/// A rate-limit response without a `Retry-After` header needs a meaningful cooldown.
+const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
 const LATEST_QUERY: &str = "cat:cs.* OR cat:physics.* OR cat:math.* OR cat:stat.* OR \
     cat:q-bio.* OR cat:astro-ph.* OR cat:cond-mat.* OR cat:gr-qc OR cat:quant-ph";
 
@@ -37,6 +46,7 @@ pub enum ArxivError {
 pub struct ArxivClient {
     client: Client,
     endpoint: Url,
+    next_request_at: Arc<Mutex<Instant>>,
 }
 
 /// One ranked page in an incremental arXiv candidate search.
@@ -61,6 +71,7 @@ impl ArxivClient {
                 .timeout(std::time::Duration::from_secs(20))
                 .build()?,
             endpoint: Url::parse(API_URL)?,
+            next_request_at: Arc::new(Mutex::new(Instant::now())),
         })
     }
 
@@ -115,7 +126,9 @@ impl ArxivClient {
 
         while start < total {
             let requested = batch_size.min(total - start);
-            let mut batch = self.query(&search_query, start, requested, "relevance").await?;
+            let mut batch = self
+                .query(&search_query, start, requested, "relevance")
+                .await?;
             let received = u16::try_from(batch.len()).unwrap_or(u16::MAX);
             papers.append(&mut batch);
             if received < requested {
@@ -156,7 +169,9 @@ impl ArxivClient {
 
         while start < total {
             let requested = batch_size.min(total - start);
-            let mut batch = self.query(&search_query, start, requested, "relevance").await?;
+            let mut batch = self
+                .query(&search_query, start, requested, "relevance")
+                .await?;
             let received = u16::try_from(batch.len()).unwrap_or(u16::MAX);
             papers.append(&mut batch);
             let final_batch = received < requested || start.saturating_add(requested) >= total;
@@ -251,11 +266,15 @@ impl ArxivClient {
     /// # Errors
     /// Returns an error when the request fails or Atom content is malformed.
     pub async fn get_by_id(&self, id: &str) -> Result<Option<RemotePaper>, ArxivError> {
+        let Some(id) = parse_arxiv_id(id) else {
+            return Ok(None);
+        };
         let response = self
-            .client
-            .get(self.endpoint.clone())
-            .query(&[("id_list", id)])
-            .send()
+            .send(
+                self.client
+                    .get(self.endpoint.clone())
+                    .query(&[("id_list", id)]),
+            )
             .await?
             .error_for_status()?
             .text()
@@ -272,22 +291,54 @@ impl ArxivClient {
         sort_by: &str,
     ) -> Result<Vec<RemotePaper>, ArxivError> {
         let response = self
-            .client
-            .get(self.endpoint.clone())
-            .query(&[
+            .send(self.client.get(self.endpoint.clone()).query(&[
                 ("search_query", search_query.to_owned()),
                 ("start", start.to_string()),
                 ("max_results", limit.clamp(1, 100).to_string()),
                 ("sortBy", sort_by.to_owned()),
                 ("sortOrder", "descending".to_owned()),
-            ])
-            .send()
+            ]))
             .await?
             .error_for_status()?
             .text()
             .await?;
         parse_response(response).await
     }
+
+    async fn send(&self, request: RequestBuilder) -> Result<Response, ArxivError> {
+        self.wait_for_request_slot().await;
+        let response = request.send().await?;
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            self.defer_after_rate_limit(retry_after(&response)).await;
+        }
+        Ok(response)
+    }
+
+    async fn wait_for_request_slot(&self) {
+        let scheduled_at = {
+            let mut next_request_at = self.next_request_at.lock().await;
+            let now = Instant::now();
+            let scheduled_at = (*next_request_at).max(now);
+            *next_request_at = scheduled_at + REQUEST_INTERVAL;
+            scheduled_at
+        };
+        tokio::time::sleep_until(tokio::time::Instant::from_std(scheduled_at)).await;
+    }
+
+    async fn defer_after_rate_limit(&self, cooldown: Duration) {
+        let mut next_request_at = self.next_request_at.lock().await;
+        *next_request_at = (*next_request_at).max(Instant::now() + cooldown);
+    }
+}
+
+fn retry_after(response: &Response) -> Duration {
+    response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(RATE_LIMIT_COOLDOWN)
 }
 
 async fn parse_response(response: String) -> Result<Vec<RemotePaper>, ArxivError> {
@@ -296,7 +347,10 @@ async fn parse_response(response: String) -> Result<Vec<RemotePaper>, ArxivError
         .map_err(|error| ArxivError::Background(error.to_string()))?
 }
 
-async fn rank_papers(input: String, mut papers: Vec<RemotePaper>) -> Result<Vec<RemotePaper>, ArxivError> {
+async fn rank_papers(
+    input: String,
+    mut papers: Vec<RemotePaper>,
+) -> Result<Vec<RemotePaper>, ArxivError> {
     tokio::task::spawn_blocking(move || {
         rank_by_query_relevance(&input, &mut papers);
         papers
@@ -621,8 +675,10 @@ fn parse_arxiv_id(s: &str) -> Option<String> {
         if parts.len() == 2 {
             let yymm = parts[0];
             let nnnn = parts[1];
-            if yymm.len() == 4 && yymm.chars().all(|c| c.is_ascii_digit())
-                && (nnnn.len() == 4 || nnnn.len() == 5) && nnnn.chars().all(|c| c.is_ascii_digit())
+            if yymm.len() == 4
+                && yymm.chars().all(|c| c.is_ascii_digit())
+                && (nnnn.len() == 4 || nnnn.len() == 5)
+                && nnnn.chars().all(|c| c.is_ascii_digit())
             {
                 let mut normalized = base.to_string();
                 if let Some(v) = version {
@@ -638,7 +694,11 @@ fn parse_arxiv_id(s: &str) -> Option<String> {
         let (cat, num) = base.split_at(slash_idx);
         let num = &num[1..];
         if num.len() == 7 && num.chars().all(|c| c.is_ascii_digit()) {
-            if !cat.is_empty() && cat.chars().all(|c| c.is_ascii_alphabetic() || c == '-' || c == '.') {
+            if !cat.is_empty()
+                && cat
+                    .chars()
+                    .all(|c| c.is_ascii_alphabetic() || c == '-' || c == '.')
+            {
                 let mut normalized = base.to_string();
                 if let Some(v) = version {
                     normalized.push_str(&v);
@@ -653,7 +713,9 @@ fn parse_arxiv_id(s: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArxivClient, build_search_query, parse_feed, rank_by_query_relevance};
+    use super::{
+        ArxivClient, build_search_query, parse_arxiv_id, parse_feed, rank_by_query_relevance,
+    };
 
     const FEED: &str = r#"<?xml version="1.0" encoding="utf-8"?>
     <feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
@@ -712,6 +774,15 @@ mod tests {
     #[test]
     fn test_endpoint_constructor_rejects_bad_url() {
         assert!(ArxivClient::with_endpoint("not a url").is_err());
+    }
+
+    #[test]
+    fn rejects_legacy_ids_without_an_archive_prefix() {
+        assert_eq!(parse_arxiv_id("0211069"), None);
+        assert_eq!(
+            parse_arxiv_id("hep-th/0211069v2").as_deref(),
+            Some("hep-th/0211069v2")
+        );
     }
 
     #[test]
