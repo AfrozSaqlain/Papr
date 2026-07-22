@@ -24,6 +24,18 @@ use syntect::{
 };
 
 const LOGO: &str = "[ P A P R ]";
+const WORKSPACE_LIST_ITEM_GAP_ROWS: usize = 1;
+
+/// Build a workspace list item with the standard vertical separation.
+///
+/// Keeping the gap here means item renderers only describe their content.
+fn workspace_list_item<'a>(mut lines: Vec<Line<'a>>) -> ListItem<'a> {
+    lines.extend(std::iter::repeat_n(
+        Line::raw(""),
+        WORKSPACE_LIST_ITEM_GAP_ROWS,
+    ));
+    ListItem::new(lines)
+}
 
 fn markdown_syntax_assets() -> &'static (SyntaxSet, ThemeSet) {
     static ASSETS: OnceLock<(SyntaxSet, ThemeSet)> = OnceLock::new();
@@ -265,7 +277,7 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
 fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     if app.active_project.is_none() || app.project_pane == ProjectPane::ProjectList {
         let items = app.projects.iter().map(|project| {
-            ListItem::new(vec![
+            workspace_list_item(vec![
                 Line::styled(&project.name, Style::default().fg(theme.text).add_modifier(Modifier::BOLD)),
                 Line::styled(project.path.display().to_string(), Style::default().fg(theme.muted)),
             ])
@@ -422,7 +434,7 @@ fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
         use papr_core::CollectionSearchItem;
         match item {
             CollectionSearchItem::Collection(collection) => {
-                ListItem::new(vec![
+                workspace_list_item(vec![
                     Line::styled(
                         &collection.name,
                         Style::default()
@@ -436,7 +448,7 @@ fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
                 ])
             }
             CollectionSearchItem::Paper(paper, _) => {
-                ListItem::new(vec![
+                workspace_list_item(vec![
                     Line::styled(
                         format!("  {}", paper.display_name()),
                         Style::default().fg(theme.text),
@@ -519,7 +531,7 @@ fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
             None,
             available_width,
         );
-        ListItem::new(lines)
+        workspace_list_item(lines)
     });
     let list = List::new(items)
         .block(
@@ -553,7 +565,7 @@ fn render_authors(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         return;
     }
     let items = authors.iter().map(|author| {
-        ListItem::new(vec![
+        workspace_list_item(vec![
             Line::styled(
                 &author.name,
                 Style::default()
@@ -636,7 +648,7 @@ fn render_author_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
             None,
             available_width,
         );
-        ListItem::new(lines)
+        workspace_list_item(lines)
     });
     let list = List::new(items)
         .block(
@@ -845,7 +857,7 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
 
 fn render_history(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let items = app.dashboard.recent_activity.iter().map(|activity| {
-        ListItem::new(vec![
+        workspace_list_item(vec![
             Line::styled(
                 &activity.label,
                 Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
@@ -858,7 +870,6 @@ fn render_history(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
                 ),
                 Style::default().fg(theme.muted),
             ),
-            Line::raw(""),
         ])
     });
     frame.render_widget(
@@ -1079,7 +1090,7 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
                     None,
                     available_width,
                 );
-                ListItem::new(lines)
+                workspace_list_item(lines)
             })
             .collect(),
         Page::Notes => app
@@ -1102,7 +1113,7 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
                     None,
                     available_width,
                 );
-                ListItem::new(lines)
+                workspace_list_item(lines)
             })
             .collect(),
         _ => Vec::new(),
@@ -2139,7 +2150,7 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
             None,
             available_width,
         );
-        ListItem::new(lines)
+        workspace_list_item(lines)
     });
     let list = List::new(items)
         .block(
@@ -2192,7 +2203,7 @@ fn render_reading_queue(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
             None,
             available_width,
         );
-        ListItem::new(lines)
+        workspace_list_item(lines)
     });
     let list = List::new(items)
         .block(
@@ -2295,7 +2306,7 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
             pl
         };
 
-        ListItem::new(lines)
+        workspace_list_item(lines)
     });
     let list = List::new(items)
         .block(
@@ -2475,13 +2486,12 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
             ));
         }
 
-        ListItem::new(vec![
+        workspace_list_item(vec![
             Line::styled(
                 display_paper_title(&paper.title),
                 Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
             ),
             Line::from(spans),
-            Line::raw(""),
         ])
     });
     let list = List::new(items)
@@ -2717,9 +2727,9 @@ fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
 fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let preview_width = usize::from(area.width.saturating_sub(8)).max(24);
     let today = match &app.today_status {
-        DiscoveryStatus::Loading => vec![ListItem::new("Loading dashboard papers...")],
-        DiscoveryStatus::Error(_) => vec![ListItem::new("Dashboard papers are unavailable")],
-        _ if app.today_papers.is_empty() => vec![ListItem::new("No new papers loaded")],
+        DiscoveryStatus::Loading => vec![workspace_list_item(vec![Line::raw("Loading dashboard papers...")])],
+        DiscoveryStatus::Error(_) => vec![workspace_list_item(vec![Line::raw("Dashboard papers are unavailable")])],
+        _ if app.today_papers.is_empty() => vec![workspace_list_item(vec![Line::raw("No new papers loaded")])],
         _ => app
             .today_papers
             .iter()
@@ -2750,14 +2760,13 @@ fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
                     ));
                 }
 
-                ListItem::new(vec![
+                workspace_list_item(vec![
                     Line::styled(
                         display_paper_title(&paper.title),
                         Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
                     ),
                     Line::from(meta_spans),
                     Line::styled(abstract_preview, Style::default().fg(theme.muted)),
-                    Line::raw(""),
                 ])
             })
             .collect(),
@@ -3196,7 +3205,7 @@ fn render_credits(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
     let list_items: Vec<ListItem> = credits_items
         .iter()
         .map(|item| {
-            ListItem::new(vec![
+            workspace_list_item(vec![
                 Line::styled(&item.label, Style::default().fg(theme.text)),
                 Line::styled(&item.url, Style::default().fg(theme.muted)),
             ])
@@ -3367,7 +3376,6 @@ fn build_paper_lines<'a>(
         vec![
             Line::styled(title.to_string(), Style::default().fg(theme.text).add_modifier(Modifier::BOLD)),
             Line::from(line_spans),
-            Line::raw(""),
         ]
     } else {
         let mut lines = vec![
@@ -3377,7 +3385,6 @@ fn build_paper_lines<'a>(
         if !stats_spans.is_empty() {
             lines.push(Line::from(stats_spans));
         }
-        lines.push(Line::raw(""));
         lines
     }
 }
