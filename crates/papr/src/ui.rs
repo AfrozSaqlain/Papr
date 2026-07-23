@@ -122,7 +122,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         AppMode::Prompt => render_metadata_prompt(frame, app, theme),
         AppMode::ConfirmDelete => render_delete_confirmation(frame, app, theme),
         AppMode::ProjectRename | AppMode::ProjectCreate | AppMode::ProjectFileCreate => render_project_name_prompt(frame, app, theme),
-        AppMode::Normal | AppMode::Search | AppMode::WorkspaceSearch | AppMode::PdfView => {}
+        AppMode::Normal | AppMode::Search | AppMode::DiscoverFilter | AppMode::WorkspaceSearch | AppMode::PdfView => {}
     }
 
     let project_editor_focused = app.page == Page::Projects
@@ -2345,6 +2345,13 @@ fn format_decimal_bytes(bytes: u64, unit: u64, suffix: &str) -> String {
 
 fn render_discover(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(4)]).split(area);
+    let show_filter = !app.discovery.results.is_empty();
+    let inputs = Layout::horizontal(if show_filter {
+        [Constraint::Percentage(55), Constraint::Percentage(45)]
+    } else {
+        [Constraint::Percentage(100), Constraint::Length(0)]
+    })
+    .split(rows[0]);
     let query = if app.discovery.query.is_empty() {
         "Search words | author: name | title: words | category: gr-qc"
     } else {
@@ -2369,8 +2376,25 @@ fn render_discover(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
                         theme.border
                     })),
             ),
-        rows[0],
+        inputs[0],
     );
+
+    if show_filter {
+        let filter = if app.discovery.filter.is_empty() { "Filter displayed results" } else { &app.discovery.filter };
+        let filter_style = if app.mode == AppMode::DiscoverFilter {
+            Style::default().fg(theme.text).bg(theme.surface)
+        } else if app.discovery.filter.is_empty() {
+            Style::default().fg(theme.muted)
+        } else {
+            Style::default().fg(theme.text)
+        };
+        frame.render_widget(
+            Paragraph::new(format!("> {filter}"))
+                .style(filter_style)
+                .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(if app.mode == AppMode::DiscoverFilter { theme.accent } else { theme.border }))),
+            inputs[1],
+        );
+    }
 
     if app.mode == AppMode::Search {
         let cursor_offset = u16::try_from(
@@ -2380,9 +2404,13 @@ fn render_discover(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
         )
         .unwrap_or(0);
         frame.set_cursor_position((
-            rows[0].x.saturating_add(3).saturating_add(cursor_offset),
-            rows[0].y.saturating_add(1),
+            inputs[0].x.saturating_add(3).saturating_add(cursor_offset),
+            inputs[0].y.saturating_add(1),
         ));
+    }
+    if show_filter && app.mode == AppMode::DiscoverFilter {
+        let cursor_offset = u16::try_from(app.discovery.filter[..app.discovery.filter_cursor].chars().count()).unwrap_or(0);
+        frame.set_cursor_position((inputs[1].x.saturating_add(3).saturating_add(cursor_offset), inputs[1].y.saturating_add(1)));
     }
 
     match &app.discovery.status {
@@ -2452,7 +2480,7 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
     } else {
         format!("{progress}  ")
     };
-    let items = app.discovery.current_page_results().iter().map(|paper| {
+    let items = app.discovery.visible_page_results().map(|paper| {
         let local_status = app
             .downloaded_remote_paper(paper)
             .map(|local| local.reading_status.as_str());
@@ -2503,7 +2531,7 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
                     progress_prefix,
                     app.discovery.page + 1,
                     app.discovery.page_count(),
-                    app.discovery.results.len(),
+                    app.discovery.filtered_result_count(),
                 ))
                 .borders(Borders::TOP)
                 .border_style(Style::default().fg(theme.border)),
@@ -2528,8 +2556,11 @@ fn compact_authors(paper: &RemotePaper) -> String {
 }
 
 fn render_paper_detail(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
-    let (papers, selected) = paper_detail_source(app);
-    let Some(paper) = papers.get(selected) else {
+    let paper = match app.page {
+        Page::Dashboard => app.today_papers.get(app.today_selected),
+        _ => app.discovery.selected_paper(),
+    };
+    let Some(paper) = paper else {
         return;
     };
     let area = frame.area();
@@ -2585,14 +2616,6 @@ fn render_paper_detail(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
                 .style(Style::default().fg(theme.success)),
             rows[2],
         );
-    }
-}
-
-fn paper_detail_source(app: &App) -> (&[RemotePaper], usize) {
-    match app.page {
-        Page::Dashboard => (&app.today_papers, app.today_selected),
-        Page::Discover => (app.discovery.current_page_results(), app.discovery.selected),
-        _ => (app.discovery.current_page_results(), app.discovery.selected),
     }
 }
 

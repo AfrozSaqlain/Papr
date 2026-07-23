@@ -108,6 +108,8 @@ pub enum AppMode {
     Help,
     /// Text entry for a discovery search.
     Search,
+    /// Text entry for filtering the currently displayed discovery results.
+    DiscoverFilter,
     /// Full paper metadata view.
     PaperDetail,
     /// Direct Markdown note editing.
@@ -212,8 +214,15 @@ pub struct DiscoveryState {
     pub query: String,
     /// Cursor position in the query field.
     pub query_cursor: usize,
+    /// Text used to refine the current result cache without starting a search.
+    pub filter: String,
+    /// Cursor position in the result filter.
+    pub filter_cursor: usize,
     /// Papers returned by the most recent request.
     pub results: Vec<RemotePaper>,
+    /// Ranked indexes into `results` that are visible after applying `filter`.
+    #[doc(hidden)]
+    pub filtered_indices: Vec<usize>,
     /// Zero-based page in the globally ranked result cache.
     pub page: usize,
     /// Selected result row.
@@ -243,7 +252,7 @@ impl DiscoveryState {
     /// Number of available pages in the globally ranked result cache.
     #[must_use]
     pub fn page_count(&self) -> usize {
-        self.results.len().div_ceil(Self::PAGE_SIZE)
+        self.visible_result_count().div_ceil(Self::PAGE_SIZE)
     }
 
     /// Results belonging to the currently visible page.
@@ -254,15 +263,47 @@ impl DiscoveryState {
         &self.results[start..end]
     }
 
+    /// Results on the visible page after applying the local filter.
+    pub fn visible_page_results(&self) -> Box<dyn Iterator<Item = &RemotePaper> + '_> {
+        if self.uses_unfiltered_fallback() {
+            Box::new(self.current_page_results().iter())
+        } else {
+            Box::new(self.current_page_indices().iter().filter_map(|&index| self.results.get(index)))
+        }
+    }
+
+    /// Number of filtered results on the visible page.
+    #[must_use]
+    pub fn visible_page_len(&self) -> usize {
+        if self.uses_unfiltered_fallback() {
+            self.current_page_results().len()
+        } else {
+            self.current_page_indices().len()
+        }
+    }
+
+    /// Total count after applying the local filter.
+    #[must_use]
+    pub fn filtered_result_count(&self) -> usize {
+        self.visible_result_count()
+    }
+
     /// Selected paper on the currently visible page.
     #[must_use]
     pub fn selected_paper(&self) -> Option<&RemotePaper> {
-        self.current_page_results().get(self.selected)
+        if self.uses_unfiltered_fallback() {
+            self.current_page_results().get(self.selected)
+        } else {
+            self.current_page_indices()
+                .get(self.selected)
+                .and_then(|&index| self.results.get(index))
+        }
     }
 
     /// Replace the cached result set after one globally ranked search.
     pub fn set_results(&mut self, results: Vec<RemotePaper>) {
         self.results = results;
+        self.rebuild_filter();
         self.page = 0;
         self.selected = 0;
         self.scroll = 0;
@@ -273,6 +314,8 @@ impl DiscoveryState {
     /// Start a new search and discard results belonging to the previous query.
     pub fn begin_search(&mut self) -> u64 {
         self.request_id = self.request_id.wrapping_add(1);
+        self.filter.clear();
+        self.filter_cursor = 0;
         self.set_results(Vec::new());
         self.status = DiscoveryStatus::Loading;
         self.next_batch_start = None;
@@ -284,21 +327,15 @@ impl DiscoveryState {
     pub fn update_results(&mut self, results: Vec<RemotePaper>) {
         let selected_id = self.selected_paper().map(|paper| paper.id.clone());
         self.results = results;
+        self.rebuild_filter_with_selected(selected_id.as_deref());
         let page_count = self.page_count();
         self.page_selections.resize(page_count, 0);
         self.page_scrolls.resize(page_count, 0);
 
-        if let Some(selected_id) = selected_id {
-            if let Some(index) = self.results.iter().position(|paper| paper.id == selected_id) {
-                self.page = index / Self::PAGE_SIZE;
-                self.selected = index % Self::PAGE_SIZE;
-                return;
-            }
-        }
         self.page = self.page.min(page_count.saturating_sub(1));
         self.selected = self
             .selected
-            .min(self.current_page_results().len().saturating_sub(1));
+            .min(self.visible_page_len().saturating_sub(1));
     }
 
     /// Move to the next cached page, preserving the current page view state.
@@ -336,8 +373,113 @@ impl DiscoveryState {
     fn restore_page_view(&mut self) {
         self.selected = self.page_selections.get(self.page).copied().unwrap_or(0);
         self.scroll = self.page_scrolls.get(self.page).copied().unwrap_or(0);
-        self.selected = self.selected.min(self.current_page_results().len().saturating_sub(1));
+        self.selected = self.selected.min(self.visible_page_len().saturating_sub(1));
     }
+
+    /// Re-rank the visible result indexes after a local filter edit.
+    pub fn rebuild_filter(&mut self) {
+        // A changed filter defines a new ranked result set.  Always start at
+        // its best match rather than retaining an index from the old set.
+        self.rebuild_filter_with_selected(None);
+    }
+
+    fn rebuild_filter_with_selected(&mut self, selected_id: Option<&str>) {
+        let query = self.filter.trim().to_lowercase();
+        let terms = query.split_whitespace().collect::<Vec<_>>();
+        let mut ranked_indices = self
+            .results
+            .iter()
+            .enumerate()
+            .filter_map(|(index, paper)| filter_rank(paper, &terms).map(|rank| (index, rank)))
+            .collect::<Vec<_>>();
+        if !terms.is_empty() {
+            ranked_indices.sort_by(|(left_index, left_rank), (right_index, right_rank)| {
+                right_rank.cmp(left_rank).then_with(|| left_index.cmp(right_index))
+            });
+        }
+        self.filtered_indices = ranked_indices.into_iter().map(|(index, _)| index).collect();
+        self.page_selections = vec![0; self.page_count()];
+        self.page_scrolls = vec![0; self.page_count()];
+        self.page = 0;
+        self.selected = 0;
+        self.scroll = 0;
+        if let Some(selected_id) = selected_id
+            && let Some(index) = self.filtered_indices.iter().position(|&index| self.results[index].id == selected_id)
+        {
+            self.page = index / Self::PAGE_SIZE;
+            self.selected = index % Self::PAGE_SIZE;
+        }
+    }
+
+    fn current_page_indices(&self) -> &[usize] {
+        let start = self.page.saturating_mul(Self::PAGE_SIZE).min(self.filtered_indices.len());
+        let end = (start + Self::PAGE_SIZE).min(self.filtered_indices.len());
+        &self.filtered_indices[start..end]
+    }
+
+    fn visible_result_count(&self) -> usize {
+        if self.uses_unfiltered_fallback() { self.results.len() } else { self.filtered_indices.len() }
+    }
+
+    fn uses_unfiltered_fallback(&self) -> bool {
+        self.filter.is_empty() && self.filtered_indices.is_empty() && !self.results.is_empty()
+    }
+}
+
+fn filter_rank(paper: &RemotePaper, terms: &[&str]) -> Option<[i32; 5]> {
+    if terms.is_empty() {
+        return Some([0; 5]);
+    }
+    let authors = paper.authors.join(" ");
+    let metadata = format!(
+        "{} {} {} {}",
+        paper.journal_ref.as_deref().unwrap_or_default(),
+        paper.categories.join(" "),
+        paper.doi.as_deref().unwrap_or_default(),
+        paper.id,
+    );
+    let fields = [
+        paper.title.as_str(),
+        authors.as_str(),
+        paper.abstract_text.as_str(),
+        paper.journal_ref.as_deref().unwrap_or_default(),
+        metadata.as_str(),
+    ];
+    let mut rank = [0; 5];
+    for term in terms {
+        let mut matched = false;
+        for (field, value) in fields.iter().enumerate() {
+            if let Some(score) = fuzzy_match_score(value, term) {
+                rank[field] += score;
+                matched = true;
+            }
+        }
+        if !matched {
+            return None;
+        }
+    }
+    Some(rank)
+}
+
+fn fuzzy_match_score(value: &str, query: &str) -> Option<i32> {
+    let value = value.to_lowercase();
+    if value == query { return Some(500); }
+    if value.starts_with(query) { return Some(400); }
+    if value.split(|character: char| !character.is_alphanumeric()).any(|word| word.starts_with(query)) {
+        return Some(300);
+    }
+    if value.contains(query) { return Some(200); }
+    let mut chars = value.chars();
+    let mut gaps = 0;
+    for target in query.chars() {
+        let mut found = false;
+        for character in chars.by_ref() {
+            if character == target { found = true; break; }
+            gaps += 1;
+        }
+        if !found { return None; }
+    }
+    Some((100 - gaps).max(1))
 }
 
 /// An item in the hierarchical collection search view.
@@ -1123,7 +1265,7 @@ impl App {
                         (self.today_selected + 1).min(self.today_papers.len().saturating_sub(1));
                 } else if self.page == Page::Discover {
                     self.discovery.selected = (self.discovery.selected + 1)
-                        .min(self.discovery.current_page_results().len().saturating_sub(1));
+                        .min(self.discovery.visible_page_len().saturating_sub(1));
                     self.discovery.store_page_view();
                 } else if self.page == Page::Library {
                     self.library.selected = (self.library.selected + 1)

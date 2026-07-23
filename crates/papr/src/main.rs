@@ -3533,6 +3533,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.mode == AppMode::Search {
         return handle_search_key(app, key);
     }
+    if app.mode == AppMode::DiscoverFilter {
+        return handle_discover_filter_key(app, key);
+    }
     if app.mode == AppMode::WorkspaceSearch {
         return handle_workspace_search_key(app, key);
     }
@@ -3575,6 +3578,16 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         && app.content_focused
     {
         return handle_projects_key(app, key);
+    }
+    if app.page == papr_core::Page::Discover
+        && app.content_focused
+        && app.mode == AppMode::Normal
+        && !app.discovery.results.is_empty()
+        && key.code == KeyCode::Left
+    {
+        app.mode = AppMode::Search;
+        app.discovery.query_cursor = app.discovery.query.len();
+        return None;
     }
     let key = normalize_panel_navigation(key);
     if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -3673,6 +3686,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             .selected_paper()
             .map(|paper| UiAction::OpenBrowser(paper.id.clone()));
     }
+    if app.page == papr_core::Page::Discover
+        && key.code == KeyCode::Char('>')
+        && !app.discovery.results.is_empty()
+    {
+        app.mode = AppMode::DiscoverFilter;
+        app.discovery.filter_cursor = app.discovery.filter.len();
+        return None;
+    }
     if app.page == papr_core::Page::Discover && key.code == KeyCode::Char('c') {
         return app
             .discovery
@@ -3702,7 +3723,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
 
     if let Some(command) = navigation_command(key) {
         if app.page == papr_core::Page::Discover && command == Command::MoveUp && app.discovery.selected == 0 {
-            app.mode = AppMode::Search;
+            app.mode = if app.discovery.results.is_empty() {
+                AppMode::Search
+            } else {
+                AppMode::DiscoverFilter
+            };
+            if app.mode == AppMode::DiscoverFilter {
+                app.discovery.filter_cursor = app.discovery.filter.len();
+            }
             return None;
         }
         app.dispatch(command);
@@ -3720,6 +3748,7 @@ fn has_active_text_input(app: &App) -> bool {
             | AppMode::NoteEdit
             | AppMode::Prompt
             | AppMode::Search
+            | AppMode::DiscoverFilter
             | AppMode::WorkspaceSearch
     ) || (app.page == papr_core::Page::Projects
         && app.content_focused
@@ -4071,6 +4100,12 @@ fn handle_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 app.discovery.selected = 0;
             }
         }
+        KeyCode::Right if !key.modifiers.contains(KeyModifiers::CONTROL)
+            && app.discovery.query_cursor == app.discovery.query.len()
+            && !app.discovery.results.is_empty() => {
+            app.mode = AppMode::DiscoverFilter;
+            app.discovery.filter_cursor = app.discovery.filter.len();
+        }
         KeyCode::Left if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             if app.discovery.query_cursor == 0 {
                 app.content_focused = false;
@@ -4095,6 +4130,38 @@ fn handle_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 &mut app.discovery.query_cursor,
                 key,
             );
+        }
+    }
+    None
+}
+
+fn handle_discover_filter_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    if app.discovery.results.is_empty() {
+        app.mode = AppMode::Normal;
+        return None;
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('>') => app.mode = AppMode::Normal,
+        KeyCode::Up => {
+            app.mode = AppMode::Search;
+            app.discovery.query_cursor = app.discovery.query.len();
+        }
+        KeyCode::Down | KeyCode::Enter => {
+            app.mode = AppMode::Normal;
+            app.discovery.selected = app.discovery.selected.min(app.discovery.visible_page_len().saturating_sub(1));
+        }
+        KeyCode::Left if !key.modifiers.contains(KeyModifiers::CONTROL) && app.discovery.filter_cursor == 0 => {
+            app.mode = AppMode::Search;
+            app.discovery.query_cursor = app.discovery.query.len();
+        }
+        KeyCode::Right if !key.modifiers.contains(KeyModifiers::CONTROL)
+            && app.discovery.filter_cursor == app.discovery.filter.len() => {
+            app.mode = AppMode::Normal;
+        }
+        _ => {
+            if edit_text(&mut app.discovery.filter, &mut app.discovery.filter_cursor, key) {
+                app.discovery.rebuild_filter();
+            }
         }
     }
     None
@@ -5006,12 +5073,10 @@ fn selected_remote_target(app: &App) -> Option<PaperTarget> {
 }
 
 fn selected_remote_paper(app: &App) -> Option<&RemotePaper> {
-    let (results, selected) = match app.page {
-        papr_core::Page::Dashboard => (app.today_papers.as_slice(), app.today_selected),
-        papr_core::Page::Discover => (app.discovery.current_page_results(), app.discovery.selected),
-        _ => (app.discovery.current_page_results(), app.discovery.selected),
-    };
-    results.get(selected)
+    match app.page {
+        papr_core::Page::Dashboard => app.today_papers.get(app.today_selected),
+        _ => app.discovery.selected_paper(),
+    }
 }
 
 fn selected_library_pdf(app: &App) -> Option<(i64, PathBuf)> {
@@ -6248,6 +6313,42 @@ mod tests {
         let action = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(action, Some(UiAction::CreateProject(name)) if name == "pap"));
         assert_eq!(app.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn discover_filter_refines_results_without_starting_a_search() {
+        let mut title_match = remote_paper("title", "Genome assembly");
+        title_match.authors = vec!["Ada Author".into()];
+        let mut author_match = remote_paper("author", "Other paper");
+        author_match.authors = vec!["Genome Researcher".into()];
+        let mut abstract_match = remote_paper("abstract", "Third paper");
+        abstract_match.abstract_text = "A genome-scale analysis.".into();
+        let mut app = App {
+            page: Page::Discover,
+            content_focused: true,
+            ..App::default()
+        };
+        app.discovery.set_results(vec![author_match, abstract_match, title_match]);
+
+        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE));
+        assert!(action.is_none());
+        assert_eq!(app.mode, AppMode::DiscoverFilter);
+        for character in "genome".chars() {
+            assert!(handle_key(&mut app, KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)).is_none());
+        }
+        assert_eq!(app.discovery.filtered_result_count(), 3);
+        assert_eq!(app.discovery.selected_paper().map(|paper| paper.id.as_str()), Some("title"));
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.discovery.filter, "genome");
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::DiscoverFilter);
+        for _ in 0.."genome".len() {
+            let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        }
+        assert!(app.discovery.filter.is_empty());
+        assert_eq!(app.discovery.filtered_result_count(), 3);
     }
 
     #[test]
