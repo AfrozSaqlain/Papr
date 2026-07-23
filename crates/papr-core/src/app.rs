@@ -124,6 +124,8 @@ pub enum AppMode {
     ProjectRename,
     /// One-line project creation input.
     ProjectCreate,
+    /// One-line file creation input within the open project.
+    ProjectFileCreate,
 }
 
 /// Logical focus target within the Projects workspace.

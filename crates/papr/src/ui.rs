@@ -121,7 +121,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         AppMode::NoteEdit => render_note_editor(frame, app, theme),
         AppMode::Prompt => render_metadata_prompt(frame, app, theme),
         AppMode::ConfirmDelete => render_delete_confirmation(frame, app, theme),
-        AppMode::ProjectRename | AppMode::ProjectCreate => render_project_name_prompt(frame, app, theme),
+        AppMode::ProjectRename | AppMode::ProjectCreate | AppMode::ProjectFileCreate => render_project_name_prompt(frame, app, theme),
         AppMode::Normal | AppMode::Search | AppMode::WorkspaceSearch | AppMode::PdfView => {}
     }
 
@@ -143,10 +143,11 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
 fn render_project_name_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let area = frame.area();
     let popup = Rect::new(area.x + area.width / 4, area.y + area.height / 2 - 2, area.width / 2, 4);
-    let title = if app.mode == AppMode::ProjectCreate {
-        " NEW PROJECT — ENTER CREATE  ESC CANCEL "
-    } else {
-        " RENAME PROJECT — ENTER SAVE  ESC CANCEL "
+    let title = match app.mode {
+        AppMode::ProjectCreate => " NEW PROJECT — ENTER CREATE  ESC CANCEL ",
+        AppMode::ProjectFileCreate => " NEW FILE — ENTER CREATE  ESC CANCEL ",
+        AppMode::ProjectRename => " RENAME PROJECT — ENTER SAVE  ESC CANCEL ",
+        _ => unreachable!("project prompt rendered outside a project prompt mode"),
     };
     frame.render_widget(Clear, popup);
     frame.render_widget(Paragraph::new(app.project_rename_input.as_str()).block(focus_block(title, true, theme)), popup);
@@ -309,7 +310,7 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
         ListItem::new(label)
     });
     let tree = List::new(files)
-        .block(focus_block(" FILES [ALT+1] — ENTER OPEN  ESC PROJECTS ", app.content_focused && app.project_pane == ProjectPane::FileTree, theme))
+        .block(focus_block(" FILES [ALT+1] — n NEW  ENTER OPEN  ESC PROJECTS ", app.content_focused && app.project_pane == ProjectPane::FileTree, theme))
         .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
         .highlight_symbol("› ");
     let mut state = ListState::default().with_selected(Some(app.project_file_selected));

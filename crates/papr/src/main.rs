@@ -8,7 +8,7 @@ mod pdf_viewer;
 use std::{
     collections::HashMap,
     io::{BufRead, BufReader},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
     sync::mpsc::{self as std_mpsc, TryRecvError},
     sync::Arc,
@@ -275,6 +275,7 @@ enum UiAction {
     RetryDownload { id: String, paper: RemotePaper },
     RefreshProjects,
     CreateProject(String),
+    CreateProjectFile(String),
     OpenProject(Project),
     OpenProjectFile(PathBuf),
     RenameProject { project: Project, name: String },
@@ -602,6 +603,54 @@ fn project_files(root: &std::path::Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     visit(root, root, &mut files);
     files
+}
+
+fn is_project_text_file(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| matches!(ext.to_str(), Some("tex" | "bib" | "sty" | "cls" | "md" | "txt")))
+}
+
+fn create_project_file(project_root: &Path, name: &str) -> Result<PathBuf, String> {
+    let relative = Path::new(name.trim());
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative.file_name().is_none()
+        || !relative.components().all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err("enter a relative file path inside the project".into());
+    }
+
+    let path = project_root.join(relative);
+    let parent = path.parent().ok_or_else(|| "enter a relative file path inside the project".to_owned())?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+
+    let canonical_root = std::fs::canonicalize(project_root).map_err(|error| error.to_string())?;
+    let canonical_parent = std::fs::canonicalize(parent).map_err(|error| error.to_string())?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        return Err("file path must stay inside the project".into());
+    }
+
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(_) => Ok(path),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err("a file with that name already exists".into())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn open_project_file(app: &mut App, path: PathBuf) {
+    match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            app.project_editor_text = text;
+            app.project_editor_path = Some(path);
+            app.project_editor_dirty = false;
+            app.project_editor_cursor = 0;
+            app.project_editor_insert_mode = false;
+            app.project_editor_scroll = 0;
+            app.project_pane = ProjectPane::Editor;
+        }
+        Err(error) => app.toast = Some(format!("Could not open file: {error}")),
+    }
 }
 
 fn config_editor_line_start(text: &str, cursor: usize) -> usize {
@@ -1558,6 +1607,26 @@ fn apply_ui_action(
                 .unwrap_or(0);
             app.toast = Some(format!("Created project {}", project.name));
         }
+        UiAction::CreateProjectFile(name) => {
+            let Some(project) = app.active_project.as_ref() else {
+                app.toast = Some("Could not create file: no project is open.".into());
+                return Ok(());
+            };
+            let path = match create_project_file(&project.path, &name) {
+                Ok(path) => path,
+                Err(error) => {
+                    app.toast = Some(format!("Could not create file: {error}"));
+                    return Ok(());
+                }
+            };
+            app.project_files = project_files(&project.path);
+            app.project_file_selected = app.project_files.iter().position(|candidate| candidate == &path).unwrap_or(0);
+            app.project_pane = ProjectPane::FileTree;
+            if is_project_text_file(&path) {
+                open_project_file(app, path);
+            }
+            app.toast = Some("Created file".into());
+        }
         UiAction::OpenProject(project) => {
             let project = runtime.project_manager.open(project.path).map_err(|e| anyhow::anyhow!(e))?;
             runtime.database.record_project_activity("project_opened", &project.name)?;
@@ -1567,18 +1636,10 @@ fn apply_ui_action(
             start_citation_indexer(runtime, app);
         }
         UiAction::OpenProjectFile(path) => {
-            match std::fs::read_to_string(&path) {
-                Ok(text) => {
-                    app.project_editor_text = text;
-                    app.project_editor_path = Some(path);
-                    app.project_editor_dirty = false;
-                    app.project_editor_cursor = 0;
-                    app.project_editor_insert_mode = false;
-                    app.project_editor_scroll = 0;
-                    app.project_pane = ProjectPane::Editor;
-                }
-                Err(error) => app.toast = Some(format!("Could not open file: {error}")),
+            if app.project_editor_dirty && !save_project_editor(app) {
+                return Ok(());
             }
+            open_project_file(app, path);
         }
         UiAction::RenameProject { project, name } => {
             match runtime.project_manager.rename(&project, &name) {
@@ -3372,7 +3433,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         app.dispatch(Command::ToggleHelp);
         return None;
     }
-    if matches!(app.mode, AppMode::ProjectRename | AppMode::ProjectCreate) {
+    if matches!(app.mode, AppMode::ProjectRename | AppMode::ProjectCreate | AppMode::ProjectFileCreate) {
         match key.code {
             KeyCode::Esc => {
                 app.project_rename_input.clear();
@@ -3380,13 +3441,17 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 app.mode = AppMode::Normal;
             }
             KeyCode::Enter => {
-                let creating = app.mode == AppMode::ProjectCreate;
+                let creating_project = app.mode == AppMode::ProjectCreate;
+                let creating_file = app.mode == AppMode::ProjectFileCreate;
                 app.mode = AppMode::Normal;
                 let name = app.project_rename_input.trim().to_owned();
                 app.project_rename_input.clear();
                 app.project_rename_cursor = 0;
-                if creating {
+                if creating_project {
                     return Some(UiAction::CreateProject(name));
+                }
+                if creating_file {
+                    return Some(UiAction::CreateProjectFile(name));
                 }
                 let project = app.active_project.clone().or_else(|| app.projects.get(app.projects_selected).cloned());
                 return project.map(|project| UiAction::RenameProject { project, name });
@@ -3650,6 +3715,7 @@ fn has_active_text_input(app: &App) -> bool {
         app.mode,
         AppMode::ProjectRename
             | AppMode::ProjectCreate
+            | AppMode::ProjectFileCreate
             | AppMode::CommandPalette
             | AppMode::NoteEdit
             | AppMode::Prompt
@@ -3757,6 +3823,11 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
     match app.project_pane {
         ProjectPane::FileTree => match key.code {
+            KeyCode::Char('n') => {
+                app.project_rename_input.clear();
+                app.project_rename_cursor = 0;
+                app.mode = AppMode::ProjectFileCreate;
+            }
             KeyCode::Char('R') => {
                 if let Some(project) = &app.active_project {
                     app.project_rename_input = project.name.clone();
@@ -3809,6 +3880,13 @@ fn handle_project_pane_shortcut(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Char('4') => ProjectPane::Build,
         _ => return false,
     };
+    if app.project_pane == ProjectPane::Editor
+        && pane != ProjectPane::Editor
+        && app.project_editor_dirty
+        && !save_project_editor(app)
+    {
+        return true;
+    }
     let available = match pane {
         ProjectPane::ProjectList => true,
         ProjectPane::FileTree | ProjectPane::Build => app.active_project.is_some(),
@@ -3907,15 +3985,19 @@ fn move_project_editor_page(app: &mut App, direction: isize) {
     );
 }
 
-fn save_project_editor(app: &mut App) {
-    let Some(path) = app.project_editor_path.as_ref() else { return; };
+fn save_project_editor(app: &mut App) -> bool {
+    let Some(path) = app.project_editor_path.as_ref() else { return true; };
     match std::fs::write(path, &app.project_editor_text) {
         Ok(()) => {
             app.project_editor_dirty = false;
             app.project_build_status = "Saved; latexmk watching…".into();
             app.toast = Some("Saved".into());
+            true
         }
-        Err(error) => app.toast = Some(format!("Could not save file: {error}")),
+        Err(error) => {
+            app.toast = Some(format!("Could not save file: {error}"));
+            false
+        }
     }
 }
 
@@ -3961,7 +4043,11 @@ fn handle_project_editor_normal_key(app: &mut App, key: KeyEvent) {
         KeyCode::PageUp | KeyCode::PageDown => {
             move_project_editor_page(app, if key.code == KeyCode::PageUp { -1 } else { 1 });
         }
-        KeyCode::Esc => app.project_pane = ProjectPane::FileTree,
+        KeyCode::Esc => {
+            if !app.project_editor_dirty || save_project_editor(app) {
+                app.project_pane = ProjectPane::FileTree;
+            }
+        }
         _ => {}
     }
 }
@@ -5351,7 +5437,9 @@ mod tests {
         UiAction, build_config_editor_view, cursor_visual_position,
         handle_config_editor_insert_key, handle_downloads_key, handle_key, handle_paper_detail_key, parse_command,
         keyword_representation_targets, move_config_editor_page, refresh_downloads_from_dir,
-        accept_project_completion, reload_config_editor_buffer, select_dashboard_papers, shuffle_daily_bucket, update_project_completions, PaperTarget,
+        accept_project_completion, create_project_file, is_project_text_file, project_files,
+        reload_config_editor_buffer, select_dashboard_papers, shuffle_daily_bucket,
+        update_project_completions, PaperTarget,
     };
 
     #[test]
@@ -6160,6 +6248,43 @@ mod tests {
         let action = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(action, Some(UiAction::CreateProject(name)) if name == "pap"));
         assert_eq!(app.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn file_tree_new_file_modal_uses_standard_text_editing() {
+        let mut app = project_editor_app("", 0);
+        app.project_pane = ProjectPane::FileTree;
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::ProjectFileCreate);
+        for character in ['n', 'o', 't', 'e', 's', '.', 'm', 'd'] {
+            let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(app.project_rename_input, "notes.m");
+
+        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(action, Some(UiAction::CreateProjectFile(name)) if name == "notes.m"));
+        assert_eq!(app.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn creates_nested_project_files_without_overwriting() {
+        let root = std::env::temp_dir().join(format!("papr-file-create-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let created = create_project_file(&root, "chapters/introduction.tex").unwrap();
+        assert_eq!(created, root.join("chapters/introduction.tex"));
+        assert!(created.exists());
+        assert!(is_project_text_file(&created));
+        assert!(project_files(&root).contains(&created));
+        assert!(create_project_file(&root, "chapters/introduction.tex").unwrap_err().contains("already exists"));
+        assert!(create_project_file(&root, "../outside.tex").is_err());
+        assert!(create_project_file(&root, "/tmp/outside.tex").is_err());
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
