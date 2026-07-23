@@ -3585,8 +3585,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         && !app.discovery.results.is_empty()
         && key.code == KeyCode::Left
     {
-        app.mode = AppMode::Search;
-        app.discovery.query_cursor = app.discovery.query.len();
+        app.content_focused = false;
         return None;
     }
     let key = normalize_panel_navigation(key);
@@ -5785,6 +5784,60 @@ mod tests {
         assert!(action.is_none());
         assert!(!app.content_focused);
         assert_eq!(app.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn discover_results_left_returns_to_navigation_and_preserves_state() {
+        for from_filter in [false, true] {
+            let mut app = App {
+                page: Page::Discover,
+                sidebar_index: Page::ALL.iter().position(|&page| page == Page::Discover).unwrap(),
+                content_focused: true,
+                mode: if from_filter { AppMode::DiscoverFilter } else { AppMode::Search },
+                discovery: DiscoveryState {
+                    query: "quantum search".into(),
+                    query_cursor: 14,
+                    filter: "paper".into(),
+                    filter_cursor: 5,
+                    ..DiscoveryState::default()
+                },
+                ..App::default()
+            };
+            app.discovery.set_results(vec![
+                remote_paper("first", "First paper"),
+                remote_paper("second", "Second paper"),
+            ]);
+            app.discovery.filter = "paper".into();
+            app.discovery.filter_cursor = app.discovery.filter.len();
+            app.discovery.rebuild_filter();
+
+            // Both inputs move into the same results pane.
+            assert!(handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).is_none());
+            assert_eq!(app.mode, AppMode::Normal);
+            assert_eq!(app.discovery.selected, 0);
+            app.discovery.scroll = 1;
+
+            // Left leaves the results pane for navigation without entering either input.
+            assert!(handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)).is_none());
+            assert!(!app.content_focused);
+            assert_eq!(app.mode, AppMode::Normal);
+            assert_eq!(app.discovery.query, "quantum search");
+            assert_eq!(app.discovery.filter, "paper");
+            assert_eq!(app.discovery.selected, 0);
+            assert_eq!(app.discovery.scroll, 1);
+
+            // Leaving Discover and returning restores the existing results-pane state.
+            app.dispatch(papr_core::Command::MoveDown);
+            app.dispatch(papr_core::Command::MoveUp);
+            app.dispatch(papr_core::Command::Open);
+            assert!(app.content_focused);
+            assert_eq!(app.page, Page::Discover);
+            assert_eq!(app.mode, AppMode::Normal);
+            assert_eq!(app.discovery.query, "quantum search");
+            assert_eq!(app.discovery.filter, "paper");
+            assert_eq!(app.discovery.selected, 0);
+            assert_eq!(app.discovery.scroll, 1);
+        }
     }
 
     #[test]
