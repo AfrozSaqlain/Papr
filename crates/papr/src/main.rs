@@ -6374,7 +6374,7 @@ mod tests {
         title_match.authors = vec!["Ada Author".into()];
         let mut author_match = remote_paper("author", "Other paper");
         author_match.authors = vec!["Genome Researcher".into()];
-        let mut abstract_match = remote_paper("abstract", "Third paper");
+        let mut abstract_match = remote_paper("abstract", "Third genome paper");
         abstract_match.abstract_text = "A genome-scale analysis.".into();
         let mut app = App {
             page: Page::Discover,
@@ -6390,7 +6390,7 @@ mod tests {
             assert!(handle_key(&mut app, KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)).is_none());
         }
         assert_eq!(app.discovery.filtered_result_count(), 3);
-        assert_eq!(app.discovery.selected_paper().map(|paper| paper.id.as_str()), Some("title"));
+        assert_eq!(app.discovery.selected_paper().map(|paper| paper.id.as_str()), Some("author"));
 
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.mode, AppMode::Normal);

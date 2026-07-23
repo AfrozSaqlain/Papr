@@ -384,20 +384,21 @@ impl DiscoveryState {
     }
 
     fn rebuild_filter_with_selected(&mut self, selected_id: Option<&str>) {
-        let query = self.filter.trim().to_lowercase();
-        let terms = query.split_whitespace().collect::<Vec<_>>();
-        let mut ranked_indices = self
+        self.filtered_indices = self
             .results
             .iter()
             .enumerate()
-            .filter_map(|(index, paper)| filter_rank(paper, &terms).map(|rank| (index, rank)))
-            .collect::<Vec<_>>();
-        if !terms.is_empty() {
-            ranked_indices.sort_by(|(left_index, left_rank), (right_index, right_rank)| {
-                right_rank.cmp(left_rank).then_with(|| left_index.cmp(right_index))
-            });
-        }
-        self.filtered_indices = ranked_indices.into_iter().map(|(index, _)| index).collect();
+            .filter(|(_, paper)| {
+                App::matches_query(
+                    &self.filter,
+                    &paper.title,
+                    &paper.author_line(),
+                    paper.doi.as_deref(),
+                    Some(paper.id.as_str()),
+                )
+            })
+            .map(|(index, _)| index)
+            .collect();
         self.page_selections = vec![0; self.page_count()];
         self.page_scrolls = vec![0; self.page_count()];
         self.page = 0;
@@ -424,62 +425,6 @@ impl DiscoveryState {
     fn uses_unfiltered_fallback(&self) -> bool {
         self.filter.is_empty() && self.filtered_indices.is_empty() && !self.results.is_empty()
     }
-}
-
-fn filter_rank(paper: &RemotePaper, terms: &[&str]) -> Option<[i32; 5]> {
-    if terms.is_empty() {
-        return Some([0; 5]);
-    }
-    let authors = paper.authors.join(" ");
-    let metadata = format!(
-        "{} {} {} {}",
-        paper.journal_ref.as_deref().unwrap_or_default(),
-        paper.categories.join(" "),
-        paper.doi.as_deref().unwrap_or_default(),
-        paper.id,
-    );
-    let fields = [
-        paper.title.as_str(),
-        authors.as_str(),
-        paper.abstract_text.as_str(),
-        paper.journal_ref.as_deref().unwrap_or_default(),
-        metadata.as_str(),
-    ];
-    let mut rank = [0; 5];
-    for term in terms {
-        let mut matched = false;
-        for (field, value) in fields.iter().enumerate() {
-            if let Some(score) = fuzzy_match_score(value, term) {
-                rank[field] += score;
-                matched = true;
-            }
-        }
-        if !matched {
-            return None;
-        }
-    }
-    Some(rank)
-}
-
-fn fuzzy_match_score(value: &str, query: &str) -> Option<i32> {
-    let value = value.to_lowercase();
-    if value == query { return Some(500); }
-    if value.starts_with(query) { return Some(400); }
-    if value.split(|character: char| !character.is_alphanumeric()).any(|word| word.starts_with(query)) {
-        return Some(300);
-    }
-    if value.contains(query) { return Some(200); }
-    let mut chars = value.chars();
-    let mut gaps = 0;
-    for target in query.chars() {
-        let mut found = false;
-        for character in chars.by_ref() {
-            if character == target { found = true; break; }
-            gaps += 1;
-        }
-        if !found { return None; }
-    }
-    Some((100 - gaps).max(1))
 }
 
 /// An item in the hierarchical collection search view.
@@ -1535,5 +1480,19 @@ mod tests {
         // Non-matching
         assert!(!App::matches_query("1402.4146", "Title", "Authors", None, Some("1502.4146")));
         assert!(!App::matches_query("hep-th/0309012", "Title", "Authors", None, Some("hep-th/0309013")));
+    }
+
+    #[test]
+    fn test_discover_filter_matches_query() {
+        // Exact title match
+        assert!(App::matches_query("rust", "Rust", "Authors", None, None));
+        // Substring title match
+        assert!(App::matches_query("rust", "The Rust compiler", "Authors", None, None));
+        // Author match
+        assert!(App::matches_query("smith", "Title", "John Smith, Jane Doe", None, None));
+        // Case insensitivity
+        assert!(App::matches_query("RuSt", "rust compiler", "Authors", None, None));
+        // Non-matching
+        assert!(!App::matches_query("rust", "C++ compiler", "John Smith", None, None));
     }
 }
