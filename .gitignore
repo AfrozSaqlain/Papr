@@ -4,5 +4,5 @@
 *.db-wal
 .DS_Store
 release.md
-recording.mp4
+*.mp4
 papr-source.zip
