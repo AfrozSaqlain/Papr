@@ -3201,11 +3201,15 @@ fn render_credits(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         Line::styled("• SQLite (Local metadata storage and persistence)", Style::default().fg(theme.text)),
         Line::styled("• Tokio (Asynchronous task pool and download scheduler)", Style::default().fg(theme.text)),
         Line::styled("• Reqwest (HTTP client for querying search APIs)", Style::default().fg(theme.text)),
+        Line::styled("• ratatui-image & Poppler (Terminal PDF rendering protocol)", Style::default().fg(theme.text)),
+        Line::styled("• pulldown-cmark & syntect (Markdown note parsing and syntax highlighting)", Style::default().fg(theme.text)),
+        Line::styled("• arboard (Cross-platform system clipboard integration)", Style::default().fg(theme.text)),
         Line::raw(""),
         Line::styled("SPECIAL THANKS", Style::default().fg(theme.secondary).add_modifier(Modifier::BOLD)),
         Line::styled("Dedicated to the open-source community,", Style::default().fg(theme.text)),
         Line::styled("and academic authors worldwide who share their work freely.", Style::default().fg(theme.text)),
-        Line::styled("And to our parents who always supported us.", Style::default().fg(theme.text)),
+        Line::styled("To our parents who always supported us.", Style::default().fg(theme.text)),
+        Line::styled("And to our friends.", Style::default().fg(theme.text)),
     ];
 
     let left_para = Paragraph::new(left_lines)

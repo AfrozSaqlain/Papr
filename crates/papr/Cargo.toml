@@ -9,22 +9,22 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-arboard = { version = "3.6.1", features = ["wayland-data-control"] }
+arboard.workspace = true
 chrono.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 crossterm.workspace = true
 papr-core = { path = "../papr-core", version = "0.1.0" }
 ratatui.workspace = true
-ratatui-image = { version = "8.1.1", features = ["crossterm", "image-defaults"] }
-image = "0.25.10"
+ratatui-image.workspace = true
+image.workspace = true
 reqwest = { workspace = true, features = ["rustls-tls"] }
 serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 toml.workspace = true
-pulldown-cmark = "0.13"
-syntect = { version = "5.2", features = ["default-fancy"] }
+pulldown-cmark.workspace = true
+syntect.workspace = true
 notify.workspace = true
 walkdir.workspace = true
 

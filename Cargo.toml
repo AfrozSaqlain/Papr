@@ -25,6 +25,11 @@ rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
+arboard = { version = "3.6.1", features = ["wayland-data-control"] }
+image = "0.25.10"
+pulldown-cmark = "0.13"
+ratatui-image = { version = "8.1.1", features = ["crossterm", "image-defaults"] }
+syntect = { version = "5.2", features = ["default-fancy"] }
 thiserror = "2.0"
 tokio = { version = "1.0", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.8"

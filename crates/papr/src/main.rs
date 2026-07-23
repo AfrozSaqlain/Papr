@@ -20,7 +20,7 @@ use toml;
 use chrono::Local;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 use papr_core::{
     App, AppMode, ArxivClient, CollectionDirectory, Command, Config, Database, DiscoveryStatus,
     DownloadEvent, DownloadManager, DownloadStatus, DownloadTask, ImportedPdf, LibraryIndexer,
@@ -1341,6 +1341,18 @@ async fn run(
                         )?;
                     }
                 }
+                Event::Mouse(mouse) => {
+                    if let Some(action) = handle_mouse(app, mouse) {
+                        apply_ui_action(
+                            action,
+                            &mut runtime,
+                            &senders,
+                            &mut pending_downloads,
+                            app,
+                            &mut theme,
+                        )?;
+                    }
+                }
                 _ => {}
             }
         }
@@ -1369,6 +1381,18 @@ async fn run(
                             )?;
                         }
                     } else if let Some(action) = handle_key(app, key) {
+                        apply_ui_action(
+                            action,
+                            &mut runtime,
+                            &senders,
+                            &mut pending_downloads,
+                            app,
+                            &mut theme,
+                        )?;
+                    }
+                }
+                Event::Mouse(mouse) => {
+                    if let Some(action) = handle_mouse(app, mouse) {
                         apply_ui_action(
                             action,
                             &mut runtime,
@@ -2676,6 +2700,23 @@ fn get_pdf_page_count(path: &Path) -> usize {
 /// Scroll the PDF viewer by `delta` rows.
 fn pdf_scroll(app: &mut App, delta: i64) {
     pdf_viewer::scroll_by_rows(app, delta);
+}
+
+fn handle_mouse(app: &mut App, mouse: MouseEvent) -> Option<UiAction> {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => {
+            if app.mode == AppMode::PdfView {
+                pdf_scroll(app, -3);
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            if app.mode == AppMode::PdfView {
+                pdf_scroll(app, 3);
+            }
+        }
+        _ => {}
+    }
+    None
 }
 
 
