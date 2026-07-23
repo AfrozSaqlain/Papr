@@ -23,25 +23,25 @@ Papr is implemented in Rust to meet the performance, reliability, and security d
 
 ## 🚀 Key Features
 
-### 🔍 Discovery & Organization
+### Discovery & Organization
 * **Integrated arXiv Search:** Search the arXiv repository by title, author, category, abstract, or DOI. View full metadata, category listings, and journal references directly.
 * **Automatic Title Sanitization:** Background downloads are saved with clean, cross-platform filenames rather than opaque arXiv identifiers.
 * **Smart Deduplication:** Resolves database conflicts (arXiv ID, file path, DOI) by automatically merging records (preserving notes, bookmarks, and progress) during downloads and scans.
 * **Workspace Syncing:** Move papers into groups within the TUI to automatically reorganize files on your disk.
 * **Storage Statistics:** Monitor reading times, streaks, and disk usage through the built-in dashboard. Folders are canonicalized to prevent duplicate PDF counts.
 
-### 📖 Reading & Note-taking
+### Reading & Note-taking
 * **Built-in Terminal PDF Viewer:** View papers directly in your terminal with high-performance smooth scrolling (requires Kitty or Sixel graphics support).
 * **External Viewer Support:** Seamlessly launch PDFs in your preferred desktop viewer (e.g., Zathura, Okular) with reading time tracked.
 * **Markdown Annotation:** Write dedicated notes for each paper with a built-in Vim-inspired editor and live styled preview.
 * **Reading Queue:** Prioritize your backlog with a dedicated, sortable reading queue (supports reordering with `K`/`J` or `Shift`/`Ctrl` + `Up`/`Down`).
 
-### ✍️ LaTeX Integration
+### LaTeX Integration
 * **Integrated Writing Workspace:** Create, edit, and compile LaTeX manuscripts directly within the TUI.
 * **Real-time Compilation:** Background compilation via `latexmk`.
 * **Split-pane View:** Side-by-side terminal PDF preview, file tree, source editor, and build logs.
 
-### 🛠️ Extensibility
+### Extensibility
 * **Process-Isolated Plugins:** Extend functionality via language-agnostic plugins communicating over a versioned JSON RPC protocol.
 
 ---
@@ -74,7 +74,7 @@ Papr is implemented in Rust to meet the performance, reliability, and security d
 **Platform-Specific Installation Commands:**
 
 <details open>
-<summary><b>🐧 Ubuntu / Debian</b></summary>
+<summary><b>Ubuntu / Debian</b></summary>
 
 ```sh
 sudo apt install build-essential pkg-config xdg-utils poppler-utils wl-clipboard texlive latexmk
@@ -82,7 +82,7 @@ sudo apt install build-essential pkg-config xdg-utils poppler-utils wl-clipboard
 </details>
 
 <details open>
-<summary><b>🎩 Fedora</b></summary>
+<summary><b>Fedora</b></summary>
 
 ```sh
 sudo dnf install gcc make pkgconf-pkg-config xdg-utils poppler-utils wl-clipboard texlive-scheme-basic latexmk
@@ -90,7 +90,7 @@ sudo dnf install gcc make pkgconf-pkg-config xdg-utils poppler-utils wl-clipboar
 </details>
 
 <details open>
-<summary><b>🦅 Arch Linux</b></summary>
+<summary><b>Arch Linux</b></summary>
 
 ```sh
 sudo pacman -S base-devel pkgconf xdg-utils poppler wl-clipboard texlive-basic texlive-latexmk
@@ -98,7 +98,7 @@ sudo pacman -S base-devel pkgconf xdg-utils poppler wl-clipboard texlive-basic t
 </details>
 
 <details open>
-<summary><b>🍎 macOS</b></summary>
+<summary><b>macOS</b></summary>
 
 First, install the Xcode Command Line Tools:
 ```sh
@@ -112,7 +112,7 @@ brew install poppler wl-clipboard basictex
 </details>
 
 <details open>
-<summary><b>🪟 Windows</b></summary>
+<summary><b> Windows</b></summary>
 
 Install the **MSVC C++ Build Tools** (or Visual Studio with the *Desktop development with C++* workload) before building with Rust.
 </details>
