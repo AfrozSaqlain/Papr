@@ -71,13 +71,46 @@ Papr is implemented in Rust to meet the performance, reliability, and security d
 | **Linux Clipboard** | `wl-clipboard` (Wayland) or `xclip` (X11). Native `arboard` fallback is included if these are unavailable. |
 | **External PDF Viewer** | The configured viewer command and its required desktop environment integration. |
 
-**Platform-Specific Installation Commands:**
+> 💡 **Ready to install?** For platform-specific terminal commands to install all required and optional dependencies on Ubuntu, Fedora, Arch Linux, macOS, or Windows, see **[Step 2 of the Installation Guide](#step-2-install-system-dependencies)** below.
+
+---
+
+## 🛠️ Beginner's Installation Guide
+
+If you are new to Rust or terminal tools, follow this step-by-step walkthrough to get Papr up and running in minutes.
+
+### Step 1: Install Rust & Build Prerequisites
+
+Papr requires the Rust programming language (version 1.85 or newer).
+
+1. **Run the Rust installer:**  
+   Open your terminal application and run:
+   ```sh
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   ```
+   When prompted, press `Enter` to accept the default options. The installer automatically configures your shell startup files (`~/.bashrc`, `~/.zshrc`, or `~/.profile`) so Rust is available whenever you open a terminal in the future.
+
+2. **Activate Rust in your current terminal session:**  
+   To use Rust immediately without closing your active terminal window, load the environment:
+   ```sh
+   source "$HOME/.cargo/env"
+   ```
+
+3. **Verify installation:**  
+   Check that Cargo (Rust's package manager) is installed properly:
+   ```sh
+   cargo --version
+   ```
+
+### Step 2: Install System Dependencies
+
+Select your operating system below and run the package command in your terminal:
 
 <details open>
 <summary><b>Ubuntu / Debian</b></summary>
 
 ```sh
-sudo apt install build-essential pkg-config xdg-utils poppler-utils wl-clipboard texlive latexmk
+sudo apt update && sudo apt install -y build-essential pkg-config xdg-utils poppler-utils wl-clipboard texlive latexmk git
 ```
 </details>
 
@@ -85,7 +118,7 @@ sudo apt install build-essential pkg-config xdg-utils poppler-utils wl-clipboard
 <summary><b>Fedora</b></summary>
 
 ```sh
-sudo dnf install gcc make pkgconf-pkg-config xdg-utils poppler-utils wl-clipboard texlive-scheme-basic latexmk
+sudo dnf install -y gcc make pkgconf-pkg-config xdg-utils poppler-utils wl-clipboard texlive-scheme-basic latexmk git
 ```
 </details>
 
@@ -93,7 +126,7 @@ sudo dnf install gcc make pkgconf-pkg-config xdg-utils poppler-utils wl-clipboar
 <summary><b>Arch Linux</b></summary>
 
 ```sh
-sudo pacman -S base-devel pkgconf xdg-utils poppler wl-clipboard texlive-basic texlive-latexmk
+sudo pacman -S --noconfirm base-devel pkgconf xdg-utils poppler wl-clipboard texlive-basic texlive-latexmk git
 ```
 </details>
 
@@ -104,61 +137,145 @@ First, install the Xcode Command Line Tools:
 ```sh
 xcode-select --install
 ```
-Then, install the remaining packages using Homebrew:
+Then, install the remaining dependencies using Homebrew:
 ```sh
-brew install poppler wl-clipboard basictex
+brew install poppler wl-clipboard basictex git
 ```
-*(Note: macOS natively provides `open` and clipboard access).*
 </details>
 
 <details open>
-<summary><b> Windows</b></summary>
+<summary><b>Windows</b></summary>
 
 Install the **MSVC C++ Build Tools** (or Visual Studio with the *Desktop development with C++* workload) before building with Rust.
 </details>
 
+<details>
+<summary><b>Installing & Setting Kitty as Default Terminal (Optional / Recommended)</b></summary>
+
+Papr's built-in PDF viewer (`pdf_viewer = "internal"`) renders crisp, high-resolution pages using the **Kitty Graphics Protocol**. 
+
+#### 1. Installation
+* **Ubuntu / Debian:** `sudo apt install kitty`
+* **Fedora:** `sudo dnf install kitty`
+* **Arch Linux:** `sudo pacman -S kitty`
+* **macOS:** `brew install --cask kitty`
+
+#### 2. Set Kitty as Default
+* **Debian / Ubuntu:** `sudo update-alternatives --config x-terminal-emulator` (Select `kitty`)
+* **GNOME:** `gsettings set org.gnome.desktop.default-applications.terminal exec 'kitty'`
+* **Shell Variable:** Add `export TERMINAL="kitty"` to your `~/.bashrc` or `~/.zshrc`.
+</details>
+
+### Step 3: Clone & Install Papr
+
+1. **Clone the repository:**
+   ```sh
+   git clone https://github.com/AfrozSaqlain/Papr.git
+   cd Papr
+   ```
+2. **Build and install Papr:**
+   ```sh
+   cargo install --path crates/papr
+   ```
+
+### Step 4: Add Cargo to your PATH
+
+If typing `papr` shows `command not found: papr`, Cargo's binary folder is not in your shell `PATH` yet. Add it permanently:
+
+* **For Bash (`~/.bashrc`):**
+  ```sh
+  echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
+  source ~/.bashrc
+  ```
+* **For Zsh (`~/.zshrc`):**
+  ```sh
+  echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
+  source ~/.zshrc
+  ```
+
 ---
 
-## 🛠️ Installation
+## ⚡ Beginner Tutorial & App Workspaces
 
-### 1. Build and Install from Source
-
-The recommended way to install Papr is by building it directly from the repository.
+Launch Papr by typing its name in your terminal:
 
 ```sh
-git clone https://github.com/AfrozSaqlain/Papr.git
-cd Papr
-cargo install --path crates/papr
+papr
 ```
 
-Ensure your Cargo binary directory is in your `PATH`:
-```sh
-export PATH="$HOME/.cargo/bin:$PATH"
-```
+### Understanding Papr's Navigation & Workspaces
 
-### 2. Run Without Installing
+Papr is divided into 14 specialized **workspaces** (sections), accessible via the sidebar menu on the left side of the screen.
 
-```sh
-cargo run --release --bin papr
-```
+* **Sidebar Navigation:** Press `Left Arrow` (or `h`) to move focus to the left sidebar, use `j`/`k` (or `Up`/`Down`) to highlight a section, and press `Enter` (or `l`) to open it.
+* **Quick Switcher:** Press `Ctrl+B` anywhere to open **Browse Papr** (a fast command palette) and type the name of any section to jump directly to it!
 
-### 3. Pre-compiled Binaries
+Here is a complete breakdown of every section in Papr, what it does, and how to use it:
 
-Download precompiled binaries directly from the [GitHub Releases](https://github.com/AfrozSaqlain/Papr/releases) page. 
-
-*Note: Depending on your OS, you may see security warnings on the first launch as the distributed binaries are not code-signed. Compiling from source avoids platform-specific security prompts.*
+| Workspace | Purpose & Description | How to Use |
+| :--- | :--- | :--- |
+| **Dashboard** | Serves as your main research overview. Displays reading statistics, streaks, disk storage usage, and a daily arXiv paper feed. | This is the default home screen. Set `dashboard_keywords` in `config.toml` to customize your feed. |
+| **Discover** | Allows you to search the online arXiv paper repository by title, author, category, abstract, or DOI. | Press `/` to focus search, type query and press `Enter`. Scroll results with `j`/`k`, press `Enter` for details, `d` to download. |
+| **Library** | Indexes and lists all local PDF files stored within your configured library directories. | Press `r` to scan folders. Select any paper and press `Enter` to view PDF, `n` for notes, `g` for groups, `B` for bookmarks, `R` to rename. |
+| **Reading Queue** | Prioritized backlog where you manage papers you plan to read next. | Press `a` on any paper to queue/dequeue. Reorder priority using `K` (up) / `J` (down) or `Shift`/`Ctrl` + `Up`/`Down`. |
+| **Groups** | Organizes your papers into filesystem-synced folders (collections). | Press `g` on a paper to assign it to a group. Papr automatically creates the folder on disk and moves the PDF. |
+| **Bookmarks** | Collects all papers you have marked as bookmarked for quick retrieval. | Press `B` on any paper across any workspace to toggle its bookmark status. |
+| **Authors** | Automatically groups all papers in your local library by author name. | Select an author from the list to view all papers written by them in your collection. |
+| **Notes** | Displays a searchable catalog of all Markdown notes written for your papers. | Press `n` on any paper to open the Markdown editor. Press `Tab` to switch to styled live preview, `Esc` to save. |
+| **Downloads** | Real-time tracker for active background PDF downloads, completed downloads, and failed requests. | Monitor download progress. Select a finished download and press `Enter` to open the PDF directly. |
+| **Projects** | Integrated LaTeX writing workspace with background `latexmk` compilation and split-pane PDF preview. | Press `n` to create a project. Use `Alt+1` (File Tree), `Alt+2` (Editor with Vim mode), `Alt+3` (PDF Preview), `Alt+4` (Build Logs). |
+| **History** | Logs a chronological timeline of your recent activity, searches, downloads, and project builds. | Scroll through past actions to re-open papers or review past search terms. |
+| **Statistics** | Analytics on reading habits, total time, paper completion counts, and a 12-week reading activity heatmap. | Track your research productivity and reading habits over time. |
+| **Settings** | Displays resolved system paths, loaded configuration settings, active themes, and discovered plugins. | Edit `config.toml` directly using the embedded editor to tweak preferences. |
+| **Credits** | Displays information about Papr's version, maintainers, open-source license, and core dependencies. | View application version metadata and component attribution. |
 
 ---
 
-## ⚡ Quick Start
+## 🔧 Troubleshooting & Setup Reference
 
-1. Run `papr` in your terminal to launch the application.
-2. Press `/` to focus the search bar.
-3. Enter a query (e.g., `author: Einstein` or `category: gr-qc`) and hit `Enter`.
-4. Use `j`/`k` to navigate results and press `Enter` to open a paper's details.
-5. Press `d` to download the paper.
-6. Navigate to the **Downloads** tab to track progress. Once downloaded, press `Enter` to open the PDF.
-7. Use `B` to toggle bookmarks, `n` to edit notes, or `g` to assign it to a group.
+### Resolving "Command Not Found: papr"
+
+If typing `papr` gives a `command not found` error, Cargo's installation directory (`~/.cargo/bin`) is not listed in your shell's search path (`PATH`).
+
+* **Temporary Fix (Current Session Only):**  
+  Run this command in your active terminal:
+  ```sh
+  export PATH="$HOME/.cargo/bin:$PATH"
+  ```
+* **Permanent Fix:**  
+  Save the search path into your shell configuration so it loads automatically in every new terminal window:
+  * For **Bash** users:
+    ```sh
+    echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
+    source ~/.bashrc
+    ```
+  * For **Zsh** users (default on macOS):
+    ```sh
+    echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
+    source ~/.zshrc
+    ```
+
+### Configuring External PDF Viewers
+
+If your terminal does not support Kitty/Sixel image graphics, Papr's built-in viewer will not render PDF pages. You can easily configure Papr to use your operating system's default graphical PDF viewer instead:
+
+1. **Locate your configuration file:**
+   ```sh
+   papr paths
+   ```
+2. **Open `config.toml` in your preferred text editor** (e.g. `nano ~/.config/papr/config.toml`).
+3. **Set your preferred viewer command:**
+   * **Linux:** `pdf_viewer = "xdg-open"`
+   * **macOS:** `pdf_viewer = "open"`
+   * **Windows:** `pdf_viewer = "cmd /C start msedge \"\""`
+
+### Locating Data, Database & Configuration Files
+
+To view resolved paths for your configuration file, local SQLite database, downloaded papers, and projects directory, execute:
+
+```sh
+papr paths
+```
 
 ---
 
@@ -202,7 +319,7 @@ enabled_plugins = []
 
 ### PDF Viewers & Reading Time
 To track reading sessions and statistics, Papr must be able to track the viewer's process.
-* **Supported (tracks time):** `"internal"`, `"zathura {path}"` (do **NOT** use `--fork`), `"okular {path}"`, `"evince {path}"`, `"C:\\Path\\To\\SumatraPDF.exe {path}"`.
+* **Supported (tracks time):** `"internal"`, `"zathura {path}"`, `"okular {path}"`, `"evince {path}"`, `"C:\\Path\\To\\SumatraPDF.exe {path}"`.
 * **Unsupported (always reports 0s):** System launchers like `xdg-open`, macOS `open`, or background forks.
 
 ---
