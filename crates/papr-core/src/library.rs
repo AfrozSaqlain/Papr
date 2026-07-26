@@ -103,6 +103,31 @@ impl LibraryIndexer {
             .sum()
     }
 
+    /// Recursively count PDF files and calculate their total size in one pass.
+    ///
+    /// This preserves the count and deduplication semantics of [`Self::count_pdfs`]
+    /// while avoiding a second traversal when both values are needed together.
+    #[must_use]
+    pub fn pdf_storage_stats(roots: &[PathBuf]) -> (u64, u64) {
+        let mut seen = std::collections::HashSet::new();
+        roots
+            .iter()
+            .flat_map(|root| WalkDir::new(root).follow_links(false).into_iter())
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file() && is_pdf(entry.path()))
+            .filter(|entry| {
+                let p = std::fs::canonicalize(entry.path())
+                    .unwrap_or_else(|_| entry.path().to_path_buf());
+                seen.insert(p)
+            })
+            .fold((0_u64, 0_u64), |(count, bytes), entry| {
+                (
+                    count + 1,
+                    bytes + entry.metadata().map(|metadata| metadata.len()).unwrap_or(0),
+                )
+            })
+    }
+
     /// Discover every subdirectory represented as a filesystem collection.
     #[must_use]
     pub fn collection_directories(roots: &[PathBuf]) -> Vec<CollectionDirectory> {
@@ -302,6 +327,34 @@ mod tests {
         let roots = vec![root.clone(), sub.clone()];
         let scanned = LibraryIndexer::scan(&roots);
         assert_eq!(scanned.len(), 1);
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn storage_stats_match_individual_count_and_size_walks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "papr-storage-stats-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested)?;
+        fs::write(root.join("first.pdf"), b"%PDF first")?;
+        fs::write(nested.join("second.pdf"), b"%PDF second")?;
+
+        let roots = vec![root.clone(), nested];
+        assert_eq!(
+            LibraryIndexer::pdf_storage_stats(&roots),
+            (
+                LibraryIndexer::count_pdfs(&roots),
+                LibraryIndexer::pdf_storage_size(&roots),
+            )
+        );
 
         fs::remove_dir_all(root)?;
         Ok(())

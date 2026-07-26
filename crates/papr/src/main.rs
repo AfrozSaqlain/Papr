@@ -115,6 +115,30 @@ async fn main() -> Result<()> {
         println!("indexed: {}, imported: {}", pdfs.len(), imported);
         return Ok(());
     }
+    let dashboard_keywords = config.dashboard_keyword_list();
+    let dashboard_keyword_signature = dashboard_keyword_signature(&dashboard_keywords);
+    let dashboard_feed_date = local_feed_date();
+    let arxiv = ArxivClient::new().context("failed to initialize arXiv client")?;
+    let (today_sender, today_receiver) = mpsc::unbounded_channel();
+    let initial_cached_papers = database.dashboard_feed_cache(
+        &dashboard_feed_date,
+        &dashboard_keyword_signature,
+    )?;
+    let initial_dashboard_fetch = if initial_cached_papers.is_none() {
+        let key = DashboardFeedKey {
+            feed_date: dashboard_feed_date.clone(),
+            keyword_signature: dashboard_keyword_signature.clone(),
+        };
+        start_dashboard_fetch(
+            arxiv.clone(),
+            dashboard_keywords.clone(),
+            key.clone(),
+            today_sender.clone(),
+        );
+        Some(key)
+    } else {
+        None
+    };
     let download_dir = config.download_path.clone().unwrap_or_else(|| paths.downloads_dir.clone());
     std::fs::create_dir_all(&download_dir).context("failed to create download directory")?;
     let download_dir = std::fs::canonicalize(&download_dir).unwrap_or(download_dir);
@@ -134,15 +158,19 @@ async fn main() -> Result<()> {
     let mut dashboard = database
         .research_dashboard()
         .context("failed to load research dashboard")?;
-    dashboard.counts.papers = LibraryIndexer::count_pdfs(&collection_roots);
-    dashboard.counts.downloaded = LibraryIndexer::count_pdfs(&[download_dir.clone()]);
-    dashboard.read = database
-        .library_papers_in_roots(&library_roots)?
-        .into_iter()
+    let (collection_pdf_count, collection_pdf_size) =
+        LibraryIndexer::pdf_storage_stats(&collection_roots);
+    let (download_pdf_count, download_pdf_size) =
+        LibraryIndexer::pdf_storage_stats(&[download_dir.clone()]);
+    let library_papers = database.library_papers_in_roots(&library_roots)?;
+    dashboard.counts.papers = collection_pdf_count;
+    dashboard.counts.downloaded = download_pdf_count;
+    dashboard.read = library_papers
+        .iter()
         .filter(|p| p.reading_status == "read")
         .count() as u64;
-    dashboard.disk_usage = LibraryIndexer::pdf_storage_size(&collection_roots);
-    dashboard.downloads_size = LibraryIndexer::pdf_storage_size(&[download_dir.clone()]);
+    dashboard.disk_usage = collection_pdf_size;
+    dashboard.downloads_size = download_pdf_size;
     dashboard.database_size = std::fs::metadata(&paths.database_file)
         .map(|m| m.len())
         .unwrap_or(0);
@@ -157,22 +185,23 @@ async fn main() -> Result<()> {
     app.plugin_diagnostics = plugin_host.diagnostics().len();
     app.config_editor_text = std::fs::read_to_string(&paths.config_file).unwrap_or_default();
     app.projects = project_manager.list().unwrap_or_default();
+    if let Some(papers) = initial_cached_papers {
+        app.today_papers = papers;
+        app.today_status = DiscoveryStatus::Ready;
+    } else {
+        app.today_status = DiscoveryStatus::Loading;
+    }
 
     discover_local_downloads(&mut app, &download_dir, &database);
 
-    app.library.papers = database
-        .library_papers_in_roots(&library_roots)
-        .context("failed to load library")?;
+    app.library.papers = library_papers;
     refresh_organization(&database, &library_roots, &mut app)?;
     let (watch_sender, watch_receiver) = mpsc::unbounded_channel();
     let watcher = start_library_watcher(&library_roots, watch_sender.clone())?;
 
-    let arxiv = ArxivClient::new().context("failed to initialize arXiv client")?;
     let downloads = DownloadManager::new().context("failed to initialize download manager")?;
     let mut session = TerminalSession::start()?;
     let primary_library_root = library_roots[0].clone();
-    let dashboard_keywords = config.dashboard_keyword_list();
-    let dashboard_keyword_signature = dashboard_keyword_signature(&dashboard_keywords);
     let runtime = Runtime {
         arxiv,
         crossref: papr_core::api::crossref::CrossrefClient::new(),
@@ -191,7 +220,8 @@ async fn main() -> Result<()> {
         collection_roots,
         dashboard_keywords,
         dashboard_keyword_signature,
-        dashboard_feed_date: local_feed_date(),
+        dashboard_feed_date,
+        active_dashboard_fetch: initial_dashboard_fetch,
         watch_sender,
         watch_receiver,
         _watcher: watcher,
@@ -199,7 +229,15 @@ async fn main() -> Result<()> {
         citation_index: None,
         citation_source: CitationSource::default(),
     };
-    run(&mut session, &mut app, theme, runtime).await
+    run(
+        &mut session,
+        &mut app,
+        theme,
+        runtime,
+        today_sender,
+        today_receiver,
+    )
+    .await
 }
 
 async fn handle_plugin_cli(command: Option<&CliCommand>, plugin_host: &PluginHost) -> Result<bool> {
@@ -317,8 +355,16 @@ const DISCOVERY_PAGE_RETRY_BASE_DELAY: std::time::Duration = std::time::Duration
 
 #[derive(Debug)]
 struct TodayResponse {
-    feed_date: String,
+    key: DashboardFeedKey,
     result: Result<Vec<RemotePaper>, String>,
+}
+
+/// Identifies one daily feed request.  Responses are accepted only when both
+/// the local date and the configured feed algorithm/keywords still match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DashboardFeedKey {
+    feed_date: String,
+    keyword_signature: String,
 }
 
 pub(crate) struct ConfigEditorView {
@@ -346,6 +392,7 @@ struct Runtime {
     dashboard_keywords: Vec<String>,
     dashboard_keyword_signature: String,
     dashboard_feed_date: String,
+    active_dashboard_fetch: Option<DashboardFeedKey>,
     watch_sender: mpsc::UnboundedSender<()>,
     watch_receiver: mpsc::UnboundedReceiver<()>,
     _watcher: LibraryWatcher,
@@ -1013,11 +1060,12 @@ async fn run(
     app: &mut App,
     mut theme: Theme,
     mut runtime: Runtime,
+    today_sender: mpsc::UnboundedSender<TodayResponse>,
+    mut today_receiver: mpsc::UnboundedReceiver<TodayResponse>,
 ) -> Result<()> {
     let (sender, mut receiver) = mpsc::unbounded_channel::<SearchResponse>();
     let (index_sender, mut index_receiver) = mpsc::unbounded_channel::<IndexResponse>();
     let (download_sender, mut download_receiver) = mpsc::unbounded_channel::<DownloadEvent>();
-    let (today_sender, mut today_receiver) = mpsc::unbounded_channel::<TodayResponse>();
     let (app_events_sender, mut app_events_receiver) = mpsc::unbounded_channel::<AppEvent>();
     let (enrichment_sender, mut enrichment_receiver) =
         mpsc::unbounded_channel::<MetadataEnrichment>();
@@ -1030,7 +1078,6 @@ async fn run(
         enrichment: enrichment_sender,
     };
     let mut pending_downloads = HashMap::<String, RemotePaper>::new();
-    refresh_dashboard_papers(&runtime, &senders, app)?;
     start_runtime_scan(&runtime, &senders, app);
     let mut last_date_check = std::time::Instant::now();
     let mut last_enrichment_check = std::time::Instant::now();
@@ -1068,15 +1115,18 @@ async fn run(
             }
         }
 
-        while let Ok(TodayResponse { feed_date, result }) = today_receiver.try_recv() {
+        while let Ok(TodayResponse { key, result }) = today_receiver.try_recv() {
             state_changed = true;
-            if feed_date != runtime.dashboard_feed_date {
+            if key.feed_date != runtime.dashboard_feed_date
+                || key.keyword_signature != runtime.dashboard_keyword_signature
+            {
                 continue;
             }
+            runtime.active_dashboard_fetch = None;
             match result {
                 Ok(papers) => {
                     runtime.database.save_dashboard_feed_cache(
-                        &feed_date,
+                        &key.feed_date,
                         &runtime.dashboard_keyword_signature,
                         &papers,
                     )?;
@@ -1094,7 +1144,7 @@ async fn run(
             let current_date = local_feed_date();
             if current_date != runtime.dashboard_feed_date {
                 runtime.dashboard_feed_date = current_date;
-                refresh_dashboard_papers(&runtime, &senders, app)?;
+                refresh_dashboard_papers(&mut runtime, &senders, app)?;
                 state_changed = true;
             }
         }
@@ -2273,7 +2323,7 @@ fn refresh_organization(database: &Database, library_roots: &[PathBuf], app: &mu
 }
 
 fn refresh_dashboard_papers(
-    runtime: &Runtime,
+    runtime: &mut Runtime,
     senders: &ActionSenders,
     app: &mut App,
 ) -> Result<()> {
@@ -2286,20 +2336,39 @@ fn refresh_dashboard_papers(
             .today_selected
             .min(app.today_papers.len().saturating_sub(1));
         app.today_status = DiscoveryStatus::Ready;
+        runtime.active_dashboard_fetch = None;
         return Ok(());
     }
+    let key = DashboardFeedKey {
+        feed_date: runtime.dashboard_feed_date.clone(),
+        keyword_signature: runtime.dashboard_keyword_signature.clone(),
+    };
     app.today_status = DiscoveryStatus::Loading;
-    let client = runtime.arxiv.clone();
-    let keywords = runtime.dashboard_keywords.clone();
-    let feed_date = runtime.dashboard_feed_date.clone();
-    let sender = senders.today.clone();
+    if runtime.active_dashboard_fetch.as_ref() == Some(&key) {
+        return Ok(());
+    }
+    start_dashboard_fetch(
+        runtime.arxiv.clone(),
+        runtime.dashboard_keywords.clone(),
+        key.clone(),
+        senders.today.clone(),
+    );
+    runtime.active_dashboard_fetch = Some(key);
+    Ok(())
+}
+
+fn start_dashboard_fetch(
+    client: ArxivClient,
+    keywords: Vec<String>,
+    key: DashboardFeedKey,
+    sender: mpsc::UnboundedSender<TodayResponse>,
+) {
     tokio::spawn(async move {
-        let result = dashboard_papers(client, keywords, &feed_date)
+        let result = dashboard_papers(client, keywords, &key.feed_date)
             .await
             .map_err(|error| error.to_string());
-        let _ = sender.send(TodayResponse { feed_date, result });
+        let _ = sender.send(TodayResponse { key, result });
     });
-    Ok(())
 }
 
 fn local_feed_date() -> String {
@@ -2322,23 +2391,36 @@ async fn dashboard_papers(
         return Ok(papers);
     }
 
-    let mut buckets = Vec::new();
-    let mut last_error = None;
-    for keyword in keywords {
-        match client
-            .search_latest(&keyword, DASHBOARD_CANDIDATE_LIMIT)
-            .await
-        {
-            Ok(mut papers) => {
+    let mut buckets = (0..keywords.len())
+        .map(|_| None)
+        .collect::<Vec<Option<(String, Vec<RemotePaper>)>>>();
+    let mut last_error: Option<anyhow::Error> = None;
+    let mut requests = JoinSet::new();
+    for (index, keyword) in keywords.into_iter().enumerate() {
+        let client = client.clone();
+        requests.spawn(async move {
+            let result = client
+                .search_latest(&keyword, DASHBOARD_CANDIDATE_LIMIT)
+                .await;
+            (index, keyword, result)
+        });
+    }
+    while let Some(result) = requests.join_next().await {
+        match result {
+            Ok((index, keyword, Ok(mut papers))) => {
                 shuffle_daily_bucket(&mut papers, feed_date, &keyword);
-                buckets.push((keyword, papers));
+                buckets[index] = Some((keyword, papers));
             }
-            Err(error) => last_error = Some(error),
+            Ok((_, _, Err(error))) => last_error = Some(error.into()),
+            Err(error) => last_error = Some(anyhow::anyhow!(
+                "dashboard keyword fetch task failed: {error}"
+            )),
         }
     }
+    let buckets = buckets.into_iter().flatten().collect::<Vec<_>>();
     if buckets.is_empty() {
         if let Some(error) = last_error {
-            return Err(error.into());
+            return Err(error);
         }
         return Ok(Vec::new());
     }
@@ -7562,6 +7644,7 @@ mod tests {
             dashboard_keywords: vec![],
             dashboard_keyword_signature: "".into(),
             dashboard_feed_date: "".into(),
+            active_dashboard_fetch: None,
             watch_sender,
             watch_receiver,
             _watcher: watcher,
