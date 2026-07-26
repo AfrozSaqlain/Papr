@@ -3209,7 +3209,6 @@ fn render_credits(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         Line::styled("Dedicated to the open-source community,", Style::default().fg(theme.text)),
         Line::styled("and academic authors worldwide who share their work freely.", Style::default().fg(theme.text)),
         Line::styled("To our parents who always supported us.", Style::default().fg(theme.text)),
-        Line::styled("And to our friends.", Style::default().fg(theme.text)),
     ];
 
     let left_para = Paragraph::new(left_lines)
