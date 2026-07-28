@@ -3517,7 +3517,7 @@ fn render_help(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         72..=104 => 2,
         _ => 3,
     };
-    let groups = help_column_groups(sections, column_count);
+    let groups = help_column_groups(sections, column_count, inner.width);
     let columns = help_columns(inner, &groups);
     let rendered = groups
         .iter()
@@ -3544,69 +3544,214 @@ fn render_help(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     }
 }
 
+#[derive(Clone)]
 struct HelpSection {
     title: &'static str,
     scope: &'static [&'static str],
     entries: &'static [(&'static str, &'static str)],
 }
 
-fn help_column_groups(sections: Vec<HelpSection>, columns: usize) -> Vec<Vec<HelpSection>> {
-    match columns {
-        1 => vec![sections],
-        2 => {
-            let mut groups = vec![Vec::new(), Vec::new()];
-            for (index, section) in sections.into_iter().enumerate() {
-                groups[usize::from(index >= 4)].push(section);
-            }
-            groups
-        }
-        _ => {
-            let mut groups = vec![Vec::new(), Vec::new(), Vec::new()];
-            for (index, section) in sections.into_iter().enumerate() {
-                groups[(index / 4).min(2)].push(section);
-            }
-            groups
-        }
+fn section_group_height(group: &[HelpSection], col_width: u16) -> usize {
+    if group.is_empty() {
+        return 0;
     }
-}
-
-fn help_columns(area: Rect, groups: &[Vec<HelpSection>]) -> Vec<Rect> {
-    if groups.len() == 1 {
-        return vec![area];
-    }
-    let gap = 2u16;
-    let preferred = groups.iter().map(help_preferred_width).collect::<Vec<_>>();
-    let total = preferred.iter().sum::<u16>().max(1);
-    let mut constraints = Vec::with_capacity(groups.len() * 2 - 1);
-    for (index, width) in preferred.into_iter().enumerate() {
-        if index > 0 {
-            constraints.push(Constraint::Length(gap));
-        }
-        constraints.push(Constraint::Ratio(u32::from(width), u32::from(total)));
-    }
-    Layout::horizontal(constraints)
-        .split(area)
-        .into_iter()
-        .step_by(2)
-        .copied()
-        .collect()
-}
-
-fn help_preferred_width(group: &Vec<HelpSection>) -> u16 {
     let key_width = group
         .iter()
         .flat_map(|section| section.entries)
         .map(|(key, _)| key.len())
         .max()
         .unwrap_or(0);
-    let description_width = group
-        .iter()
-        .flat_map(|section| section.entries)
-        .map(|(_, description)| description.len())
-        .max()
-        .unwrap_or(16)
-        .min(28);
-    (key_width + description_width + 6) as u16
+    let prefix_width = key_width + 4;
+    let desc_width = usize::from(col_width).saturating_sub(prefix_width).max(1);
+
+    let mut height = 0;
+    for section in group {
+        height += wrap_help_text(section.title, usize::from(col_width)).len();
+        for scope in section.scope {
+            height += wrap_help_text(scope, usize::from(col_width).saturating_sub(2)).len();
+        }
+        for (_key, desc) in section.entries {
+            height += wrap_help_text(desc, desc_width).len();
+        }
+        height += 1;
+    }
+    height
+}
+
+fn help_column_groups(
+    sections: Vec<HelpSection>,
+    columns: usize,
+    width: u16,
+) -> Vec<Vec<HelpSection>> {
+    let num_sections = sections.len();
+    if columns <= 1 || num_sections == 0 {
+        return vec![sections];
+    }
+    let columns = columns.min(num_sections);
+    if columns == 1 {
+        return vec![sections];
+    }
+
+    let mut best_partition: Vec<Vec<HelpSection>> = Vec::new();
+    let mut best_score = (usize::MAX, usize::MAX);
+
+    if columns == 2 {
+        for i in 1..num_sections {
+            let candidate = vec![sections[..i].to_vec(), sections[i..].to_vec()];
+            let widths = help_columns_widths(width, &candidate);
+            let h0 = section_group_height(&candidate[0], widths[0]);
+            let h1 = section_group_height(&candidate[1], widths[1]);
+            let max_h = h0.max(h1);
+            let diff = max_h - h0.min(h1);
+            let score = (max_h, diff);
+            if score < best_score || best_partition.is_empty() {
+                best_score = score;
+                best_partition = candidate;
+            }
+        }
+    } else {
+        for i in 1..num_sections {
+            for j in (i + 1)..num_sections {
+                let candidate = vec![
+                    sections[..i].to_vec(),
+                    sections[i..j].to_vec(),
+                    sections[j..].to_vec(),
+                ];
+                let widths = help_columns_widths(width, &candidate);
+                let heights: Vec<usize> = candidate
+                    .iter()
+                    .zip(widths.iter())
+                    .map(|(g, &w)| section_group_height(g, w))
+                    .collect();
+                let max_h = *heights.iter().max().unwrap_or(&0);
+                let min_h = *heights.iter().min().unwrap_or(&0);
+                let diff = max_h - min_h;
+                let score = (max_h, diff);
+                if score < best_score || best_partition.is_empty() {
+                    best_score = score;
+                    best_partition = candidate;
+                }
+            }
+        }
+    }
+
+    best_partition
+}
+
+fn help_columns_widths(area_width: u16, groups: &[Vec<HelpSection>]) -> Vec<u16> {
+    let count = groups.len();
+    if count == 0 {
+        return vec![];
+    }
+    if count == 1 {
+        return vec![area_width];
+    }
+
+    let gap = 2u16;
+    let total_gaps = (count as u16 - 1) * gap;
+    let avail_width = area_width.saturating_sub(total_gaps);
+
+    let mut prefix_widths = Vec::with_capacity(count);
+    let mut ideal_desc_widths = Vec::with_capacity(count);
+    let mut min_widths = Vec::with_capacity(count);
+    let mut ideal_widths = Vec::with_capacity(count);
+
+    for g in groups {
+        let key_width = g
+            .iter()
+            .flat_map(|section| section.entries)
+            .map(|(key, _)| key.len())
+            .max()
+            .unwrap_or(0);
+        let prefix = (key_width + 4) as u16;
+        let max_desc = g
+            .iter()
+            .flat_map(|section| section.entries)
+            .map(|(_, desc)| desc.len())
+            .max()
+            .unwrap_or(16) as u16;
+
+        let ideal_desc = max_desc;
+        let min_w = prefix + 10;
+        let ideal_w = prefix + ideal_desc;
+
+        prefix_widths.push(prefix);
+        ideal_desc_widths.push(ideal_desc);
+        min_widths.push(min_w);
+        ideal_widths.push(ideal_w);
+    }
+
+    let min_sum: u16 = min_widths.iter().sum();
+    let ideal_sum: u16 = ideal_widths.iter().sum();
+
+    let mut widths = vec![0u16; count];
+
+    if avail_width <= min_sum {
+        let total_min = min_sum.max(1) as u32;
+        let mut allocated = 0u16;
+        for i in 0..count {
+            let w = ((u32::from(min_widths[i]) * u32::from(avail_width)) / total_min) as u16;
+            widths[i] = w;
+            allocated += w;
+        }
+        let mut rem = avail_width.saturating_sub(allocated);
+        let mut i = 0;
+        while rem > 0 && count > 0 {
+            widths[i % count] += 1;
+            rem -= 1;
+            i += 1;
+        }
+    } else if avail_width <= ideal_sum {
+        let extra = avail_width - min_sum;
+        let needed_extra: Vec<u16> = ideal_widths
+            .iter()
+            .zip(min_widths.iter())
+            .map(|(&ideal, &min)| ideal.saturating_sub(min))
+            .collect();
+        let total_needed_extra: u32 = needed_extra.iter().map(|&x| u32::from(x)).sum::<u32>().max(1);
+
+        let mut allocated = 0u16;
+        for i in 0..count {
+            let add = ((u32::from(extra) * u32::from(needed_extra[i])) / total_needed_extra) as u16;
+            widths[i] = min_widths[i] + add;
+            allocated += widths[i];
+        }
+        let mut rem = avail_width.saturating_sub(allocated);
+        let mut i = 0;
+        while rem > 0 && count > 0 {
+            widths[i % count] += 1;
+            rem -= 1;
+            i += 1;
+        }
+    } else {
+        let extra = avail_width - ideal_sum;
+        let base_add = extra / (count as u16);
+        let mut rem = extra % (count as u16);
+
+        for i in 0..count {
+            widths[i] = ideal_widths[i] + base_add + if rem > 0 { rem -= 1; 1 } else { 0 };
+        }
+    }
+
+    widths
+}
+
+fn help_columns(area: Rect, groups: &[Vec<HelpSection>]) -> Vec<Rect> {
+    if groups.is_empty() {
+        return vec![];
+    }
+    if groups.len() == 1 {
+        return vec![area];
+    }
+    let widths = help_columns_widths(area.width, groups);
+    let gap = 2u16;
+    let mut rects = Vec::with_capacity(groups.len());
+    let mut x = area.x;
+    for &w in &widths {
+        rects.push(Rect::new(x, area.y, w, area.height));
+        x = x.saturating_add(w).saturating_add(gap);
+    }
+    rects
 }
 
 fn wrap_help_text(text: &str, width: usize) -> Vec<String> {
@@ -3801,15 +3946,12 @@ fn keyboard_reference() -> Vec<HelpSection> {
             scope: &[],
             entries: &[
                 ("i", "enter Insert mode"),
-                (":", "begin Ex command"),
+                ("Esc", "leave editor focus"),
                 (":w", "validate, save, apply"),
-                (":wq", "save, apply, leave"),
                 (":q", "discard buffer, leave"),
-                ("0 / $", "line start / end"),
                 ("x", "delete character"),
                 ("u", "undo"),
                 ("Ctrl+r", "redo"),
-                ("Esc", "leave editor focus"),
                 ("q", "leave editor"),
             ],
         },
@@ -3838,11 +3980,9 @@ fn keyboard_reference() -> Vec<HelpSection> {
             scope: &[],
             entries: &[
                 ("i", "enter Insert mode"),
-                ("h / j / k / l", "move cursor"),
                 ("w / b", "next / previous word"),
                 ("0 / $", "line start / end"),
                 ("x / Delete", "delete character"),
-                ("Backspace", "move cursor left"),
                 ("PgUp / PgDn", "move by editor page"),
                 ("Esc", "focus file tree"),
                 ("Ctrl+s", "save current source"),
@@ -4256,7 +4396,7 @@ mod tests {
     fn keyboard_reference_reflows_without_exceeding_each_column() -> Result<(), Box<dyn std::error::Error>> {
         let theme = Theme::load("nord")?;
         for (width, count) in [(54, 1), (76, 2), (130, 3)] {
-            let groups = help_column_groups(keyboard_reference(), count);
+            let groups = help_column_groups(keyboard_reference(), count, width);
             let columns = help_columns(Rect::new(0, 0, width, 30), &groups);
             for (group, column) in groups.iter().zip(columns) {
                 assert!(format_help_column(group, column.width, &theme)
@@ -4265,6 +4405,39 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn keyboard_reference_balances_column_heights_and_widths() {
+        let theme = Theme::load("nord").unwrap();
+
+        // Check 3-column layout on wide screen
+        let groups_3col = help_column_groups(keyboard_reference(), 3, 130);
+        assert_eq!(groups_3col.len(), 3);
+        let cols_3col = help_columns(Rect::new(0, 0, 130, 30), &groups_3col);
+        let heights_3col: Vec<usize> = groups_3col
+            .iter()
+            .zip(&cols_3col)
+            .map(|(g, col)| format_help_column(g, col.width, &theme).len())
+            .collect();
+        let max_h3 = *heights_3col.iter().max().unwrap();
+        let min_h3 = *heights_3col.iter().min().unwrap();
+        // Heights should be well balanced: max height should be <= 40 lines and diff <= 10 lines
+        assert!(max_h3 <= 40, "Max height in 3-col layout should be <= 40, got {}", max_h3);
+        assert!(max_h3 - min_h3 <= 10, "Height diff in 3-col layout should be <= 10, got {}", max_h3 - min_h3);
+
+        // Check 2-column layout on medium screen
+        let groups_2col = help_column_groups(keyboard_reference(), 2, 86);
+        assert_eq!(groups_2col.len(), 2);
+        let cols_2col = help_columns(Rect::new(0, 0, 86, 30), &groups_2col);
+        let heights_2col: Vec<usize> = groups_2col
+            .iter()
+            .zip(&cols_2col)
+            .map(|(g, col)| format_help_column(g, col.width, &theme).len())
+            .collect();
+        let max_h2 = *heights_2col.iter().max().unwrap();
+        let min_h2 = *heights_2col.iter().min().unwrap();
+        assert!(max_h2 - min_h2 <= 10, "Height diff in 2-col layout should be <= 10, got {}", max_h2 - min_h2);
     }
 
     #[test]
