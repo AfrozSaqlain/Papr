@@ -3760,6 +3760,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if key.code == KeyCode::Char('r') && app.page == papr_core::Page::Library {
         return Some(UiAction::Reindex);
     }
+    if key.code == KeyCode::Char('o') {
+        if let Some(arxiv_reference) = selected_paper_arxiv_reference(app) {
+            return open_arxiv_page(app, arxiv_reference);
+        }
+    }
     if key.code == KeyCode::Char('u') {
         if let Some(paper_id) = selected_local_paper_id(app) {
             return Some(UiAction::MarkUnread(paper_id));
@@ -3801,12 +3806,6 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
     if let Some(action) = handle_credits_key(app, key) {
         return Some(action);
-    }
-    if app.page == papr_core::Page::Discover && key.code == KeyCode::Char('o') {
-        return app
-            .discovery
-            .selected_paper()
-            .map(|paper| UiAction::OpenBrowser(paper.id.clone()));
     }
     if app.page == papr_core::Page::Discover
         && key.code == KeyCode::Char('>')
@@ -4581,14 +4580,6 @@ fn handle_dashboard_key(app: &mut App, key: KeyEvent) -> KeyHandling {
     if app.page != papr_core::Page::Dashboard {
         return KeyHandling::Ignored;
     }
-    if key.code == KeyCode::Char('o') {
-        return KeyHandling::Handled(
-            app.today_papers
-                .get(app.today_selected)
-                .map(|paper| UiAction::OpenBrowser(paper.id.clone()))
-                .map(Box::new),
-        );
-    }
     if key.code == KeyCode::Char('c') {
         return KeyHandling::Handled(
             app.today_papers
@@ -5140,7 +5131,7 @@ fn handle_paper_detail_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             return selected_remote_target(app).map(UiAction::CopyCitation);
         }
         KeyCode::Char('o') => {
-            return selected_remote_paper(app).map(|paper| UiAction::OpenBrowser(paper.id.clone()));
+            return open_arxiv_page(app, selected_remote_paper(app).map(|paper| paper.id.clone()));
         }
         KeyCode::Enter => {
             let remote = selected_remote_paper(app)?;
@@ -5207,6 +5198,95 @@ fn selected_library_pdf(app: &App) -> Option<(i64, PathBuf)> {
         .pdf_path
         .as_ref()
         .map(|path| (paper.id, PathBuf::from(path)))
+}
+
+/// Return the online arXiv reference for the currently selected paper row.
+/// The outer option distinguishes a selected paper row from other workspace
+/// rows (for example, a group or author heading).
+fn selected_paper_arxiv_reference(app: &App) -> Option<Option<String>> {
+    match app.page {
+        papr_core::Page::Dashboard => app
+            .today_papers
+            .get(app.today_selected)
+            .map(|paper| Some(paper.id.clone())),
+        papr_core::Page::Discover => app
+            .discovery
+            .selected_paper()
+            .map(|paper| Some(paper.id.clone())),
+        papr_core::Page::Downloads => app
+            .filtered_downloads()
+            .get(app.download_selected)
+            .map(|task| {
+                task.remote_paper
+                    .as_ref()
+                    .map(|paper| paper.id.clone())
+                    .or_else(|| {
+                        selected_local_paper_id(app).and_then(|id| {
+                            app.library
+                                .papers
+                                .iter()
+                                .find(|paper| paper.id == id)
+                                .and_then(|paper| paper.arxiv_id.clone())
+                        })
+                    })
+            }),
+        papr_core::Page::Library
+        | papr_core::Page::ReadingQueue
+        | papr_core::Page::Collections
+        | papr_core::Page::Bookmarks
+        | papr_core::Page::Authors
+        | papr_core::Page::Notes => selected_local_paper_id(app).map(|id| {
+            app.library
+                .papers
+                .iter()
+                .find(|paper| paper.id == id)
+                .and_then(|paper| paper.arxiv_id.clone())
+        }),
+        papr_core::Page::Projects
+        | papr_core::Page::History
+        | papr_core::Page::Statistics
+        | papr_core::Page::Settings
+        | papr_core::Page::Credits => None,
+    }
+}
+
+fn open_arxiv_page(app: &mut App, arxiv_reference: Option<String>) -> Option<UiAction> {
+    let Some(url) = arxiv_reference.as_deref().and_then(arxiv_page_url) else {
+        app.toast = Some("No valid arXiv page is available for this paper".into());
+        return None;
+    };
+    Some(UiAction::OpenBrowser(url))
+}
+
+fn arxiv_page_url(reference: &str) -> Option<String> {
+    let reference = reference.trim();
+    if reference.starts_with("https://") || reference.starts_with("http://") {
+        return Some(reference.to_owned());
+    }
+    let id = reference
+        .strip_prefix("arXiv:")
+        .unwrap_or(reference)
+        .trim_end_matches(".pdf");
+    let (base, version) = match id.rsplit_once('v') {
+        Some((base, version)) if !version.is_empty() && version.chars().all(|character| character.is_ascii_digit()) => (base, Some(version)),
+        _ => (id, None),
+    };
+    let modern = base.split_once('.').is_some_and(|(year_month, number)| {
+        year_month.len() == 4
+            && year_month.chars().all(|character| character.is_ascii_digit())
+            && matches!(number.len(), 4 | 5)
+            && number.chars().all(|character| character.is_ascii_digit())
+    });
+    let legacy = base.split_once('/').is_some_and(|(category, number)| {
+        !category.is_empty()
+            && category.chars().all(|character| character.is_ascii_alphabetic() || matches!(character, '-' | '.'))
+            && number.len() == 7
+            && number.chars().all(|character| character.is_ascii_digit())
+    });
+    (modern || legacy).then(|| match version {
+        Some(version) => format!("https://arxiv.org/abs/{base}v{version}"),
+        None => format!("https://arxiv.org/abs/{base}"),
+    })
 }
 
 fn selected_local_paper_id(app: &App) -> Option<i64> {
@@ -7028,6 +7108,41 @@ mod tests {
             search,
             Some(UiAction::OpenBrowser(url)) if url.ends_with("/search")
         ));
+    }
+
+    #[test]
+    fn browser_shortcut_opens_local_papers_and_reports_missing_arxiv_metadata() {
+        let paper = LibraryPaper {
+            id: 42,
+            title: "Local paper".into(),
+            authors: String::new(),
+            doi: None,
+            arxiv_id: Some("2607.12345v2".into()),
+            pdf_path: Some("/tmp/local.pdf".into()),
+            file_size: None,
+            reading_status: "unread".into(),
+            is_favorite: false,
+        };
+        let mut app = App {
+            page: Page::Library,
+            content_focused: true,
+            library: papr_core::LibraryState {
+                papers: vec![paper.clone()],
+                ..papr_core::LibraryState::default()
+            },
+            ..App::default()
+        };
+        assert!(matches!(
+            handle_key(&mut app, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)),
+            Some(UiAction::OpenBrowser(url)) if url == "https://arxiv.org/abs/2607.12345v2"
+        ));
+
+        app.library.papers[0].arxiv_id = None;
+        assert!(handle_key(&mut app, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)).is_none());
+        assert_eq!(
+            app.toast.as_deref(),
+            Some("No valid arXiv page is available for this paper")
+        );
     }
 
     #[test]
