@@ -3765,6 +3765,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             return open_arxiv_page(app, arxiv_reference);
         }
     }
+    if matches!(app.page, papr_core::Page::Dashboard | papr_core::Page::Discover) {
+        match key.code {
+            KeyCode::Char('c') => return selected_remote_target(app).map(UiAction::CopyCitation),
+            KeyCode::Char('d') => return selected_remote_paper(app).cloned().map(UiAction::Download),
+            _ => {}
+        }
+    }
     if key.code == KeyCode::Char('u') {
         if let Some(paper_id) = selected_local_paper_id(app) {
             return Some(UiAction::MarkUnread(paper_id));
@@ -3814,13 +3821,6 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         app.mode = AppMode::DiscoverFilter;
         app.discovery.filter_cursor = app.discovery.filter.len();
         return None;
-    }
-    if app.page == papr_core::Page::Discover && key.code == KeyCode::Char('c') {
-        return app
-            .discovery
-            .selected_paper()
-            .cloned()
-            .map(|paper| UiAction::CopyCitation(PaperTarget::Remote(Box::new(paper))));
     }
     if app.page == papr_core::Page::Discover
         && matches!(
@@ -4579,14 +4579,6 @@ fn library_action(app: &mut App, key: KeyEvent) -> Option<UiAction> {
 fn handle_dashboard_key(app: &mut App, key: KeyEvent) -> KeyHandling {
     if app.page != papr_core::Page::Dashboard {
         return KeyHandling::Ignored;
-    }
-    if key.code == KeyCode::Char('c') {
-        return KeyHandling::Handled(
-            app.today_papers
-                .get(app.today_selected)
-                .cloned()
-                .map(|paper| Box::new(UiAction::CopyCitation(PaperTarget::Remote(Box::new(paper))))),
-        );
     }
     if matches!(
         key.code,
@@ -7108,6 +7100,34 @@ mod tests {
             search,
             Some(UiAction::OpenBrowser(url)) if url.ends_with("/search")
         ));
+    }
+
+    #[test]
+    fn dashboard_and_discover_paper_rows_support_citation_and_download_shortcuts() {
+        for page in [Page::Dashboard, Page::Discover] {
+            let paper = remote_paper("https://arxiv.org/abs/2607.12345", "Paper");
+            let mut app = App {
+                page,
+                content_focused: true,
+                today_papers: (page == Page::Dashboard)
+                    .then_some(paper.clone())
+                    .into_iter()
+                    .collect(),
+                discovery: DiscoveryState {
+                    results: (page == Page::Discover).then_some(paper).into_iter().collect(),
+                    ..DiscoveryState::default()
+                },
+                ..App::default()
+            };
+            assert!(matches!(
+                handle_key(&mut app, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+                Some(UiAction::CopyCitation(PaperTarget::Remote(_)))
+            ));
+            assert!(matches!(
+                handle_key(&mut app, KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)),
+                Some(UiAction::Download(_))
+            ));
+        }
     }
 
     #[test]

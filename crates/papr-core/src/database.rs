@@ -1965,7 +1965,9 @@ impl Database {
                 if let Some(path) = pdf_path {
                     transaction.execute(
                         "UPDATE papers SET pdf_path = ?1, file_size = COALESCE(?2, file_size),
-                         title = ?3, abstract = ?4, doi = COALESCE(?5, doi),
+                         title = ?3,
+                         abstract = CASE WHEN ?4 IS NULL OR trim(?4) = '' THEN abstract ELSE ?4 END,
+                         doi = COALESCE(?5, doi),
                          published_at = ?6, updated_at = ?7, journal = COALESCE(?8, journal)
                          WHERE id = ?9",
                         params![
@@ -1975,7 +1977,8 @@ impl Database {
                     )?;
                 } else {
                     transaction.execute(
-                        "UPDATE papers SET title = ?1, abstract = ?2,
+                        "UPDATE papers SET title = ?1,
+                         abstract = CASE WHEN ?2 IS NULL OR trim(?2) = '' THEN abstract ELSE ?2 END,
                          doi = COALESCE(?3, doi), published_at = ?4, updated_at = ?5, journal = COALESCE(?6, journal)
                          WHERE id = ?7",
                         params![
@@ -1987,7 +1990,9 @@ impl Database {
                 existing
             } else {
                 transaction.execute(
-                    "UPDATE papers SET title = ?1, abstract = ?2, arxiv_id = ?3,
+                    "UPDATE papers SET title = ?1,
+                     abstract = CASE WHEN ?2 IS NULL OR trim(?2) = '' THEN abstract ELSE ?2 END,
+                     arxiv_id = ?3,
                      doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6, journal = COALESCE(?7, journal)
                      WHERE id = ?8",
                     params![
@@ -1999,7 +2004,9 @@ impl Database {
             }
         } else {
             transaction.execute(
-                "UPDATE papers SET title = ?1, abstract = ?2, arxiv_id = ?3,
+            "UPDATE papers SET title = ?1,
+             abstract = CASE WHEN ?2 IS NULL OR trim(?2) = '' THEN abstract ELSE ?2 END,
+             arxiv_id = ?3,
                  doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6, journal = COALESCE(?7, journal)
                  WHERE id = ?8",
                 params![
@@ -2237,6 +2244,48 @@ mod tests {
         database.ensure_remote_paper(&paper)?;
 
         assert!(database.library_papers()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn enrichment_preserves_an_existing_abstract_when_the_provider_has_none()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut database = Database::in_memory()?;
+        let timestamp = Utc
+            .with_ymd_and_hms(2026, 2, 1, 0, 0, 0)
+            .single()
+            .ok_or("invalid test timestamp")?;
+        let mut paper = RemotePaper {
+            id: "https://arxiv.org/abs/2602.00003".into(),
+            title: "Original title".into(),
+            authors: vec!["Researcher".into()],
+            abstract_text: "Abstract from arXiv.".into(),
+            published: timestamp,
+            updated: timestamp,
+            categories: vec![],
+            pdf_url: None,
+            doi: Some("10.1000/abstract-merge".into()),
+            journal_ref: None,
+        };
+        let paper_id = database.ensure_remote_paper(&paper)?;
+
+        paper.abstract_text = "   ".into();
+        database.apply_arxiv_metadata(paper_id, &paper)?;
+        let abstract_text: String = database.connection.query_row(
+            "SELECT abstract FROM papers WHERE id = ?1",
+            [paper_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(abstract_text, "Abstract from arXiv.");
+
+        paper.abstract_text = "A richer provider abstract.".into();
+        database.apply_arxiv_metadata(paper_id, &paper)?;
+        let abstract_text: String = database.connection.query_row(
+            "SELECT abstract FROM papers WHERE id = ?1",
+            [paper_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(abstract_text, "A richer provider abstract.");
         Ok(())
     }
 

@@ -3722,6 +3722,7 @@ fn keyboard_reference() -> Vec<HelpSection> {
             ],
             entries: &[
                 ("Enter / → / l", "open local PDF"),
+                ("o", "open paper online"),
                 ("B", "toggle bookmark"),
                 (">", "toggle local search"),
                 ("n", "open note"),
@@ -3758,8 +3759,6 @@ fn keyboard_reference() -> Vec<HelpSection> {
             scope: &[],
             entries: &[
                 ("/", "toggle arXiv search"),
-                ("o", "open paper online"),
-                ("c", "copy citation"),
                 ("d", "download paper"),
                 ("Enter", "open downloaded PDF"),
                 ("Discover Ctrl+←", "previous cached page"),
