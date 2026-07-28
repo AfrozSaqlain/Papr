@@ -1209,13 +1209,13 @@ async fn run(
                     // Update in-memory today_papers
                     for paper in &mut app.today_papers {
                         if paper.id == p.id || (p.doi.is_some() && paper.doi == p.doi) {
-                            *paper = p.clone();
+                            *paper = merge_enriched_remote_paper(paper, p);
                         }
                     }
                     // Update in-memory discovery results
                     for paper in &mut app.discovery.results {
                         if paper.id == p.id || (p.doi.is_some() && paper.doi == p.doi) {
-                            *paper = p.clone();
+                            *paper = merge_enriched_remote_paper(paper, p);
                         }
                     }
                     // Save updated today_papers to SQLite dashboard feed cache
@@ -2999,6 +2999,20 @@ fn log_message(database_file: &Path, message: &str) {
             let _ = writeln!(file, "[{}] {}", timestamp, message);
         }
     }
+}
+
+/// Project enriched metadata onto a paper already shown by the UI.
+///
+/// Database enrichment deliberately retains the stored abstract when a provider
+/// has none. The UI must apply that same merge before it persists the dashboard
+/// cache; replacing the object wholesale would otherwise make a valid abstract
+/// disappear from the UI even though it remains in SQLite.
+fn merge_enriched_remote_paper(current: &RemotePaper, enriched: &RemotePaper) -> RemotePaper {
+    let mut merged = enriched.clone();
+    if merged.abstract_text.trim().is_empty() {
+        merged.abstract_text = current.abstract_text.clone();
+    }
+    merged
 }
 
 fn start_library_watcher(
@@ -5698,7 +5712,7 @@ mod tests {
         keyword_representation_targets, move_config_editor_page, refresh_downloads_from_dir,
         accept_project_completion, create_project_file, is_project_text_file, project_files,
         reload_config_editor_buffer, select_dashboard_papers, shuffle_daily_bucket,
-        update_project_completions, PaperTarget,
+        update_project_completions, merge_enriched_remote_paper, PaperTarget,
     };
 
     #[test]
@@ -5733,6 +5747,20 @@ mod tests {
         // Test Ctrl + Right
         edit_text(&mut buffer, &mut cursor, KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL));
         assert_eq!(cursor, 13);
+    }
+
+    #[test]
+    fn enrichment_projection_keeps_the_displayed_abstract_when_provider_has_none() {
+        let mut displayed = remote_paper("https://arxiv.org/abs/2602.00004", "Original title");
+        displayed.abstract_text = "Abstract fetched from arXiv.".into();
+        let mut provider = displayed.clone();
+        provider.title = "Enriched title".into();
+        provider.abstract_text = "  ".into();
+
+        let merged = merge_enriched_remote_paper(&displayed, &provider);
+
+        assert_eq!(merged.title, "Enriched title");
+        assert_eq!(merged.abstract_text, "Abstract fetched from arXiv.");
     }
 
     #[test]
