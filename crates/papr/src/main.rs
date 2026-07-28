@@ -4450,14 +4450,14 @@ fn handle_reading_queue_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
     
     // Check for moving items up/down in the queue
-    if (key.code == KeyCode::Char('K'))
-        || (key.code == KeyCode::Up && (key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::CONTROL)))
+    if key.code == KeyCode::Up
+        && (key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::CONTROL))
     {
         let paper = *app.filtered_reading_queue_papers().get(app.reading_queue_selected)?;
         return Some(UiAction::MoveQueueItemUp(paper.id));
     }
-    if (key.code == KeyCode::Char('J'))
-        || (key.code == KeyCode::Down && (key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::CONTROL)))
+    if key.code == KeyCode::Down
+        && (key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::CONTROL))
     {
         let paper = *app.filtered_reading_queue_papers().get(app.reading_queue_selected)?;
         return Some(UiAction::MoveQueueItemDown(paper.id));
@@ -7561,9 +7561,9 @@ mod tests {
         assert!(matches!(action, Some(UiAction::RemoveFromQueue(42))));
 
         // Case 3: Move Up and Move Down in queue
-        let action_up = handle_key(&mut app, KeyEvent::new(KeyCode::Char('K'), KeyModifiers::NONE));
+        let action_up = handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
         assert!(matches!(action_up, Some(UiAction::MoveQueueItemUp(42))));
-        let action_down = handle_key(&mut app, KeyEvent::new(KeyCode::Char('J'), KeyModifiers::NONE));
+        let action_down = handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
         assert!(matches!(action_down, Some(UiAction::MoveQueueItemDown(42))));
     }
 

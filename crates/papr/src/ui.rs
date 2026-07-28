@@ -3706,6 +3706,7 @@ fn keyboard_reference() -> Vec<HelpSection> {
             scope: &[],
             entries: &[
                 ("?", "toggle reference"),
+                ("/", "toggle arXiv search"),
                 ("Ctrl+b", "toggle navigator"),
                 ("Esc", "close local search"),
                 ("Enter / → / l", "open selected item"),
@@ -3738,6 +3739,12 @@ fn keyboard_reference() -> Vec<HelpSection> {
             entries: &[
                 ("Tab", "toggle edit / preview"),
                 ("Esc", "save and leave note"),
+            ],
+        },
+        HelpSection {
+            title: "INTERNAL PDF VIEWER",
+            scope: &[],
+            entries: &[
                 ("PDF Esc / q", "close internal viewer"),
             ],
         },
@@ -3761,18 +3768,33 @@ fn keyboard_reference() -> Vec<HelpSection> {
             ],
         },
         HelpSection {
-            title: "GROUPS",
+            title: "DISCOVER",
             scope: &[],
-            entries: &[("Groups g", "create a group")],
+            entries: &[
+                ("/", "toggle arXiv search"),
+                ("Ctrl+←", "previous cached page"),
+                ("Ctrl+→", "next cached page"),
+                ("r", "retry loading failure"),
+            ],
         },
         HelpSection {
-            title: "QUEUE & DOWNLOADS",
+            title: "GROUPS",
+            scope: &[],
+            entries: &[("g", "create a group")],
+        },
+        HelpSection {
+            title: "QUEUE",
             scope: &[],
             entries: &[
                 ("Shift+↑", "move queued paper up"),
                 ("Shift+↓", "move queued paper down"),
-                ("K / J", "move queued paper up / down"),
-                ("Downloads r", "retry failed download"),
+            ],
+        },
+        HelpSection {
+            title: "DOWNLOADS",
+            scope: &[],
+            entries: &[
+                ("r", "retry failed download"),
             ],
         },
         HelpSection {
