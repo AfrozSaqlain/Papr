@@ -1382,7 +1382,7 @@ async fn run(
                 Event::Key(key)
                     if key.kind == KeyEventKind::Press || (app.mode == AppMode::PdfView && key.kind == KeyEventKind::Repeat) =>
                 {
-                    if app.page == papr_core::Page::Settings && app.content_focused && app.mode != AppMode::Help {
+                    if app.page == papr_core::Page::Settings && app.content_focused && app.mode == AppMode::Normal {
                         if let Some(action) = handle_settings_modal_key(app, key, &mut runtime, &mut theme, &senders)? {
                             apply_ui_action(
                                 action,
@@ -1427,7 +1427,7 @@ async fn run(
                 Event::Key(key)
                     if key.kind == KeyEventKind::Press || (app.mode == AppMode::PdfView && key.kind == KeyEventKind::Repeat) =>
                 {
-                    if app.page == papr_core::Page::Settings && app.content_focused && app.mode != AppMode::Help {
+                    if app.page == papr_core::Page::Settings && app.content_focused && app.mode == AppMode::Normal {
                         if let Some(action) = handle_settings_modal_key(app, key, &mut runtime, &mut theme, &senders)? {
                             apply_ui_action(
                                 action,
@@ -5850,6 +5850,81 @@ mod tests {
             KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
         );
         assert_eq!(app.mode, AppMode::CommandPalette);
+    }
+
+    #[test]
+    fn test_settings_workspace_ctrl_b_transfers_focus_to_command_palette() {
+        let mut app = App {
+            page: papr_core::Page::Settings,
+            content_focused: true,
+            mode: AppMode::Normal,
+            ..App::default()
+        };
+
+        // Press Ctrl+B while in settings workspace
+        let res = crate::settings_modal::handle_settings_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+        );
+        assert!(matches!(res, crate::settings_modal::SettingsKeyResult::Handled));
+        assert_eq!(app.mode, AppMode::CommandPalette);
+
+        // When app.mode == AppMode::CommandPalette, event loop condition
+        // (app.page == Page::Settings && app.content_focused && app.mode == AppMode::Normal) is false.
+        assert!(!(app.page == papr_core::Page::Settings && app.content_focused && app.mode == AppMode::Normal));
+
+        // Subsequent keys go to handle_key for CommandPalette
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.palette_query, "d");
+
+        // Esc closes CommandPalette and restores normal focus in Settings workspace
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.page, papr_core::Page::Settings);
+        assert!(app.content_focused);
+    }
+
+    #[test]
+    fn test_settings_workspace_question_mark_transfers_focus_to_help() {
+        let mut app = App {
+            page: papr_core::Page::Settings,
+            content_focused: true,
+            mode: AppMode::Normal,
+            ..App::default()
+        };
+
+        // Press '?' while in settings workspace
+        let res = crate::settings_modal::handle_settings_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+        );
+        assert!(matches!(res, crate::settings_modal::SettingsKeyResult::Handled));
+        assert_eq!(app.mode, AppMode::Help);
+
+        // While app.mode == AppMode::Help, key routing condition for settings workspace is false
+        assert!(!(app.page == papr_core::Page::Settings && app.content_focused && app.mode == AppMode::Normal));
+
+        // Subsequent keys go to handle_key for Help mode (scrolling)
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        );
+        assert_eq!(app.help_scroll, 1);
+
+        // Pressing '?' or Esc closes Help mode and restores normal focus in Settings workspace
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.page, papr_core::Page::Settings);
+        assert!(app.content_focused);
     }
 
     #[test]

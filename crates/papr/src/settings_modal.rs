@@ -219,6 +219,12 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
         return SettingsKeyResult::Handled;
     }
 
+    // Global ? shortcut handling: toggle keyboard reference overlay when not in text editing mode.
+    if key.code == KeyCode::Char('?') && !is_editing {
+        app.dispatch(papr_core::Command::ToggleHelp);
+        return SettingsKeyResult::Handled;
+    }
+
     // Check if current context requires Left/Right for its own control-specific functionality:
     //   • In active text edit mode: Left/Right moves text cursor.
     //   • In General tab when startup_page selector is focused: Left/Right cycles startup pages.
@@ -2139,5 +2145,32 @@ mod tests {
         let _ = handle_settings_key(&mut app, key_ctrl_b);
         assert_ne!(app.mode, AppMode::CommandPalette);
         assert!(app.settings_modal.pdf_viewer_editing);
+    }
+
+    #[test]
+    fn test_question_mark_shortcut_handling() {
+        let mut app = App::default();
+        let key_question = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
+
+        // Outside text edit mode -> dispatches Command::ToggleHelp and returns Handled
+        let res = handle_settings_key(&mut app, key_question);
+        assert!(matches!(res, SettingsKeyResult::Handled));
+        assert_eq!(app.mode, AppMode::Help);
+
+        // Reset mode
+        app.mode = AppMode::Normal;
+
+        // Inside text edit mode -> types '?' into text box instead of toggling Help
+        app.settings_modal.tab = SettingsTab::General;
+        app.settings_modal.tab_bar_focused = false;
+        app.settings_modal.general_focus = GeneralTabFocus::PdfViewer;
+        app.settings_modal.pdf_viewer_editing = true;
+        app.settings_modal.pdf_viewer = "zathura".to_string();
+        app.settings_modal.pdf_viewer_cursor = 7;
+
+        let _ = handle_settings_key(&mut app, key_question);
+        assert_ne!(app.mode, AppMode::Help);
+        assert!(app.settings_modal.pdf_viewer_editing);
+        assert_eq!(app.settings_modal.pdf_viewer, "zathura?");
     }
 }
