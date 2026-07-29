@@ -14,8 +14,9 @@ pub mod theme;
 
 pub use api::arxiv::ArxivClient;
 pub use app::{
-    App, AppMode, CollectionSearchItem, Command, DeletionTarget, DiscoveryState, DiscoveryStatus, DownloadStatus, DownloadTask,
-    LibraryState, MetadataPrompt, Page, ProjectPane,
+    App, AppMode, CollectionSearchItem, Command, DeletionTarget, DiscoveryState, DiscoveryStatus,
+    DownloadStatus, DownloadTask, GeneralTabFocus, LibraryState, MetadataPrompt, Page, PathEntryState,
+    PathsTabFocus, ProjectPane, SettingsModalState, SettingsTab,
 };
 pub use config::{Config, Paths};
 pub use completions::{CitationEntry, CitationSource, CompletionItem, CompletionSource};

@@ -3,6 +3,7 @@
 use std::sync::OnceLock;
 
 use crate::build_config_editor_view;
+use crate::settings_modal;
 use papr_core::{
     App, AppMode, DeletionTarget, DiscoveryStatus, DownloadStatus, Page, ProjectPane, RemotePaper,
     Theme,
@@ -136,7 +137,8 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         | AppMode::Search
         | AppMode::DiscoverFilter
         | AppMode::WorkspaceSearch
-        | AppMode::PdfView => {}
+        | AppMode::PdfView
+        | AppMode::SettingsModal => {}
     }
 
     let project_editor_focused = app.page == Page::Projects
@@ -151,6 +153,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
             } else {
                 crossterm::cursor::SetCursorStyle::BlinkingBlock
             }
+        } else if app.mode == AppMode::SettingsModal {
+            // The settings modal manages cursor visibility itself.
+            crossterm::cursor::SetCursorStyle::BlinkingBar
         } else {
             crossterm::cursor::SetCursorStyle::BlinkingBar
         };
@@ -812,199 +817,7 @@ fn render_author_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
 }
 
 fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
-    let title = if app.config_editor_focused {
-        if app.config_editor_insert_mode {
-            " CONFIG.TOML - INSERT "
-        } else if app.config_editor_command.is_some() {
-            " CONFIG.TOML - COMMAND "
-        } else {
-            " CONFIG.TOML - NORMAL "
-        }
-    } else {
-        " CONFIG.TOML "
-    };
-
-    let border_style = if app.config_editor_focused {
-        Style::default().fg(theme.accent)
-    } else {
-        Style::default().fg(theme.border)
-    };
-
-    let chunks = Layout::vertical([
-        Constraint::Length(6),
-        Constraint::Min(4),
-        Constraint::Length(1),
-    ])
-    .split(area);
-    let summary_area = chunks[0];
-    let editor_area = chunks[1];
-    let status_area = chunks[2];
-
-    let summary_cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(summary_area);
-
-    // Render themes
-    let active_name = &theme.name;
-    let mut is_builtin = false;
-    let mut themes_spans = Vec::new();
-    for t_name in Theme::BUILTIN_THEMES {
-        if t_name.to_lowercase() == active_name.to_lowercase() {
-            is_builtin = true;
-            break;
-        }
-    }
-    if !is_builtin {
-        themes_spans.push(Span::styled(
-            format!("{} (Custom)", active_name),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    for (i, t_name) in Theme::BUILTIN_THEMES.iter().enumerate() {
-        if i > 0 || !is_builtin {
-            themes_spans.push(Span::raw("  "));
-        }
-        if t_name.to_lowercase() == active_name.to_lowercase() {
-            themes_spans.push(Span::styled(
-                *t_name,
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        } else {
-            themes_spans.push(Span::styled(*t_name, Style::default().fg(theme.muted)));
-        }
-    }
-
-    let themes_block = Block::default()
-        .title(" Active & Available Themes ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border));
-
-    frame.render_widget(
-        Paragraph::new(Line::from(themes_spans))
-            .block(themes_block)
-            .wrap(Wrap { trim: true }),
-        summary_cols[0],
-    );
-
-    // Render plugins
-    let plugins_block = Block::default()
-        .title(" Installed & Discovered Plugins ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border));
-
-    let mut plugins_spans = Vec::new();
-    if app.plugins.is_empty() {
-        plugins_spans.push(Span::styled(
-            "No plugins installed.",
-            Style::default().fg(theme.muted),
-        ));
-    } else {
-        for (i, plugin) in app.plugins.iter().enumerate() {
-            if i > 0 {
-                plugins_spans.push(Span::raw("  "));
-            }
-            let status = if plugin.enabled {
-                "Enabled"
-            } else {
-                "Disabled"
-            };
-            let color = if plugin.enabled {
-                theme.success
-            } else {
-                theme.muted
-            };
-            plugins_spans.push(Span::styled(
-                format!("{} ({})", plugin.name, status),
-                Style::default().fg(color),
-            ));
-        }
-    }
-
-    frame.render_widget(
-        Paragraph::new(Line::from(plugins_spans))
-            .block(plugins_block)
-            .wrap(Wrap { trim: true }),
-        summary_cols[1],
-    );
-
-    let height = editor_area.height.saturating_sub(2) as usize;
-    let wrap_width = editor_area.width.saturating_sub(6) as usize;
-    app.config_editor_wrap_width = wrap_width.max(1);
-    app.config_editor_viewport_height = height;
-
-    let view = build_config_editor_view(
-        &app.config_editor_text,
-        app.config_editor_cursor,
-        app.config_editor_wrap_width,
-        height,
-        &mut app.config_editor_scroll,
-    );
-
-    let displayed = view
-        .lines
-        .iter()
-        .skip(app.config_editor_scroll)
-        .take(height)
-        .map(|line| {
-            let (prefix, content) = line.split_at(4.min(line.len()));
-            Line::from(vec![
-                Span::styled(prefix.to_owned(), Style::default().fg(theme.muted)),
-                Span::styled(content.to_owned(), Style::default().fg(theme.text)),
-            ])
-        })
-        .collect::<Vec<_>>();
-
-    let hint_text = if app.config_editor_focused {
-        " Press Esc to exit editor mode "
-    } else {
-        " Press Enter to focus "
-    };
-    let hint_title =
-        Line::styled(hint_text, Style::default().fg(theme.muted)).alignment(Alignment::Right);
-
-    frame.render_widget(
-        Paragraph::new(displayed)
-            .block(
-                Block::default()
-                    .title(title)
-                    .title(hint_title)
-                    .borders(Borders::ALL)
-                    .border_style(border_style),
-            )
-            .wrap(Wrap { trim: false })
-            .style(Style::default().fg(theme.text).bg(theme.surface)),
-        editor_area,
-    );
-
-    let status_line = if let Some(ref err) = app.config_editor_error {
-        Line::styled(err.clone(), Style::default().fg(theme.error))
-    } else if let Some(ref cmd) = app.config_editor_command {
-        Line::styled(format!(":{}", cmd), Style::default().fg(theme.text))
-    } else {
-        Line::styled(
-            if app.config_editor_insert_mode {
-                "-- INSERT --"
-            } else {
-                "-- NORMAL --"
-            },
-            Style::default().fg(theme.muted),
-        )
-    };
-    frame.render_widget(Paragraph::new(status_line), status_area);
-
-    if app.config_editor_focused {
-        let screen_x = editor_area
-            .x
-            .saturating_add(5)
-            .saturating_add(u16::try_from(view.cursor_col).unwrap_or(0));
-        let screen_y = editor_area.y.saturating_add(1).saturating_add(
-            u16::try_from(view.cursor_row.saturating_sub(app.config_editor_scroll)).unwrap_or(0),
-        );
-        frame.set_cursor_position((screen_x, screen_y));
-    }
+    settings_modal::render_settings_ui(frame, area, app, theme);
 }
 
 fn render_history(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {

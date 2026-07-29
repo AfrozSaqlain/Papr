@@ -128,6 +128,194 @@ pub enum AppMode {
     ProjectCreate,
     /// One-line file creation input within the open project.
     ProjectFileCreate,
+    /// Interactive settings modal.
+    SettingsModal,
+}
+
+/// Tabs shown in the settings modal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsTab {
+    /// Theme selection with live preview.
+    #[default]
+    Theme,
+    /// General application preferences.
+    General,
+    /// Filesystem paths.
+    Paths,
+    /// Plugin management.
+    Plugins,
+}
+
+impl SettingsTab {
+    /// All tabs in display order.
+    pub const ALL: [Self; 4] = [Self::Theme, Self::General, Self::Paths, Self::Plugins];
+
+    /// Human-readable tab label.
+    #[must_use]
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Theme => "Theme",
+            Self::General => "General",
+            Self::Paths => "Paths",
+            Self::Plugins => "Plugins",
+        }
+    }
+
+    /// Tab index in `ALL`.
+    #[must_use]
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|t| *t == self).unwrap_or(0)
+    }
+
+    /// Navigate right with wrapping.
+    #[must_use]
+    pub fn next(self) -> Self {
+        let idx = (self.index() + 1) % Self::ALL.len();
+        Self::ALL[idx]
+    }
+
+    /// Navigate left with wrapping.
+    #[must_use]
+    pub fn prev(self) -> Self {
+        let idx = self.index().wrapping_sub(1).min(Self::ALL.len() - 1);
+        Self::ALL[idx]
+    }
+}
+
+/// State for a single editable path entry in the library_folders list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathEntryState {
+    /// Current text content of this entry.
+    pub text: String,
+    /// Byte cursor position within `text`.
+    pub cursor: usize,
+    /// Validation error message for this entry, if any.
+    pub error: Option<String>,
+}
+
+impl PathEntryState {
+    /// Create a new entry from an existing path string.
+    #[must_use]
+    pub fn new(text: String) -> Self {
+        Self { text, cursor: 0, error: None }
+    }
+}
+
+/// Focus target within the Paths tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PathsTabFocus {
+    /// The library_folders multi-entry list.
+    #[default]
+    LibraryFolders,
+    /// The download_path single-line field.
+    DownloadPath,
+    /// The projects_directory single-line field.
+    ProjectsDirectory,
+}
+
+/// Focus target within the General tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GeneralTabFocus {
+    /// startup_page selection list.
+    #[default]
+    StartupPage,
+    /// pdf_viewer text field.
+    PdfViewer,
+    /// enabled_plugins toggle list.
+    EnabledPlugins,
+}
+
+/// Staged (in-memory) settings being edited in the modal.
+#[derive(Debug, Clone)]
+pub struct SettingsModalState {
+    /// Whether focus is currently on the tab bar header.
+    pub tab_bar_focused: bool,
+    /// Active tab.
+    pub tab: SettingsTab,
+    /// Selected theme index in `Theme::BUILTIN_THEMES`.
+    pub theme_selected: usize,
+    /// Scroll offset for the theme list.
+    pub theme_scroll: usize,
+    // --- General tab ---
+    /// Staged startup_page value.
+    pub startup_page: String,
+    /// Selected startup_page option index.
+    pub startup_page_selected: usize,
+    /// Staged pdf_viewer value (raw command string).
+    pub pdf_viewer: String,
+    /// Byte cursor in pdf_viewer text field.
+    pub pdf_viewer_cursor: usize,
+    /// Whether the pdf_viewer field is being edited.
+    pub pdf_viewer_editing: bool,
+    /// Staged enabled_plugins list.
+    pub enabled_plugins: Vec<String>,
+    /// Focus within the General tab.
+    pub general_focus: GeneralTabFocus,
+    // --- Paths tab ---
+    /// Staged library_folders as editable entries.
+    pub library_entries: Vec<PathEntryState>,
+    /// Selected entry index in library_entries.
+    pub library_selected: usize,
+    /// Whether the selected library entry is actively being edited.
+    pub library_editing: bool,
+    /// Staged download_path string.
+    pub download_path: String,
+    /// Byte cursor in download_path field.
+    pub download_path_cursor: usize,
+    /// Whether the download_path field is being edited.
+    pub download_path_editing: bool,
+    /// Validation error for download_path.
+    pub download_path_error: Option<String>,
+    /// Staged projects_directory string.
+    pub projects_directory: String,
+    /// Byte cursor in projects_directory field.
+    pub projects_directory_cursor: usize,
+    /// Whether projects_directory field is being edited.
+    pub projects_directory_editing: bool,
+    /// Validation error for projects_directory.
+    pub projects_directory_error: Option<String>,
+    /// Focus within the Paths tab.
+    pub paths_focus: PathsTabFocus,
+    // --- Plugins tab ---
+    /// Selected plugin index.
+    pub plugins_selected: usize,
+    /// Scroll offset for the plugins list.
+    pub plugins_scroll: usize,
+    /// Original theme name before the modal was opened (for Esc revert).
+    pub original_theme: String,
+}
+
+impl Default for SettingsModalState {
+    fn default() -> Self {
+        Self {
+            tab_bar_focused: true,
+            tab: SettingsTab::Theme,
+            theme_selected: 0,
+            theme_scroll: 0,
+            startup_page: "dashboard".into(),
+            startup_page_selected: 0,
+            pdf_viewer: String::new(),
+            pdf_viewer_cursor: 0,
+            pdf_viewer_editing: false,
+            enabled_plugins: Vec::new(),
+            general_focus: GeneralTabFocus::StartupPage,
+            library_entries: Vec::new(),
+            library_selected: 0,
+            library_editing: false,
+            download_path: String::new(),
+            download_path_cursor: 0,
+            download_path_editing: false,
+            download_path_error: None,
+            projects_directory: String::new(),
+            projects_directory_cursor: 0,
+            projects_directory_editing: false,
+            projects_directory_error: None,
+            paths_focus: PathsTabFocus::LibraryFolders,
+            plugins_selected: 0,
+            plugins_scroll: 0,
+            original_theme: String::new(),
+        }
+    }
 }
 
 /// Logical focus target within the Projects workspace.
@@ -750,6 +938,10 @@ pub struct App {
     pub active_pdf_session_start: Option<std::time::Instant>,
     /// Configured PDF viewer name.
     pub pdf_viewer: String,
+    /// State of the interactive settings modal.
+    pub settings_modal: SettingsModalState,
+    /// Available startup page choices.
+    pub startup_page_options: Vec<String>,
 }
 
 impl Default for App {
@@ -864,6 +1056,14 @@ impl Default for App {
             active_pdf_session_id: None,
             active_pdf_session_start: None,
             pdf_viewer: "internal".to_string(),
+            settings_modal: SettingsModalState::default(),
+            startup_page_options: vec![
+                "dashboard".into(),
+                "discover".into(),
+                "library".into(),
+                "reading_queue".into(),
+                "projects".into(),
+            ],
         }
     }
 }

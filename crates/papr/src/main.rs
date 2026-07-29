@@ -4,6 +4,7 @@ mod terminal;
 mod ui;
 mod citation;
 mod pdf_viewer;
+mod settings_modal;
 
 use std::{
     collections::HashMap,
@@ -884,6 +885,7 @@ fn cursor_from_visual_position(
     text.len()
 }
 
+#[allow(dead_code)]
 fn move_config_editor_vertical(app: &mut App, row_delta: isize) {
     let wrap_width = app.config_editor_wrap_width.max(1);
     let (row, col) = cursor_visual_position(&app.config_editor_text, app.config_editor_cursor, wrap_width);
@@ -1283,11 +1285,27 @@ async fn run(
         if app.page != last_page {
             app.workspace_query.clear();
             app.workspace_query_cursor = 0;
+            if last_page == papr_core::Page::Settings {
+                let original = app.settings_modal.original_theme.clone();
+                if !original.is_empty() && theme.name != original {
+                    if let Ok(reverted) = Theme::load(&original) {
+                        theme = reverted;
+                    }
+                }
+            }
             if matches!(
                 app.page,
                 papr_core::Page::Dashboard | papr_core::Page::History | papr_core::Page::Statistics
             ) {
                 refresh_dashboard(&runtime, app)?;
+            }
+            // Auto-open the settings workspace whenever the user navigates to the
+            // Settings page. Read the config fresh from disk so the workspace
+            // always reflects the persisted state.
+            if app.page == papr_core::Page::Settings {
+                if let Ok(config) = Config::load_or_create(&Paths::discover()?) {
+                    settings_modal::open_settings_modal(app, &config, &theme.name);
+                }
             }
             last_page = app.page;
             state_changed = true;
@@ -1364,13 +1382,8 @@ async fn run(
                 Event::Key(key)
                     if key.kind == KeyEventKind::Press || (app.mode == AppMode::PdfView && key.kind == KeyEventKind::Repeat) =>
                 {
-                    if app.page == papr_core::Page::Settings
-                        && app.config_editor_focused
-                        && app.mode != AppMode::Help
-                    {
-                        if let Some(action) =
-                            handle_config_editor_key(app, key, &mut runtime, &mut theme, &senders)
-                        {
+                    if app.page == papr_core::Page::Settings && app.content_focused && app.mode != AppMode::Help {
+                        if let Some(action) = handle_settings_modal_key(app, key, &mut runtime, &mut theme, &senders)? {
                             apply_ui_action(
                                 action,
                                 &mut runtime,
@@ -1414,13 +1427,8 @@ async fn run(
                 Event::Key(key)
                     if key.kind == KeyEventKind::Press || (app.mode == AppMode::PdfView && key.kind == KeyEventKind::Repeat) =>
                 {
-                    if app.page == papr_core::Page::Settings
-                        && app.config_editor_focused
-                        && app.mode != AppMode::Help
-                    {
-                        if let Some(action) =
-                            handle_config_editor_key(app, key, &mut runtime, &mut theme, &senders)
-                        {
+                    if app.page == papr_core::Page::Settings && app.content_focused && app.mode != AppMode::Help {
+                        if let Some(action) = handle_settings_modal_key(app, key, &mut runtime, &mut theme, &senders)? {
                             apply_ui_action(
                                 action,
                                 &mut runtime,
@@ -3737,13 +3745,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
 
     if !app.content_focused {
-        if app.page == papr_core::Page::Settings && matches!(key.code, KeyCode::Right | KeyCode::Char('l')) {
+        if app.page == papr_core::Page::Settings && matches!(key.code, KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter) {
+            // Opening the settings modal is handled by the sidebar navigation
+            // path; just focus content so UI is consistent.
             app.content_focused = true;
-            return None;
-        }
-        if app.page == papr_core::Page::Settings && matches!(key.code, KeyCode::Enter) {
-            app.content_focused = true;
-            app.config_editor_focused = true;
             return None;
         }
         if let Some(command) = navigation_command(key) {
@@ -3751,11 +3756,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         }
         return None;
     }
-    if app.content_focused && app.page == papr_core::Page::Settings && !app.config_editor_focused {
-        if matches!(key.code, KeyCode::Enter) {
-            app.config_editor_focused = true;
-            return None;
-        }
+    // When Settings page gains content_focused, immediately open the modal.
+    if app.content_focused && app.page == papr_core::Page::Settings && app.mode == AppMode::Normal {
+        // The modal will be opened by the page-change handler; just return.
     }
     if key.code == KeyCode::Char('r')
         && app.page == papr_core::Page::Discover
@@ -5380,6 +5383,81 @@ fn record_config_history(app: &mut App) {
     }
 }
 
+fn handle_settings_modal_key(
+    app: &mut App,
+    key: KeyEvent,
+    runtime: &mut Runtime,
+    theme: &mut Theme,
+    senders: &ActionSenders,
+) -> Result<Option<UiAction>> {
+    use settings_modal::{handle_settings_key, SettingsKeyResult, staged_config};
+
+    match handle_settings_key(app, key) {
+        SettingsKeyResult::Handled => {}
+
+        SettingsKeyResult::Apply => {
+            let base_config = Config::load_or_create(&Paths::discover()?).unwrap_or_default();
+            let new_config = staged_config(&app.settings_modal, &app.startup_page_options, &base_config);
+            let toml_str = match toml::to_string_pretty(&new_config) {
+                Ok(s) => s,
+                Err(e) => {
+                    app.toast = Some(format!("Serialization failed: {e}"));
+                    return Ok(None);
+                }
+            };
+            if let Err(e) = std::fs::write(&runtime.config_file, &toml_str) {
+                app.toast = Some(format!("Write failed: {e}"));
+                return Ok(None);
+            }
+            // Also refresh the config editor buffer.
+            app.config_editor_text = toml_str;
+            app.config_editor_history = vec![app.config_editor_text.clone()];
+            app.config_editor_history_idx = 0;
+            app.config_editor_error = None;
+
+            if let Err(e) = apply_config_update(runtime, app, &new_config, theme, senders) {
+                app.toast = Some(format!("Apply failed: {e}"));
+            } else {
+                app.settings_modal.original_theme = new_config.theme.clone();
+                settings_modal::sync_theme_selection_to_applied(app);
+                app.toast = Some("Settings saved and applied.".to_owned());
+                return Ok(Some(UiAction::Reindex));
+            }
+        }
+
+        SettingsKeyResult::ReturnToSidebar => {
+            app.content_focused = false;
+            let original = app.settings_modal.original_theme.clone();
+            if !original.is_empty() && theme.name != original {
+                if let Ok(reverted) = Theme::load(&original) {
+                    *theme = reverted;
+                }
+            }
+            settings_modal::sync_theme_selection_to_applied(app);
+        }
+
+        SettingsKeyResult::Quit => {
+            let original = app.settings_modal.original_theme.clone();
+            if !original.is_empty() && theme.name != original {
+                if let Ok(reverted) = Theme::load(&original) {
+                    *theme = reverted;
+                }
+            }
+            if let Ok(config) = Config::load_or_create(&Paths::discover()?) {
+                settings_modal::open_settings_modal(app, &config, &original);
+            }
+            app.dispatch(papr_core::Command::Quit);
+        }
+
+        SettingsKeyResult::PreviewTheme(name) => {
+            if let Ok(preview) = Theme::load(&name) {
+                *theme = preview;
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn apply_config_update(
     runtime: &mut Runtime,
     app: &mut App,
@@ -5450,6 +5528,7 @@ fn apply_config_update(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn handle_config_editor_key(
     app: &mut App,
     key: KeyEvent,
