@@ -3906,9 +3906,6 @@ fn keyboard_reference() -> Vec<HelpSection> {
                 ("/", "toggle arXiv search"),
                 ("d", "download paper"),
                 ("Enter", "open downloaded PDF"),
-                ("Discover Ctrl+←", "previous cached page"),
-                ("Discover Ctrl+→", "next cached page"),
-                ("Discover r", "retry loading failure"),
             ],
         },
         HelpSection {
