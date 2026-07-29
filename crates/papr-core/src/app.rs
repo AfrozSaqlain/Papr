@@ -221,6 +221,8 @@ pub enum GeneralTabFocus {
     StartupPage,
     /// pdf_viewer text field.
     PdfViewer,
+    /// dashboard_keywords list.
+    DashboardKeywords,
     /// enabled_plugins toggle list.
     EnabledPlugins,
 }
@@ -247,6 +249,12 @@ pub struct SettingsModalState {
     pub pdf_viewer_cursor: usize,
     /// Whether the pdf_viewer field is being edited.
     pub pdf_viewer_editing: bool,
+    /// Staged dashboard_keywords as editable entries.
+    pub keyword_entries: Vec<PathEntryState>,
+    /// Selected entry index in keyword_entries.
+    pub keyword_selected: usize,
+    /// Whether the selected keyword entry is actively being edited.
+    pub keyword_editing: bool,
     /// Staged enabled_plugins list.
     pub enabled_plugins: Vec<String>,
     /// Focus within the General tab.
@@ -258,19 +266,19 @@ pub struct SettingsModalState {
     pub library_selected: usize,
     /// Whether the selected library entry is actively being edited.
     pub library_editing: bool,
-    /// Staged download_path string.
+    /// Staged download_path value.
     pub download_path: String,
-    /// Byte cursor in download_path field.
+    /// Byte cursor in download_path text field.
     pub download_path_cursor: usize,
-    /// Whether the download_path field is being edited.
+    /// Whether download_path is actively being edited.
     pub download_path_editing: bool,
     /// Validation error for download_path.
     pub download_path_error: Option<String>,
-    /// Staged projects_directory string.
+    /// Staged projects_directory value.
     pub projects_directory: String,
-    /// Byte cursor in projects_directory field.
+    /// Byte cursor in projects_directory text field.
     pub projects_directory_cursor: usize,
-    /// Whether projects_directory field is being edited.
+    /// Whether projects_directory is actively being edited.
     pub projects_directory_editing: bool,
     /// Validation error for projects_directory.
     pub projects_directory_error: Option<String>,
@@ -281,7 +289,7 @@ pub struct SettingsModalState {
     pub plugins_selected: usize,
     /// Scroll offset for the plugins list.
     pub plugins_scroll: usize,
-    /// Original theme name before the modal was opened (for Esc revert).
+    /// Original theme before live preview started.
     pub original_theme: String,
 }
 
@@ -289,16 +297,19 @@ impl Default for SettingsModalState {
     fn default() -> Self {
         Self {
             tab_bar_focused: true,
-            tab: SettingsTab::Theme,
+            tab: SettingsTab::default(),
             theme_selected: 0,
             theme_scroll: 0,
-            startup_page: "dashboard".into(),
+            startup_page: String::new(),
             startup_page_selected: 0,
             pdf_viewer: String::new(),
             pdf_viewer_cursor: 0,
             pdf_viewer_editing: false,
+            keyword_entries: Vec::new(),
+            keyword_selected: 0,
+            keyword_editing: false,
             enabled_plugins: Vec::new(),
-            general_focus: GeneralTabFocus::StartupPage,
+            general_focus: GeneralTabFocus::default(),
             library_entries: Vec::new(),
             library_selected: 0,
             library_editing: false,
@@ -310,7 +321,7 @@ impl Default for SettingsModalState {
             projects_directory_cursor: 0,
             projects_directory_editing: false,
             projects_directory_error: None,
-            paths_focus: PathsTabFocus::LibraryFolders,
+            paths_focus: PathsTabFocus::default(),
             plugins_selected: 0,
             plugins_scroll: 0,
             original_theme: String::new(),

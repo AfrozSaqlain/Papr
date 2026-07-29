@@ -64,6 +64,13 @@ pub fn open_settings_modal(app: &mut App, config: &Config, current_theme_name: &
     modal.pdf_viewer = config.pdf_viewer.clone().unwrap_or_default();
     modal.pdf_viewer_cursor = modal.pdf_viewer.len();
     modal.pdf_viewer_editing = false;
+    modal.keyword_entries = config
+        .dashboard_keyword_list()
+        .into_iter()
+        .map(PathEntryState::new)
+        .collect();
+    modal.keyword_selected = 0;
+    modal.keyword_editing = false;
     modal.enabled_plugins = config.enabled_plugins.clone();
     modal.general_focus = GeneralTabFocus::StartupPage;
 
@@ -131,6 +138,15 @@ pub fn staged_config(modal: &SettingsModalState, options: &[String], base: &Conf
     } else {
         Some(modal.pdf_viewer.clone())
     };
+    let mut keyword_list = Vec::new();
+    for entry in &modal.keyword_entries {
+        let trimmed = entry.text.trim();
+        if !trimmed.is_empty() {
+            keyword_list.push(trimmed.to_string());
+        }
+    }
+    let dashboard_keywords = keyword_list.join(", ");
+
     Config {
         theme: Theme::BUILTIN_THEMES
             .get(modal.theme_selected)
@@ -142,6 +158,7 @@ pub fn staged_config(modal: &SettingsModalState, options: &[String], base: &Conf
         library_folders,
         download_path,
         projects_directory,
+        dashboard_keywords,
         enabled_plugins: modal.enabled_plugins.clone(),
         ..base.clone()
     }
@@ -194,6 +211,12 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
     // Global q key handling: if not in text editing mode, quit application cleanly.
     if key.code == KeyCode::Char('q') && !is_editing {
         return SettingsKeyResult::Quit;
+    }
+
+    // Global Ctrl+B shortcut handling: toggle command palette/navigator when not in text editing mode.
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('b') && !is_editing {
+        app.dispatch(papr_core::Command::TogglePalette);
+        return SettingsKeyResult::Handled;
     }
 
     // Check if current context requires Left/Right for its own control-specific functionality:
@@ -285,6 +308,7 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
 fn any_field_editing(app: &App) -> bool {
     let m = &app.settings_modal;
     m.pdf_viewer_editing
+        || m.keyword_editing
         || m.library_editing
         || m.download_path_editing
         || m.projects_directory_editing
@@ -293,6 +317,7 @@ fn any_field_editing(app: &App) -> bool {
 fn clear_edit_state(app: &mut App) {
     let m = &mut app.settings_modal;
     m.pdf_viewer_editing = false;
+    m.keyword_editing = false;
     m.library_editing = false;
     m.download_path_editing = false;
     m.projects_directory_editing = false;
@@ -353,72 +378,144 @@ fn handle_general_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
     if app.settings_modal.pdf_viewer_editing {
         return handle_pdf_viewer_edit(app, key);
     }
+    if app.settings_modal.keyword_editing {
+        return handle_keyword_entry_edit(app, key);
+    }
 
-    match key.code {
-        KeyCode::Up | KeyCode::Char('k') => match focus {
-            GeneralTabFocus::StartupPage => {
+    match focus {
+        GeneralTabFocus::StartupPage => match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
                 app.settings_modal.tab_bar_focused = true;
             }
-            GeneralTabFocus::PdfViewer => {
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.settings_modal.general_focus = GeneralTabFocus::PdfViewer;
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                let opts_len = app.startup_page_options.len();
+                if opts_len > 0 {
+                    app.settings_modal.startup_page_selected =
+                        (app.settings_modal.startup_page_selected + opts_len - 1) % opts_len;
+                    app.settings_modal.startup_page = app
+                        .startup_page_options
+                        .get(app.settings_modal.startup_page_selected)
+                        .cloned()
+                        .unwrap_or_default();
+                    return SettingsKeyResult::Apply;
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                let opts_len = app.startup_page_options.len();
+                if opts_len > 0 {
+                    app.settings_modal.startup_page_selected =
+                        (app.settings_modal.startup_page_selected + 1) % opts_len;
+                    app.settings_modal.startup_page = app
+                        .startup_page_options
+                        .get(app.settings_modal.startup_page_selected)
+                        .cloned()
+                        .unwrap_or_default();
+                    return SettingsKeyResult::Apply;
+                }
+            }
+            KeyCode::Enter => return SettingsKeyResult::Apply,
+            _ => {}
+        },
+
+        GeneralTabFocus::PdfViewer => match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
                 app.settings_modal.general_focus = GeneralTabFocus::StartupPage;
             }
-            GeneralTabFocus::EnabledPlugins => {
-                app.settings_modal.general_focus = GeneralTabFocus::PdfViewer;
-            }
-        },
-        KeyCode::Down | KeyCode::Char('j') => match focus {
-            GeneralTabFocus::StartupPage => {
-                app.settings_modal.general_focus = GeneralTabFocus::PdfViewer;
-            }
-            GeneralTabFocus::PdfViewer => {
-                app.settings_modal.general_focus = GeneralTabFocus::EnabledPlugins;
-            }
-            GeneralTabFocus::EnabledPlugins => {}
-        },
-        KeyCode::Left | KeyCode::Char('h') if focus == GeneralTabFocus::StartupPage => {
-            let opts_len = app.startup_page_options.len();
-            if opts_len > 0 {
-                app.settings_modal.startup_page_selected =
-                    (app.settings_modal.startup_page_selected + opts_len - 1) % opts_len;
-                app.settings_modal.startup_page = app
-                    .startup_page_options
-                    .get(app.settings_modal.startup_page_selected)
-                    .cloned()
-                    .unwrap_or_default();
-                return SettingsKeyResult::Apply;
-            }
-        }
-        KeyCode::Right | KeyCode::Char('l') if focus == GeneralTabFocus::StartupPage => {
-            let opts_len = app.startup_page_options.len();
-            if opts_len > 0 {
-                app.settings_modal.startup_page_selected =
-                    (app.settings_modal.startup_page_selected + 1) % opts_len;
-                app.settings_modal.startup_page = app
-                    .startup_page_options
-                    .get(app.settings_modal.startup_page_selected)
-                    .cloned()
-                    .unwrap_or_default();
-                return SettingsKeyResult::Apply;
-            }
-        }
-        KeyCode::Enter if focus == GeneralTabFocus::PdfViewer => {
-            app.settings_modal.pdf_viewer_editing = true;
-        }
-        KeyCode::Enter => {
-            return SettingsKeyResult::Apply;
-        }
-        KeyCode::Char(' ') if focus == GeneralTabFocus::EnabledPlugins => {
-            if let Some(plugin) = app.plugins.get(app.settings_modal.plugins_selected) {
-                let id = plugin.id.clone();
-                if app.settings_modal.enabled_plugins.contains(&id) {
-                    app.settings_modal.enabled_plugins.retain(|p| p != &id);
-                } else {
-                    app.settings_modal.enabled_plugins.push(id);
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.settings_modal.general_focus = GeneralTabFocus::DashboardKeywords;
+                if !app.settings_modal.keyword_entries.is_empty() {
+                    app.settings_modal.keyword_selected = 0;
                 }
-                return SettingsKeyResult::Apply;
             }
-        }
-        _ => {}
+            KeyCode::Enter => {
+                app.settings_modal.pdf_viewer_editing = true;
+            }
+            _ => {}
+        },
+
+        GeneralTabFocus::DashboardKeywords => match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if app.settings_modal.keyword_selected > 0 {
+                    app.settings_modal.keyword_selected -= 1;
+                } else {
+                    app.settings_modal.general_focus = GeneralTabFocus::PdfViewer;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let len = app.settings_modal.keyword_entries.len();
+                if len > 0 && app.settings_modal.keyword_selected + 1 < len {
+                    app.settings_modal.keyword_selected += 1;
+                } else {
+                    app.settings_modal.general_focus = GeneralTabFocus::EnabledPlugins;
+                }
+            }
+            KeyCode::Enter => {
+                if !app.settings_modal.keyword_entries.is_empty() {
+                    app.settings_modal.keyword_editing = true;
+                }
+            }
+            KeyCode::Char('a') => {
+                app.settings_modal.keyword_entries.push(PathEntryState::new(String::new()));
+                app.settings_modal.keyword_selected = app.settings_modal.keyword_entries.len() - 1;
+                app.settings_modal.keyword_editing = true;
+            }
+            KeyCode::Char('d') | KeyCode::Delete => {
+                let idx = app.settings_modal.keyword_selected;
+                if !app.settings_modal.keyword_entries.is_empty() {
+                    app.settings_modal.keyword_entries.remove(idx);
+                    if app.settings_modal.keyword_selected >= app.settings_modal.keyword_entries.len()
+                        && app.settings_modal.keyword_selected > 0
+                    {
+                        app.settings_modal.keyword_selected -= 1;
+                    }
+                    return SettingsKeyResult::Apply;
+                }
+            }
+            KeyCode::Char('K') => {
+                let idx = app.settings_modal.keyword_selected;
+                if idx > 0 {
+                    app.settings_modal.keyword_entries.swap(idx, idx - 1);
+                    app.settings_modal.keyword_selected -= 1;
+                    return SettingsKeyResult::Apply;
+                }
+            }
+            KeyCode::Char('J') => {
+                let idx = app.settings_modal.keyword_selected;
+                let len = app.settings_modal.keyword_entries.len();
+                if len > 0 && idx + 1 < len {
+                    app.settings_modal.keyword_entries.swap(idx, idx + 1);
+                    app.settings_modal.keyword_selected += 1;
+                    return SettingsKeyResult::Apply;
+                }
+            }
+            _ => {}
+        },
+
+        GeneralTabFocus::EnabledPlugins => match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.settings_modal.general_focus = GeneralTabFocus::DashboardKeywords;
+                if !app.settings_modal.keyword_entries.is_empty() {
+                    app.settings_modal.keyword_selected =
+                        app.settings_modal.keyword_entries.len() - 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {}
+            KeyCode::Char(' ') => {
+                if let Some(plugin) = app.plugins.get(app.settings_modal.plugins_selected) {
+                    let id = plugin.id.clone();
+                    if app.settings_modal.enabled_plugins.contains(&id) {
+                        app.settings_modal.enabled_plugins.retain(|p| p != &id);
+                    } else {
+                        app.settings_modal.enabled_plugins.push(id);
+                    }
+                    return SettingsKeyResult::Apply;
+                }
+            }
+            _ => {}
+        },
     }
     SettingsKeyResult::Handled
 }
@@ -1114,12 +1211,101 @@ fn render_theme_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
     app.settings_modal.theme_scroll = list_state.offset();
 }
 
+fn handle_keyword_entry_edit(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
+    let idx = app.settings_modal.keyword_selected;
+    match key.code {
+        KeyCode::Enter => {
+            if let Some(entry) = app.settings_modal.keyword_entries.get_mut(idx) {
+                let trimmed = entry.text.trim();
+                if trimmed.is_empty() {
+                    entry.error = Some("Keyword cannot be empty".to_string());
+                    return SettingsKeyResult::Handled;
+                }
+                entry.text = trimmed.to_string();
+                entry.error = None;
+                app.settings_modal.keyword_editing = false;
+                return SettingsKeyResult::Apply;
+            } else {
+                app.settings_modal.keyword_editing = false;
+            }
+        }
+        KeyCode::Esc => {
+            app.settings_modal.keyword_editing = false;
+        }
+        KeyCode::Char(c) => {
+            if let Some(entry) = app.settings_modal.keyword_entries.get_mut(idx) {
+                let cur = entry.cursor;
+                entry.text.insert(cur, c);
+                entry.cursor = cur + c.len_utf8();
+                entry.error = None;
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(entry) = app.settings_modal.keyword_entries.get_mut(idx) {
+                let cur = entry.cursor;
+                if cur > 0 {
+                    let prev = prev_char_boundary(&entry.text, cur);
+                    entry.text.remove(prev);
+                    entry.cursor = prev;
+                    entry.error = None;
+                }
+            }
+        }
+        KeyCode::Delete => {
+            if let Some(entry) = app.settings_modal.keyword_entries.get_mut(idx) {
+                let cur = entry.cursor;
+                if cur < entry.text.len() {
+                    entry.text.remove(cur);
+                    entry.error = None;
+                }
+            }
+        }
+        KeyCode::Left => {
+            if let Some(entry) = app.settings_modal.keyword_entries.get_mut(idx) {
+                let cur = entry.cursor;
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    entry.cursor = prev_word_boundary(&entry.text, cur);
+                } else if cur > 0 {
+                    entry.cursor = prev_char_boundary(&entry.text, cur);
+                }
+            }
+        }
+        KeyCode::Right => {
+            if let Some(entry) = app.settings_modal.keyword_entries.get_mut(idx) {
+                let cur = entry.cursor;
+                let len = entry.text.len();
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    entry.cursor = next_word_boundary(&entry.text, cur);
+                } else if cur < len {
+                    entry.cursor = next_char_boundary(&entry.text, cur);
+                }
+            }
+        }
+        KeyCode::Home => {
+            if let Some(entry) = app.settings_modal.keyword_entries.get_mut(idx) {
+                entry.cursor = 0;
+            }
+        }
+        KeyCode::End => {
+            if let Some(entry) = app.settings_modal.keyword_entries.get_mut(idx) {
+                entry.cursor = entry.text.len();
+            }
+        }
+        _ => {}
+    }
+    SettingsKeyResult::Handled
+}
+
 // --- General tab rendering ---
 
-fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+    let kw_count = app.settings_modal.keyword_entries.len();
+    let kw_height = (kw_count as u16 + 2).max(4).min(area.height.saturating_sub(10));
+
     let chunks = Layout::vertical([
-        Constraint::Length(4),
         Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Length(kw_height),
         Constraint::Min(3),
     ])
     .margin(1)
@@ -1180,6 +1366,10 @@ fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Them
         frame.set_cursor_position((chunks[1].x + 1 + visible_cols, chunks[1].y + 1));
     }
 
+    // dashboard_keywords
+    let keywords_focused = is_body_active && app.settings_modal.general_focus == GeneralTabFocus::DashboardKeywords;
+    render_dashboard_keywords(frame, chunks[2], app, keywords_focused, theme);
+
     // enabled_plugins
     let plugins_focused = is_body_active && app.settings_modal.general_focus == GeneralTabFocus::EnabledPlugins;
     let enabled_count = app.settings_modal.enabled_plugins.len();
@@ -1198,8 +1388,99 @@ fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Them
             Style::default().fg(if plugins_focused { theme.accent } else { theme.muted }),
         ))
         .block(focused_block(" Plugins (see Plugins tab) ", plugins_focused, theme)),
-        chunks[2],
+        chunks[3],
     );
+}
+
+fn render_dashboard_keywords(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &mut App,
+    focused: bool,
+    theme: &Theme,
+) {
+    let editing = app.settings_modal.keyword_editing;
+    let title = if editing {
+        " Dashboard Search Keywords [editing — Enter commit, Esc cancel] "
+    } else {
+        " Dashboard Search Keywords  a Add  d Remove  K/J Reorder  Enter Edit "
+    };
+    let block = focused_block(title, focused, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let sel = app.settings_modal.keyword_selected;
+    let entries = &app.settings_modal.keyword_entries;
+
+    if entries.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "  No keywords configured. Press a to add one.",
+                Style::default().fg(theme.muted),
+            )),
+            inner,
+        );
+        return;
+    }
+
+    let wrap_width = inner.width.saturating_sub(2).max(1) as usize;
+    let mut y_offset = 0u16;
+
+    for (i, entry) in entries.iter().enumerate() {
+        if y_offset >= inner.height {
+            break;
+        }
+        let is_selected = i == sel && focused;
+        let is_editing = editing && is_selected;
+
+        let text_rows = entry.text.len().div_ceil(wrap_width.max(1)).max(1) as u16;
+        let error_rows = if entry.error.is_some() { 1u16 } else { 0 };
+        let total_rows = text_rows + error_rows;
+
+        let row_area = Rect::new(
+            inner.x,
+            inner.y + y_offset,
+            inner.width,
+            total_rows.min(inner.height - y_offset),
+        );
+
+        let base_style = if is_selected {
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text)
+        };
+        let prefix = if is_selected { "› " } else { "  " };
+
+        let display_text = format!("{}{}", prefix, entry.text);
+        let paragraph = Paragraph::new(display_text)
+            .style(base_style)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, row_area);
+
+        if let Some(ref err) = entry.error {
+            let err_area = Rect::new(
+                row_area.x + 2,
+                row_area.y + text_rows,
+                row_area.width.saturating_sub(2),
+                1,
+            );
+            frame.render_widget(
+                Paragraph::new(format!("⚠ {err}")).style(Style::default().fg(theme.warning)),
+                err_area,
+            );
+        }
+
+        if is_editing {
+            let cur = entry.text[..entry.cursor].chars().count() as u16;
+            let cursor_x = row_area.x + 2 + (cur % (wrap_width as u16));
+            let cursor_y = row_area.y + (cur / (wrap_width as u16));
+            if cursor_y < inner.y + inner.height {
+                frame.set_cursor_position((cursor_x, cursor_y));
+            }
+        }
+
+        y_offset += total_rows;
+    }
 }
 
 // --- Paths tab rendering ---
@@ -1785,5 +2066,78 @@ mod tests {
         let key_right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
         let _ = handle_settings_key(&mut app, key_right);
         assert_eq!(app.settings_modal.theme_selected, dracula_idx);
+    }
+
+    #[test]
+    fn test_dashboard_keywords_actions_and_validation() {
+        let mut app = App::default();
+        app.settings_modal.tab = SettingsTab::General;
+        app.settings_modal.tab_bar_focused = false;
+        app.settings_modal.general_focus = GeneralTabFocus::DashboardKeywords;
+        app.settings_modal.keyword_entries = vec![
+            PathEntryState::new("quantum computing".into()),
+            PathEntryState::new("machine learning".into()),
+        ];
+        app.settings_modal.keyword_selected = 0;
+
+        // 1. Reorder 'J' -> swaps entries and returns Apply immediately
+        let key_j = KeyEvent::new(KeyCode::Char('J'), KeyModifiers::NONE);
+        let res_j = handle_settings_key(&mut app, key_j);
+        assert!(matches!(res_j, SettingsKeyResult::Apply));
+        assert_eq!(app.settings_modal.keyword_entries[0].text, "machine learning");
+
+        // 2. Add 'a' -> appends empty entry and enters editing
+        let key_a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        let _ = handle_settings_key(&mut app, key_a);
+        assert_eq!(app.settings_modal.keyword_entries.len(), 3);
+        assert!(app.settings_modal.keyword_editing);
+        assert_eq!(app.settings_modal.keyword_selected, 2);
+
+        // 3. Submitting empty string -> returns Handled, shows error, stays editing
+        let key_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let res_empty = handle_settings_key(&mut app, key_enter);
+        assert!(matches!(res_empty, SettingsKeyResult::Handled));
+        assert!(app.settings_modal.keyword_editing);
+        assert_eq!(
+            app.settings_modal.keyword_entries[2].error,
+            Some("Keyword cannot be empty".to_string())
+        );
+
+        // 4. Typing a valid keyword and hitting Enter -> returns Apply and exits editing
+        let key_g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
+        let _ = handle_settings_key(&mut app, key_g);
+        let res_valid = handle_settings_key(&mut app, key_enter);
+        assert!(matches!(res_valid, SettingsKeyResult::Apply));
+        assert!(!app.settings_modal.keyword_editing);
+        assert_eq!(app.settings_modal.keyword_entries[2].text, "g");
+
+        // 5. Delete 'd' -> removes entry and returns Apply
+        let key_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE);
+        let res_d = handle_settings_key(&mut app, key_d);
+        assert!(matches!(res_d, SettingsKeyResult::Apply));
+        assert_eq!(app.settings_modal.keyword_entries.len(), 2);
+    }
+
+    #[test]
+    fn test_ctrl_b_shortcut_handling() {
+        let mut app = App::default();
+        let key_ctrl_b = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+
+        // Outside text edit mode -> dispatches Command::TogglePalette and returns Handled
+        let res = handle_settings_key(&mut app, key_ctrl_b);
+        assert!(matches!(res, SettingsKeyResult::Handled));
+        assert_eq!(app.mode, AppMode::CommandPalette);
+
+        // Reset mode
+        app.mode = AppMode::Normal;
+
+        // Inside text edit mode -> does not interrupt text edit mode
+        app.settings_modal.tab = SettingsTab::General;
+        app.settings_modal.general_focus = GeneralTabFocus::PdfViewer;
+        app.settings_modal.pdf_viewer_editing = true;
+
+        let _ = handle_settings_key(&mut app, key_ctrl_b);
+        assert_ne!(app.mode, AppMode::CommandPalette);
+        assert!(app.settings_modal.pdf_viewer_editing);
     }
 }

@@ -3752,20 +3752,6 @@ fn keyboard_reference() -> Vec<HelpSection> {
             ],
         },
         HelpSection {
-            title: "SETTINGS EDITOR — NORMAL",
-            scope: &[],
-            entries: &[
-                ("i", "enter Insert mode"),
-                ("Esc", "leave editor focus"),
-                (":w", "validate, save, apply"),
-                (":q", "discard buffer, leave"),
-                ("x", "delete character"),
-                ("u", "undo"),
-                ("Ctrl+r", "redo"),
-                ("q", "leave editor"),
-            ],
-        },
-        HelpSection {
             title: "PROJECT LIST & FILE TREE",
             scope: &[],
             entries: &[
