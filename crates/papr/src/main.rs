@@ -35,7 +35,7 @@ use terminal::TerminalSession;
 
 const DASHBOARD_CANDIDATE_LIMIT: u16 = 30;
 const DASHBOARD_DISPLAY_LIMIT: usize = 10;
-const DASHBOARD_FEED_ALGORITHM_VERSION: &str = "balanced-v2";
+const DASHBOARD_FEED_ALGORITHM_VERSION: &str = "balanced-v3";
 const METADATA_ENRICHMENT_CONCURRENCY: usize = 1;
 
 #[derive(Debug, Parser)]
@@ -2488,10 +2488,11 @@ struct KeywordMatch {
 /// Select a balanced, relevance-ranked daily dashboard feed.
 ///
 /// Each keyword receives a gentle, position-weighted representation target.
-/// Greedy selection maximizes coverage of still-unmet targets, then prefers
-/// papers matching more keywords and stronger title matches. A selected paper
-/// counts toward every keyword it matches, so cross-keyword papers are boosted
-/// rather than attributed to whichever bucket happened to be visited first.
+/// Greedy selection maximizes coverage of still-unmet targets, then uses a
+/// deterministic daily rank to rotate papers. A selected paper counts toward
+/// every keyword it matches, so cross-keyword papers are boosted rather than
+/// attributed to whichever bucket happened to be visited first. Title matches
+/// remain a tie-breaker after daily rotation.
 fn select_dashboard_papers(
     buckets: Vec<(String, Vec<RemotePaper>)>,
     limit: usize,
@@ -2576,9 +2577,9 @@ fn select_dashboard_papers(
                     coverage_keywords,
                     candidate.matches.len(),
                     weighted_coverage,
+                    candidate.daily_rank,
                     full_title_matches,
                     title_term_matches,
-                    candidate.daily_rank,
                     candidate.paper.id.as_str(),
                 )
             })
@@ -7658,6 +7659,29 @@ mod tests {
         assert_ne!(
             same_day.iter().take(10).map(|paper| &paper.id).collect::<Vec<_>>(),
             next_day.iter().take(10).map(|paper| &paper.id).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn keyword_dashboard_feed_rotates_selected_papers_each_day() {
+        let papers = (0..30)
+            .map(|index| remote_paper(&format!("https://arxiv.org/abs/{index}"), "Quantum result"))
+            .collect::<Vec<_>>();
+
+        let first_day = select_dashboard_papers(
+            vec![("quantum".into(), papers.clone())],
+            10,
+            "2026-07-19",
+        );
+        let next_day = select_dashboard_papers(
+            vec![("quantum".into(), papers)],
+            10,
+            "2026-07-20",
+        );
+
+        assert_ne!(
+            first_day.iter().map(|paper| &paper.id).collect::<Vec<_>>(),
+            next_day.iter().map(|paper| &paper.id).collect::<Vec<_>>(),
         );
     }
 
