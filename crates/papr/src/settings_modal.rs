@@ -1064,19 +1064,23 @@ fn render_theme_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
         .iter()
         .enumerate()
         .map(|(i, &name)| {
-            let selected = i == app.settings_modal.theme_selected;
-            let style = if selected && is_focused {
-                Style::default()
-                    .fg(theme.background)
-                    .bg(theme.accent)
-                    .add_modifier(Modifier::BOLD)
-            } else if selected {
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD)
+            let is_cursor = i == app.settings_modal.theme_selected;
+            let is_applied = name.eq_ignore_ascii_case(&app.settings_modal.original_theme);
+
+            let mut style = if is_cursor && is_focused {
+                Style::default().fg(theme.background).bg(theme.accent)
+            } else if is_cursor {
+                Style::default().fg(theme.accent)
+            } else if is_applied {
+                Style::default().fg(theme.accent)
             } else {
                 Style::default().fg(theme.text)
             };
+
+            if is_applied {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+
             let display = name
                 .split('-')
                 .map(|s| {
@@ -1088,7 +1092,12 @@ fn render_theme_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
                 })
                 .collect::<Vec<_>>()
                 .join(" ");
-            ListItem::new(Line::styled(format!("  {}  ", display), style))
+
+            let prefix = if is_cursor { "> " } else { "  " };
+            let suffix = if is_applied { " (Active)" } else { "" };
+            let label = format!("{}{}{}", prefix, display, suffix);
+
+            ListItem::new(Line::styled(label, style))
         })
         .collect();
 
