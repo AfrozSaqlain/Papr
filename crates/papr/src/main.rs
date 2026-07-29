@@ -219,6 +219,8 @@ async fn main() -> Result<()> {
         database,
         database_file: paths.database_file.clone(),
         config_file: paths.config_file.clone(),
+        plugins_dir: paths.plugins_dir.clone(),
+        plugin_host,
         project_manager,
         project_compiler: None,
         default_downloads_dir: paths.downloads_dir.clone(),
@@ -390,6 +392,8 @@ struct Runtime {
     database: Database,
     database_file: PathBuf,
     config_file: PathBuf,
+    plugins_dir: PathBuf,
+    plugin_host: PluginHost,
     project_manager: ProjectManager,
     project_compiler: Option<ProjectCompiler>,
     default_downloads_dir: PathBuf,
@@ -1209,7 +1213,7 @@ async fn run(
         }
         while let Ok(response) = index_receiver.try_recv() {
             state_changed = true;
-            apply_index_response(response, &mut runtime, &senders, app)?;
+            apply_index_response(response, &mut runtime, &senders, app).await?;
         }
         let mut any_enrichment_processed = false;
         while let Ok(MetadataEnrichment { paper_id, outcome }) = enrichment_receiver.try_recv() {
@@ -1271,7 +1275,7 @@ async fn run(
                 &mut runtime,
                 app,
                 &senders,
-            )?;
+            ).await?;
         }
         while let Ok(event) = app_events_receiver.try_recv() {
             state_changed = true;
@@ -1399,7 +1403,7 @@ async fn run(
                                 &mut pending_downloads,
                                 app,
                                 &mut theme,
-                            )?;
+                            ).await?;
                         }
                     } else if let Some(action) = handle_key(app, key) {
                         apply_ui_action(
@@ -1409,7 +1413,7 @@ async fn run(
                             &mut pending_downloads,
                             app,
                             &mut theme,
-                        )?;
+                        ).await?;
                     }
                 }
                 Event::Mouse(mouse) => {
@@ -1421,7 +1425,7 @@ async fn run(
                             &mut pending_downloads,
                             app,
                             &mut theme,
-                        )?;
+                        ).await?;
                     }
                 }
                 _ => {}
@@ -1444,7 +1448,7 @@ async fn run(
                                 &mut pending_downloads,
                                 app,
                                 &mut theme,
-                            )?;
+                            ).await?;
                         }
                     } else if let Some(action) = handle_key(app, key) {
                         apply_ui_action(
@@ -1454,7 +1458,7 @@ async fn run(
                             &mut pending_downloads,
                             app,
                             &mut theme,
-                        )?;
+                        ).await?;
                     }
                 }
                 Event::Mouse(mouse) => {
@@ -1466,7 +1470,7 @@ async fn run(
                             &mut pending_downloads,
                             app,
                             &mut theme,
-                        )?;
+                        ).await?;
                     }
                 }
                 _ => {}
@@ -1584,7 +1588,7 @@ async fn fetch_discovery_pages(
     }
 }
 
-fn apply_ui_action(
+async fn apply_ui_action(
     action: UiAction,
     runtime: &mut Runtime,
     senders: &ActionSenders,
@@ -1623,6 +1627,7 @@ fn apply_ui_action(
         UiAction::OpenPaper(paper) => {
             let paper_id = runtime.database.ensure_remote_paper(&paper)?;
             runtime.database.record_activity("paper_browsed", Some(paper_id), None)?;
+            dispatch_plugin_events(runtime, app, &["paper_opened"], paper_id).await?;
             refresh_dashboard(runtime, app)?;
             app.mode = AppMode::PaperDetail;
             app.paper_detail_scroll = 0;
@@ -1813,6 +1818,7 @@ fn apply_ui_action(
                 Some(session_id),
                 Some(senders.app_events.clone()),
             )?;
+            dispatch_plugin_events(runtime, app, &["paper_opened"], paper_id).await?;
             refresh_paper_views(runtime, app)?;
         }
         UiAction::OpenNote(target) => {
@@ -1820,6 +1826,7 @@ fn apply_ui_action(
             runtime
                 .database
                 .record_activity("note_opened", Some(paper_id), None)?;
+            dispatch_plugin_events(runtime, app, &["paper_opened"], paper_id).await?;
             refresh_dashboard(runtime, app)?;
             app.note_editor = Some(runtime.database.paper_note(paper_id)?);
             app.note_preview = false;
@@ -2282,6 +2289,85 @@ fn open_author(database: &Database, library_roots: &[PathBuf], app: &mut App, au
         0
     };
     app.last_opened_author_id = Some(author_id);
+    Ok(())
+}
+
+async fn dispatch_plugin_events(
+    runtime: &Runtime,
+    app: &mut App,
+    events: &[&str],
+    paper_id: i64,
+) -> Result<()> {
+    let Some(paper) = runtime.database.library_paper_by_id(paper_id)? else {
+        return Ok(());
+    };
+
+    let paper_json = serde_json::json!({
+        "id": paper.id,
+        "title": paper.title,
+        "authors": paper.authors,
+        "doi": paper.doi,
+        "arxiv_id": paper.arxiv_id,
+        "pdf_path": paper.pdf_path,
+        "reading_status": paper.reading_status,
+        "is_favorite": paper.is_favorite,
+    });
+
+    let enabled_plugins = runtime.plugin_host.plugins();
+    let mut organization_dirty = false;
+    let mut last_notify = None;
+
+    for plugin in enabled_plugins {
+        if !plugin.enabled {
+            continue;
+        }
+
+        for &event_name in events {
+            let request = papr_core::PluginRequest::new(
+                event_name,
+                serde_json::json!({
+                    "paper_id": paper.id,
+                    "paper": paper_json.clone(),
+                }),
+            );
+
+            match runtime
+                .plugin_host
+                .invoke(&plugin.id, &request, std::time::Duration::from_secs(5))
+                .await
+            {
+                Ok(response) => {
+                    for action in response.actions {
+                        match action {
+                            papr_core::PluginAction::Notify { message } => {
+                                last_notify = Some(message);
+                            }
+                            papr_core::PluginAction::AddToCollection { name } => {
+                                if let Err(err) = runtime.database.add_to_collection(paper.id, &name) {
+                                    eprintln!("Failed to add paper to collection '{name}': {err}");
+                                } else {
+                                    organization_dirty = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!("Plugin '{}' invocation failed: {err}", plugin.id);
+                }
+            }
+        }
+    }
+
+    if organization_dirty {
+        refresh_organization(&runtime.database, &runtime.library_roots, app)?;
+        refresh_library(runtime, app)?;
+    }
+
+    if let Some(msg) = last_notify {
+        app.toast = Some(msg);
+    }
+
     Ok(())
 }
 
@@ -3225,7 +3311,7 @@ fn start_silent_runtime_scan(runtime: &Runtime, senders: &ActionSenders, app: &m
     );
 }
 
-fn apply_index_response(
+async fn apply_index_response(
     response: IndexResponse,
     runtime: &mut Runtime,
     senders: &ActionSenders,
@@ -3247,6 +3333,7 @@ fn apply_index_response(
                         pdf,
                         &runtime.collection_roots,
                     )?;
+                    dispatch_plugin_events(runtime, app, &["paper_imported"], paper_id).await?;
                 }
             }
             runtime
@@ -3266,6 +3353,7 @@ fn apply_index_response(
                     &pdf,
                     &runtime.collection_roots,
                 )?;
+                dispatch_plugin_events(runtime, app, &["paper_imported"], paper_id).await?;
             }
             app.library.message = Some(if imported {
                 format!("Imported {}", pdf.title)
@@ -3478,7 +3566,7 @@ fn start_download(
     });
 }
 
-fn apply_download_event(
+async fn apply_download_event(
     event: DownloadEvent,
     pending: &mut HashMap<String, RemotePaper>,
     runtime: &mut Runtime,
@@ -3531,6 +3619,7 @@ fn apply_download_event(
                     &pdf,
                     &runtime.collection_roots,
                 )?;
+                dispatch_plugin_events(runtime, app, &["paper_downloaded", "paper_opened"], paper_id).await?;
             }
 
             // Project the completed download into every workspace before the next
@@ -5523,11 +5612,10 @@ fn apply_config_update(
     refresh_dashboard(runtime, app)?;
     refresh_downloads(runtime, app);
 
-    if let Ok(paths) = Paths::discover() {
-        if let Ok(plugin_host) = PluginHost::discover(&paths.plugins_dir, &config.enabled_plugins) {
-            app.plugins = plugin_host.plugins();
-            app.plugin_diagnostics = plugin_host.diagnostics().len();
-        }
+    if let Ok(plugin_host) = PluginHost::discover(&runtime.plugins_dir, &config.enabled_plugins) {
+        app.plugins = plugin_host.plugins();
+        app.plugin_diagnostics = plugin_host.diagnostics().len();
+        runtime.plugin_host = plugin_host;
     }
 
     if keywords_changed {
@@ -8003,6 +8091,8 @@ mod tests {
             database,
             database_file,
             config_file: temp_dir.join("papr.toml"),
+            plugins_dir: temp_dir.join("plugins"),
+            plugin_host: papr_core::PluginHost::discover(&temp_dir.join("plugins"), &[]).unwrap(),
             project_manager: papr_core::ProjectManager::new(temp_dir.join("projects"))?,
             project_compiler: None,
             default_downloads_dir: temp_dir.clone(),
@@ -8084,8 +8174,115 @@ mod tests {
             app_events: app_events_tx,
         };
 
-        super::apply_index_response(response, &mut runtime, &senders, &mut app)?;
+        super::apply_index_response(response, &mut runtime, &senders, &mut app).await?;
         assert_eq!(app.library.papers[0].title, "my old paper");
+
+        std::fs::remove_dir_all(&temp_dir)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_plugin_event_dispatch_and_auto_tagger_action() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::sync::mpsc;
+        use super::{Runtime, dispatch_plugin_events};
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "papr-plugin-dispatch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        let plugins_dir = temp_dir.join("plugins");
+        let auto_tagger_dir = plugins_dir.join("auto-tagger");
+        std::fs::create_dir_all(&auto_tagger_dir)?;
+
+        let manifest = r#"
+id = "auto-tagger"
+name = "Auto Tagger"
+version = "1.0.0"
+api_version = 1
+description = "Auto tagger test"
+executable = "tagger.py"
+capabilities = ["activity-events", "read-paper-metadata"]
+"#;
+        std::fs::write(auto_tagger_dir.join("plugin.toml"), manifest)?;
+
+        let script = r#"#!/usr/bin/env python3
+import json
+import sys
+
+req = json.load(sys.stdin)
+paper = req.get("context", {}).get("paper", {})
+title = paper.get("title", "").lower()
+
+actions = []
+if "neural" in title or "deep learning" in title:
+    actions.append({"type": "add_to_collection", "name": "Machine Learning"})
+    actions.append({"type": "notify", "message": "Tagged paper!"})
+
+print(json.dumps({"actions": actions}))
+"#;
+        let script_path = auto_tagger_dir.join("tagger.py");
+        std::fs::write(&script_path, script)?;
+        let mut perms = std::fs::metadata(&script_path)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms)?;
+
+        let plugin_host = papr_core::PluginHost::discover(&plugins_dir, &["auto-tagger".to_string()])?;
+        let database_file = temp_dir.join("papr.db");
+        let database = Database::open(&database_file)?;
+
+        let (watch_sender, watch_receiver) = mpsc::unbounded_channel();
+        let watcher = papr_core::library::LibraryWatcher::start(&[], || {}).unwrap();
+
+        let runtime = Runtime {
+            arxiv: papr_core::api::arxiv::ArxivClient::new().unwrap(),
+            crossref: papr_core::api::crossref::CrossrefClient::new(),
+            openalex: papr_core::api::openalex::OpenAlexClient::new(),
+            downloads: papr_core::downloads::DownloadManager::new().unwrap(),
+            database,
+            database_file,
+            config_file: temp_dir.join("papr.toml"),
+            plugins_dir: plugins_dir.clone(),
+            plugin_host,
+            project_manager: papr_core::ProjectManager::new(temp_dir.join("projects"))?,
+            project_compiler: None,
+            default_downloads_dir: temp_dir.clone(),
+            download_dir: temp_dir.clone(),
+            pdf_viewer: "xdg-open".into(),
+            primary_library_root: temp_dir.clone(),
+            library_roots: vec![temp_dir.clone()],
+            collection_roots: vec![temp_dir.clone()],
+            dashboard_keywords: vec![],
+            dashboard_keyword_signature: "".into(),
+            dashboard_feed_date: "".into(),
+            active_dashboard_fetch: None,
+            watch_sender,
+            watch_receiver,
+            _watcher: watcher,
+            active_enrichments: std::collections::HashSet::new(),
+            citation_index: None,
+            citation_source: papr_core::CitationSource::default(),
+        };
+
+        let pdf_path = temp_dir.join("neural_networks.pdf");
+        std::fs::write(&pdf_path, "%PDF-1.4 test")?;
+        let pdf = papr_core::library::LibraryIndexer::inspect_in_roots(&pdf_path, &[temp_dir.clone()])?;
+        runtime.database.import_pdf(&pdf)?;
+
+        let papers = runtime.database.library_papers()?;
+        assert!(!papers.is_empty());
+        let paper_id = papers[0].id;
+
+        let mut app = App::default();
+        dispatch_plugin_events(&runtime, &mut app, &["paper_opened"], paper_id).await?;
+
+        let collections = runtime.database.collections()?;
+        assert!(collections.iter().any(|c| c.name == "Machine Learning"));
+        assert_eq!(app.toast, Some("Tagged paper!".to_string()));
 
         std::fs::remove_dir_all(&temp_dir)?;
         Ok(())

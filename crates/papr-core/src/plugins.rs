@@ -261,8 +261,34 @@ impl PluginHost {
             .iter()
             .find(|plugin| plugin.enabled && plugin.manifest.id == id)
             .ok_or_else(|| PluginError::NotEnabled(id.to_owned()))?;
-        let mut child = Command::new(&plugin.executable)
-            .args(&plugin.manifest.args)
+        let ext = plugin.executable.extension().and_then(|e| e.to_str());
+        let mut cmd = match ext {
+            Some("py") => {
+                let mut c = Command::new("python3");
+                c.arg(&plugin.executable);
+                c.args(&plugin.manifest.args);
+                c
+            }
+            Some("js") => {
+                let mut c = Command::new("node");
+                c.arg(&plugin.executable);
+                c.args(&plugin.manifest.args);
+                c
+            }
+            Some("sh") => {
+                let mut c = Command::new("sh");
+                c.arg(&plugin.executable);
+                c.args(&plugin.manifest.args);
+                c
+            }
+            _ => {
+                let mut c = Command::new(&plugin.executable);
+                c.args(&plugin.manifest.args);
+                c
+            }
+        };
+
+        let mut child = cmd
             .env("PAPR_PLUGIN_ID", &plugin.manifest.id)
             .env("PAPR_PLUGIN_API_VERSION", PLUGIN_API_VERSION.to_string())
             .stdin(Stdio::piped())

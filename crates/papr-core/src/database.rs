@@ -360,6 +360,42 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Retrieve a single paper by its database ID formatted as a `LibraryPaper`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database query fails.
+    pub fn library_paper_by_id(&self, paper_id: i64) -> Result<Option<LibraryPaper>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT p.id, p.title,
+                    COALESCE((SELECT GROUP_CONCAT(a.name, ', ')
+                              FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
+                              WHERE pa.paper_id = p.id ORDER BY pa.position), ''),
+                    p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
+             FROM papers p
+             WHERE p.id = ?1",
+        )?;
+        let mut rows = statement.query_map([paper_id], |row| {
+            let file_size: Option<i64> = row.get(6)?;
+            Ok(LibraryPaper {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                authors: row.get(2)?,
+                doi: row.get(3)?,
+                arxiv_id: row.get(4)?,
+                pdf_path: row.get(5)?,
+                file_size: file_size.and_then(|size| u64::try_from(size).ok()),
+                reading_status: row.get(7)?,
+                is_favorite: row.get(8)?,
+            })
+        })?;
+        if let Some(row) = rows.next() {
+            Ok(Some(row?))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// List local PDF-backed papers whose files are inside the configured roots.
     ///
     /// # Errors
