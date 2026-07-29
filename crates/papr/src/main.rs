@@ -25,7 +25,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use papr_core::{
     App, AppMode, ArxivClient, CollectionDirectory, Command, Config, Database, DiscoveryStatus,
     DownloadEvent, DownloadManager, DownloadStatus, DownloadTask, ImportedPdf, LibraryIndexer,
-    LibraryWatcher, MetadataPrompt, PaperNote, Paths, PluginHost, RemotePaper, Theme, Project,
+    LibraryWatcher, MetadataPrompt, Page, PaperNote, Paths, PluginHost, RemotePaper, Theme, Project,
     CitationSource, CompletionSource, ProjectManager, ProjectPane,
 };
 use sha2::{Digest, Sha256};
@@ -176,7 +176,15 @@ async fn main() -> Result<()> {
         .map(|m| m.len())
         .unwrap_or(0);
 
+    let initial_page = Page::from_config_str(&config.startup_page).unwrap_or(Page::Dashboard);
+    let initial_sidebar_index = Page::ALL
+        .iter()
+        .position(|&p| p == initial_page)
+        .unwrap_or(0);
+
     let mut app = App {
+        page: initial_page,
+        sidebar_index: initial_sidebar_index,
         stats: dashboard.counts,
         dashboard,
         pdf_viewer: config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer),
@@ -1083,7 +1091,7 @@ async fn run(
     start_runtime_scan(&runtime, &senders, app);
     let mut last_date_check = std::time::Instant::now();
     let mut last_enrichment_check = std::time::Instant::now();
-    let mut last_page = app.page;
+    let mut last_page: Option<Page> = None;
     let mut last_toast = None;
     let mut last_pdf_page_cached = false;
     let mut force_redraw = true;
@@ -1282,10 +1290,10 @@ async fn run(
                 }
             }
         }
-        if app.page != last_page {
+        if Some(app.page) != last_page {
             app.workspace_query.clear();
             app.workspace_query_cursor = 0;
-            if last_page == papr_core::Page::Settings {
+            if last_page == Some(papr_core::Page::Settings) {
                 let original = app.settings_modal.original_theme.clone();
                 if !original.is_empty() && theme.name != original {
                     if let Ok(reverted) = Theme::load(&original) {
@@ -1307,7 +1315,7 @@ async fn run(
                     settings_modal::open_settings_modal(app, &config, &theme.name);
                 }
             }
-            last_page = app.page;
+            last_page = Some(app.page);
             state_changed = true;
         }
         if app.toast.is_some() {
@@ -5925,6 +5933,27 @@ mod tests {
         assert_eq!(app.mode, AppMode::Normal);
         assert_eq!(app.page, papr_core::Page::Settings);
         assert!(app.content_focused);
+    }
+
+    #[test]
+    fn test_startup_page_config_initializes_app_page_and_sidebar_index() {
+        let mut config = papr_core::Config::default();
+        config.startup_page = "reading_queue".into();
+
+        let initial_page = Page::from_config_str(&config.startup_page).unwrap_or(Page::Dashboard);
+        let initial_sidebar_index = Page::ALL
+            .iter()
+            .position(|&p| p == initial_page)
+            .unwrap_or(0);
+
+        let app = App {
+            page: initial_page,
+            sidebar_index: initial_sidebar_index,
+            ..App::default()
+        };
+
+        assert_eq!(app.page, Page::ReadingQueue);
+        assert_eq!(app.sidebar_index, 3);
     }
 
     #[test]

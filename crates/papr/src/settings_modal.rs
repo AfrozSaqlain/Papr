@@ -406,7 +406,6 @@ fn handle_general_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
                         .get(app.settings_modal.startup_page_selected)
                         .cloned()
                         .unwrap_or_default();
-                    return SettingsKeyResult::Apply;
                 }
             }
             KeyCode::Right | KeyCode::Char('l') => {
@@ -419,7 +418,6 @@ fn handle_general_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
                         .get(app.settings_modal.startup_page_selected)
                         .cloned()
                         .unwrap_or_default();
-                    return SettingsKeyResult::Apply;
                 }
             }
             KeyCode::Enter => return SettingsKeyResult::Apply,
@@ -1969,10 +1967,15 @@ mod tests {
         let key_right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
         let res = handle_settings_key(&mut app, key_right);
 
-        // Tab should remain General, while startup_page_selected advances to 1
+        // Tab should remain General, while startup_page_selected advances to 1 without saving immediately
         assert_eq!(app.settings_modal.tab, SettingsTab::General);
         assert_eq!(app.settings_modal.startup_page_selected, 1);
-        assert!(matches!(res, SettingsKeyResult::Apply));
+        assert!(matches!(res, SettingsKeyResult::Handled));
+
+        // Pressing Enter applies the selected startup page change
+        let key_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let res_enter = handle_settings_key(&mut app, key_enter);
+        assert!(matches!(res_enter, SettingsKeyResult::Apply));
     }
 
     #[test]

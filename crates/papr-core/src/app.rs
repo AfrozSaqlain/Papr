@@ -94,6 +94,50 @@ impl Page {
             Self::Credits => "Credits",
         }
     }
+
+    /// Parse a configuration string into a `Page`.
+    #[must_use]
+    pub fn from_config_str(s: &str) -> Option<Self> {
+        let normalized = s.trim().to_lowercase().replace('-', "_").replace(' ', "_");
+        match normalized.as_str() {
+            "dashboard" => Some(Self::Dashboard),
+            "discover" => Some(Self::Discover),
+            "library" => Some(Self::Library),
+            "reading_queue" | "readingqueue" => Some(Self::ReadingQueue),
+            "collections" | "groups" | "group" => Some(Self::Collections),
+            "bookmarks" | "bookmark" => Some(Self::Bookmarks),
+            "authors" | "author" => Some(Self::Authors),
+            "notes" | "note" => Some(Self::Notes),
+            "downloads" | "download" => Some(Self::Downloads),
+            "projects" | "project" => Some(Self::Projects),
+            "history" => Some(Self::History),
+            "statistics" | "stats" => Some(Self::Statistics),
+            "settings" => Some(Self::Settings),
+            "credits" => Some(Self::Credits),
+            _ => None,
+        }
+    }
+
+    /// Canonical configuration string representation for this page.
+    #[must_use]
+    pub const fn config_str(self) -> &'static str {
+        match self {
+            Self::Dashboard => "dashboard",
+            Self::Discover => "discover",
+            Self::Library => "library",
+            Self::ReadingQueue => "reading_queue",
+            Self::Collections => "collections",
+            Self::Bookmarks => "bookmarks",
+            Self::Authors => "authors",
+            Self::Notes => "notes",
+            Self::Downloads => "downloads",
+            Self::Projects => "projects",
+            Self::History => "history",
+            Self::Statistics => "statistics",
+            Self::Settings => "settings",
+            Self::Credits => "credits",
+        }
+    }
 }
 
 /// Current input focus.
@@ -1089,6 +1133,14 @@ pub struct InteractiveCreditItem {
 }
 
 impl App {
+    /// Set the active page and synchronize `sidebar_index`.
+    pub fn set_page(&mut self, page: Page) {
+        self.page = page;
+        if let Some(index) = Page::ALL.iter().position(|&p| p == page) {
+            self.sidebar_index = index;
+        }
+    }
+
     /// Returns the local PDF record for a remote paper when it has been downloaded.
     #[must_use]
     pub fn downloaded_remote_paper(&self, remote: &RemotePaper) -> Option<&LibraryPaper> {
@@ -1705,5 +1757,38 @@ mod tests {
         assert!(App::matches_query("RuSt", "rust compiler", "Authors", None, None));
         // Non-matching
         assert!(!App::matches_query("rust", "C++ compiler", "John Smith", None, None));
+    }
+
+    #[test]
+    fn test_page_from_config_str_and_set_page() {
+        assert_eq!(Page::from_config_str("dashboard"), Some(Page::Dashboard));
+        assert_eq!(Page::from_config_str("discover"), Some(Page::Discover));
+        assert_eq!(Page::from_config_str("library"), Some(Page::Library));
+        assert_eq!(Page::from_config_str("reading_queue"), Some(Page::ReadingQueue));
+        assert_eq!(Page::from_config_str("reading-queue"), Some(Page::ReadingQueue));
+        assert_eq!(Page::from_config_str("projects"), Some(Page::Projects));
+        assert_eq!(Page::from_config_str("collections"), Some(Page::Collections));
+        assert_eq!(Page::from_config_str("groups"), Some(Page::Collections));
+        assert_eq!(Page::from_config_str("bookmarks"), Some(Page::Bookmarks));
+        assert_eq!(Page::from_config_str("authors"), Some(Page::Authors));
+        assert_eq!(Page::from_config_str("notes"), Some(Page::Notes));
+        assert_eq!(Page::from_config_str("downloads"), Some(Page::Downloads));
+        assert_eq!(Page::from_config_str("history"), Some(Page::History));
+        assert_eq!(Page::from_config_str("statistics"), Some(Page::Statistics));
+        assert_eq!(Page::from_config_str("settings"), Some(Page::Settings));
+        assert_eq!(Page::from_config_str("credits"), Some(Page::Credits));
+        assert_eq!(Page::from_config_str("unknown_page"), None);
+
+        let mut app = App::default();
+        assert_eq!(app.page, Page::Dashboard);
+        assert_eq!(app.sidebar_index, 0);
+
+        app.set_page(Page::Projects);
+        assert_eq!(app.page, Page::Projects);
+        assert_eq!(app.sidebar_index, Page::ALL.iter().position(|&p| p == Page::Projects).unwrap());
+
+        app.set_page(Page::Discover);
+        assert_eq!(app.page, Page::Discover);
+        assert_eq!(app.sidebar_index, Page::ALL.iter().position(|&p| p == Page::Discover).unwrap());
     }
 }
