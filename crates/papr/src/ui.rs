@@ -3310,6 +3310,26 @@ fn render_terminal_command(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     } else {
         app.terminal_command_output.clone()
     };
+    let mut output_lines = Vec::new();
+    if !app.terminal_completions.is_empty() {
+        output_lines.push(Line::styled(
+            format!("Completions ({})", app.terminal_completions.len()),
+            Style::default().fg(theme.muted),
+        ));
+        output_lines.extend(app.terminal_completions.iter().enumerate().map(|(index, candidate)| {
+            let style = if app.terminal_completion_selected == Some(index) {
+                Style::default()
+                    .bg(theme.surface)
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.text)
+            };
+            Line::styled(format!("{} {candidate}", if app.terminal_completion_selected == Some(index) { "›" } else { " " }), style)
+        }));
+        output_lines.push(Line::raw(""));
+    }
+    output_lines.extend(output.lines().map(|line| Line::raw(line.to_owned())));
     let sections = Layout::vertical([
         Constraint::Min(4),
         Constraint::Length(2),
@@ -3317,7 +3337,7 @@ fn render_terminal_command(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     ])
     .split(area);
     frame.render_widget(
-        Paragraph::new(output)
+        Paragraph::new(output_lines)
             .wrap(Wrap { trim: false })
             .block(focus_block(" TERMINAL OUTPUT ", false, theme)),
         sections[0],
@@ -3337,7 +3357,10 @@ fn render_terminal_command(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         .min(app.terminal_command.len())]
         .chars()
         .count() as u16;
-    frame.set_cursor_position((sections[2].x.saturating_add(1 + cursor), sections[2].y + 1));
+    frame.set_cursor_position((
+        sections[2].x.saturating_add(1 + cursor),
+        sections[2].y + 1,
+    ));
 }
 
 fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {

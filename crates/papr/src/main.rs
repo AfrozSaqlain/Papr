@@ -3898,6 +3898,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         app.terminal_command_cursor = 0;
         app.terminal_command_output.clear();
         app.terminal_command_directory = app.active_project.as_ref().map(|project| project.path.clone());
+        reset_terminal_completion(app);
         return None;
     }
     // Help is a global command. Resolve it before any view-specific handler
@@ -3998,9 +3999,18 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.mode == AppMode::TerminalCommand {
         match key.code {
             KeyCode::Esc => app.mode = AppMode::Normal,
-            KeyCode::Enter => run_terminal_command(app),
-            KeyCode::Tab => complete_terminal_command(app),
+            KeyCode::Enter => {
+                if app.terminal_completion_selected.is_some() {
+                    apply_selected_terminal_completion(app);
+                    reset_terminal_completion(app);
+                } else {
+                    run_terminal_command(app);
+                }
+            }
+            KeyCode::Tab => complete_terminal_command(app, key.modifiers.contains(KeyModifiers::SHIFT)),
+            KeyCode::BackTab => complete_terminal_command(app, true),
             _ => {
+                reset_terminal_completion(app);
                 let _ = edit_text(
                     &mut app.terminal_command,
                     &mut app.terminal_command_cursor,
@@ -4256,6 +4266,7 @@ fn has_active_text_input(app: &App) -> bool {
 
 fn run_terminal_command(app: &mut App) {
     let command_text = app.terminal_command.trim().to_owned();
+    reset_terminal_completion(app);
     if command_text.is_empty() {
         return;
     }
@@ -4314,15 +4325,18 @@ fn run_terminal_command(app: &mut App) {
     app.terminal_command_cursor = 0;
 }
 
-fn complete_terminal_command(app: &mut App) {
+fn complete_terminal_command(app: &mut App, backwards: bool) {
+    if !app.terminal_completions.is_empty() {
+        cycle_terminal_completion(app, backwards);
+        return;
+    }
     let cursor = app.terminal_command_cursor.min(app.terminal_command.len());
     let before_cursor = &app.terminal_command[..cursor];
     let token_start = before_cursor
         .rfind(char::is_whitespace)
         .map_or(0, |index| index + 1);
     let token = &before_cursor[token_start..];
-    let completing_command = before_cursor[..token_start].trim().is_empty();
-    let candidates = if completing_command {
+    let candidates = if before_cursor[..token_start].trim().is_empty() {
         terminal_command_candidates(token)
     } else {
         terminal_path_candidates(token, app.terminal_command_directory.as_deref())
@@ -4330,27 +4344,58 @@ fn complete_terminal_command(app: &mut App) {
     if candidates.is_empty() {
         return;
     }
-
-    let replacement = if candidates.len() == 1 {
-        candidates[0].clone()
-    } else {
-        common_terminal_prefix(&candidates)
-    };
-    if replacement.len() > token.len() {
-        app.terminal_command
-            .replace_range(token_start..cursor, &replacement);
-        app.terminal_command_cursor = token_start + replacement.len();
-    }
-    if candidates.len() > 1 {
-        let displayed = candidates.into_iter().take(40).collect::<Vec<_>>().join("  ");
-        append_terminal_output(app, "<Tab>", &format!("Completions:\n{displayed}"));
+    app.terminal_completions = candidates;
+    app.terminal_completion_token_start = token_start;
+    app.terminal_completion_selected = Some(0);
+    app.terminal_completion_applied = false;
+    if app.terminal_completions.len() == 1 {
+        apply_selected_terminal_completion(app);
+        // A completed token is now the current input.  The next Tab must
+        // inspect that input rather than continuing this one-item session.
+        reset_terminal_completion(app);
     }
 }
 
+fn cycle_terminal_completion(app: &mut App, backwards: bool) {
+    let count = app.terminal_completions.len();
+    let Some(selected) = app.terminal_completion_selected else { return; };
+    let next = if !app.terminal_completion_applied {
+        if backwards { count.saturating_sub(1) } else { selected }
+    } else if backwards {
+        selected.checked_sub(1).unwrap_or(count.saturating_sub(1))
+    } else {
+        (selected + 1) % count
+    };
+    app.terminal_completion_selected = Some(next);
+    apply_selected_terminal_completion(app);
+}
+
+fn apply_selected_terminal_completion(app: &mut App) {
+    let Some(selected) = app.terminal_completion_selected else { return; };
+    let Some(candidate) = app.terminal_completions.get(selected).cloned() else { return; };
+    let start = app.terminal_completion_token_start;
+    let end = app.terminal_command_cursor.min(app.terminal_command.len());
+    if start > end {
+        reset_terminal_completion(app);
+        return;
+    }
+    app.terminal_command.replace_range(start..end, &candidate);
+    app.terminal_command_cursor = start + candidate.len();
+    app.terminal_completion_applied = true;
+}
+
+fn reset_terminal_completion(app: &mut App) {
+    app.terminal_completions.clear();
+    app.terminal_completion_selected = None;
+    app.terminal_completion_token_start = 0;
+    app.terminal_completion_applied = false;
+}
+
 fn terminal_command_candidates(prefix: &str) -> Vec<String> {
+    let normalized_prefix = prefix.to_lowercase();
     let mut candidates = ["cd", "clear"]
         .into_iter()
-        .filter(|command| command.starts_with(prefix))
+        .filter(|command| command.to_lowercase().starts_with(&normalized_prefix))
         .map(str::to_owned)
         .collect::<Vec<_>>();
     if let Some(path) = std::env::var_os("PATH") {
@@ -4358,11 +4403,13 @@ fn terminal_command_candidates(prefix: &str) -> Vec<String> {
             let Ok(entries) = std::fs::read_dir(directory) else { continue; };
             candidates.extend(entries.filter_map(Result::ok).filter_map(|entry| {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                name.starts_with(prefix).then_some(name)
+                name.to_lowercase()
+                    .starts_with(&normalized_prefix)
+                    .then_some(name)
             }));
         }
     }
-    candidates.sort();
+    sort_terminal_candidates(&mut candidates);
     candidates.dedup();
     candidates
 }
@@ -4375,22 +4422,22 @@ fn terminal_path_candidates(prefix: &str, directory: Option<&Path>) -> Vec<Strin
     let (search_directory, display_parent, name_prefix) = if let Some(path) = prefix.strip_prefix("~/") {
         let Some(home) = terminal_home_directory() else { return Vec::new(); };
         let typed_path = Path::new(path);
-        let parent = typed_path.parent().filter(|parent| !parent.as_os_str().is_empty());
-        let search_directory = parent.map_or_else(|| home.clone(), |parent| home.join(parent));
-        let display_parent = Some(parent.map_or_else(
+        let (parent, name_prefix) = terminal_path_parent_and_prefix(typed_path, path);
+        let search_directory = parent
+            .as_ref()
+            .map_or_else(|| home.clone(), |parent| home.join(parent));
+        let display_parent = Some(parent.as_ref().map_or_else(
             || "~".to_owned(),
             |parent| format!("~{}{}", std::path::MAIN_SEPARATOR, parent.display()),
         ));
-        let name_prefix = typed_path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
         (search_directory, display_parent, name_prefix)
     } else {
         let typed_path = Path::new(prefix);
-        let parent = typed_path.parent().filter(|parent| !parent.as_os_str().is_empty());
-        let search_directory = parent.map_or_else(|| working_directory.clone(), |parent| {
+        let (parent, name_prefix) = terminal_path_parent_and_prefix(typed_path, prefix);
+        let search_directory = parent.as_ref().map_or_else(|| working_directory.clone(), |parent| {
             if parent.is_absolute() { parent.to_path_buf() } else { working_directory.join(parent) }
         });
-        let display_parent = parent.map(Path::to_path_buf);
-        let name_prefix = typed_path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+        let display_parent = parent;
         (search_directory, display_parent.map(|parent| parent.display().to_string()), name_prefix)
     };
     let Ok(entries) = std::fs::read_dir(search_directory) else { return Vec::new(); };
@@ -4398,7 +4445,10 @@ fn terminal_path_candidates(prefix: &str, directory: Option<&Path>) -> Vec<Strin
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if !name.starts_with(name_prefix) {
+            if !name
+                .to_lowercase()
+                .starts_with(&name_prefix.to_lowercase())
+            {
                 return None;
             }
             let mut candidate = display_parent
@@ -4410,26 +4460,47 @@ fn terminal_path_candidates(prefix: &str, directory: Option<&Path>) -> Vec<Strin
             Some(candidate)
         })
         .collect::<Vec<_>>();
-    candidates.sort();
+    sort_terminal_candidates(&mut candidates);
     candidates
+}
+
+fn terminal_path_parent_and_prefix(path: &Path, raw: &str) -> (Option<PathBuf>, String) {
+    let has_trailing_separator = raw.ends_with('/') || raw.ends_with(std::path::MAIN_SEPARATOR);
+    if has_trailing_separator {
+        let parent = raw.trim_end_matches(|character| {
+            character == '/' || character == std::path::MAIN_SEPARATOR
+        });
+        let parent = if parent.is_empty() {
+            PathBuf::from(std::path::MAIN_SEPARATOR.to_string())
+        } else {
+            PathBuf::from(parent)
+        };
+        (Some(parent), String::new())
+    } else {
+        (
+            path.parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .map(Path::to_path_buf),
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_owned(),
+        )
+    }
+}
+
+fn sort_terminal_candidates(candidates: &mut [String]) {
+    candidates.sort_by(|left, right| {
+        left.to_lowercase()
+            .cmp(&right.to_lowercase())
+            .then_with(|| left.cmp(right))
+    });
 }
 
 fn terminal_home_directory() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
-}
-
-fn common_terminal_prefix(candidates: &[String]) -> String {
-    let Some(first) = candidates.first() else { return String::new(); };
-    candidates.iter().skip(1).fold(first.clone(), |prefix, candidate| {
-        prefix
-            .chars()
-            .zip(candidate.chars())
-            .take_while(|(left, right)| left == right)
-            .map(|(character, _)| character)
-            .collect()
-    })
 }
 
 fn change_terminal_directory(app: &mut App, path: &str) {
@@ -7285,10 +7356,82 @@ mod tests {
         app.terminal_command = "cat ref".into();
         app.terminal_command_cursor = app.terminal_command.len();
 
-        complete_terminal_command(&mut app);
+        complete_terminal_command(&mut app, false);
 
         assert_eq!(app.terminal_command, "cat references.bib");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn terminal_tab_lists_then_cycles_completion_candidates() {
+        let root = std::env::temp_dir().join(format!("papr-cycle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("alpha.tex"), "").unwrap();
+        std::fs::write(root.join("amber.tex"), "").unwrap();
+        let mut app = App::default();
+        app.terminal_command_directory = Some(root.clone());
+        app.terminal_command = "cat a".into();
+        app.terminal_command_cursor = app.terminal_command.len();
+
+        complete_terminal_command(&mut app, false);
+        assert_eq!(app.terminal_command, "cat a");
+        assert_eq!(app.terminal_completions, vec!["alpha.tex", "amber.tex"]);
+        complete_terminal_command(&mut app, false);
+        assert_eq!(app.terminal_command, "cat alpha.tex");
+        complete_terminal_command(&mut app, false);
+        assert_eq!(app.terminal_command, "cat amber.tex");
+        complete_terminal_command(&mut app, true);
+        assert_eq!(app.terminal_command, "cat alpha.tex");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn terminal_completion_is_case_insensitive_and_recomputes_after_accepting() {
+        let root = std::env::temp_dir().join(format!("papr-case-complete-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Documents")).unwrap();
+        std::fs::create_dir_all(root.join("Downloads")).unwrap();
+        std::fs::write(root.join("Documents").join("Alpha.tex"), "").unwrap();
+        std::fs::write(root.join("Documents").join("Beta.tex"), "").unwrap();
+        let mut app = App::default();
+        app.mode = AppMode::TerminalCommand;
+        app.terminal_command_directory = Some(root.clone());
+        app.terminal_command = "cp doc".into();
+        app.terminal_command_cursor = app.terminal_command.len();
+
+        complete_terminal_command(&mut app, false);
+        assert_eq!(app.terminal_command, "cp Documents/");
+        assert!(app.terminal_completions.is_empty());
+
+        complete_terminal_command(&mut app, false);
+        assert_eq!(app.terminal_command, "cp Documents/");
+        assert_eq!(app.terminal_completions, vec!["Documents/Alpha.tex", "Documents/Beta.tex"]);
+        complete_terminal_command(&mut app, false);
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.terminal_command, "cp Documents/Alpha.tex");
+        assert!(app.terminal_completions.is_empty());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn terminal_enter_accepts_a_completion_before_running() {
+        let mut app = App::default();
+        app.mode = AppMode::TerminalCommand;
+        app.terminal_command = "cle".into();
+        app.terminal_command_cursor = app.terminal_command.len();
+        app.terminal_completions = vec!["clear".into()];
+        app.terminal_completion_selected = Some(0);
+        app.terminal_completion_token_start = 0;
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.terminal_command, "clear");
+        assert!(app.terminal_command_output.is_empty());
+        assert!(app.terminal_completions.is_empty());
     }
 
     #[test]

@@ -830,6 +830,14 @@ pub struct App {
     pub terminal_command_output: String,
     /// Working directory for the terminal command palette session.
     pub terminal_command_directory: Option<std::path::PathBuf>,
+    /// Candidates currently shown by terminal completion.
+    pub terminal_completions: Vec<String>,
+    /// Highlighted terminal completion candidate.
+    pub terminal_completion_selected: Option<usize>,
+    /// Start of the token being completed in the terminal input.
+    pub terminal_completion_token_start: usize,
+    /// Whether the selected terminal completion has been inserted into input.
+    pub terminal_completion_applied: bool,
     /// Selected credits item row.
     pub credits_selected: usize,
     /// Vertical list scroll offset for credits list.
@@ -1049,6 +1057,10 @@ impl Default for App {
             terminal_command_cursor: 0,
             terminal_command_output: String::new(),
             terminal_command_directory: None,
+            terminal_completions: Vec::new(),
+            terminal_completion_selected: None,
+            terminal_completion_token_start: 0,
+            terminal_completion_applied: false,
             credits_selected: 0,
             credits_scroll: 0,
             workspace_query: String::new(),
