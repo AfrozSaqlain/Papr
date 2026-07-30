@@ -115,12 +115,19 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         ])
         .split(area);
     render_header(frame, rows[0], app, theme);
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(22), Constraint::Min(32)])
-        .split(rows[1]);
-    render_sidebar(frame, columns[0], app, theme);
-    render_content(frame, columns[1], app, theme);
+    let project_open = app.page == Page::Projects
+        && app.active_project.is_some()
+        && app.project_pane != ProjectPane::ProjectList;
+    if project_open {
+        render_projects(frame, rows[1], app, theme);
+    } else {
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(22), Constraint::Min(32)])
+            .split(rows[1]);
+        render_sidebar(frame, columns[0], app, theme);
+        render_content(frame, columns[1], app, theme);
+    }
     render_status(frame, rows[2], app, theme);
 
     match app.mode {
@@ -343,17 +350,16 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
         .as_ref()
         .expect("active project checked above");
     let (file_tree_area, editor_area, build_area, preview_area) = if app.pdf_viewer == "internal" {
-        let panes = Layout::horizontal([Constraint::Percentage(52), Constraint::Percentage(48)])
-            .split(area);
-        let left = Layout::vertical([
-            Constraint::Percentage(32),
-            Constraint::Min(5),
-            Constraint::Length(4),
+        let panes = Layout::horizontal([
+            Constraint::Length(22),
+            Constraint::Ratio(1, 2),
+            Constraint::Ratio(1, 2),
         ])
-        .split(panes[0]);
-        (left[0], left[1], left[2], Some(panes[1]))
+        .split(area);
+        let left = Layout::vertical([Constraint::Min(5), Constraint::Length(4)]).split(panes[0]);
+        (left[0], panes[1], left[1], Some(panes[2]))
     } else {
-        let panes = Layout::horizontal([Constraint::Length(30), Constraint::Min(10)]).split(area);
+        let panes = Layout::horizontal([Constraint::Length(22), Constraint::Min(10)]).split(area);
         let right = Layout::vertical([Constraint::Min(5), Constraint::Length(4)]).split(panes[1]);
         (panes[0], right[0], right[1], None)
     };
@@ -366,12 +372,20 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
             .to_string();
         ListItem::new(label)
     });
+    let file_tree_focused = app.content_focused && app.project_pane == ProjectPane::FileTree;
+    let tree_block = focus_block(" FILE TREE ", file_tree_focused, theme).title_bottom(
+        Line::styled(
+            " n new · ↵/→ open ",
+            if file_tree_focused {
+                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.muted)
+            },
+        )
+        .alignment(Alignment::Center),
+    );
     let tree = List::new(files)
-        .block(focus_block(
-            " FILES [ALT+1] — n NEW  ENTER OPEN  ESC PROJECTS ",
-            app.content_focused && app.project_pane == ProjectPane::FileTree,
-            theme,
-        ))
+        .block(tree_block)
         .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
         .highlight_symbol("› ");
     let mut state = ListState::default().with_selected(Some(app.project_file_selected));
@@ -3209,7 +3223,23 @@ fn render_dashboard_details(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
 }
 
 fn render_status(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
-    let line = Line::from(vec![
+    let line = if app.page == Page::Projects
+        && app.active_project.is_some()
+        && app.project_pane == ProjectPane::FileTree
+    {
+        Line::from(vec![
+            Span::styled(" n ", Style::default().fg(theme.background).bg(theme.accent)),
+            Span::styled(" new  ", Style::default().fg(theme.muted)),
+            Span::styled(
+                " enter/right ",
+                Style::default().fg(theme.background).bg(theme.secondary),
+            ),
+            Span::styled(" open  ", Style::default().fg(theme.muted)),
+            Span::styled(" esc ", Style::default().fg(theme.background).bg(theme.warning)),
+            Span::styled(" projects", Style::default().fg(theme.muted)),
+        ])
+    } else {
+        Line::from(vec![
         Span::styled(
             " j/k ",
             Style::default().fg(theme.background).bg(theme.accent),
@@ -3227,7 +3257,8 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme
         Span::styled(" help  ", Style::default().fg(theme.muted)),
         Span::styled(" q ", Style::default().fg(theme.background).bg(theme.error)),
         Span::styled(" quit", Style::default().fg(theme.muted)),
-    ]);
+        ])
+    };
     frame.render_widget(Paragraph::new(line), area);
     if let Some(toast) = &app.toast {
         frame.render_widget(

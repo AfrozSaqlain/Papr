@@ -479,6 +479,7 @@ struct ProjectCompiler {
     _watcher: RecommendedWatcher,
     pdf_changed: bool,
     build_succeeded: bool,
+    stopped: bool,
 }
 
 #[derive(Debug)]
@@ -490,22 +491,8 @@ enum ProjectBuildEvent {
 
 impl ProjectCompiler {
     fn start(project: Project) -> Result<Self> {
-        let mut child = ProcessCommand::new("latexmk")
-            .args(["-pdf", "-pvc", "-view=none", "main.tex"])
-            .current_dir(&project.path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("latexmk is not available; install a TeX distribution and latexmk")?;
         let (sender, events) = std_mpsc::channel();
-        if let Some(stdout) = child.stdout.take() {
-            spawn_latexmk_reader(stdout, sender.clone());
-        }
-        if let Some(stderr) = child.stderr.take() {
-            spawn_latexmk_reader(stderr, sender.clone());
-        }
-        let watch_sender = sender;
+        let watch_sender = sender.clone();
         let mut watcher = RecommendedWatcher::new(
             move |event: notify::Result<notify::Event>| {
                 if let Ok(event) = event
@@ -520,10 +507,60 @@ impl ProjectCompiler {
             NotifyConfig::default(),
         )?;
         watcher.watch(&project.path, RecursiveMode::NonRecursive)?;
-        Ok(Self { project, child, events, _watcher: watcher, pdf_changed: false, build_succeeded: false })
+
+        let mut command = ProcessCommand::new("latexmk");
+        command
+            .args(["-pdf", "-pvc", "-view=none", "main.tex"])
+            .current_dir(&project.path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+
+            // A dedicated group lets teardown include latexmk's active TeX
+            // subprocesses, which otherwise retain the captured output pipes.
+            command.process_group(0);
+        }
+        let mut child = command
+            .spawn()
+            .context("latexmk is not available; install a TeX distribution and latexmk")?;
+        if let Some(stdout) = child.stdout.take() {
+            spawn_latexmk_reader(stdout, sender.clone());
+        }
+        if let Some(stderr) = child.stderr.take() {
+            spawn_latexmk_reader(stderr, sender.clone());
+        }
+        Ok(Self {
+            project,
+            child,
+            events,
+            _watcher: watcher,
+            pdf_changed: false,
+            build_succeeded: false,
+            stopped: false,
+        })
     }
 
-    fn stop(&mut self) { let _ = self.child.kill(); let _ = self.child.wait(); }
+    fn stop(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
+        #[cfg(unix)]
+        {
+            let process_group = format!("-{}", self.child.id());
+            let _ = ProcessCommand::new("kill")
+                .args(["-KILL", "--", &process_group])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 
     /// Consume build and filesystem events. No filesystem metadata is polled.
     fn drain_events(&mut self, app: &mut App) -> bool {
@@ -566,6 +603,12 @@ impl ProjectCompiler {
             }
         }
         changed
+    }
+}
+
+impl Drop for ProjectCompiler {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -4128,6 +4171,18 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         }
         return None;
     }
+    if key.code == KeyCode::Esc {
+        if app.project_pane == ProjectPane::FileTree {
+            exit_project_view(app);
+        } else {
+            return_to_project_file_tree(app);
+        }
+        return None;
+    }
+    if app.project_pane == ProjectPane::FileTree && key.code == KeyCode::Left {
+        exit_project_view(app);
+        return None;
+    }
     // Save is mode-independent: handle it before Insert-mode text dispatch.
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
         save_project_editor(app);
@@ -4202,14 +4257,6 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                     app.mode = AppMode::ProjectRename;
                 }
             }
-            KeyCode::Esc | KeyCode::Left => {
-                if let Some(active) = &app.active_project
-                    && let Some(selected) = app.projects.iter().position(|project| project.path == active.path)
-                {
-                    app.projects_selected = selected;
-                }
-                app.project_pane = ProjectPane::ProjectList;
-            }
             KeyCode::Up | KeyCode::Char('k') => {
                 app.project_file_selected = app.project_file_selected.saturating_sub(1);
             }
@@ -4217,14 +4264,13 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 app.project_file_selected = (app.project_file_selected + 1)
                     .min(app.project_files.len().saturating_sub(1));
             }
-            KeyCode::Enter => {
+            KeyCode::Enter | KeyCode::Right => {
                 return app
                     .project_files
                     .get(app.project_file_selected)
                     .cloned()
                     .map(UiAction::OpenProjectFile);
             }
-            KeyCode::Right => {}
             _ => {}
         },
         ProjectPane::Build => handle_project_build_key(app, key),
@@ -4368,6 +4414,35 @@ fn save_project_editor(app: &mut App) -> bool {
     }
 }
 
+fn exit_project_view(app: &mut App) {
+    if app.project_editor_dirty && !save_project_editor(app) {
+        return;
+    }
+    if let Some(active) = &app.active_project
+        && let Some(selected) = app
+            .projects
+            .iter()
+            .position(|project| project.path == active.path)
+    {
+        app.projects_selected = selected;
+    }
+    app.project_editor_insert_mode = false;
+    app.project_completions.clear();
+    app.project_pane = ProjectPane::ProjectList;
+}
+
+fn return_to_project_file_tree(app: &mut App) {
+    if app.project_pane == ProjectPane::Editor
+        && app.project_editor_dirty
+        && !save_project_editor(app)
+    {
+        return;
+    }
+    app.project_editor_insert_mode = false;
+    app.project_completions.clear();
+    app.project_pane = ProjectPane::FileTree;
+}
+
 fn is_project_bibtex_paste_shortcut(key: KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL)
         && key.modifiers.contains(KeyModifiers::SHIFT)
@@ -4466,11 +4541,6 @@ fn handle_project_editor_normal_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::PageUp | KeyCode::PageDown => {
             move_project_editor_page(app, if key.code == KeyCode::PageUp { -1 } else { 1 });
-        }
-        KeyCode::Esc => {
-            if !app.project_editor_dirty || save_project_editor(app) {
-                app.project_pane = ProjectPane::FileTree;
-            }
         }
         _ => {}
     }
@@ -7133,6 +7203,45 @@ mod tests {
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         assert!(!app.content_focused);
         assert_eq!(app.projects_selected, 1);
+    }
+
+    #[test]
+    fn escape_returns_to_file_tree_before_exiting_the_project() {
+        let mut app = project_editor_app("abc", 1);
+        let active = app.active_project.clone().unwrap();
+        app.projects = vec![
+            Project { name: "other".into(), path: "other".into(), opened_at: 0 },
+            active,
+        ];
+        app.projects_selected = 0;
+
+        for pane in [ProjectPane::Editor, ProjectPane::Build, ProjectPane::Preview] {
+            app.project_pane = pane;
+            app.project_editor_insert_mode = pane == ProjectPane::Editor;
+
+            let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+            assert_eq!(app.project_pane, ProjectPane::FileTree);
+            assert!(app.content_focused);
+            assert!(!app.project_editor_insert_mode);
+        }
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.project_pane, ProjectPane::ProjectList);
+        assert!(app.content_focused);
+        assert_eq!(app.projects_selected, 1);
+    }
+
+    #[test]
+    fn file_tree_right_arrow_opens_the_selected_file() {
+        let mut app = project_editor_app("", 0);
+        let file = std::path::PathBuf::from("keyboard-test/references.bib");
+        app.project_pane = ProjectPane::FileTree;
+        app.project_files = vec![file.clone()];
+
+        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        assert!(matches!(action, Some(UiAction::OpenProjectFile(path)) if path == file));
     }
 
     #[test]
