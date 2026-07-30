@@ -24,17 +24,17 @@ Papr is implemented in Rust to meet the performance, reliability, and security d
 ## 🚀 Key Features
 
 ### Discovery & Organization
-* **Integrated arXiv Search:** Search the arXiv repository by title, author, category, abstract, or DOI. View full metadata, category listings, and journal references directly.
+* **Integrated arXiv Search:** Search arXiv by title, author, category, abstract, or DOI. Results load incrementally, can be filtered in place, and retain cached pages for back/forward browsing.
 * **Automatic Title Sanitization:** Background downloads are saved with clean, cross-platform filenames rather than opaque arXiv identifiers.
 * **Smart Deduplication:** Resolves database conflicts (arXiv ID, file path, DOI) by automatically merging records (preserving notes, bookmarks, and progress) during downloads and scans.
 * **Workspace Syncing:** Move papers into groups within the TUI to automatically reorganize files on your disk.
-* **Storage Statistics:** Monitor reading times, streaks, and disk usage through the built-in dashboard. Folders are canonicalized to prevent duplicate PDF counts.
+* **Daily Research Dashboard:** Monitor reading times, streaks, disk usage, and a cached daily arXiv recommendation feed. Use normalized, comma-separated interests to tailor the feed; it remains available offline after it has been cached.
 
 ### Reading & Note-taking
 * **Built-in Terminal PDF Viewer:** View papers directly in your terminal with high-performance smooth scrolling (requires Kitty or Sixel graphics support).
 * **External Viewer Support:** Seamlessly launch PDFs in your preferred desktop viewer (e.g., Zathura, Okular) with reading time tracked.
 * **Markdown Annotation:** Write dedicated notes for each paper with a built-in Vim-inspired editor and live styled preview.
-* **Reading Queue:** Prioritize your backlog with a dedicated, sortable reading queue (supports reordering with `K`/`J` or `Shift`/`Ctrl` + `Up`/`Down`).
+* **Reading Queue:** Prioritize your backlog with a dedicated, sortable reading queue (reorder with `Shift`/`Ctrl` + `Up`/`Down`).
 
 ### LaTeX Integration
 * **Integrated Writing Workspace:** Create, edit, and compile LaTeX manuscripts directly within the TUI.
@@ -42,7 +42,7 @@ Papr is implemented in Rust to meet the performance, reliability, and security d
 * **Split-pane View:** Side-by-side terminal PDF preview, file tree, source editor, and build logs.
 
 ### Extensibility
-* **Process-Isolated Plugins:** Extend functionality via language-agnostic plugins communicating over a versioned JSON RPC protocol.
+* **Process-Isolated Plugins:** Extend workflows with language-agnostic, versioned JSON plugins. Papr ships an opt-in auto-tagger and safely bounds every plugin invocation.
 
 ---
 
@@ -139,7 +139,7 @@ xcode-select --install
 ```
 Then, install the remaining dependencies using Homebrew:
 ```sh
-brew install poppler wl-clipboard basictex git
+brew install poppler basictex git
 ```
 </details>
 
@@ -217,7 +217,7 @@ Here is a complete breakdown of every section in Papr, what it does, and how to 
 | **Dashboard** | Serves as your main research overview. Displays reading statistics, streaks, disk storage usage, and a daily arXiv paper feed. | This is the default home screen. Set `dashboard_keywords` in `config.toml` to customize your feed. |
 | **Discover** | Allows you to search the online arXiv paper repository by title, author, category, abstract, or DOI. | Press `/` to focus search, type query and press `Enter`. Scroll results with `j`/`k`, press `Enter` for details, `d` to download. |
 | **Library** | Indexes and lists all local PDF files stored within your configured library directories. | Press `r` to scan folders. Select any paper and press `Enter` to view PDF, `n` for notes, `g` for groups, `B` for bookmarks, `R` to rename. |
-| **Reading Queue** | Prioritized backlog where you manage papers you plan to read next. | Press `a` on any paper to queue/dequeue. Reorder priority using `K` (up) / `J` (down) or `Shift`/`Ctrl` + `Up`/`Down`. |
+| **Reading Queue** | Prioritized backlog where you manage papers you plan to read next. | Press `a` on any paper to queue/dequeue. Reorder priority using `Shift`/`Ctrl` + `Up`/`Down`. |
 | **Groups** | Organizes your papers into filesystem-synced folders (collections). | Press `g` on a paper to assign it to a group. Papr automatically creates the folder on disk and moves the PDF. |
 | **Bookmarks** | Collects all papers you have marked as bookmarked for quick retrieval. | Press `B` on any paper across any workspace to toggle its bookmark status. |
 | **Authors** | Automatically groups all papers in your local library by author name. | Select an author from the list to view all papers written by them in your collection. |
@@ -226,7 +226,7 @@ Here is a complete breakdown of every section in Papr, what it does, and how to 
 | **Projects** | Integrated LaTeX writing workspace with background `latexmk` compilation and split-pane PDF preview. | Press `n` to create a project. Use `Alt+1` (File Tree), `Alt+2` (Editor with Vim mode), `Alt+3` (PDF Preview), `Alt+4` (Build Logs). |
 | **History** | Logs a chronological timeline of your recent activity, searches, downloads, and project builds. | Scroll through past actions to re-open papers or review past search terms. |
 | **Statistics** | Analytics on reading habits, total time, paper completion counts, and a 12-week reading activity heatmap. | Track your research productivity and reading habits over time. |
-| **Settings** | Displays resolved system paths, loaded configuration settings, active themes, and discovered plugins. | Edit `config.toml` directly using the embedded editor to tweak preferences. |
+| **Settings** | An interactive settings workspace for preferences, paths, themes, and plugins. | Open it from the sidebar. Its Theme tab previews built-in themes live; General and Paths stage configuration values; Plugins enables or disables discovered plugins. Press `Enter` to apply changes or `Esc` to return to the sidebar. |
 | **Credits** | Displays information about Papr's version, maintainers, open-source license, and core dependencies. | View application version metadata and component attribution. |
 
 ---
@@ -287,17 +287,19 @@ papr paths
 ```
 
 ### Path Locations
-| OS | Configuration File | Database & Data | Projects Directory |
+| OS | Configuration File | Database, Downloads & Plugins | Projects Directory |
 | :--- | :--- | :--- | :--- |
 | **Linux** | `~/.config/papr/config.toml` | `~/.local/share/papr/` | `~/.local/share/papr/projects/` |
 | **macOS** | `~/Library/Application Support/papr/config.toml` | `~/Library/Application Support/papr/` | `~/Library/Application Support/papr/projects/` |
 | **Windows** | `%APPDATA%\papr\config.toml` | `%APPDATA%\papr\` | `%APPDATA%\papr\projects\` |
 
+`papr paths` prints the exact configuration file, SQLite database, downloads, plugins, and projects paths resolved on your machine.
+
 ### Example `config.toml`
 ```toml
 theme = "catppuccin-mocha"
-startup_page = "dashboard"
-pdf_viewer = "internal" # Use "internal" for the built-in terminal viewer, or a custom desktop viewer e.g. "zathura {path}"
+startup_page = "dashboard" # dashboard, discover, library, reading_queue, projects, and the other sidebar pages
+pdf_viewer = "zathura {path}" # Or "internal" for the terminal viewer; omit {path} to append the PDF path
 
 # Paths to recursively scan for local PDFs
 library_folders = [
@@ -311,11 +313,15 @@ download_path = "/home/user/Documents/papers"
 # Default directory used to create and discover LaTeX writing projects
 projects_directory = "/home/user/Documents/projects"
 
-# Comma-separated interests to populate the Dashboard arXiv feed
+# Comma-separated interests to populate the daily Dashboard arXiv feed
 dashboard_keywords = "machine learning, gravitational waves, astrophysics"
 
 enabled_plugins = []
 ```
+
+All eight keys shown above are the current configuration surface. On first launch Papr writes this file with `library_folders` and `download_path` set to its default downloads directory, `projects_directory` set to its default projects directory, and a platform default viewer (`xdg-open` on Linux, `open` on macOS, or `cmd /C start msedge \"\"` on Windows). Existing configurations that lack `projects_directory` are upgraded automatically. `dashboard_keywords` is case-insensitive, whitespace-normalized, and deduplicated before Papr fetches the daily feed.
+
+The Settings workspace can edit built-in themes, startup page, PDF viewer, dashboard interests, paths, and the enabled-plugin list without leaving Papr. For a custom theme file, edit `config.toml` directly.
 
 ### PDF Viewers & Reading Time
 To track reading sessions and statistics, Papr must be able to track the viewer's process.
@@ -334,21 +340,21 @@ To track reading sessions and statistics, Papr must be able to track the viewer'
 | `Enter` / `l` / `Right` | Open selected item, section, or paper |
 | `Left` | Return focus to sidebar |
 | `h` / `Esc` | Go back to previous screen |
-| `u` | Mark paper as unread |
-| `a` | Toggle paper queue/dequeue |
 | `/` | Start arXiv search |
 | `Ctrl+B` | Open Browse Papr (Fast navigation command palette) |
 | `?` | Toggle help |
-| `q` | Close active popups or exit application |
+| `q` | Exit the application outside text input |
 
-### Discovery
+### Discovery & Dashboard
 | Key | Action |
 | :--- | :--- |
 | `Enter` | Open details page for selected search result |
 | `Ctrl+Right` / `Ctrl+Left` | Browse next/previous page |
 | `d` | Download PDF |
+| `c` | Copy citation |
 | `o` | Open paper webpage in default browser |
 | `r` | Refresh/retry search |
+| `>` | Filter the loaded results |
 
 ### Paper Management (Library, Queue, Groups, Bookmarks, Notes, Downloads)
 | Key | Action |
@@ -362,6 +368,8 @@ To track reading sessions and statistics, Papr must be able to track the viewer'
 | `R` | Rename PDF or group |
 | `x` | Delete PDF or group |
 | `c` | Copy citation |
+| `o` | Open the paper's arXiv page (when available) |
+| `a` / `u` | Toggle the reading queue / mark a paper unread |
 
 ### LaTeX Workspace
 
@@ -389,8 +397,14 @@ To track reading sessions and statistics, Papr must be able to track the viewer'
 | `h`/`j`/`k`/`l`, `w`/`b`, `0`/`$` | Vim motions in Normal mode |
 
 ### Internal PDF Viewer & Markdown Editor
-* **PDF Viewer:** `Esc`/`q` to exit, `j`/`k` or `PageDown`/`PageUp` to scroll.
+* **PDF Viewer:** `Esc`/`q` to exit; use `j`/`k`, `Up`/`Down`, `PageDown`/`PageUp`, or the mouse wheel to scroll.
 * **Markdown Editor:** `Tab` toggles styled preview, `Esc` saves and exits.
+
+### Settings Workspace
+* **Tabs:** `Left`/`Right` switch among Theme, General, Paths, and Plugins when the tab bar is focused; `Down`/`j`/`Enter` enters a tab.
+* **Theme:** `j`/`k` previews built-in themes live; `Enter` applies the staged settings.
+* **Lists:** In dashboard keywords and path lists, `a` adds, `d`/`Delete` removes, and `K`/`J` reorders entries. In the Plugins tab, `Space` toggles the selected plugin.
+* **Apply and leave:** `Enter` writes and applies all staged changes. `Esc` stops editing a field, or returns focus to the sidebar when no field is being edited.
 
 ---
 
@@ -408,16 +422,16 @@ theme = "/home/user/.config/papr/my-theme.toml"
 
 ## 🧩 Plugins
 
-Papr supports **process-isolated plugins** written in any language (Python, Node.js, Bash, etc.). Plugins interact via JSON RPC over `stdin`/`stdout`, enabling deep customization without compromising core stability. 
+Papr supports **process-isolated plugins** written in any language (Python, Node.js, Bash, or an executable). A bundle lives under the plugins directory printed by `papr paths`, contains `plugin.toml`, and exchanges one JSON request and response over standard input/output. A plugin must be explicitly named in `enabled_plugins` before Papr runs it.
 
-Papr includes **one built-in plugin (`auto-tagger`)** which is automatically created in your plugin directory on first launch.
+Papr creates the built-in **auto-tagger** bundle when the plugins directory has no plugin bundles. It is discovered but disabled by default. The Settings → Plugins tab, `enabled_plugins` in `config.toml`, and `papr plugins` all show its status and any discovery diagnostics.
 
-Plugins can inject scholarly metadata, hook into lifecycle events (e.g. `paper_imported`, `paper_downloaded` for auto-tagging), or register custom UI commands. See the [Plugins Documentation](docs/PLUGINS.md) for full details.
+Papr currently dispatches lifecycle requests for `paper_imported`, `paper_downloaded`, and `paper_opened`. Plugins can return `notify` and `add_to_collection` actions; the latter assigns the contextual local paper to a Group. The manifest also declares the protocol capabilities (`metadata-provider`, `commands`, `activity-events`, and `read-paper-metadata`). See the [plugin protocol reference](docs/PLUGINS.md) for the manifest and JSON contract.
 
 <details>
 <summary><b>Click to view the Built-In Python plugin (Auto Tagger)</b></summary>
 
-This plugin categorizes papers into a "Machine Learning" group when papers are imported or downloaded if the title matches certain keywords.
+This plugin categorizes newly imported or downloaded papers from their titles. Its supplied rules create **Machine Learning**, **Quantum Computing**, or **Computer Systems & Networking** groups; the first matching rule wins. Edit `RULES` in the generated script to tailor it.
 
 **1. Plugin Location**
 Papr automatically populates built-in plugins at `~/.local/share/papr/plugins/auto-tagger`:
@@ -445,8 +459,8 @@ Auto Tagger Plugin for Papr
 User Customization:
 To add your own groups and filter rules, edit the `RULES` list below.
 Each rule consists of:
-  - "group": Name of the group in Papr (e.g. "Machine Learning", "Quantum Computing")
-  - "keywords": Regex patterns with word boundaries (\b) to avoid accidental substring matches.
+  - "group": The name of the group in Papr
+  - "keywords": Keyword, keyphrase, or regex patterns matched against titles.
 """
 
 import json
@@ -472,6 +486,15 @@ RULES = [
             r"\bquantum computing\b",
             r"\bqubits?\b",
             r"\bquantum algorithms?\b",
+        ],
+    },
+    {
+        "group": "Computer Systems & Networking",
+        "keywords": [
+            r"\bdistributed systems?\b",
+            r"\boperating systems?\b",
+            r"\bcloud computing\b",
+            r"\bcomputer networks?\b",
         ],
     },
 ]
@@ -607,7 +630,7 @@ papr paths                   # Print where configs, databases, and folders resid
 papr index                   # Scan library folders and index new files
 papr completions <SHELL>     # Generate completions (bash, zsh, fish)
 papr plugins                 # Check discovered plugins and validation diagnostics
-papr plugin <ID> <EVENT>     # Run plugin events manually for testing
+papr plugin <ID> <EVENT>     # Invoke an enabled plugin with an empty context (use --timeout <seconds> to override 10s)
 ```
 
 ---
