@@ -1428,6 +1428,9 @@ async fn run(
                         ).await?;
                     }
                 }
+                Event::Paste(text) => {
+                    handle_project_bibtex_paste(app, &text);
+                }
                 _ => {}
             }
         }
@@ -1472,6 +1475,9 @@ async fn run(
                             &mut theme,
                         ).await?;
                     }
+                }
+                Event::Paste(text) => {
+                    handle_project_bibtex_paste(app, &text);
                 }
                 _ => {}
             }
@@ -4127,6 +4133,15 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         save_project_editor(app);
         return None;
     }
+    if is_project_bibtex_paste_shortcut(key) && is_project_bibtex_editor(app) {
+        match read_clipboard_text() {
+            Some(text) if !text.is_empty() => {
+                handle_project_bibtex_paste(app, &text);
+            }
+            _ => app.toast = Some("Clipboard does not contain text to paste.".into()),
+        }
+        return None;
+    }
     if app.project_pane == ProjectPane::Editor && app.project_editor_insert_mode {
         if !app.project_completions.is_empty() {
             match key.code {
@@ -4351,6 +4366,63 @@ fn save_project_editor(app: &mut App) -> bool {
             false
         }
     }
+}
+
+fn is_project_bibtex_paste_shortcut(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.modifiers.contains(KeyModifiers::SHIFT)
+        && matches!(key.code, KeyCode::Char('v' | 'V'))
+}
+
+fn is_project_bibtex_editor(app: &App) -> bool {
+    app.page == Page::Projects
+        && app.content_focused
+        && app.project_pane == ProjectPane::Editor
+        && app.project_editor_path.as_ref().is_some_and(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("bib"))
+        })
+}
+
+/// Inserts terminal-paste text without normalizing its whitespace or entries.
+/// Returns whether the paste was accepted for the active editor.
+fn handle_project_bibtex_paste(app: &mut App, text: &str) -> bool {
+    if !is_project_bibtex_editor(app) || text.is_empty() {
+        return false;
+    }
+
+    insert_project_bibtex_text(app, text);
+    save_project_editor(app)
+}
+
+fn insert_project_bibtex_text(app: &mut App, text: &str) {
+    app.project_editor_text
+        .insert_str(app.project_editor_cursor, text);
+    app.project_editor_cursor += text.len();
+    app.project_editor_dirty = true;
+    app.project_completions.clear();
+}
+
+fn read_clipboard_text() -> Option<String> {
+    if let Ok(mut clipboard) = arboard::Clipboard::new()
+        && let Ok(text) = clipboard.get_text()
+    {
+        return Some(text);
+    }
+
+    for (program, args) in [
+        ("wl-paste", &["--no-newline"][..]),
+        ("xclip", &["-selection", "clipboard", "-o"][..]),
+        ("pbpaste", &[][..]),
+    ] {
+        if let Ok(output) = ProcessCommand::new(program).args(args).output()
+            && output.status.success()
+            && let Ok(text) = String::from_utf8(output.stdout)
+        {
+            return Some(text);
+        }
+    }
+    None
 }
 
 /// Projects intentionally uses the same movement primitives as Settings.  The
@@ -5974,6 +6046,7 @@ mod tests {
         handle_config_editor_insert_key, handle_downloads_key, handle_key, handle_paper_detail_key, parse_command,
         keyword_representation_targets, move_config_editor_page, refresh_downloads_from_dir,
         accept_project_completion, create_project_file, is_project_text_file, project_files,
+        insert_project_bibtex_text,
         reload_config_editor_buffer, select_dashboard_papers, shuffle_daily_bucket,
         update_project_completions, merge_enriched_remote_paper, PaperTarget,
     };
@@ -6682,6 +6755,18 @@ mod tests {
         assert_eq!(app.project_editor_cursor, 3);
         assert!(app.project_editor_insert_mode);
         assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn bibtex_paste_preserves_the_clipboard_text_exactly() {
+        let citation = "@article{doe2026,\n  title = {Exact {BibTeX} Formatting},\n  author = {Doe, Jane},\n}\n";
+        let mut app = project_editor_app("before\nafter", "before\n".len());
+
+        insert_project_bibtex_text(&mut app, citation);
+
+        assert_eq!(app.project_editor_text, format!("before\n{citation}after"));
+        assert_eq!(app.project_editor_cursor, "before\n".len() + citation.len());
+        assert!(app.project_editor_dirty);
     }
 
     #[test]

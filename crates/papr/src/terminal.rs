@@ -3,7 +3,7 @@
 use std::io::{self, Stdout};
 
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -19,12 +19,12 @@ impl TerminalSession {
     pub fn start() -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste) {
             let _ = disable_raw_mode();
             return Err(error);
         }
         if let Err(error) = execute!(stdout, EnableMouseCapture) {
-            let _ = execute!(stdout, LeaveAlternateScreen);
+            let _ = execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen);
             let _ = disable_raw_mode();
             return Err(error);
         }
@@ -50,7 +50,11 @@ impl TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), DisableMouseCapture);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            DisableBracketedPaste,
+            DisableMouseCapture
+        );
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
         let _ = execute!(
             self.terminal.backend_mut(),
