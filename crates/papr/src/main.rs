@@ -4941,8 +4941,10 @@ fn handle_project_build_key(app: &mut App, key: KeyEvent) {
 
 fn handle_project_preview_key(app: &mut App, key: KeyEvent) {
     match key.code {
-        KeyCode::Up => pdf_viewer::jump_to_page(app, app.pdf_viewer_page.saturating_sub(1)),
-        KeyCode::Down => pdf_viewer::jump_to_page(
+        KeyCode::Up | KeyCode::PageUp => {
+            pdf_viewer::jump_to_page(app, app.pdf_viewer_page.saturating_sub(1));
+        }
+        KeyCode::Down | KeyCode::PageDown => pdf_viewer::jump_to_page(
             app,
             (app.pdf_viewer_page + 1).min(app.pdf_viewer_total_pages.max(1)),
         ),
@@ -8082,6 +8084,10 @@ mod tests {
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(app.pdf_viewer_page, 2);
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.pdf_viewer_page, 3);
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.pdf_viewer_page, 4);
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
         assert_eq!(app.pdf_viewer_page, 3);
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         assert_eq!(app.pdf_viewer_page, 5);

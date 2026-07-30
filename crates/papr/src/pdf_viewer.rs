@@ -42,7 +42,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use anyhow::{Context, Result};
-use image::{DynamicImage, RgbaImage};
+use image::{DynamicImage, Rgba, RgbaImage};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
@@ -98,6 +98,9 @@ struct CropKey {
     pixel_w: u32,
     crop_y: u32,
     crop_h: u32,
+    /// The embedded project preview displays a fitted full page instead of a
+    /// scroll crop, so it must not reuse an encoded scroll-mode frame.
+    page_fit: bool,
 }
 
 /// The result of one encode pass: the Kitty escape string that uploads the
@@ -561,6 +564,9 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             return;
         }
     };
+    let page_fit = app.page == papr_core::Page::Projects
+        && app.active_project.is_some()
+        && app.pdf_viewer == "internal";
 
     // Layout
     let chunks = Layout::default()
@@ -617,7 +623,8 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
         g.last_viewport_h = pixel_h;
 
-        // Run smooth scroll physics
+        // The embedded Project preview is a discrete page viewer.  Its
+        // fullscreen counterpart keeps the existing smooth scrolling model.
         let now = std::time::Instant::now();
         let dt = g.last_update.map(|t| (now - t).as_secs_f64()).unwrap_or(0.0);
         g.last_update = Some(now);
@@ -625,7 +632,10 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let total_pages = app.pdf_viewer_total_pages;
         let default_h = pixel_h as f64 * 1.5;
 
-        if dt > 0.0 {
+        if page_fit {
+            g.target_scroll_px = 0.0;
+            g.current_scroll_px = 0.0;
+        } else if dt > 0.0 {
             let target_rel = to_relative_px(
                 g.target_page, g.target_scroll_px, g.current_page, &g.pages, default_h,
             );
@@ -712,8 +722,8 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     let page_h = page_data.pixel_h;
     app.pdf_viewer_page_pixel_h = page_h;
-    let max_scroll_px = page_h.saturating_sub(pixel_h);
-    let scroll_px = (current_scroll_px_val as u32).min(page_h);
+    let max_scroll_px = if page_fit { 0 } else { page_h.saturating_sub(pixel_h) };
+    let scroll_px = if page_fit { 0 } else { (current_scroll_px_val as u32).min(page_h) };
     let max_scroll_cells = max_scroll_px / (font_h as u32);
     app.pdf_viewer_max_scroll_y = max_scroll_cells;
 
@@ -725,13 +735,16 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         pixel_w,
         crop_y: scroll_px,
         crop_h: pixel_h,
+        page_fit,
     };
 
     let need_encode = last_crop_key.as_ref() != Some(&crop_key);
 
     if need_encode || !last_encoded_is_some {
         // Crop/stitch the pixel data
-        let cropped = if scroll_px + pixel_h > page_h && current_page < app.pdf_viewer_total_pages {
+        let cropped = if page_fit {
+            fit_page_to_viewport(&page_data.image, pixel_w, pixel_h)
+        } else if scroll_px + pixel_h > page_h && current_page < app.pdf_viewer_total_pages {
             if let Some(next_page) = next_page_data_opt {
                 crop_and_stitch(&page_data.image, &next_page.image, scroll_px, pixel_h)
             } else {
@@ -826,6 +839,20 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         app.pdf_viewer_scroll_y,
         max_scroll_cells,
     );
+}
+
+/// Letterbox a page into the available pane pixels without cropping it.
+/// Project Preview uses this to make each navigation step correspond to one
+/// complete PDF page regardless of the page's aspect ratio.
+fn fit_page_to_viewport(page: &RgbaImage, viewport_w: u32, viewport_h: u32) -> DynamicImage {
+    let scaled = DynamicImage::ImageRgba8(page.clone())
+        .resize(viewport_w, viewport_h, image::imageops::FilterType::Triangle)
+        .into_rgba8();
+    let mut canvas = RgbaImage::from_pixel(viewport_w, viewport_h, Rgba([255, 255, 255, 255]));
+    let x = i64::from(viewport_w.saturating_sub(scaled.width()) / 2);
+    let y = i64::from(viewport_h.saturating_sub(scaled.height()) / 2);
+    image::imageops::overlay(&mut canvas, &scaled, x, y);
+    DynamicImage::ImageRgba8(canvas)
 }
 
 // ---------------------------------------------------------------------------
