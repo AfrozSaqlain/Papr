@@ -3413,33 +3413,44 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
 }
 
 fn render_help(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
-    let area = centered(132, 32, frame.area());
-    frame.render_widget(Clear, area);
-    let block = Block::default()
-        .title(" KEYBOARD REFERENCE — ↑/↓ SCROLL  PGUP/PGDN PAGE  HOME/END JUMP  ?/ESC/q CLOSE ")
-        .borders(Borders::ALL)
-        .style(Style::default().bg(theme.surface))
-        .border_style(Style::default().fg(theme.secondary));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let max_area = centered(160, frame.area().height.saturating_sub(4), frame.area());
     let sections = keyboard_reference();
     // A column needs enough room for a key and a useful description.  Reflow
     // whole sections at narrower sizes rather than squeezing the old fixed
     // three-column layout until the descriptions are unusable.
-    let column_count = match inner.width {
+    let inner_width = max_area.width.saturating_sub(2);
+    let column_count = match inner_width {
         0..=71 => 1,
         72..=104 => 2,
         _ => 3,
     };
-    let groups = help_column_groups(sections, column_count, inner.width);
-    let columns = help_columns(inner, &groups);
+    let groups = help_column_groups(sections, column_count, inner_width);
+    let layout_area = Rect::new(0, 0, inner_width, 0);
+    let columns = help_columns(layout_area, &groups);
     let rendered = groups
         .iter()
         .zip(columns.iter())
         .map(|(group, column)| format_help_column(group, column.width, theme))
         .collect::<Vec<_>>();
     let total_rows = rendered.iter().map(Vec::len).max().unwrap_or(0);
+    let desired_height = u16::try_from(total_rows.saturating_add(2)).unwrap_or(u16::MAX);
+    let height = desired_height.clamp(12, max_area.height);
+    let area = centered(max_area.width, height, frame.area());
+    frame.render_widget(Clear, area);
+    let title = if area.width < 86 {
+        " KEYBOARD HELP — ↑/↓ SCROLL  ?/ESC CLOSE "
+    } else {
+        " KEYBOARD REFERENCE — ↑/↓ SCROLL  PGUP/PGDN PAGE  HOME/END JUMP  ?/ESC/q CLOSE "
+    };
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .style(Style::default().bg(theme.surface))
+        .border_style(Style::default().fg(theme.secondary));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
     let viewport_rows = inner.height as usize;
+    let columns = help_columns(inner, &groups);
     app.help_scroll = app
         .help_scroll
         .min(total_rows.saturating_sub(viewport_rows));
@@ -3767,6 +3778,7 @@ fn keyboard_reference() -> Vec<HelpSection> {
                 ("?", "toggle reference"),
                 ("/", "toggle arXiv search"),
                 ("Ctrl+b", "toggle navigator"),
+                ("Ctrl+t", "terminal palette (Enter run; Tab complete)"),
                 ("Esc", "close local search"),
                 ("Enter / → / l", "open selected item"),
                 ("← / h", "return one level"),
@@ -3805,7 +3817,7 @@ fn keyboard_reference() -> Vec<HelpSection> {
             title: "INTERNAL PDF VIEWER",
             scope: &[],
             entries: &[
-                ("PDF Esc / q", "close internal viewer"),
+                ("Esc / q", "close internal viewer"),
             ],
         },
         HelpSection {
@@ -3853,13 +3865,25 @@ fn keyboard_reference() -> Vec<HelpSection> {
             ],
         },
         HelpSection {
-            title: "PROJECT LIST & FILE TREE",
+            title: "PROJECT LIST",
             scope: &[],
             entries: &[
                 ("n", "create named project"),
                 ("r", "refresh project list"),
                 ("R", "rename selected project"),
                 ("x", "delete selected project"),
+            ],
+        },
+        HelpSection {
+            title: "PROJECT FILE TREE",
+            scope: &["Shows folders, source files, and supported image files."],
+            entries: &[
+                ("Enter / →", "open file or enter folder"),
+                ("←", "parent folder; exit at project root"),
+                ("n", "create file; add / for folder"),
+                ("R", "rename selected file or folder"),
+                ("x", "confirm then delete file or folder"),
+                ("Esc", "return to project list at root"),
             ],
         },
         HelpSection {
@@ -3883,6 +3907,7 @@ fn keyboard_reference() -> Vec<HelpSection> {
                 ("PgUp / PgDn", "move by editor page"),
                 ("Esc", "focus file tree"),
                 ("Ctrl+s", "save current source"),
+                ("Ctrl+Shift+v", "paste exactly into .bib and save"),
             ],
         },
     ]

@@ -208,7 +208,7 @@ papr
 Papr is divided into 14 specialized **workspaces** (sections), accessible via the sidebar menu on the left side of the screen.
 
 * **Sidebar Navigation:** Press `Left Arrow` (or `h`) to move focus to the left sidebar, use `j`/`k` (or `Up`/`Down`) to highlight a section, and press `Enter` (or `l`) to open it.
-* **Quick Switcher:** Press `Ctrl+B` anywhere to open **Browse Papr** (a fast command palette) and type the name of any section to jump directly to it!
+* **Quick Switcher:** Press `Ctrl+B` anywhere to open **Browse Papr** (a fast command palette) and type the name of any section to jump directly to it. Press `Ctrl+T` for the terminal command palette; when a project is open, commands run from that project's directory.
 
 Here is a complete breakdown of every section in Papr, what it does, and how to use it:
 
@@ -223,7 +223,7 @@ Here is a complete breakdown of every section in Papr, what it does, and how to 
 | **Authors** | Automatically groups all papers in your local library by author name. | Select an author from the list to view all papers written by them in your collection. |
 | **Notes** | Displays a searchable catalog of all Markdown notes written for your papers. | Press `n` on any paper to open the Markdown editor. Press `Tab` to switch to styled live preview, `Esc` to save. |
 | **Downloads** | Real-time tracker for active background PDF downloads, completed downloads, and failed requests. | Monitor download progress. Select a finished download and press `Enter` to open the PDF directly. |
-| **Projects** | Integrated LaTeX writing workspace with background `latexmk` compilation and split-pane PDF preview. | Press `n` to create a project. Use `Alt+1` (File Tree), `Alt+2` (Editor with Vim mode), `Alt+3` (PDF Preview), `Alt+4` (Build Logs). |
+| **Projects** | Integrated LaTeX writing workspace with background `latexmk` compilation and split-pane PDF preview. An open project uses the full workspace width for File Tree, Editor, Build, and (when internal viewing is enabled) PDF Preview. | Press `n` to create a project. Use `Alt+1` (File Tree), `Alt+2` (Editor with Vim mode), `Alt+3` (PDF Preview), `Alt+4` (Build Logs). |
 | **History** | Logs a chronological timeline of your recent activity, searches, downloads, and project builds. | Scroll through past actions to re-open papers or review past search terms. |
 | **Statistics** | Analytics on reading habits, total time, paper completion counts, and a 12-week reading activity heatmap. | Track your research productivity and reading habits over time. |
 | **Settings** | An interactive settings workspace for preferences, paths, themes, and plugins. | Open it from the sidebar. Its Theme tab previews built-in themes live; General and Paths stage configuration values; Plugins enables or disables discovered plugins. Press `Enter` to apply changes or `Esc` to return to the sidebar. |
@@ -342,6 +342,7 @@ To track reading sessions and statistics, Papr must be able to track the viewer'
 | `h` / `Esc` | Go back to previous screen |
 | `/` | Start arXiv search |
 | `Ctrl+B` | Open Browse Papr (Fast navigation command palette) |
+| `Ctrl+T` | Open terminal command palette (`Enter` runs, `Tab` completes, `Esc` closes) |
 | `?` | Toggle help |
 | `q` | Exit the application outside text input |
 
@@ -388,12 +389,25 @@ To track reading sessions and statistics, Papr must be able to track the viewer'
 | `Alt+3` | Focus **PDF Preview** pane (scroll compiled PDF) |
 | `Alt+4` | Focus **Build Logs** pane (scroll compilation output) |
 
+#### File Tree (`Alt+1`)
+| Key | Action |
+| :--- | :--- |
+| `Enter` / `Right` | Open a source file or enter the selected folder |
+| `Left` | Return to the parent folder; exit the project at its root |
+| `n` | Create a file; end the name with `/` to create a folder |
+| `R` | Rename the selected file or folder |
+| `x` | Confirm then delete the selected file or folder |
+| `Esc` | Return to the project list from the project root |
+
+The File Tree shows folders, LaTeX/project source files, and every image format supported by Papr's image library.
+
 #### Editor Mode (`Alt+2`)
 | Key | Action |
 | :--- | :--- |
 | `i` | Enter Insert mode |
-| `Esc` | Return to Normal mode (or exit Editor to File Tree) |
+| `Esc` | Return to the File Tree |
 | `Ctrl+S` | Save file changes to disk |
+| `Ctrl+Shift+V` | Paste clipboard text exactly into an open `.bib` file and save it |
 | `h`/`j`/`k`/`l`, `w`/`b`, `0`/`$` | Vim motions in Normal mode |
 
 ### Internal PDF Viewer & Markdown Editor
@@ -401,7 +415,7 @@ To track reading sessions and statistics, Papr must be able to track the viewer'
 * **Markdown Editor:** `Tab` toggles styled preview, `Esc` saves and exits.
 
 ### Settings Workspace
-* **Tabs:** `Left`/`Right` switch among Theme, General, Paths, and Plugins when the tab bar is focused; `Down`/`j`/`Enter` enters a tab.
+* **Tabs:** `Left`/`Right` switch among Theme, General, Paths, and Plugins when the tab bar is focused; `Down`/`j`/`Enter` enters a tab. `Left` on Theme returns to Navigation instead of wrapping.
 * **Theme:** `j`/`k` previews built-in themes live; `Enter` applies the staged settings.
 * **Lists:** In dashboard keywords and path lists, `a` adds, `d`/`Delete` removes, and `K`/`J` reorders entries. In the Plugins tab, `Space` toggles the selected plugin.
 * **Apply and leave:** `Enter` writes and applies all staged changes. `Esc` stops editing a field, or returns focus to the sidebar when no field is being edited.
@@ -411,7 +425,7 @@ To track reading sessions and statistics, Papr must be able to track the viewer'
 ## 🎨 Themes
 
 Papr supports over a dozen built-in themes out of the box, including:
-`catppuccin-mocha` (default), `catppuccin-macchiato`, `catppuccin-frappe`, `catppuccin-latte`, `tokyo-night`, `gruvbox`, `nord`, `dracula`, `light`, `rose-pink-dark`, `rose-pink-light`, `everforest`, `kanagawa`, `one-dark`, and `cyberpunk`.
+`catppuccin-mocha` (default), `catppuccin-macchiato`, `catppuccin-frappe`, `catppuccin-latte`, `tokyo-night`, `gruvbox`, `nord`, `dracula`, `light`, `rose-pink-dark`, `rose-pink-light`, `everforest`, `kanagawa`, `one-dark`, `cyberpunk`, `ember`, `verdant`, `lavender`, and `parchment`.
 
 You can also define custom themes. Save a TOML file with color hex codes and point the `theme` configuration to its absolute path:
 ```toml

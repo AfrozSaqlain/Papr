@@ -3999,6 +3999,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         match key.code {
             KeyCode::Esc => app.mode = AppMode::Normal,
             KeyCode::Enter => run_terminal_command(app),
+            KeyCode::Tab => complete_terminal_command(app),
             _ => {
                 let _ = edit_text(
                     &mut app.terminal_command,
@@ -4311,6 +4312,124 @@ fn run_terminal_command(app: &mut App) {
     append_terminal_output(app, &command_text, &output);
     app.terminal_command.clear();
     app.terminal_command_cursor = 0;
+}
+
+fn complete_terminal_command(app: &mut App) {
+    let cursor = app.terminal_command_cursor.min(app.terminal_command.len());
+    let before_cursor = &app.terminal_command[..cursor];
+    let token_start = before_cursor
+        .rfind(char::is_whitespace)
+        .map_or(0, |index| index + 1);
+    let token = &before_cursor[token_start..];
+    let completing_command = before_cursor[..token_start].trim().is_empty();
+    let candidates = if completing_command {
+        terminal_command_candidates(token)
+    } else {
+        terminal_path_candidates(token, app.terminal_command_directory.as_deref())
+    };
+    if candidates.is_empty() {
+        return;
+    }
+
+    let replacement = if candidates.len() == 1 {
+        candidates[0].clone()
+    } else {
+        common_terminal_prefix(&candidates)
+    };
+    if replacement.len() > token.len() {
+        app.terminal_command
+            .replace_range(token_start..cursor, &replacement);
+        app.terminal_command_cursor = token_start + replacement.len();
+    }
+    if candidates.len() > 1 {
+        let displayed = candidates.into_iter().take(40).collect::<Vec<_>>().join("  ");
+        append_terminal_output(app, "<Tab>", &format!("Completions:\n{displayed}"));
+    }
+}
+
+fn terminal_command_candidates(prefix: &str) -> Vec<String> {
+    let mut candidates = ["cd", "clear"]
+        .into_iter()
+        .filter(|command| command.starts_with(prefix))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            let Ok(entries) = std::fs::read_dir(directory) else { continue; };
+            candidates.extend(entries.filter_map(Result::ok).filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.starts_with(prefix).then_some(name)
+            }));
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+fn terminal_path_candidates(prefix: &str, directory: Option<&Path>) -> Vec<String> {
+    let working_directory = directory
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok());
+    let Some(working_directory) = working_directory else { return Vec::new(); };
+    let (search_directory, display_parent, name_prefix) = if let Some(path) = prefix.strip_prefix("~/") {
+        let Some(home) = terminal_home_directory() else { return Vec::new(); };
+        let typed_path = Path::new(path);
+        let parent = typed_path.parent().filter(|parent| !parent.as_os_str().is_empty());
+        let search_directory = parent.map_or_else(|| home.clone(), |parent| home.join(parent));
+        let display_parent = Some(parent.map_or_else(
+            || "~".to_owned(),
+            |parent| format!("~{}{}", std::path::MAIN_SEPARATOR, parent.display()),
+        ));
+        let name_prefix = typed_path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+        (search_directory, display_parent, name_prefix)
+    } else {
+        let typed_path = Path::new(prefix);
+        let parent = typed_path.parent().filter(|parent| !parent.as_os_str().is_empty());
+        let search_directory = parent.map_or_else(|| working_directory.clone(), |parent| {
+            if parent.is_absolute() { parent.to_path_buf() } else { working_directory.join(parent) }
+        });
+        let display_parent = parent.map(Path::to_path_buf);
+        let name_prefix = typed_path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+        (search_directory, display_parent.map(|parent| parent.display().to_string()), name_prefix)
+    };
+    let Ok(entries) = std::fs::read_dir(search_directory) else { return Vec::new(); };
+    let mut candidates = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with(name_prefix) {
+                return None;
+            }
+            let mut candidate = display_parent
+                .as_ref()
+                .map_or_else(|| name.clone(), |parent| format!("{parent}{}{}", std::path::MAIN_SEPARATOR, name));
+            if entry.path().is_dir() {
+                candidate.push(std::path::MAIN_SEPARATOR);
+            }
+            Some(candidate)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates
+}
+
+fn terminal_home_directory() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+fn common_terminal_prefix(candidates: &[String]) -> String {
+    let Some(first) = candidates.first() else { return String::new(); };
+    candidates.iter().skip(1).fold(first.clone(), |prefix, candidate| {
+        prefix
+            .chars()
+            .zip(candidate.chars())
+            .take_while(|(left, right)| left == right)
+            .map(|(character, _)| character)
+            .collect()
+    })
 }
 
 fn change_terminal_directory(app: &mut App, path: &str) {
@@ -6389,6 +6508,7 @@ mod tests {
         reload_config_editor_buffer, select_dashboard_papers, shuffle_daily_bucket,
         update_project_completions, merge_enriched_remote_paper, run_terminal_command,
         sanitize_terminal_output, PaperTarget,
+        complete_terminal_command,
     };
 
     #[test]
@@ -7152,6 +7272,23 @@ mod tests {
         assert!(app.terminal_command_output.is_empty());
         assert!(app.terminal_command.is_empty());
         assert_eq!(sanitize_terminal_output("safe\u{1b}[2Jtext"), "safe[2Jtext");
+    }
+
+    #[test]
+    fn terminal_tab_completes_paths_in_the_session_directory() {
+        let root = std::env::temp_dir().join(format!("papr-complete-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("references.bib"), "").unwrap();
+        let mut app = App::default();
+        app.terminal_command_directory = Some(root.clone());
+        app.terminal_command = "cat ref".into();
+        app.terminal_command_cursor = app.terminal_command.len();
+
+        complete_terminal_command(&mut app);
+
+        assert_eq!(app.terminal_command, "cat references.bib");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
