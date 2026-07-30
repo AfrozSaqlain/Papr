@@ -2292,6 +2292,77 @@ fn open_author(database: &Database, library_roots: &[PathBuf], app: &mut App, au
     Ok(())
 }
 
+fn add_paper_to_collection_with_disk(
+    runtime: &Runtime,
+    _app: &mut App,
+    paper_id: i64,
+    name: &str,
+) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Ok(());
+    }
+    validate_collection_name(name)?;
+
+    let collections = runtime.database.collections()?;
+    let existing = collections
+        .iter()
+        .find(|item| item.name.eq_ignore_ascii_case(name));
+
+    let (collection_id, folder) = if let Some(collection) = existing {
+        let folder = collection.folder_path.as_ref().map_or_else(
+            || runtime.primary_library_root.join(&collection.name),
+            PathBuf::from,
+        );
+        std::fs::create_dir_all(&folder)?;
+        runtime
+            .database
+            .set_collection_folder(collection.id, &folder)?;
+        (collection.id, folder)
+    } else {
+        let folder = runtime.primary_library_root.join(name);
+        std::fs::create_dir_all(&folder)?;
+        (runtime.database.create_collection(name, &folder)?, folder)
+    };
+
+    let Some(paper) = runtime.database.library_paper_by_id(paper_id)? else {
+        return Ok(());
+    };
+
+    if let Some(pdf_path_str) = &paper.pdf_path {
+        let source = PathBuf::from(pdf_path_str);
+        if source.exists() {
+            let destination = folder.join(
+                source
+                    .file_name()
+                    .context("PDF path has no filename")?,
+            );
+            if source != destination {
+                if !destination.exists() {
+                    move_pdf_file(&source, &destination)?;
+                }
+            }
+            runtime
+                .database
+                .assign_moved_pdf(paper_id, collection_id, &destination)?;
+            let directories = LibraryIndexer::collection_directories(&runtime.collection_roots);
+            for directory in &directories {
+                let _ = runtime.database.sync_collection_directory(directory);
+            }
+            let _ = runtime.database.reconcile_collections(&runtime.collection_roots, &directories);
+            return Ok(());
+        }
+    }
+
+    runtime.database.add_to_collection(paper_id, name)?;
+    let directories = LibraryIndexer::collection_directories(&runtime.collection_roots);
+    for directory in &directories {
+        let _ = runtime.database.sync_collection_directory(directory);
+    }
+    let _ = runtime.database.reconcile_collections(&runtime.collection_roots, &directories);
+    Ok(())
+}
+
 async fn dispatch_plugin_events(
     runtime: &Runtime,
     app: &mut App,
@@ -2343,7 +2414,7 @@ async fn dispatch_plugin_events(
                                 last_notify = Some(message);
                             }
                             papr_core::PluginAction::AddToCollection { name } => {
-                                if let Err(err) = runtime.database.add_to_collection(paper.id, &name) {
+                                if let Err(err) = add_paper_to_collection_with_disk(runtime, app, paper.id, &name) {
                                     eprintln!("Failed to add paper to collection '{name}': {err}");
                                 } else {
                                     organization_dirty = true;
@@ -8278,11 +8349,19 @@ print(json.dumps({"actions": actions}))
         let paper_id = papers[0].id;
 
         let mut app = App::default();
-        dispatch_plugin_events(&runtime, &mut app, &["paper_opened"], paper_id).await?;
+        dispatch_plugin_events(&runtime, &mut app, &["paper_imported"], paper_id).await?;
 
         let collections = runtime.database.collections()?;
         assert!(collections.iter().any(|c| c.name == "Machine Learning"));
         assert_eq!(app.toast, Some("Tagged paper!".to_string()));
+
+        let moved_pdf = temp_dir.join("Machine Learning").join("neural_networks.pdf");
+        assert!(moved_pdf.exists());
+
+        let directories = papr_core::LibraryIndexer::collection_directories(&runtime.collection_roots);
+        runtime.database.reconcile_collections(&runtime.collection_roots, &directories)?;
+        let collections_after = runtime.database.collections()?;
+        assert!(collections_after.iter().any(|c| c.name == "Machine Learning"));
 
         std::fs::remove_dir_all(&temp_dir)?;
         Ok(())

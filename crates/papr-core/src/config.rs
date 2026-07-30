@@ -188,6 +188,7 @@ enabled_plugins = []
         config.download_path = Some(paths.downloads_dir.clone());
         config.projects_directory = Some(paths.projects_dir.clone());
         config.pdf_viewer = Some(default_pdf_viewer.to_string());
+        config.enabled_plugins = Vec::new();
         fs::create_dir_all(&paths.projects_dir)?;
         Ok(config)
     }

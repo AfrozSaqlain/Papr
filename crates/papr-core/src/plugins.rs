@@ -178,6 +178,74 @@ pub struct PluginHost {
     diagnostics: Vec<PluginDiagnostic>,
 }
 
+fn ensure_builtin_plugins(root: &Path) -> Result<(), std::io::Error> {
+    let has_dirs = if let Ok(entries) = std::fs::read_dir(root) {
+        entries.filter_map(Result::ok).any(|entry| entry.path().is_dir())
+    } else {
+        false
+    };
+
+    if !has_dirs {
+        let auto_tagger_dir = root.join("auto-tagger");
+        std::fs::create_dir_all(&auto_tagger_dir)?;
+
+        let manifest = r#"id = "auto-tagger"
+name = "Auto Tagger"
+version = "1.0.0"
+api_version = 1
+description = "Automatically categorizes papers based on keyword rules"
+executable = "tagger.py"
+capabilities = ["activity-events", "read-paper-metadata"]
+"#;
+        std::fs::write(auto_tagger_dir.join("plugin.toml"), manifest)?;
+
+        let script = r#"#!/usr/bin/env python3
+import json
+import sys
+
+def main():
+    try:
+        request = json.load(sys.stdin)
+    except Exception:
+        sys.exit(1)
+
+    response = {"actions": []}
+
+    event = request.get("event")
+    if event in ("paper_imported", "paper_downloaded"):
+        paper = request.get("context", {}).get("paper", {})
+        title = paper.get("title", "").lower()
+
+        if any(kw in title for kw in ["neural network", "deep learning", "machine learning", "learning", "transformer", "ai"]):
+            response["actions"].append({
+                "type": "add_to_collection",
+                "name": "Machine Learning"
+            })
+            response["actions"].append({
+                "type": "notify",
+                "message": f"Added '{paper.get('title', '')[:30]}...' to Machine Learning"
+            })
+
+    print(json.dumps(response))
+
+if __name__ == "__main__":
+    main()
+"#;
+        let script_path = auto_tagger_dir.join("tagger.py");
+        std::fs::write(&script_path, script)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(metadata) = std::fs::metadata(&script_path) {
+                let mut perms = metadata.permissions();
+                perms.set_mode(0o755);
+                let _ = std::fs::set_permissions(&script_path, perms);
+            }
+        }
+    }
+    Ok(())
+}
+
 impl PluginHost {
     /// Discover plugin bundles beneath a platform data directory.
     ///
@@ -189,6 +257,7 @@ impl PluginHost {
     /// Returns an error only when the root directory cannot be created or read.
     pub fn discover(root: &Path, enabled_ids: &[String]) -> Result<Self, PluginError> {
         std::fs::create_dir_all(root)?;
+        let _ = ensure_builtin_plugins(root);
         let enabled = enabled_ids
             .iter()
             .map(String::as_str)
@@ -442,6 +511,23 @@ mod tests {
             )
             .await?;
         assert_eq!(response.actions.len(), 1);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn creates_builtin_auto_tagger_when_plugins_dir_is_empty() -> Result<(), Box<dyn std::error::Error>> {
+        let root = temporary_root("empty_builtin");
+        fs::create_dir_all(&root)?;
+
+        let host = PluginHost::discover(&root, &[])?;
+        let plugins = host.plugins();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].id, "auto-tagger");
+        assert!(!plugins[0].enabled);
+        assert!(root.join("auto-tagger").join("plugin.toml").exists());
+        assert!(root.join("auto-tagger").join("tagger.py").exists());
+
         fs::remove_dir_all(root)?;
         Ok(())
     }

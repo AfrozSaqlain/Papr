@@ -15,7 +15,8 @@ fn fresh_database_exposes_dashboard_through_public_api() -> Result<(), Box<dyn s
 fn empty_plugin_directory_is_a_valid_registry() -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::temp_dir().join(format!("papr-public-api-{}", std::process::id()));
     let host = PluginHost::discover(&root, &[])?;
-    assert!(host.plugins().is_empty());
+    assert_eq!(host.plugins().len(), 1);
+    assert_eq!(host.plugins()[0].id, "auto-tagger");
     assert!(host.diagnostics().is_empty());
     let request = PluginRequest::new("test", serde_json::json!({"ok": true}));
     assert_eq!(request.event, "test");

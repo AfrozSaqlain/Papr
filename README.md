@@ -410,20 +410,22 @@ theme = "/home/user/.config/papr/my-theme.toml"
 
 Papr supports **process-isolated plugins** written in any language (Python, Node.js, Bash, etc.). Plugins interact via JSON RPC over `stdin`/`stdout`, enabling deep customization without compromising core stability. 
 
-Plugins can inject scholarly metadata, hook into lifecycle events (e.g., auto-tagging), or register custom UI commands. See the [Plugins Documentation](docs/PLUGINS.md) for full details.
+Papr includes **one built-in plugin (`auto-tagger`)** which is automatically created in your plugin directory on first launch.
+
+Plugins can inject scholarly metadata, hook into lifecycle events (e.g. `paper_imported`, `paper_downloaded` for auto-tagging), or register custom UI commands. See the [Plugins Documentation](docs/PLUGINS.md) for full details.
 
 <details>
-<summary><b>Click to view a Python plugin example (Auto Tagger)</b></summary>
+<summary><b>Click to view the Built-In Python plugin (Auto Tagger)</b></summary>
 
-This example categorizes papers into a "Machine Learning" group if the title matches certain keywords.
+This plugin categorizes papers into a "Machine Learning" group when papers are imported or downloaded if the title matches certain keywords.
 
-**1. Create the Plugin Directory**
+**1. Plugin Location**
+Papr automatically populates built-in plugins at `~/.local/share/papr/plugins/auto-tagger`:
 ```bash
-mkdir -p ~/.local/share/papr/plugins/auto-tagger
 cd ~/.local/share/papr/plugins/auto-tagger
 ```
 
-**2. Create the Manifest (`plugin.toml`)**
+**2. Manifest (`plugin.toml`)**
 ```toml
 id = "auto-tagger"
 name = "Auto Tagger"
@@ -434,7 +436,7 @@ executable = "tagger.py"
 capabilities = ["activity-events", "read-paper-metadata"]
 ```
 
-**3. Write the Plugin (`tagger.py`)**
+**3. Plugin Code (`tagger.py`)**
 ```python
 #!/usr/bin/env python3
 import json
@@ -448,18 +450,19 @@ def main():
 
     response = {"actions": []}
 
-    if request.get("event") == "paper_opened":
+    event = request.get("event")
+    if event in ("paper_imported", "paper_downloaded"):
         paper = request.get("context", {}).get("paper", {})
         title = paper.get("title", "").lower()
 
-        if "neural network" in title or "deep learning" in title:
+        if any(kw in title for kw in ["neural network", "deep learning", "machine learning", "learning", "transformer", "ai"]):
             response["actions"].append({
                 "type": "add_to_collection",
                 "name": "Machine Learning"
             })
             response["actions"].append({
                 "type": "notify",
-                "message": f"Added '{paper.get('title')[:30]}...' to Machine Learning"
+                "message": f"Added '{paper.get('title', '')[:30]}...' to Machine Learning"
             })
 
     print(json.dumps(response))
@@ -469,11 +472,12 @@ if __name__ == "__main__":
 ```
 Make it executable: `chmod +x tagger.py`
 
-**4. Enable the Plugin**
+**4. Enabling the Plugin**
 In your `config.toml`, add:
 ```toml
 enabled_plugins = ["auto-tagger"]
 ```
+*(Plugins are disabled by default until added to `enabled_plugins`)*
 </details>
 
 ---
