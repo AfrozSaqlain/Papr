@@ -2297,10 +2297,10 @@ fn add_paper_to_collection_with_disk(
     _app: &mut App,
     paper_id: i64,
     name: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let name = name.trim();
     if name.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     validate_collection_name(name)?;
 
@@ -2326,8 +2326,11 @@ fn add_paper_to_collection_with_disk(
     };
 
     let Some(paper) = runtime.database.library_paper_by_id(paper_id)? else {
-        return Ok(());
+        return Ok(false);
     };
+
+    let current_collection_name = runtime.database.paper_collection_name(paper_id)?;
+    let already_in_collection = current_collection_name.as_deref().map_or(false, |c| c.eq_ignore_ascii_case(name));
 
     if let Some(pdf_path_str) = &paper.pdf_path {
         let source = PathBuf::from(pdf_path_str);
@@ -2337,9 +2340,11 @@ fn add_paper_to_collection_with_disk(
                     .file_name()
                     .context("PDF path has no filename")?,
             );
+            let mut moved = false;
             if source != destination {
                 if !destination.exists() {
                     move_pdf_file(&source, &destination)?;
+                    moved = true;
                 }
             }
             runtime
@@ -2350,7 +2355,7 @@ fn add_paper_to_collection_with_disk(
                 let _ = runtime.database.sync_collection_directory(directory);
             }
             let _ = runtime.database.reconcile_collections(&runtime.collection_roots, &directories);
-            return Ok(());
+            return Ok(!already_in_collection || moved);
         }
     }
 
@@ -2360,7 +2365,7 @@ fn add_paper_to_collection_with_disk(
         let _ = runtime.database.sync_collection_directory(directory);
     }
     let _ = runtime.database.reconcile_collections(&runtime.collection_roots, &directories);
-    Ok(())
+    Ok(!already_in_collection)
 }
 
 async fn dispatch_plugin_events(
@@ -2414,10 +2419,15 @@ async fn dispatch_plugin_events(
                                 last_notify = Some(message);
                             }
                             papr_core::PluginAction::AddToCollection { name } => {
-                                if let Err(err) = add_paper_to_collection_with_disk(runtime, app, paper.id, &name) {
-                                    eprintln!("Failed to add paper to collection '{name}': {err}");
-                                } else {
-                                    organization_dirty = true;
+                                match add_paper_to_collection_with_disk(runtime, app, paper.id, &name) {
+                                    Ok(changed) => {
+                                        if changed {
+                                            organization_dirty = true;
+                                        }
+                                    }
+                                    Err(err) => {
+                                        eprintln!("Failed to add paper to collection '{name}': {err}");
+                                    }
                                 }
                             }
                         }
@@ -2433,10 +2443,9 @@ async fn dispatch_plugin_events(
     if organization_dirty {
         refresh_organization(&runtime.database, &runtime.library_roots, app)?;
         refresh_library(runtime, app)?;
-    }
-
-    if let Some(msg) = last_notify {
-        app.toast = Some(msg);
+        if let Some(msg) = last_notify {
+            app.toast = Some(msg);
+        }
     }
 
     Ok(())
@@ -3396,7 +3405,8 @@ async fn apply_index_response(
                 runtime.database.sync_collection_directory(directory)?;
             }
             for pdf in &pdfs {
-                imported += usize::from(runtime.database.import_pdf(pdf)?);
+                let was_newly_imported = runtime.database.import_pdf(pdf)?;
+                imported += usize::from(was_newly_imported);
                 if let Some(paper_id) = runtime.database.paper_id_for_pdf(pdf)? {
                     sync_pdf_collection_membership(
                         &runtime.database,
@@ -3404,7 +3414,9 @@ async fn apply_index_response(
                         pdf,
                         &runtime.collection_roots,
                     )?;
-                    dispatch_plugin_events(runtime, app, &["paper_imported"], paper_id).await?;
+                    if was_newly_imported {
+                        dispatch_plugin_events(runtime, app, &["paper_imported"], paper_id).await?;
+                    }
                 }
             }
             runtime
@@ -3424,7 +3436,9 @@ async fn apply_index_response(
                     &pdf,
                     &runtime.collection_roots,
                 )?;
-                dispatch_plugin_events(runtime, app, &["paper_imported"], paper_id).await?;
+                if imported {
+                    dispatch_plugin_events(runtime, app, &["paper_imported"], paper_id).await?;
+                }
             }
             app.library.message = Some(if imported {
                 format!("Imported {}", pdf.title)
