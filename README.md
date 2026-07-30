@@ -439,8 +439,42 @@ capabilities = ["activity-events", "read-paper-metadata"]
 **3. Plugin Code (`tagger.py`)**
 ```python
 #!/usr/bin/env python3
+"""
+Auto Tagger Plugin for Papr
+---------------------------
+User Customization:
+To add your own groups and filter rules, edit the `RULES` list below.
+Each rule consists of:
+  - "group": Name of the group in Papr (e.g. "Machine Learning", "Quantum Computing")
+  - "keywords": Regex patterns with word boundaries (\b) to avoid accidental substring matches.
+"""
+
 import json
+import re
 import sys
+
+RULES = [
+    {
+        "group": "Machine Learning",
+        "keywords": [
+            r"\bneural networks?\b",
+            r"\bdeep learning\b",
+            r"\bmachine learning\b",
+            r"\btransformers?\b",
+            r"\bllms?\b",
+            r"\breinforcement learning\b",
+            r"\bartificial intelligence\b",
+        ],
+    },
+    {
+        "group": "Quantum Computing",
+        "keywords": [
+            r"\bquantum computing\b",
+            r"\bqubits?\b",
+            r"\bquantum algorithms?\b",
+        ],
+    },
+]
 
 def main():
     try:
@@ -453,17 +487,25 @@ def main():
     event = request.get("event")
     if event in ("paper_imported", "paper_downloaded"):
         paper = request.get("context", {}).get("paper", {})
-        title = paper.get("title", "").lower()
+        title = paper.get("title", "")
+        if not title:
+            print(json.dumps(response))
+            return
 
-        if any(kw in title for kw in ["neural network", "deep learning", "machine learning", "learning", "transformer", "ai"]):
-            response["actions"].append({
-                "type": "add_to_collection",
-                "name": "Machine Learning"
-            })
-            response["actions"].append({
-                "type": "notify",
-                "message": f"Added '{paper.get('title', '')[:30]}...' to Machine Learning"
-            })
+        for rule in RULES:
+            group_name = rule["group"]
+            keywords = rule.get("keywords", [])
+            for pattern in keywords:
+                if re.search(pattern, title, re.IGNORECASE):
+                    response["actions"].append({
+                        "type": "add_to_collection",
+                        "name": group_name
+                    })
+                    response["actions"].append({
+                        "type": "notify",
+                        "message": f"Added '{title[:30]}...' to {group_name}"
+                    })
+                    break
 
     print(json.dumps(response))
 

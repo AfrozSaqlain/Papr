@@ -200,8 +200,55 @@ capabilities = ["activity-events", "read-paper-metadata"]
         std::fs::write(auto_tagger_dir.join("plugin.toml"), manifest)?;
 
         let script = r#"#!/usr/bin/env python3
+"""
+Auto Tagger Plugin for Papr
+---------------------------
+Automatically categorizes newly imported or downloaded papers into groups/collections based on keyword rules.
+
+User Customization:
+To add your own groups and filter rules, edit the `RULES` list below.
+Each rule consists of:
+  - "group": The name of the collection/group in Papr (e.g. "Machine Learning", "Quantum Computing", "Systems")
+  - "keywords": A list of keywords, keyphrases, or regex patterns to match against paper titles.
+    Word boundaries (\b) are used to avoid matching substrings inside unrelated words (e.g. matching "ai" in "main").
+"""
+
 import json
+import re
 import sys
+
+# Configure your custom groups and filter criteria here:
+RULES = [
+    {
+        "group": "Machine Learning",
+        "keywords": [
+            r"\bneural networks?\b",
+            r"\bdeep learning\b",
+            r"\bmachine learning\b",
+            r"\btransformers?\b",
+            r"\bllms?\b",
+            r"\breinforcement learning\b",
+            r"\bartificial intelligence\b",
+        ],
+    },
+    {
+        "group": "Quantum Computing",
+        "keywords": [
+            r"\bquantum computing\b",
+            r"\bqubits?\b",
+            r"\bquantum algorithms?\b",
+        ],
+    },
+    {
+        "group": "Computer Systems & Networking",
+        "keywords": [
+            r"\bdistributed systems?\b",
+            r"\boperating systems?\b",
+            r"\bcloud computing\b",
+            r"\bcomputer networks?\b",
+        ],
+    },
+]
 
 def main():
     try:
@@ -214,17 +261,25 @@ def main():
     event = request.get("event")
     if event in ("paper_imported", "paper_downloaded"):
         paper = request.get("context", {}).get("paper", {})
-        title = paper.get("title", "").lower()
+        title = paper.get("title", "")
+        if not title:
+            print(json.dumps(response))
+            return
 
-        if any(kw in title for kw in ["neural network", "deep learning", "machine learning", "learning", "transformer", "ai"]):
-            response["actions"].append({
-                "type": "add_to_collection",
-                "name": "Machine Learning"
-            })
-            response["actions"].append({
-                "type": "notify",
-                "message": f"Added '{paper.get('title', '')[:30]}...' to Machine Learning"
-            })
+        for rule in RULES:
+            group_name = rule["group"]
+            keywords = rule.get("keywords", [])
+            for pattern in keywords:
+                if re.search(pattern, title, re.IGNORECASE):
+                    response["actions"].append({
+                        "type": "add_to_collection",
+                        "name": group_name
+                    })
+                    response["actions"].append({
+                        "type": "notify",
+                        "message": f"Added '{title[:30]}...' to {group_name}"
+                    })
+                    break
 
     print(json.dumps(response))
 
