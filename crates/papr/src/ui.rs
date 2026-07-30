@@ -3490,7 +3490,7 @@ fn section_group_height(group: &[HelpSection], col_width: u16) -> usize {
     let desc_width = usize::from(col_width).saturating_sub(prefix_width).max(1);
 
     let mut height = 0;
-    for section in group {
+    for (index, section) in group.iter().enumerate() {
         height += wrap_help_text(section.title, usize::from(col_width)).len();
         for scope in section.scope {
             height += wrap_help_text(scope, usize::from(col_width).saturating_sub(2)).len();
@@ -3498,69 +3498,69 @@ fn section_group_height(group: &[HelpSection], col_width: u16) -> usize {
         for (_key, desc) in section.entries {
             height += wrap_help_text(desc, desc_width).len();
         }
-        height += 1;
+        if index + 1 < group.len() {
+            height += 1;
+        }
     }
     height
 }
 
-fn help_column_groups(
-    sections: Vec<HelpSection>,
-    columns: usize,
-    width: u16,
-) -> Vec<Vec<HelpSection>> {
-    let num_sections = sections.len();
-    if columns <= 1 || num_sections == 0 {
+fn help_column_groups(sections: Vec<HelpSection>, columns: usize, width: u16) -> Vec<Vec<HelpSection>> {
+    if columns <= 1 || sections.is_empty() {
         return vec![sections];
     }
-    let columns = columns.min(num_sections);
-    if columns == 1 {
-        return vec![sections];
+    let columns = columns.min(sections.len());
+    let column_width = width
+        .saturating_sub((columns.saturating_sub(1) as u16) * 2)
+        / columns as u16;
+    let mut units = help_section_units(sections);
+    let global_unit = units
+        .iter()
+        .position(|unit| unit.first().is_some_and(|section| section.title == "GLOBAL & NAVIGATION"))
+        .map(|index| units.remove(index));
+    units.sort_by_key(|unit| std::cmp::Reverse(section_group_height(unit, column_width)));
+
+    let mut groups = vec![Vec::new(); columns];
+    let mut heights = vec![0usize; columns];
+    if let Some(global_unit) = global_unit {
+        heights[0] = section_group_height(&global_unit, column_width);
+        groups[0] = global_unit;
     }
-
-    let mut best_partition: Vec<Vec<HelpSection>> = Vec::new();
-    let mut best_score = (usize::MAX, usize::MAX);
-
-    if columns == 2 {
-        for i in 1..num_sections {
-            let candidate = vec![sections[..i].to_vec(), sections[i..].to_vec()];
-            let widths = help_columns_widths(width, &candidate);
-            let h0 = section_group_height(&candidate[0], widths[0]);
-            let h1 = section_group_height(&candidate[1], widths[1]);
-            let max_h = h0.max(h1);
-            let diff = max_h - h0.min(h1);
-            let score = (max_h, diff);
-            if score < best_score || best_partition.is_empty() {
-                best_score = score;
-                best_partition = candidate;
-            }
+    for unit in units {
+        let target = heights
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, height)| *height)
+            .map_or(0, |(index, _)| index);
+        if !groups[target].is_empty() {
+            heights[target] += 1;
         }
-    } else {
-        for i in 1..num_sections {
-            for j in (i + 1)..num_sections {
-                let candidate = vec![
-                    sections[..i].to_vec(),
-                    sections[i..j].to_vec(),
-                    sections[j..].to_vec(),
-                ];
-                let widths = help_columns_widths(width, &candidate);
-                let heights: Vec<usize> = candidate
-                    .iter()
-                    .zip(widths.iter())
-                    .map(|(g, &w)| section_group_height(g, w))
-                    .collect();
-                let max_h = *heights.iter().max().unwrap_or(&0);
-                let min_h = *heights.iter().min().unwrap_or(&0);
-                let diff = max_h - min_h;
-                let score = (max_h, diff);
-                if score < best_score || best_partition.is_empty() {
-                    best_score = score;
-                    best_partition = candidate;
-                }
-            }
+        heights[target] += section_group_height(&unit, column_width);
+        groups[target].extend(unit);
+    }
+    groups
+}
+
+fn help_section_units(sections: Vec<HelpSection>) -> Vec<Vec<HelpSection>> {
+    let mut units = Vec::new();
+    let mut index = 0;
+    while index < sections.len() {
+        if sections[index].title == "NOTES & PDF VIEWER"
+            && sections.get(index + 1).is_some_and(|section| section.title == "INTERNAL PDF VIEWER")
+        {
+            units.push(vec![sections[index].clone(), sections[index + 1].clone()]);
+            index += 2;
+        } else if sections[index].title == "DOWNLOADS"
+            && sections.get(index + 1).is_some_and(|section| section.title == "PROJECT LIST")
+        {
+            units.push(vec![sections[index].clone(), sections[index + 1].clone()]);
+            index += 2;
+        } else {
+            units.push(vec![sections[index].clone()]);
+            index += 1;
         }
     }
-
-    best_partition
+    units
 }
 
 fn help_columns_widths(area_width: u16, groups: &[Vec<HelpSection>]) -> Vec<u16> {
@@ -3723,7 +3723,7 @@ fn format_help_column(group: &[HelpSection], width: u16, theme: &Theme) -> Vec<L
     let prefix_width = key_width + 4; // two-space left indent and key/description gap
     let description_width = usize::from(width).saturating_sub(prefix_width).max(1);
     let mut lines = Vec::new();
-    for section in group {
+    for (index, section) in group.iter().enumerate() {
         lines.extend(
             wrap_help_text(section.title, usize::from(width))
                 .into_iter()
@@ -3761,7 +3761,9 @@ fn format_help_column(group: &[HelpSection], width: u16, theme: &Theme) -> Vec<L
                 ]));
             }
         }
-        lines.push(Line::raw(""));
+        if index + 1 < group.len() {
+            lines.push(Line::raw(""));
+        }
     }
     lines
 }
@@ -3778,7 +3780,7 @@ fn keyboard_reference() -> Vec<HelpSection> {
                 ("?", "toggle reference"),
                 ("/", "toggle arXiv search"),
                 ("Ctrl+b", "toggle navigator"),
-                ("Ctrl+t", "terminal palette (Enter run; Tab complete)"),
+                ("Ctrl+t", "terminal palette"),
                 ("Esc", "close local search"),
                 ("Enter / → / l", "open selected item"),
                 ("← / h", "return one level"),
