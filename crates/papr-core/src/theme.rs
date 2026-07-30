@@ -95,6 +95,10 @@ impl Theme {
         "kanagawa",
         "one-dark",
         "cyberpunk",
+        "ember",
+        "verdant",
+        "lavender",
+        "parchment",
     ];
 
     /// Load a built-in theme by name, or a custom theme from a TOML path.
@@ -210,6 +214,22 @@ fn builtin(name: &str) -> Option<ThemeSpec> {
             "0f0f1a", "1a1a2e", "ffffff", "707080", "00ffff", "ff007f", "39ff14", "ffb300",
             "ff3333", "2a2a40",
         ),
+        "ember" => (
+            "211512", "34201a", "f5e6d3", "a98e7d", "f07c3e", "d64c32", "8eb65b", "e6ad43",
+            "d9554f", "54342a",
+        ),
+        "verdant" => (
+            "14231b", "203329", "e4f0df", "91a998", "75b798", "c4a85d", "8fbd65", "d4ac57",
+            "cf6b62", "365044",
+        ),
+        "lavender" => (
+            "211b2e", "302842", "f0eaff", "a69bbd", "bd93f9", "e7a6d7", "a9c78d", "efc078",
+            "e5829a", "493d60",
+        ),
+        "parchment" => (
+            "f4eddc", "fffaf0", "342b22", "87796a", "aa6a2a", "8a4d69", "4f7b48", "a06d1e",
+            "ae4139", "d9cdb9",
+        ),
         _ => return None,
     };
     Some(ThemeSpec {
@@ -251,6 +271,10 @@ mod tests {
             "kanagawa",
             "one-dark",
             "cyberpunk",
+            "ember",
+            "verdant",
+            "lavender",
+            "parchment",
         ] {
             let theme = Theme::load(name)?;
             assert_ne!(theme.text, theme.background);
