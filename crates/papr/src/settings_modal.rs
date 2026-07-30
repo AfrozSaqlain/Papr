@@ -254,6 +254,12 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
 
     // Universal Left / Right Arrow tab cycling across all tabs (where not consumed by control):
     if matches!(key.code, KeyCode::Left | KeyCode::Right) && !consumes_left_right {
+        // Theme's left edge returns focus to the navigation panel instead of
+        // wrapping back to Plugins, whether the tab bar or its list is focused.
+        if key.code == KeyCode::Left && app.settings_modal.tab == SettingsTab::Theme {
+            return SettingsKeyResult::ReturnToSidebar;
+        }
+
         let prev_tab = app.settings_modal.tab;
         app.settings_modal.tab = if key.code == KeyCode::Left {
             prev_tab.prev()
@@ -2022,6 +2028,38 @@ mod tests {
         } else {
             panic!("Expected PreviewTheme with original theme on tab switch from Theme");
         }
+    }
+
+    #[test]
+    fn theme_tab_left_arrow_returns_to_sidebar() {
+        let mut app = App::default();
+        app.settings_modal.tab = SettingsTab::Theme;
+        app.settings_modal.tab_bar_focused = true;
+
+        let result = handle_settings_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+        );
+
+        assert!(matches!(result, SettingsKeyResult::ReturnToSidebar));
+        assert_eq!(app.settings_modal.tab, SettingsTab::Theme);
+        assert!(app.settings_modal.tab_bar_focused);
+    }
+
+    #[test]
+    fn theme_list_left_arrow_returns_to_sidebar() {
+        let mut app = App::default();
+        app.settings_modal.tab = SettingsTab::Theme;
+        app.settings_modal.tab_bar_focused = false;
+
+        let result = handle_settings_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+        );
+
+        assert!(matches!(result, SettingsKeyResult::ReturnToSidebar));
+        assert_eq!(app.settings_modal.tab, SettingsTab::Theme);
+        assert!(!app.settings_modal.tab_bar_focused);
     }
 
     #[test]
