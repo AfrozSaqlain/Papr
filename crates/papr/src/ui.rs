@@ -414,6 +414,19 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
         editor_height,
         &mut app.project_editor_scroll,
     );
+    let visual_lines = app.project_editor_visual_line_anchor.map(|anchor| {
+        let current = app.project_editor_text[..app.project_editor_cursor.min(app.project_editor_text.len())]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count();
+        (anchor.min(current), anchor.max(current))
+    });
+    let mut rendered_source_line = 0_usize;
+    for line in editor_view.lines.iter().take(app.project_editor_scroll) {
+        if let Ok(line_number) = line[..4.min(line.len())].trim().parse::<usize>() {
+            rendered_source_line = line_number.saturating_sub(1);
+        }
+    }
     let editor_lines = editor_view
         .lines
         .iter()
@@ -421,9 +434,23 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
         .take(editor_height)
         .map(|line| {
             let (prefix, content) = line.split_at(4.min(line.len()));
+            if let Ok(line_number) = prefix.trim().parse::<usize>() {
+                rendered_source_line = line_number.saturating_sub(1);
+            }
+            let selected = visual_lines.is_some_and(|(first, last)| {
+                (first..=last).contains(&rendered_source_line)
+            });
+            let line_style = if selected {
+                Style::default().bg(theme.surface).fg(theme.accent)
+            } else {
+                Style::default().fg(theme.text)
+            };
             Line::from(vec![
-                Span::styled(prefix.to_owned(), Style::default().fg(theme.muted)),
-                Span::styled(content.to_owned(), Style::default().fg(theme.text)),
+                Span::styled(
+                    prefix.to_owned(),
+                    if selected { line_style } else { Style::default().fg(theme.muted) },
+                ),
+                Span::styled(content.to_owned(), line_style),
             ])
         })
         .collect::<Vec<_>>();
@@ -432,8 +459,9 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
             .wrap(Wrap { trim: false })
             .block(focus_block(
                 &format!(
-                    " EDITOR [ALT+2] — {editor_title}{} ",
-                    if app.project_editor_dirty { " •" } else { "" }
+                    " EDITOR [ALT+2]{} — {editor_title}{} ",
+                    if visual_lines.is_some() { " [VISUAL LINE]" } else { "" },
+                    if app.project_editor_dirty { " •" } else { "" },
                 ),
                 app.content_focused && app.project_pane == ProjectPane::Editor,
                 theme,
@@ -3929,10 +3957,12 @@ fn keyboard_reference() -> Vec<HelpSection> {
                 ("w / b", "next / previous word"),
                 ("0 / $", "line start / end"),
                 ("x / Delete", "delete character"),
+                ("V, j/k, y/d", "select lines, move, yank/delete"),
+                ("u / Ctrl+r", "undo/redo; Ctrl+Bksp/Delete word"),
                 ("PgUp / PgDn", "move by editor page"),
                 ("Esc", "focus file tree"),
                 ("Ctrl+s", "save current source"),
-                ("Ctrl+Shift+v", "paste exactly into .bib and save"),
+                ("Ctrl+Shift+v", "paste exactly into .tex/.bib and save"),
             ],
         },
     ]

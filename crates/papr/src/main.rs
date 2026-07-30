@@ -692,6 +692,9 @@ fn open_project_workspace(app: &mut App, project: Project) {
     app.project_editor_dirty = false;
     app.project_editor_cursor = 0;
     app.project_editor_insert_mode = false;
+    app.project_editor_visual_line_anchor = None;
+    app.project_editor_undo.clear();
+    app.project_editor_redo.clear();
     app.project_editor_scroll = 0;
     app.project_build_status = "Starting latexmk…".into();
     app.project_build_errors.clear();
@@ -890,6 +893,9 @@ fn open_project_file(app: &mut App, path: PathBuf) {
             app.project_editor_dirty = false;
             app.project_editor_cursor = 0;
             app.project_editor_insert_mode = false;
+            app.project_editor_visual_line_anchor = None;
+            app.project_editor_undo.clear();
+            app.project_editor_redo.clear();
             app.project_editor_scroll = 0;
             app.project_pane = ProjectPane::Editor;
         }
@@ -1622,7 +1628,7 @@ async fn run(
                     }
                 }
                 Event::Paste(text) => {
-                    handle_project_bibtex_paste(app, &text);
+                    handle_project_exact_paste(app, &text);
                 }
                 _ => {}
             }
@@ -1670,7 +1676,7 @@ async fn run(
                     }
                 }
                 Event::Paste(text) => {
-                    handle_project_bibtex_paste(app, &text);
+                    handle_project_exact_paste(app, &text);
                 }
                 _ => {}
             }
@@ -4726,6 +4732,21 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         }
         return None;
     }
+    if key.code == KeyCode::Esc
+        && app.project_pane == ProjectPane::Editor
+        && app.project_editor_insert_mode
+    {
+        app.project_editor_insert_mode = false;
+        app.project_completions.clear();
+        return None;
+    }
+    if key.code == KeyCode::Esc
+        && app.project_pane == ProjectPane::Editor
+        && app.project_editor_visual_line_anchor.is_some()
+    {
+        app.project_editor_visual_line_anchor = None;
+        return None;
+    }
     if key.code == KeyCode::Esc {
         if app.project_pane == ProjectPane::FileTree {
             exit_project_view(app);
@@ -4745,10 +4766,10 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         save_project_editor(app);
         return None;
     }
-    if is_project_bibtex_paste_shortcut(key) && is_project_bibtex_editor(app) {
+    if is_project_exact_paste_shortcut(key) && is_project_exact_paste_editor(app) {
         match read_clipboard_text() {
             Some(text) if !text.is_empty() => {
-                handle_project_bibtex_paste(app, &text);
+                handle_project_exact_paste(app, &text);
             }
             _ => app.toast = Some("Clipboard does not contain text to paste.".into()),
         }
@@ -4779,13 +4800,17 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             move_project_editor_page(app, if key.code == KeyCode::PageUp { -1 } else { 1 });
             return None;
         }
+        let before_change = (app.project_editor_text.clone(), app.project_editor_cursor);
         match apply_editor_insert_key(
             &mut app.project_editor_text,
             &mut app.project_editor_cursor,
             key,
         ) {
             EditorInsertResult::ExitInsert => app.project_editor_insert_mode = false,
-            EditorInsertResult::Changed => app.project_editor_dirty = true,
+            EditorInsertResult::Changed => {
+                record_project_editor_snapshot(app, before_change);
+                app.project_editor_dirty = true;
+            }
             EditorInsertResult::Ignored | EditorInsertResult::Moved => {}
         }
         return None;
@@ -5032,39 +5057,82 @@ fn move_project_tree_to_parent(app: &mut App) -> bool {
     true
 }
 
-fn is_project_bibtex_paste_shortcut(key: KeyEvent) -> bool {
+fn is_project_exact_paste_shortcut(key: KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL)
         && key.modifiers.contains(KeyModifiers::SHIFT)
         && matches!(key.code, KeyCode::Char('v' | 'V'))
 }
 
-fn is_project_bibtex_editor(app: &App) -> bool {
+fn is_project_exact_paste_editor(app: &App) -> bool {
     app.page == Page::Projects
         && app.content_focused
         && app.project_pane == ProjectPane::Editor
         && app.project_editor_path.as_ref().is_some_and(|path| {
             path.extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("bib"))
+                .is_some_and(|extension| {
+                    extension.eq_ignore_ascii_case("bib") || extension.eq_ignore_ascii_case("tex")
+                })
         })
 }
 
-/// Inserts terminal-paste text without normalizing its whitespace or entries.
+/// Inserts `.tex`/`.bib` terminal-paste text without normalizing whitespace.
 /// Returns whether the paste was accepted for the active editor.
-fn handle_project_bibtex_paste(app: &mut App, text: &str) -> bool {
-    if !is_project_bibtex_editor(app) || text.is_empty() {
+fn handle_project_exact_paste(app: &mut App, text: &str) -> bool {
+    if !is_project_exact_paste_editor(app) || text.is_empty() {
         return false;
     }
 
     insert_project_bibtex_text(app, text);
-    save_project_editor(app)
+    let is_bibtex = app.project_editor_path.as_ref().is_some_and(|path| {
+        path.extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("bib"))
+    });
+    if is_bibtex {
+        save_project_editor(app)
+    } else {
+        true
+    }
 }
 
 fn insert_project_bibtex_text(app: &mut App, text: &str) {
+    record_project_editor_change(app);
     app.project_editor_text
         .insert_str(app.project_editor_cursor, text);
     app.project_editor_cursor += text.len();
     app.project_editor_dirty = true;
     app.project_completions.clear();
+}
+
+fn record_project_editor_change(app: &mut App) {
+    record_project_editor_snapshot(app, (app.project_editor_text.clone(), app.project_editor_cursor));
+}
+
+fn record_project_editor_snapshot(app: &mut App, snapshot: (String, usize)) {
+    if app.project_editor_undo.last() != Some(&snapshot) {
+        app.project_editor_undo.push(snapshot);
+        if app.project_editor_undo.len() > 512 {
+            app.project_editor_undo.remove(0);
+        }
+    }
+    app.project_editor_redo.clear();
+}
+
+fn undo_project_editor_change(app: &mut App) {
+    let Some(snapshot) = app.project_editor_undo.pop() else { return; };
+    app.project_editor_redo
+        .push((app.project_editor_text.clone(), app.project_editor_cursor));
+    (app.project_editor_text, app.project_editor_cursor) = snapshot;
+    app.project_editor_dirty = true;
+    app.project_editor_visual_line_anchor = None;
+}
+
+fn redo_project_editor_change(app: &mut App) {
+    let Some(snapshot) = app.project_editor_redo.pop() else { return; };
+    app.project_editor_undo
+        .push((app.project_editor_text.clone(), app.project_editor_cursor));
+    (app.project_editor_text, app.project_editor_cursor) = snapshot;
+    app.project_editor_dirty = true;
+    app.project_editor_visual_line_anchor = None;
 }
 
 fn read_clipboard_text() -> Option<String> {
@@ -5105,12 +5173,64 @@ fn handle_project_editor_normal_key(app: &mut App, key: KeyEvent) {
         let _ = edit_text(&mut app.project_editor_text, &mut app.project_editor_cursor, movement_key);
         return;
     }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
+        redo_project_editor_change(app);
+        return;
+    }
+    if let Some(anchor) = app.project_editor_visual_line_anchor {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('V') => app.project_editor_visual_line_anchor = None,
+            KeyCode::Char('y') => {
+                let (start, end) = project_editor_visual_byte_range(app, anchor);
+                let text = app.project_editor_text[start..end].to_owned();
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    let _ = clipboard.set_text(text);
+                }
+                app.project_editor_visual_line_anchor = None;
+                app.toast = Some("Yanked selected line(s)".into());
+            }
+            KeyCode::Char('d') => {
+                let (start, end) = project_editor_visual_byte_range(app, anchor);
+                record_project_editor_change(app);
+                app.project_editor_text.drain(start..end);
+                app.project_editor_cursor = start.min(app.project_editor_text.len());
+                app.project_editor_dirty = true;
+                app.project_editor_visual_line_anchor = None;
+            }
+            _ => {}
+        }
+        return;
+    }
     match key.code {
         KeyCode::Char('i') => app.project_editor_insert_mode = true,
+        KeyCode::Char('V') => {
+            app.project_editor_visual_line_anchor = Some(project_editor_line_at(
+                &app.project_editor_text,
+                app.project_editor_cursor,
+            ));
+        }
+        KeyCode::Char('u') => undo_project_editor_change(app),
         KeyCode::Char('w') => app.project_editor_cursor = next_word_boundary(&app.project_editor_text, app.project_editor_cursor),
         KeyCode::Char('b') => app.project_editor_cursor = prev_word_boundary(&app.project_editor_text, app.project_editor_cursor),
         KeyCode::Char('0') | KeyCode::Home => app.project_editor_cursor = config_editor_line_start(&app.project_editor_text, app.project_editor_cursor),
         KeyCode::Char('$') | KeyCode::End => app.project_editor_cursor = config_editor_line_end(&app.project_editor_text, app.project_editor_cursor),
+        KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let previous = prev_word_boundary(&app.project_editor_text, app.project_editor_cursor);
+            if previous != app.project_editor_cursor {
+                record_project_editor_change(app);
+                app.project_editor_text.drain(previous..app.project_editor_cursor);
+                app.project_editor_cursor = previous;
+                app.project_editor_dirty = true;
+            }
+        }
+        KeyCode::Delete if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let next = next_word_boundary(&app.project_editor_text, app.project_editor_cursor);
+            if next != app.project_editor_cursor {
+                record_project_editor_change(app);
+                app.project_editor_text.drain(app.project_editor_cursor..next);
+                app.project_editor_dirty = true;
+            }
+        }
         KeyCode::Backspace => {
             app.project_editor_cursor = prev_char_boundary(
                 &app.project_editor_text,
@@ -5119,6 +5239,7 @@ fn handle_project_editor_normal_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Delete | KeyCode::Char('x') => {
             if app.project_editor_cursor < app.project_editor_text.len() {
+                record_project_editor_change(app);
                 let next = next_char_boundary(
                     &app.project_editor_text,
                     app.project_editor_cursor,
@@ -5133,6 +5254,30 @@ fn handle_project_editor_normal_key(app: &mut App, key: KeyEvent) {
         }
         _ => {}
     }
+}
+
+fn project_editor_line_at(text: &str, cursor: usize) -> usize {
+    text[..cursor.min(text.len())].bytes().filter(|byte| *byte == b'\n').count()
+}
+
+fn project_editor_visual_byte_range(app: &App, anchor: usize) -> (usize, usize) {
+    let current = project_editor_line_at(&app.project_editor_text, app.project_editor_cursor);
+    let first = anchor.min(current);
+    let last = anchor.max(current);
+    let start = app
+        .project_editor_text
+        .split('\n')
+        .take(first)
+        .map(|line| line.len() + 1)
+        .sum();
+    let end = app
+        .project_editor_text
+        .split_inclusive('\n')
+        .take(last + 1)
+        .map(str::len)
+        .sum::<usize>()
+        .min(app.project_editor_text.len());
+    (start, end)
 }
 
 
@@ -5915,7 +6060,11 @@ fn apply_editor_insert_key(text: &mut String, cursor: &mut usize, key: KeyEvent)
             if *cursor == 0 {
                 return EditorInsertResult::Ignored;
             }
-            let previous = prev_char_boundary(text, *cursor);
+            let previous = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                prev_word_boundary(text, *cursor)
+            } else {
+                prev_char_boundary(text, *cursor)
+            };
             text.drain(previous..*cursor);
             *cursor = previous;
             EditorInsertResult::Changed
@@ -5924,7 +6073,11 @@ fn apply_editor_insert_key(text: &mut String, cursor: &mut usize, key: KeyEvent)
             if *cursor >= text.len() {
                 return EditorInsertResult::Ignored;
             }
-            let next = next_char_boundary(text, *cursor);
+            let next = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                next_word_boundary(text, *cursor)
+            } else {
+                next_char_boundary(text, *cursor)
+            };
             text.drain(*cursor..next);
             EditorInsertResult::Changed
         }
@@ -6708,7 +6861,7 @@ mod tests {
         handle_config_editor_insert_key, handle_downloads_key, handle_key, handle_paper_detail_key, parse_command,
         keyword_representation_targets, move_config_editor_page, refresh_downloads_from_dir,
         accept_project_completion, create_project_file, is_project_text_file, project_tree_entries,
-        insert_project_bibtex_text,
+        handle_project_exact_paste, insert_project_bibtex_text,
         reload_config_editor_buffer, select_dashboard_papers, shuffle_daily_bucket,
         update_project_completions, merge_enriched_remote_paper, run_terminal_command,
         sanitize_terminal_output, PaperTarget,
@@ -7434,6 +7587,22 @@ mod tests {
     }
 
     #[test]
+    fn project_tex_paste_uses_the_same_exact_text_path() {
+        let pasted = "\\section{Exact}\n  text   stays\n";
+        let mut app = project_editor_app("before", 6);
+        let path = std::env::temp_dir().join(format!("papr-exact-{}.tex", std::process::id()));
+        std::fs::write(&path, "before").unwrap();
+        app.project_editor_path = Some(path.clone());
+
+        assert!(handle_project_exact_paste(&mut app, pasted));
+
+        assert_eq!(app.project_editor_text, format!("before{pasted}"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "before");
+        assert!(app.project_editor_dirty);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn ctrl_t_opens_the_terminal_command_palette() {
         let mut app = App::default();
 
@@ -7740,6 +7909,30 @@ mod tests {
     }
 
     #[test]
+    fn project_editor_visual_line_delete_undo_redo_and_word_deletion_work() {
+        let mut app = project_editor_app("one\ntwo\nthree", 0);
+        app.project_editor_insert_mode = false;
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT));
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.project_editor_visual_line_anchor, Some(0));
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(app.project_editor_text, "three");
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        assert_eq!(app.project_editor_text, "one\ntwo\nthree");
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(app.project_editor_text, "three");
+
+        app.project_editor_text = "alpha beta".into();
+        app.project_editor_cursor = app.project_editor_text.len();
+        app.project_editor_insert_mode = true;
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+        assert_eq!(app.project_editor_text, "alpha ");
+        app.project_editor_cursor = 0;
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL));
+        assert_eq!(app.project_editor_text, "");
+    }
+
+    #[test]
     fn project_editor_navigation_keys_move_without_mutating_the_buffer() {
         let mut app = project_editor_app("abc\ndef", 2);
 
@@ -8021,9 +8214,16 @@ mod tests {
         ];
         app.projects_selected = 0;
 
-        for pane in [ProjectPane::Editor, ProjectPane::Build, ProjectPane::Preview] {
+        app.project_pane = ProjectPane::Editor;
+        app.project_editor_insert_mode = true;
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.project_pane, ProjectPane::Editor);
+        assert!(!app.project_editor_insert_mode);
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.project_pane, ProjectPane::FileTree);
+
+        for pane in [ProjectPane::Build, ProjectPane::Preview] {
             app.project_pane = pane;
-            app.project_editor_insert_mode = pane == ProjectPane::Editor;
 
             let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
@@ -8031,6 +8231,14 @@ mod tests {
             assert!(app.content_focused);
             assert!(!app.project_editor_insert_mode);
         }
+
+        app.project_pane = ProjectPane::Editor;
+        app.project_editor_visual_line_anchor = Some(0);
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.project_pane, ProjectPane::Editor);
+        assert!(app.project_editor_visual_line_anchor.is_none());
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.project_pane, ProjectPane::FileTree);
 
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.project_pane, ProjectPane::ProjectList);

@@ -870,6 +870,12 @@ pub struct App {
     pub project_editor_cursor: usize,
     /// Vim insert-mode state for the project editor.
     pub project_editor_insert_mode: bool,
+    /// Anchor line for Vim-style linewise visual selection in the project editor.
+    pub project_editor_visual_line_anchor: Option<usize>,
+    /// Undo snapshots for project-editor text changes.
+    pub project_editor_undo: Vec<(String, usize)>,
+    /// Redo snapshots for project-editor text changes.
+    pub project_editor_redo: Vec<(String, usize)>,
     /// Vertical visual-row offset for the project editor.
     pub project_editor_scroll: usize,
     /// Cached wrapped width of the project editor viewport.
@@ -1077,6 +1083,9 @@ impl Default for App {
             project_editor_dirty: false,
             project_editor_cursor: 0,
             project_editor_insert_mode: false,
+            project_editor_visual_line_anchor: None,
+            project_editor_undo: Vec::new(),
+            project_editor_redo: Vec::new(),
             project_editor_scroll: 0,
             project_editor_wrap_width: 1,
             project_editor_viewport_height: 0,
