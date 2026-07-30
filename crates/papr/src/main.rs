@@ -4692,14 +4692,6 @@ fn sanitize_terminal_output(output: &str) -> String {
 }
 
 fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
-    // Pane shortcuts deliberately do nothing in Insert mode. They are still
-    // consumed so an Alt sequence can never become editor text.
-    if app.project_pane == ProjectPane::Editor
-        && app.project_editor_insert_mode
-        && is_project_pane_shortcut(key)
-    {
-        return None;
-    }
     if handle_project_pane_shortcut(app, key) {
         return None;
     }
@@ -4872,13 +4864,6 @@ fn handle_project_pane_shortcut(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Char('4') => ProjectPane::Build,
         _ => return false,
     };
-    if app.project_pane == ProjectPane::Editor
-        && pane != ProjectPane::Editor
-        && app.project_editor_dirty
-        && !save_project_editor(app)
-    {
-        return true;
-    }
     let available = match pane {
         ProjectPane::ProjectList => true,
         ProjectPane::FileTree | ProjectPane::Build => app.active_project.is_some(),
@@ -7802,18 +7787,20 @@ mod tests {
     }
 
     #[test]
-    fn project_alt_shortcuts_are_inactive_in_insert_mode_and_unavailable_panes_are_safe() {
+    fn project_alt_shortcuts_work_in_insert_mode_and_unavailable_panes_are_safe() {
         let mut app = project_editor_app("abc", 1);
         app.project_editor_path = Some(std::path::PathBuf::from("keyboard-test/main.tex"));
+        app.project_editor_dirty = true;
 
         let _ = handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('4'), KeyModifiers::ALT),
         );
-        assert_eq!(app.project_pane, ProjectPane::Editor);
+        assert_eq!(app.project_pane, ProjectPane::Build);
         assert_eq!(app.project_editor_text, "abc");
         assert_eq!(app.project_editor_cursor, 1);
         assert!(app.project_editor_insert_mode);
+        assert!(app.project_editor_dirty);
 
         app.active_project = None;
         app.project_pane = ProjectPane::ProjectList;
