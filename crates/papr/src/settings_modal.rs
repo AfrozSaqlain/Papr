@@ -1249,13 +1249,9 @@ fn render_theme_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
             let is_applied = name.eq_ignore_ascii_case(&app.settings_modal.original_theme);
 
             let mut style = if is_cursor && is_focused {
-                Style::default().fg(theme.background).bg(theme.accent)
-            } else if is_cursor {
-                Style::default().fg(theme.accent)
-            } else if is_applied {
-                Style::default().fg(theme.accent)
+                Style::default().fg(theme.text).bg(theme.accent)
             } else {
-                Style::default().fg(theme.text)
+                Style::default().fg(theme.muted)
             };
 
             if is_applied {
@@ -1417,11 +1413,7 @@ fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
         Paragraph::new(Line::styled(
             startup_text,
             Style::default()
-                .fg(if startup_focused {
-                    theme.accent
-                } else {
-                    theme.text
-                })
+                .fg(if startup_focused { theme.text } else { theme.muted })
                 .add_modifier(if startup_focused {
                     Modifier::BOLD
                 } else {
@@ -1445,11 +1437,7 @@ fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
     let viewer_style = if viewer_editing {
         Style::default().fg(theme.text)
     } else {
-        Style::default().fg(if viewer_focused {
-            theme.accent
-        } else {
-            theme.muted
-        })
+        setting_value_style(viewer_focused, theme)
     };
     frame.render_widget(
         Paragraph::new(Line::styled(&app.settings_modal.pdf_viewer, viewer_style))
@@ -1485,11 +1473,7 @@ fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
     frame.render_widget(
         Paragraph::new(Line::styled(
             plugin_hint,
-            Style::default().fg(if plugins_focused {
-                theme.accent
-            } else {
-                theme.muted
-            }),
+            setting_value_style(plugins_focused, theme),
         ))
         .block(focused_block(
             " Plugins (see Plugins tab) ",
@@ -1552,13 +1536,11 @@ fn render_dashboard_keywords(
             total_rows.min(inner.height - y_offset),
         );
 
-        let base_style = if is_selected {
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD)
+        let base_style = setting_value_style(is_selected, theme).add_modifier(if is_selected {
+            Modifier::BOLD
         } else {
-            Style::default().fg(theme.text)
-        };
+            Modifier::empty()
+        });
         let prefix = if is_selected { "› " } else { "  " };
 
         let display_text = format!("{}{}", prefix, entry.text);
@@ -1706,13 +1688,11 @@ fn render_library_folders(
             total_rows.min(inner.height - y_offset),
         );
 
-        let base_style = if is_selected {
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD)
+        let base_style = setting_value_style(is_selected, theme).add_modifier(if is_selected {
+            Modifier::BOLD
         } else {
-            Style::default().fg(theme.text)
-        };
+            Modifier::empty()
+        });
         let prefix = if is_selected { "› " } else { "  " };
         let display_text = format!("{}{}", prefix, entry.text);
 
@@ -1780,7 +1760,7 @@ fn render_single_path_field(
     } else if error.is_some() {
         Style::default().fg(theme.error)
     } else {
-        Style::default().fg(if focused { theme.accent } else { theme.muted })
+        setting_value_style(focused, theme)
     };
     let content = if let Some(err) = error {
         format!("{} — {}", text, err)
@@ -1820,28 +1800,23 @@ fn render_plugins_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
             let selected = i == app.settings_modal.plugins_selected && is_focused;
             let staged_enabled = enabled_ids.contains(&plugin.id);
             let check = if staged_enabled { "✓" } else { "✗" };
-            let check_style = if staged_enabled {
-                Style::default().fg(theme.success)
+            let check_style = setting_value_style(selected, theme);
+            let name_style = setting_value_style(selected, theme).add_modifier(if selected {
+                Modifier::BOLD
             } else {
-                Style::default().fg(theme.muted)
-            };
-            let name_style = if selected {
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.text)
-            };
+                Modifier::empty()
+            });
+            let detail_style = setting_value_style(selected, theme);
             ListItem::new(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(format!("[{}] ", check), check_style),
                 Span::styled(format!("{} ", plugin.name), name_style),
                 Span::styled(
                     format!("v{}", plugin.version),
-                    Style::default().fg(theme.muted),
+                    detail_style,
                 ),
                 Span::raw("  "),
-                Span::styled(&plugin.description, Style::default().fg(theme.muted)),
+                Span::styled(&plugin.description, detail_style),
             ]))
         })
         .collect();
@@ -1889,7 +1864,7 @@ fn focused_block<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> 
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme.muted)
+        Style::default().fg(theme.text)
     };
     let mut block = Block::default()
         .title(Line::styled(title, title_style))
@@ -1901,6 +1876,11 @@ fn focused_block<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> 
             .border_set(border::THICK);
     }
     block
+}
+
+/// Use the same subdued/active treatment for every settings value.
+fn setting_value_style(focused: bool, theme: &Theme) -> Style {
+    Style::default().fg(if focused { theme.text } else { theme.muted })
 }
 
 fn validate_path(text: &str) -> Option<String> {
