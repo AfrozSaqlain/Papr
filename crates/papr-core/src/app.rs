@@ -882,6 +882,10 @@ pub struct App {
     pub project_editor_wrap_width: usize,
     /// Cached height of the project editor viewport.
     pub project_editor_viewport_height: usize,
+    /// Whether mouse-wheel scrolling is temporarily controlling the editor viewport.
+    pub project_editor_manual_scroll: bool,
+    /// Pending first `g` of the Vim-style `gg` command.
+    pub project_editor_pending_g: bool,
     /// Items currently offered by the editor completion engine.
     pub project_completions: Vec<crate::completions::CompletionItem>,
     /// Selected item in the completion popup.
@@ -1089,6 +1093,8 @@ impl Default for App {
             project_editor_scroll: 0,
             project_editor_wrap_width: 1,
             project_editor_viewport_height: 0,
+            project_editor_manual_scroll: false,
+            project_editor_pending_g: false,
             project_completions: Vec::new(),
             project_completion_selected: 0,
             project_build_status: "Idle".into(),

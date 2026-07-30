@@ -148,7 +148,7 @@ fn validate_name(name: &str) -> Result<(), ProjectError> {
 fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() }
 
 fn default_main_tex(title: &str) -> String {
-    format!("\\documentclass[11pt]{{article}}\n\\usepackage[utf8]{{inputenc}}\n\\usepackage{{graphicx}}\n\\usepackage{{amsmath}}\n\\title{{{title}}}\n\\author{{}}\n\\date{{\\today}}\n\n\\begin{{document}}\n\\maketitle\n\n\\begin{{abstract}}\nWrite your abstract here.\n\\end{{abstract}}\n\n\\section{{Introduction}}\nStart writing.\n\n\\bibliographystyle{{plain}}\n\\bibliography{{references}}\n\\end{{document}}\n")
+    format!("\\documentclass[11pt]{{article}}\n\\usepackage[utf8]{{inputenc}}\n\\usepackage{{graphicx}}\n\\usepackage{{amsmath,amssymb,amsthm}}\n\\usepackage[a4paper,margin=1in]{{geometry}}\n\\usepackage{{enumerate}}\n\\usepackage{{float}}\n\n\\setlength{{\\parindent}}{{0em}}\n\n\\title{{{title}}}\n\\author{{}}\n\\date{{\\today}}\n\n\\begin{{document}}\n\\maketitle\n\n\\begin{{abstract}}\nWrite your abstract here.\n\\end{{abstract}}\n\n\\section{{Introduction}}\nStart writing.\n\n\\bibliographystyle{{plain}}\n\\bibliography{{references}}\n\\end{{document}}\n")
 }
 
 #[cfg(test)]
@@ -160,7 +160,15 @@ mod tests {
         let manager = ProjectManager::new(root.clone())?;
         let created = manager.create("paper")?;
         assert!(created.path.join("main.tex").exists());
-        assert!(fs::read_to_string(created.path.join("main.tex"))?.contains("\\title{paper}"));
+        let main = fs::read_to_string(created.path.join("main.tex"))?;
+        assert!(main.contains("\\title{paper}"));
+        assert!(main.contains("\\usepackage[a4paper,margin=1in]{geometry}"));
+        assert!(main.contains("\\usepackage{enumerate}"));
+        assert!(main.contains("\\usepackage{float}"));
+        assert!(main.contains("\\usepackage{amsmath,amssymb,amsthm}"));
+        assert!(!main.contains("\\usepackage{parskip}"));
+        assert!(main.contains("\\setlength{\\parindent}{0em}"));
+        assert!(!main.contains("\\setlength{\\parskip}"));
         assert_eq!(manager.list()?.len(), 1);
         let external = root.parent().unwrap().join(format!("papr-external-{}", now()));
         fs::create_dir_all(&external)?;

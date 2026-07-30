@@ -2,7 +2,7 @@
 
 use std::sync::OnceLock;
 
-use crate::build_config_editor_view;
+use crate::build_config_editor_view_with_scroll_mode;
 use crate::settings_modal;
 use papr_core::{
     App, AppMode, DeletionTarget, DiscoveryStatus, DownloadStatus, Page, ProjectPane, RemotePaper,
@@ -407,12 +407,13 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
     let editor_height = editor_area.height.saturating_sub(2) as usize;
     app.project_editor_wrap_width = editor_area.width.saturating_sub(6).max(1) as usize;
     app.project_editor_viewport_height = editor_height;
-    let editor_view = build_config_editor_view(
+    let editor_view = build_config_editor_view_with_scroll_mode(
         &app.project_editor_text,
         app.project_editor_cursor,
         app.project_editor_wrap_width,
         editor_height,
         &mut app.project_editor_scroll,
+        !app.project_editor_manual_scroll,
     );
     let visual_lines = app.project_editor_visual_line_anchor.map(|anchor| {
         let current = app.project_editor_text[..app.project_editor_cursor.min(app.project_editor_text.len())]
@@ -468,7 +469,11 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
             )),
         editor_area,
     );
-    if app.content_focused && app.project_pane == ProjectPane::Editor {
+    if app.content_focused
+        && app.project_pane == ProjectPane::Editor
+        && editor_view.cursor_row >= app.project_editor_scroll
+        && editor_view.cursor_row < app.project_editor_scroll + editor_height
+    {
         frame.set_cursor_position((
             editor_area
                 .x
@@ -3955,11 +3960,11 @@ fn keyboard_reference() -> Vec<HelpSection> {
             entries: &[
                 ("i", "enter Insert mode"),
                 ("w / b", "next / previous word"),
-                ("0 / $", "line start / end"),
+                ("0/$, gg/G", "line/file bounds"),
                 ("x / Delete", "delete character"),
                 ("V, j/k, y/d", "select lines, move, yank/delete"),
                 ("u / Ctrl+r", "undo/redo; Ctrl+Bksp/Delete word"),
-                ("PgUp / PgDn", "move by editor page"),
+                ("PgUp/PgDn", "page move; wheel scrolls"),
                 ("Esc", "focus file tree"),
                 ("Ctrl+s", "save current source"),
                 ("Ctrl+Shift+v", "paste exactly into .tex/.bib and save"),

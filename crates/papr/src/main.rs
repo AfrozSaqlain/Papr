@@ -696,6 +696,8 @@ fn open_project_workspace(app: &mut App, project: Project) {
     app.project_editor_undo.clear();
     app.project_editor_redo.clear();
     app.project_editor_scroll = 0;
+    app.project_editor_manual_scroll = false;
+    app.project_editor_pending_g = false;
     app.project_build_status = "Starting latexmk…".into();
     app.project_build_errors.clear();
     app.project_build_scroll = 0;
@@ -897,6 +899,8 @@ fn open_project_file(app: &mut App, path: PathBuf) {
             app.project_editor_undo.clear();
             app.project_editor_redo.clear();
             app.project_editor_scroll = 0;
+            app.project_editor_manual_scroll = false;
+            app.project_editor_pending_g = false;
             app.project_pane = ProjectPane::Editor;
         }
         Err(error) => app.toast = Some(format!("Could not open file: {error}")),
@@ -1145,6 +1149,7 @@ fn reload_config_editor_buffer(app: &mut App, config_file: &std::path::Path) {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn build_config_editor_view(
     text: &str,
     cursor: usize,
@@ -1152,13 +1157,24 @@ pub(crate) fn build_config_editor_view(
     viewport_height: usize,
     scroll: &mut usize,
 ) -> ConfigEditorView {
+    build_config_editor_view_with_scroll_mode(text, cursor, wrap_width, viewport_height, scroll, true)
+}
+
+pub(crate) fn build_config_editor_view_with_scroll_mode(
+    text: &str,
+    cursor: usize,
+    wrap_width: usize,
+    viewport_height: usize,
+    scroll: &mut usize,
+    follow_cursor: bool,
+) -> ConfigEditorView {
     let wrap_width = wrap_width.max(1);
     let (display_text, display_cursor) = expand_tabs_for_editor_view(text, cursor, 4);
     let (cursor_row, cursor_col) = cursor_visual_position(&display_text, display_cursor, wrap_width);
 
-    if cursor_row < *scroll {
+    if follow_cursor && cursor_row < *scroll {
         *scroll = cursor_row;
-    } else if viewport_height > 0 && cursor_row >= *scroll + viewport_height {
+    } else if follow_cursor && viewport_height > 0 && cursor_row >= *scroll + viewport_height {
         *scroll = cursor_row - viewport_height + 1;
     }
 
@@ -1178,6 +1194,7 @@ pub(crate) fn build_config_editor_view(
             lines.push(format!("{prefix}{segment}"));
         }
     }
+    *scroll = (*scroll).min(lines.len().saturating_sub(viewport_height.max(1)));
 
     ConfigEditorView {
         lines,
@@ -3254,16 +3271,38 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) -> Option<UiAction> {
         MouseEventKind::ScrollUp => {
             if app.mode == AppMode::PdfView {
                 pdf_scroll(app, -3);
+            } else if app.page == Page::Projects
+                && app.content_focused
+                && app.project_pane == ProjectPane::Editor
+            {
+                scroll_project_editor(app, -3);
             }
         }
         MouseEventKind::ScrollDown => {
             if app.mode == AppMode::PdfView {
                 pdf_scroll(app, 3);
+            } else if app.page == Page::Projects
+                && app.content_focused
+                && app.project_pane == ProjectPane::Editor
+            {
+                scroll_project_editor(app, 3);
             }
         }
         _ => {}
     }
     None
+}
+
+fn scroll_project_editor(app: &mut App, delta: isize) {
+    let code = if delta < 0 { KeyCode::Up } else { KeyCode::Down };
+    for _ in 0..delta.unsigned_abs() {
+        let _ = edit_text(
+            &mut app.project_editor_text,
+            &mut app.project_editor_cursor,
+            KeyEvent::new(code, KeyModifiers::NONE),
+        );
+    }
+    app.project_editor_manual_scroll = false;
 }
 
 
@@ -4810,8 +4849,10 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             EditorInsertResult::Changed => {
                 record_project_editor_snapshot(app, before_change);
                 app.project_editor_dirty = true;
+                app.project_editor_manual_scroll = false;
             }
-            EditorInsertResult::Ignored | EditorInsertResult::Moved => {}
+            EditorInsertResult::Moved => app.project_editor_manual_scroll = false,
+            EditorInsertResult::Ignored => {}
         }
         return None;
     }
@@ -5160,6 +5201,16 @@ fn read_clipboard_text() -> Option<String> {
 /// Projects intentionally uses the same movement primitives as Settings.  The
 /// only project-specific concern is persistence, handled by Ctrl+S above.
 fn handle_project_editor_normal_key(app: &mut App, key: KeyEvent) {
+    if key.code == KeyCode::Char('g') && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if app.project_editor_pending_g {
+            app.project_editor_cursor = 0;
+            app.project_editor_scroll = 0;
+            app.project_editor_manual_scroll = false;
+        }
+        app.project_editor_pending_g = !app.project_editor_pending_g;
+        return;
+    }
+    app.project_editor_pending_g = false;
     let movement = match key.code {
         KeyCode::Left | KeyCode::Char('h') => Some(KeyCode::Left),
         KeyCode::Right | KeyCode::Char('l') => Some(KeyCode::Right),
@@ -5168,6 +5219,7 @@ fn handle_project_editor_normal_key(app: &mut App, key: KeyEvent) {
         _ => None,
     };
     if let Some(code) = movement {
+        app.project_editor_manual_scroll = false;
         let mut movement_key = KeyEvent::new(code, key.modifiers);
         movement_key.kind = key.kind;
         let _ = edit_text(&mut app.project_editor_text, &mut app.project_editor_cursor, movement_key);
@@ -5203,6 +5255,13 @@ fn handle_project_editor_normal_key(app: &mut App, key: KeyEvent) {
     }
     match key.code {
         KeyCode::Char('i') => app.project_editor_insert_mode = true,
+        KeyCode::Char('G') => {
+            app.project_editor_cursor = config_editor_line_start(
+                &app.project_editor_text,
+                app.project_editor_text.len(),
+            );
+            app.project_editor_manual_scroll = false;
+        }
         KeyCode::Char('V') => {
             app.project_editor_visual_line_anchor = Some(project_editor_line_at(
                 &app.project_editor_text,
@@ -6849,7 +6908,7 @@ mod tests {
     use std::fs;
 
     use chrono::{TimeZone, Utc};
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use papr_core::{
         App, AppMode, BookmarkSummary, CollectionSummary, Database, DiscoveryState, DownloadStatus,
         CitationEntry, CitationSource, DownloadTask, LibraryPaper, Page, PaperNote, Project, ProjectPane, RemotePaper,
@@ -6858,7 +6917,7 @@ mod tests {
 
     use super::{
         UiAction, build_config_editor_view, cursor_visual_position,
-        handle_config_editor_insert_key, handle_downloads_key, handle_key, handle_paper_detail_key, parse_command,
+        handle_config_editor_insert_key, handle_downloads_key, handle_key, handle_mouse, handle_paper_detail_key, parse_command,
         keyword_representation_targets, move_config_editor_page, refresh_downloads_from_dir,
         accept_project_completion, create_project_file, is_project_text_file, project_tree_entries,
         handle_project_exact_paste, insert_project_bibtex_text,
@@ -7946,6 +8005,27 @@ mod tests {
         assert_eq!(app.project_editor_cursor, 4);
         assert_eq!(app.project_editor_text, "abc\ndef");
         assert!(!app.project_editor_dirty);
+    }
+
+    #[test]
+    fn project_editor_supports_gg_g_and_mouse_wheel_scrolling() {
+        let mut app = project_editor_app("one\ntwo\nthree\nfour", 5);
+        app.project_editor_insert_mode = false;
+        app.project_editor_viewport_height = 1;
+        app.project_editor_wrap_width = 80;
+
+        let _ = handle_mouse(
+            &mut app,
+            MouseEvent { kind: MouseEventKind::ScrollDown, column: 0, row: 0, modifiers: KeyModifiers::NONE },
+        );
+        assert_eq!(app.project_editor_cursor, "one\ntwo\nthree\n".len() + 1);
+        assert!(!app.project_editor_manual_scroll);
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(app.project_editor_cursor, 0);
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT));
+        assert_eq!(app.project_editor_cursor, "one\ntwo\nthree\n".len());
     }
 
     #[test]
