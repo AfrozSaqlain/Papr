@@ -269,17 +269,16 @@ def main():
         for rule in RULES:
             group_name = rule["group"]
             keywords = rule.get("keywords", [])
-            for pattern in keywords:
-                if re.search(pattern, title, re.IGNORECASE):
-                    response["actions"].append({
-                        "type": "add_to_collection",
-                        "name": group_name
-                    })
-                    response["actions"].append({
-                        "type": "notify",
-                        "message": f"Added '{title[:30]}...' to {group_name}"
-                    })
-                    break
+            if any(re.search(pattern, title, re.IGNORECASE) for pattern in keywords):
+                response["actions"].append({
+                    "type": "add_to_collection",
+                    "name": group_name
+                })
+                response["actions"].append({
+                    "type": "notify",
+                    "message": f"Added '{title[:30]}...' to {group_name}"
+                })
+                break  # Stop evaluating further rules once assigned to a group
 
     print(json.dumps(response))
 
