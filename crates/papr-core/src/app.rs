@@ -148,6 +148,8 @@ pub enum AppMode {
     Normal,
     /// Fuzzy command lookup.
     CommandPalette,
+    /// Shell command palette.
+    TerminalCommand,
     /// Shortcut overlay.
     Help,
     /// Text entry for a discovery search.
@@ -172,6 +174,8 @@ pub enum AppMode {
     ProjectCreate,
     /// One-line file creation input within the open project.
     ProjectFileCreate,
+    /// One-line file or folder rename input within the open project.
+    ProjectEntryRename,
     /// Interactive settings modal.
     SettingsModal,
 }
@@ -818,6 +822,14 @@ pub struct App {
     pub palette_query: String,
     /// Cursor position in Browse Papr query.
     pub palette_query_cursor: usize,
+    /// Command entered in the terminal command palette.
+    pub terminal_command: String,
+    /// Cursor position in the terminal command palette.
+    pub terminal_command_cursor: usize,
+    /// Most recent terminal command output.
+    pub terminal_command_output: String,
+    /// Working directory for the terminal command palette session.
+    pub terminal_command_directory: Option<std::path::PathBuf>,
     /// Selected credits item row.
     pub credits_selected: usize,
     /// Vertical list scroll offset for credits list.
@@ -874,6 +886,8 @@ pub struct App {
     pub project_rename_input: String,
     /// Byte cursor within the project name modal input.
     pub project_rename_cursor: usize,
+    /// File or folder being renamed from the active project tree.
+    pub project_entry_rename_path: Option<std::path::PathBuf>,
     /// Remote paper discovery state.
     pub discovery: DiscoveryState,
     /// Scroll offset within the currently open paper detail view.
@@ -1031,6 +1045,10 @@ impl Default for App {
             palette_scroll: 0,
             palette_query: String::new(),
             palette_query_cursor: 0,
+            terminal_command: String::new(),
+            terminal_command_cursor: 0,
+            terminal_command_output: String::new(),
+            terminal_command_directory: None,
             credits_selected: 0,
             credits_scroll: 0,
             workspace_query: String::new(),
@@ -1059,6 +1077,7 @@ impl Default for App {
             project_pane: ProjectPane::ProjectList,
             project_rename_input: String::new(),
             project_rename_cursor: 0,
+            project_entry_rename_path: None,
             discovery: DiscoveryState::default(),
             paper_detail_scroll: 0,
             library: LibraryState::default(),

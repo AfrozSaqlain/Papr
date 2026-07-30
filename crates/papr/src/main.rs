@@ -332,6 +332,7 @@ enum UiAction {
     RenameProject { project: Project, name: String },
     ConfirmDeleteProject(Project),
     DeleteProject(Project),
+    RenameProjectEntry { path: PathBuf, name: String },
 }
 
 enum KeyHandling {
@@ -699,7 +700,7 @@ fn project_tree_entries(directory: &Path) -> Vec<PathBuf> {
         .filter(|entry| entry.file_name() != ".git")
         .filter_map(|entry| {
             let path = entry.path();
-            (path.is_dir() || is_project_text_file(&path)).then_some(path)
+            (path.is_dir() || is_project_tree_file(&path)).then_some(path)
         })
         .collect::<Vec<_>>();
     entries.sort_by(|left, right| {
@@ -710,6 +711,10 @@ fn project_tree_entries(directory: &Path) -> Vec<PathBuf> {
 
 fn is_project_text_file(path: &Path) -> bool {
     path.extension().is_some_and(|ext| matches!(ext.to_str(), Some("tex" | "bib" | "sty" | "cls" | "md" | "txt")))
+}
+
+fn is_project_tree_file(path: &Path) -> bool {
+    is_project_text_file(path) || image::ImageFormat::from_path(path).is_ok()
 }
 
 fn create_project_file(project_root: &Path, name: &str) -> Result<PathBuf, String> {
@@ -1794,6 +1799,42 @@ async fn apply_ui_action(
                 return Ok(());
             }
             open_project_file(app, path);
+        }
+        UiAction::RenameProjectEntry { path, name } => {
+            let Some(project) = app.active_project.as_ref() else {
+                app.toast = Some("Could not rename entry: no project is open.".into());
+                return Ok(());
+            };
+            let project_root = project.path.clone();
+            let name = name.trim();
+            if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
+                app.toast = Some("Could not rename entry: enter a single file or folder name.".into());
+                return Ok(());
+            }
+            let Some(parent) = path.parent() else {
+                app.toast = Some("Could not rename entry: invalid path.".into());
+                return Ok(());
+            };
+            if !path.starts_with(&project_root) {
+                app.toast = Some("Could not rename entry outside the project.".into());
+                return Ok(());
+            }
+            let renamed = parent.join(name);
+            if let Err(error) = std::fs::rename(&path, &renamed) {
+                app.toast = Some(format!("Could not rename entry: {error}"));
+                return Ok(());
+            }
+            if let Some(editor_path) = &app.project_editor_path
+                && let Ok(relative) = editor_path.strip_prefix(&path)
+            {
+                app.project_editor_path = Some(renamed.join(relative));
+            } else if app.project_editor_path.as_ref() == Some(&path) {
+                app.project_editor_path = Some(renamed.clone());
+            }
+            let tree_dir = app.project_tree_dir.clone().unwrap_or(project_root);
+            app.project_files = project_tree_entries(&tree_dir);
+            app.project_file_selected = app.project_files.iter().position(|entry| entry == &renamed).unwrap_or(0);
+            app.toast = Some("Renamed".into());
         }
         UiAction::ConfirmDeleteProjectEntry(path) => {
             let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("entry").to_owned();
@@ -3851,6 +3892,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         }
         return None;
     }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t') {
+        app.mode = AppMode::TerminalCommand;
+        app.terminal_command.clear();
+        app.terminal_command_cursor = 0;
+        app.terminal_command_output.clear();
+        app.terminal_command_directory = app.active_project.as_ref().map(|project| project.path.clone());
+        return None;
+    }
     // Help is a global command. Resolve it before any view-specific handler
     // (notably PaperDetail) can interpret the key as navigation. Text-entry
     // contexts retain the character as normal input.
@@ -3858,16 +3907,24 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         app.dispatch(Command::ToggleHelp);
         return None;
     }
-    if matches!(app.mode, AppMode::ProjectRename | AppMode::ProjectCreate | AppMode::ProjectFileCreate) {
+    if matches!(
+        app.mode,
+        AppMode::ProjectRename
+            | AppMode::ProjectCreate
+            | AppMode::ProjectFileCreate
+            | AppMode::ProjectEntryRename
+    ) {
         match key.code {
             KeyCode::Esc => {
                 app.project_rename_input.clear();
                 app.project_rename_cursor = 0;
+                app.project_entry_rename_path = None;
                 app.mode = AppMode::Normal;
             }
             KeyCode::Enter => {
                 let creating_project = app.mode == AppMode::ProjectCreate;
                 let creating_file = app.mode == AppMode::ProjectFileCreate;
+                let renaming_entry = app.mode == AppMode::ProjectEntryRename;
                 app.mode = AppMode::Normal;
                 let name = app.project_rename_input.trim().to_owned();
                 app.project_rename_input.clear();
@@ -3877,6 +3934,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 }
                 if creating_file {
                     return Some(UiAction::CreateProjectFile(name));
+                }
+                if renaming_entry {
+                    return app
+                        .project_entry_rename_path
+                        .take()
+                        .map(|path| UiAction::RenameProjectEntry { path, name });
                 }
                 let project = app.active_project.clone().or_else(|| app.projects.get(app.projects_selected).cloned());
                 return project.map(|project| UiAction::RenameProject { project, name });
@@ -3928,6 +3991,20 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                         app.palette_selected = 0;
                     }
                 }
+            }
+        }
+        return None;
+    }
+    if app.mode == AppMode::TerminalCommand {
+        match key.code {
+            KeyCode::Esc => app.mode = AppMode::Normal,
+            KeyCode::Enter => run_terminal_command(app),
+            _ => {
+                let _ = edit_text(
+                    &mut app.terminal_command,
+                    &mut app.terminal_command_cursor,
+                    key,
+                );
             }
         }
         return None;
@@ -4162,7 +4239,9 @@ fn has_active_text_input(app: &App) -> bool {
         AppMode::ProjectRename
             | AppMode::ProjectCreate
             | AppMode::ProjectFileCreate
+            | AppMode::ProjectEntryRename
             | AppMode::CommandPalette
+            | AppMode::TerminalCommand
             | AppMode::NoteEdit
             | AppMode::Prompt
             | AppMode::Search
@@ -4172,6 +4251,108 @@ fn has_active_text_input(app: &App) -> bool {
         && app.content_focused
         && app.project_pane == ProjectPane::Editor
         && app.project_editor_insert_mode)
+}
+
+fn run_terminal_command(app: &mut App) {
+    let command_text = app.terminal_command.trim().to_owned();
+    if command_text.is_empty() {
+        return;
+    }
+    if command_text == "clear" {
+        app.terminal_command_output.clear();
+        app.terminal_command.clear();
+        app.terminal_command_cursor = 0;
+        return;
+    }
+    if command_text == "cd" || command_text.starts_with("cd ") {
+        let path = command_text[2..].trim();
+        app.terminal_command.clear();
+        app.terminal_command_cursor = 0;
+        change_terminal_directory(app, path);
+        return;
+    }
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = ProcessCommand::new("cmd");
+        command.args(["/C", &command_text]);
+        command
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut command = {
+        let mut command = ProcessCommand::new("sh");
+        command.args(["-c", &command_text]);
+        command
+    };
+    if let Some(directory) = &app.terminal_command_directory {
+        command.current_dir(directory);
+    }
+
+    let output = match command.output() {
+        Ok(output) => {
+            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.is_empty() {
+                if !text.is_empty() && !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(&stderr);
+            }
+            if text.is_empty() {
+                text = "Command completed with no output.".into();
+            }
+            format!(
+                "[exit {}]\n{text}",
+                output.status.code().map_or_else(|| "signal".to_owned(), |code| code.to_string())
+            )
+        }
+        Err(error) => format!("Could not run command: {error}"),
+    };
+    append_terminal_output(app, &command_text, &output);
+    app.terminal_command.clear();
+    app.terminal_command_cursor = 0;
+}
+
+fn change_terminal_directory(app: &mut App, path: &str) {
+    let base = app
+        .terminal_command_directory
+        .clone()
+        .or_else(|| std::env::current_dir().ok());
+    let candidate = match base {
+        Some(base) if Path::new(path).is_relative() => base.join(path),
+        _ => PathBuf::from(path),
+    };
+    match std::fs::canonicalize(&candidate) {
+        Ok(directory) if directory.is_dir() => {
+            app.terminal_command_directory = Some(directory.clone());
+            append_terminal_output(app, &format!("cd {path}"), &directory.display().to_string());
+        }
+        Ok(_) => append_terminal_output(app, &format!("cd {path}"), "Not a directory."),
+        Err(error) => append_terminal_output(app, &format!("cd {path}"), &format!("cd: {error}")),
+    }
+}
+
+fn append_terminal_output(app: &mut App, command: &str, output: &str) {
+    if !app.terminal_command_output.is_empty() {
+        app.terminal_command_output.push('\n');
+    }
+    app.terminal_command_output.push_str("$ ");
+    app.terminal_command_output.push_str(command);
+    app.terminal_command_output.push('\n');
+    app.terminal_command_output.push_str(&sanitize_terminal_output(output));
+    const MAX_SCROLLBACK_BYTES: usize = 64 * 1024;
+    if app.terminal_command_output.len() > MAX_SCROLLBACK_BYTES {
+        let start = app.terminal_command_output.len() - MAX_SCROLLBACK_BYTES;
+        let start = next_char_boundary(&app.terminal_command_output, start);
+        app.terminal_command_output.drain(..start);
+    }
+}
+
+fn sanitize_terminal_output(output: &str) -> String {
+    output
+        .chars()
+        .filter(|character| matches!(character, '\n' | '\t') || !character.is_control())
+        .collect()
 }
 
 fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
@@ -4299,10 +4480,15 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 app.mode = AppMode::ProjectFileCreate;
             }
             KeyCode::Char('R') => {
-                if let Some(project) = &app.active_project {
-                    app.project_rename_input = project.name.clone();
+                if let Some(path) = app.project_files.get(app.project_file_selected).cloned() {
+                    app.project_rename_input = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default()
+                        .to_owned();
                     app.project_rename_cursor = app.project_rename_input.len();
-                    app.mode = AppMode::ProjectRename;
+                    app.project_entry_rename_path = Some(path);
+                    app.mode = AppMode::ProjectEntryRename;
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -6201,7 +6387,8 @@ mod tests {
         accept_project_completion, create_project_file, is_project_text_file, project_tree_entries,
         insert_project_bibtex_text,
         reload_config_editor_buffer, select_dashboard_papers, shuffle_daily_bucket,
-        update_project_completions, merge_enriched_remote_paper, PaperTarget,
+        update_project_completions, merge_enriched_remote_paper, run_terminal_command,
+        sanitize_terminal_output, PaperTarget,
     };
 
     #[test]
@@ -6923,6 +7110,51 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_t_opens_the_terminal_command_palette() {
+        let mut app = App::default();
+
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(app.mode, AppMode::TerminalCommand);
+        assert!(app.terminal_command.is_empty());
+        assert!(app.terminal_command_output.is_empty());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn terminal_command_uses_the_open_project_directory() {
+        let root = std::env::temp_dir().join(format!("papr-terminal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = project_editor_app("", 0);
+        app.active_project = Some(Project { name: "terminal".into(), path: root.clone(), opened_at: 0 });
+        app.terminal_command_directory = Some(root.clone());
+        app.terminal_command = "pwd".into();
+        app.terminal_command_cursor = app.terminal_command.len();
+
+        run_terminal_command(&mut app);
+
+        assert!(app.terminal_command_output.contains(root.to_string_lossy().as_ref()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn terminal_clear_and_control_sequences_stay_inside_the_palette() {
+        let mut app = App::default();
+        app.terminal_command_output = "previous output".into();
+        app.terminal_command = "clear".into();
+
+        run_terminal_command(&mut app);
+
+        assert!(app.terminal_command_output.is_empty());
+        assert!(app.terminal_command.is_empty());
+        assert_eq!(sanitize_terminal_output("safe\u{1b}[2Jtext"), "safe[2Jtext");
+    }
+
+    #[test]
     fn help_shortcut_is_global_and_editor_insert_mode_keeps_question_mark() {
         let mut library = App {
             page: Page::Library,
@@ -7258,6 +7490,9 @@ mod tests {
         assert_eq!(folder, root.join("assets"));
         assert!(folder.is_dir());
         assert!(project_tree_entries(&root).contains(&folder));
+        let image = root.join("figure.webp");
+        std::fs::write(&image, []).unwrap();
+        assert!(project_tree_entries(&root).contains(&image));
         assert!(create_project_file(&root, "chapters/introduction.tex").unwrap_err().contains("already exists"));
         assert!(create_project_file(&root, "../outside.tex").is_err());
         assert!(create_project_file(&root, "/tmp/outside.tex").is_err());
@@ -7301,6 +7536,20 @@ mod tests {
         let action = handle_key(&mut app, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
 
         assert!(matches!(action, Some(UiAction::ConfirmDeleteProjectEntry(path)) if path == folder));
+    }
+
+    #[test]
+    fn file_tree_r_opens_the_entry_rename_prompt() {
+        let mut app = project_editor_app("", 0);
+        let folder = std::path::PathBuf::from("keyboard-test/assets");
+        app.project_pane = ProjectPane::FileTree;
+        app.project_files = vec![folder.clone()];
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+
+        assert_eq!(app.mode, AppMode::ProjectEntryRename);
+        assert_eq!(app.project_rename_input, "assets");
+        assert_eq!(app.project_entry_rename_path, Some(folder));
     }
 
     #[test]

@@ -132,12 +132,16 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
 
     match app.mode {
         AppMode::CommandPalette => render_palette(frame, app, theme),
+        AppMode::TerminalCommand => render_terminal_command(frame, app, theme),
         AppMode::Help => render_help(frame, app, theme),
         AppMode::PaperDetail => render_paper_detail(frame, app, theme),
         AppMode::NoteEdit => render_note_editor(frame, app, theme),
         AppMode::Prompt => render_metadata_prompt(frame, app, theme),
         AppMode::ConfirmDelete => render_delete_confirmation(frame, app, theme),
-        AppMode::ProjectRename | AppMode::ProjectCreate | AppMode::ProjectFileCreate => {
+        AppMode::ProjectRename
+        | AppMode::ProjectCreate
+        | AppMode::ProjectFileCreate
+        | AppMode::ProjectEntryRename => {
             render_project_name_prompt(frame, app, theme)
         }
         AppMode::Normal
@@ -180,6 +184,7 @@ fn render_project_name_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let title = match app.mode {
         AppMode::ProjectCreate => " NEW PROJECT — ENTER CREATE  ESC CANCEL ",
         AppMode::ProjectFileCreate => " NEW FILE OR FOLDER — ENTER CREATE  ESC CANCEL ",
+        AppMode::ProjectEntryRename => " RENAME FILE OR FOLDER — ENTER SAVE  ESC CANCEL ",
         AppMode::ProjectRename => " RENAME PROJECT — ENTER SAVE  ESC CANCEL ",
         _ => unreachable!("project prompt rendered outside a project prompt mode"),
     };
@@ -3290,6 +3295,49 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme
             area,
         );
     }
+}
+
+fn render_terminal_command(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
+    let area = centered(76, 20, frame.area());
+    frame.render_widget(Clear, area);
+    let working_directory = app
+        .terminal_command_directory
+        .as_ref()
+        .map(|directory| directory.display().to_string())
+        .unwrap_or_else(|| "current application directory".to_owned());
+    let output = if app.terminal_command_output.is_empty() {
+        "Command output will appear here.".to_owned()
+    } else {
+        app.terminal_command_output.clone()
+    };
+    let sections = Layout::vertical([
+        Constraint::Min(4),
+        Constraint::Length(2),
+        Constraint::Length(3),
+    ])
+    .split(area);
+    frame.render_widget(
+        Paragraph::new(output)
+            .wrap(Wrap { trim: false })
+            .block(focus_block(" TERMINAL OUTPUT ", false, theme)),
+        sections[0],
+    );
+    frame.render_widget(
+        Paragraph::new(format!("cwd: {working_directory}"))
+            .style(Style::default().fg(theme.muted)),
+        sections[1],
+    );
+    frame.render_widget(
+        Paragraph::new(app.terminal_command.as_str())
+            .block(focus_block(" TERMINAL — ENTER RUN  ESC CLOSE ", true, theme)),
+        sections[2],
+    );
+    let cursor = app.terminal_command[..app
+        .terminal_command_cursor
+        .min(app.terminal_command.len())]
+        .chars()
+        .count() as u16;
+    frame.set_cursor_position((sections[2].x.saturating_add(1 + cursor), sections[2].y + 1));
 }
 
 fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
