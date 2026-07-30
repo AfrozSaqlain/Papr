@@ -3712,7 +3712,9 @@ async fn apply_download_event(
             spawn_enrichment_if_needed(runtime, senders, app)?;
             refresh_paper_views(runtime, app)?;
             refresh_dashboard(runtime, app)?;
-            app.toast = Some("Download complete. Press Enter to open the PDF.".to_owned());
+            if app.toast.is_none() {
+                app.toast = Some("Download complete. Press Enter to open the PDF.".to_owned());
+            }
         }
         DownloadEvent::Failed { id, error } => {
             pending.remove(&id);
