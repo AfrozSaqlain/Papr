@@ -236,6 +236,7 @@ async fn main() -> Result<()> {
         watch_sender,
         watch_receiver,
         _watcher: watcher,
+        project_filesystem_watcher: None,
         active_enrichments: std::collections::HashSet::new(),
         citation_index: None,
         citation_source: CitationSource::default(),
@@ -412,6 +413,7 @@ struct Runtime {
     watch_sender: mpsc::UnboundedSender<()>,
     watch_receiver: mpsc::UnboundedReceiver<()>,
     _watcher: LibraryWatcher,
+    project_filesystem_watcher: Option<ProjectFilesystemWatcher>,
     active_enrichments: std::collections::HashSet<i64>,
     citation_index: Option<CitationIndexer>,
     citation_source: CitationSource,
@@ -422,6 +424,51 @@ struct Runtime {
 struct CitationIndexer {
     events: std_mpsc::Receiver<CitationSource>,
     _watcher: RecommendedWatcher,
+}
+
+/// Watches the projects root and the currently open project so the UI stays in
+/// sync with edits made by the integrated terminal or other applications.
+struct ProjectFilesystemWatcher {
+    events: std_mpsc::Receiver<notify::Event>,
+    _watcher: RecommendedWatcher,
+}
+
+impl ProjectFilesystemWatcher {
+    fn start(projects_root: &Path, active_project: Option<&Project>) -> Result<Self> {
+        let (sender, events) = std_mpsc::channel();
+        let mut watcher = RecommendedWatcher::new(
+            move |event: notify::Result<notify::Event>| {
+                if let Ok(event) = event
+                    && !matches!(event.kind, notify::EventKind::Access(_))
+                {
+                    let _ = sender.send(event);
+                }
+            },
+            NotifyConfig::default(),
+        )?;
+        watcher.watch(projects_root, RecursiveMode::Recursive)?;
+        if let Some(project) = active_project
+            && !project.path.starts_with(projects_root)
+        {
+            watcher.watch(&project.path, RecursiveMode::Recursive)?;
+        }
+        Ok(Self { events, _watcher: watcher })
+    }
+
+    fn has_changes(&self) -> bool {
+        let mut changed = false;
+        while let Ok(event) = self.events.try_recv() {
+            // Listing projects updates this registry; it is metadata rather
+            // than a user-visible filesystem change and must not trigger a
+            // self-sustaining refresh loop.
+            if event.paths.iter().any(|path| {
+                path.file_name().is_none_or(|name| name != ".papr-projects.toml")
+            }) {
+                changed = true;
+            }
+        }
+        changed
+    }
 }
 
 impl CitationIndexer {
@@ -691,6 +738,86 @@ fn start_citation_indexer(runtime: &mut Runtime, app: &mut App) {
     runtime.citation_source = CitationSource::default();
     app.project_completions.clear();
     app.project_completion_selected = 0;
+}
+
+fn restart_project_filesystem_watcher(runtime: &mut Runtime, app: &mut App) {
+    runtime.project_filesystem_watcher = ProjectFilesystemWatcher::start(
+        runtime.project_manager.root(),
+        app.active_project.as_ref(),
+    )
+    .map(Some)
+    .unwrap_or_else(|error| {
+        app.toast = Some(format!("Could not watch project files: {error}"));
+        None
+    });
+}
+
+fn refresh_project_filesystem(runtime: &mut Runtime, app: &mut App) {
+    let selected_project = app.projects.get(app.projects_selected).map(|project| project.path.clone());
+    app.projects = runtime.project_manager.list().unwrap_or_default();
+    app.projects_selected = selected_project
+        .and_then(|path| app.projects.iter().position(|project| project.path == path))
+        .unwrap_or_else(|| app.projects_selected.min(app.projects.len().saturating_sub(1)));
+
+    let Some(project) = app.active_project.as_ref().cloned() else { return; };
+    if !project.path.is_dir() {
+        if let Some(mut compiler) = runtime.project_compiler.take() {
+            compiler.stop();
+        }
+        runtime.citation_index = None;
+        runtime.citation_source = CitationSource::default();
+        app.active_project = None;
+        app.project_files.clear();
+        app.project_tree_dir = None;
+        app.project_editor_path = None;
+        app.project_editor_text.clear();
+        app.project_editor_dirty = false;
+        app.project_pane = ProjectPane::ProjectList;
+        app.toast = Some("The open project was removed from disk.".into());
+        return;
+    }
+
+    let tree_dir = app
+        .project_tree_dir
+        .as_ref()
+        .filter(|directory| directory.is_dir() && directory.starts_with(&project.path))
+        .cloned()
+        .unwrap_or_else(|| project.path.clone());
+    let selected_entry = app.project_files.get(app.project_file_selected).cloned();
+    app.project_tree_dir = Some(tree_dir.clone());
+    app.project_files = project_tree_entries(&tree_dir);
+    app.project_file_selected = selected_entry
+        .and_then(|path| app.project_files.iter().position(|entry| entry == &path))
+        .unwrap_or_else(|| app.project_file_selected.min(app.project_files.len().saturating_sub(1)));
+
+    if let Some(editor_path) = app.project_editor_path.clone() {
+        if !editor_path.is_file() {
+            app.project_editor_path = None;
+            app.project_editor_text.clear();
+            app.project_editor_dirty = false;
+            app.project_editor_cursor = 0;
+            app.project_editor_insert_mode = false;
+            app.project_pane = ProjectPane::FileTree;
+        } else if !app.project_editor_dirty
+            && let Ok(text) = std::fs::read_to_string(&editor_path)
+            && text != app.project_editor_text
+        {
+            app.project_editor_text = text;
+            app.project_editor_cursor = app.project_editor_cursor.min(app.project_editor_text.len());
+        }
+    }
+
+    let pdf = project.path.join("main.pdf");
+    if app.pdf_viewer_path.as_ref().is_some_and(|path| !path.exists()) {
+        app.pdf_viewer_path = None;
+    }
+    if pdf.is_file() && app.pdf_viewer_path.as_ref() != Some(&pdf) {
+        pdf_viewer::reset_for_new_document(&pdf);
+        app.pdf_viewer_path = Some(pdf.clone());
+        app.pdf_viewer_total_pages = get_pdf_page_count(&pdf);
+        app.pdf_viewer_page = 1;
+        app.pdf_viewer_scroll_y = 0;
+    }
 }
 
 fn project_tree_entries(directory: &Path) -> Vec<PathBuf> {
@@ -1161,6 +1288,15 @@ async fn run(
         // state_changed drives non-PDF redraws; force_redraw (for PDF/animation)
         // is consumed and reset at the bottom of the loop after drawing.
         let mut state_changed = force_redraw;
+
+        let project_files_changed = runtime
+            .project_filesystem_watcher
+            .as_ref()
+            .is_some_and(ProjectFilesystemWatcher::has_changes);
+        if project_files_changed {
+            refresh_project_filesystem(&mut runtime, app);
+            state_changed = true;
+        }
 
         if let Some(compiler) = runtime.project_compiler.as_mut() {
             let previous = (app.project_build_status.clone(), app.project_build_errors.clone());
@@ -1757,6 +1893,7 @@ async fn apply_ui_action(
             open_project_workspace(app, project.clone());
             start_project_compiler(runtime, app);
             start_citation_indexer(runtime, app);
+            restart_project_filesystem_watcher(runtime, app);
             app.projects = runtime.project_manager.list().unwrap_or_default();
             app.projects_selected = app
                 .projects
@@ -1793,6 +1930,7 @@ async fn apply_ui_action(
             open_project_workspace(app, project);
             start_project_compiler(runtime, app);
             start_citation_indexer(runtime, app);
+            restart_project_filesystem_watcher(runtime, app);
         }
         UiAction::OpenProjectFile(path) => {
             if app.project_editor_dirty && !save_project_editor(app) {
@@ -1892,6 +2030,7 @@ async fn apply_ui_action(
                         }
                         start_project_compiler(runtime, app);
                         start_citation_indexer(runtime, app);
+                        restart_project_filesystem_watcher(runtime, app);
                     }
                     app.projects = runtime.project_manager.list().unwrap_or_default();
                     app.projects_selected = app.projects.iter().position(|p| p.path == renamed.path).unwrap_or(0);
@@ -1932,6 +2071,7 @@ async fn apply_ui_action(
                 app.project_completions.clear();
                 runtime.citation_index = None;
                 runtime.citation_source = CitationSource::default();
+                runtime.project_filesystem_watcher = None;
                 app.project_build_status = "Idle".into();
                 app.project_build_errors.clear();
                 app.project_build_scroll = 0;
@@ -3897,7 +4037,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         app.terminal_command.clear();
         app.terminal_command_cursor = 0;
         app.terminal_command_output.clear();
-        app.terminal_command_directory = app.active_project.as_ref().map(|project| project.path.clone());
+        app.terminal_command_directory = if app.page == Page::Projects
+            && app.project_pane != ProjectPane::ProjectList
+        {
+            app.active_project.as_ref().map(|project| project.path.clone())
+        } else {
+            terminal_home_directory()
+        };
         reset_terminal_completion(app);
         return None;
     }
@@ -7312,6 +7458,23 @@ mod tests {
         assert_eq!(app.mode, AppMode::TerminalCommand);
         assert!(app.terminal_command.is_empty());
         assert!(app.terminal_command_output.is_empty());
+        assert_eq!(app.terminal_command_directory, super::terminal_home_directory());
+    }
+
+    #[test]
+    fn ctrl_t_uses_the_project_root_only_inside_an_open_project() {
+        let root = std::env::temp_dir().join(format!("papr-terminal-root-{}", std::process::id()));
+        let project = Project { name: "terminal".into(), path: root.clone(), opened_at: 0 };
+        let mut app = App {
+            page: Page::Projects,
+            active_project: Some(project),
+            project_pane: ProjectPane::FileTree,
+            ..App::default()
+        };
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+
+        assert_eq!(app.terminal_command_directory, Some(root));
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -9043,6 +9206,7 @@ mod tests {
             watch_sender,
             watch_receiver,
             _watcher: watcher,
+            project_filesystem_watcher: None,
             active_enrichments: HashSet::new(),
             citation_index: None,
             citation_source: papr_core::CitationSource::default(),
@@ -9198,6 +9362,7 @@ print(json.dumps({"actions": actions}))
             watch_sender,
             watch_receiver,
             _watcher: watcher,
+            project_filesystem_watcher: None,
             active_enrichments: std::collections::HashSet::new(),
             citation_index: None,
             citation_source: papr_core::CitationSource::default(),
