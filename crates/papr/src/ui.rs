@@ -179,7 +179,7 @@ fn render_project_name_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     );
     let title = match app.mode {
         AppMode::ProjectCreate => " NEW PROJECT — ENTER CREATE  ESC CANCEL ",
-        AppMode::ProjectFileCreate => " NEW FILE — ENTER CREATE  ESC CANCEL ",
+        AppMode::ProjectFileCreate => " NEW FILE OR FOLDER — ENTER CREATE  ESC CANCEL ",
         AppMode::ProjectRename => " RENAME PROJECT — ENTER SAVE  ESC CANCEL ",
         _ => unreachable!("project prompt rendered outside a project prompt mode"),
     };
@@ -365,11 +365,14 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
     };
 
     let files = app.project_files.iter().map(|path| {
-        let label = path
+        let mut label = path
             .strip_prefix(&project.path)
             .unwrap_or(path)
             .display()
             .to_string();
+        if path.is_dir() {
+            label.push('/');
+        }
         ListItem::new(label)
     });
     let file_tree_focused = app.content_focused && app.project_pane == ProjectPane::FileTree;
@@ -2246,6 +2249,23 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
             "Are you sure you want to permanently delete this group (subdirectory) and ALL of its contents?",
             name.as_str(),
         ),
+        DeletionTarget::ProjectEntry {
+            name,
+            is_directory,
+            ..
+        } => (
+            if *is_directory {
+                " CONFIRM DELETE FOLDER "
+            } else {
+                " CONFIRM DELETE FILE "
+            },
+            if *is_directory {
+                "Are you sure you want to permanently delete this folder and all of its contents?"
+            } else {
+                "Are you sure you want to permanently delete this file?"
+            },
+            name.as_str(),
+        ),
     };
 
     let height = 12;
@@ -3236,7 +3256,9 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme
             ),
             Span::styled(" open  ", Style::default().fg(theme.muted)),
             Span::styled(" esc ", Style::default().fg(theme.background).bg(theme.warning)),
-            Span::styled(" projects", Style::default().fg(theme.muted)),
+            Span::styled(" projects  ", Style::default().fg(theme.muted)),
+            Span::styled(" x ", Style::default().fg(theme.background).bg(theme.error)),
+            Span::styled(" delete", Style::default().fg(theme.muted)),
         ])
     } else {
         Line::from(vec![

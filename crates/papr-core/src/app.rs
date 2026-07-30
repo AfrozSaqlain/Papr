@@ -415,6 +415,15 @@ pub enum DeletionTarget {
         /// Path to the collection directory.
         path: Option<std::path::PathBuf>,
     },
+    /// A file or folder inside an open project.
+    ProjectEntry {
+        /// Entry path.
+        path: std::path::PathBuf,
+        /// Display name.
+        name: String,
+        /// Whether the entry is a folder and will be deleted recursively.
+        is_directory: bool,
+    },
 }
 
 /// Active metadata input prompt.
@@ -825,8 +834,10 @@ pub struct App {
     pub projects_selected: usize,
     /// Open project, if the split writing workspace is active.
     pub active_project: Option<Project>,
-    /// Files shown in the active project's tree.
+    /// Files and folders shown in the active project's tree.
     pub project_files: Vec<std::path::PathBuf>,
+    /// Directory currently displayed by the active project's file tree.
+    pub project_tree_dir: Option<std::path::PathBuf>,
     /// Selected file in the project tree.
     pub project_file_selected: usize,
     /// Text buffer for the selected source file.
@@ -1029,6 +1040,7 @@ impl Default for App {
             projects_selected: 0,
             active_project: None,
             project_files: Vec::new(),
+            project_tree_dir: None,
             project_file_selected: 0,
             project_editor_text: String::new(),
             project_editor_path: None,

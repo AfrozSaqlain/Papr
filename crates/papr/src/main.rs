@@ -327,6 +327,8 @@ enum UiAction {
     CreateProjectFile(String),
     OpenProject(Project),
     OpenProjectFile(PathBuf),
+    ConfirmDeleteProjectEntry(PathBuf),
+    DeleteProjectEntry(PathBuf),
     RenameProject { project: Project, name: String },
     ConfirmDeleteProject(Project),
     DeleteProject(Project),
@@ -634,7 +636,8 @@ fn config_editor_wrap_rows(char_len: usize, wrap_width: usize) -> usize {
 }
 
 fn open_project_workspace(app: &mut App, project: Project) {
-    app.project_files = project_files(&project.path);
+    app.project_tree_dir = Some(project.path.clone());
+    app.project_files = project_tree_entries(&project.path);
     app.project_file_selected = 0;
     app.project_editor_path = None;
     app.project_editor_text.clear();
@@ -689,23 +692,20 @@ fn start_citation_indexer(runtime: &mut Runtime, app: &mut App) {
     app.project_completion_selected = 0;
 }
 
-fn project_files(root: &std::path::Path) -> Vec<PathBuf> {
-    fn visit(root: &std::path::Path, path: &std::path::Path, files: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(path) else { return; };
-        let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
-            let entry_path = entry.path();
-            if entry_path.file_name().is_some_and(|name| name == ".git") { continue; }
-            if entry_path.is_dir() { visit(root, &entry_path, files); }
-            else if entry_path.extension().is_some_and(|ext| matches!(ext.to_str(), Some("tex" | "bib" | "sty" | "cls" | "md"))) {
-                files.push(entry_path);
-            }
-        }
-    }
-    let mut files = Vec::new();
-    visit(root, root, &mut files);
-    files
+fn project_tree_entries(directory: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(directory) else { return Vec::new(); };
+    let mut entries = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name() != ".git")
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.is_dir() || is_project_text_file(&path)).then_some(path)
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        right.is_dir().cmp(&left.is_dir()).then_with(|| left.file_name().cmp(&right.file_name()))
+    });
+    entries
 }
 
 fn is_project_text_file(path: &Path) -> bool {
@@ -713,7 +713,9 @@ fn is_project_text_file(path: &Path) -> bool {
 }
 
 fn create_project_file(project_root: &Path, name: &str) -> Result<PathBuf, String> {
-    let relative = Path::new(name.trim());
+    let name = name.trim();
+    let create_directory = name.ends_with('/');
+    let relative = Path::new(name.trim_end_matches('/'));
     if relative.as_os_str().is_empty()
         || relative.is_absolute()
         || relative.file_name().is_none()
@@ -732,6 +734,13 @@ fn create_project_file(project_root: &Path, name: &str) -> Result<PathBuf, Strin
         return Err("file path must stay inside the project".into());
     }
 
+    if create_directory {
+        return std::fs::create_dir(&path)
+            .map(|()| path)
+            .map_err(|error| if error.kind() == std::io::ErrorKind::AlreadyExists {
+                "already exists".into()
+            } else { error.to_string() });
+    }
     match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
         Ok(_) => Ok(path),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -1756,20 +1765,21 @@ async fn apply_ui_action(
                 app.toast = Some("Could not create file: no project is open.".into());
                 return Ok(());
             };
-            let path = match create_project_file(&project.path, &name) {
+            let tree_dir = app.project_tree_dir.clone().unwrap_or_else(|| project.path.clone());
+            let path = match create_project_file(&tree_dir, &name) {
                 Ok(path) => path,
                 Err(error) => {
                     app.toast = Some(format!("Could not create file: {error}"));
                     return Ok(());
                 }
             };
-            app.project_files = project_files(&project.path);
+            app.project_files = project_tree_entries(&tree_dir);
             app.project_file_selected = app.project_files.iter().position(|candidate| candidate == &path).unwrap_or(0);
             app.project_pane = ProjectPane::FileTree;
-            if is_project_text_file(&path) {
+            if path.is_file() && is_project_text_file(&path) {
                 open_project_file(app, path);
             }
-            app.toast = Some("Created file".into());
+            app.toast = Some(if name.trim().ends_with('/') { "Created folder" } else { "Created file" }.into());
         }
         UiAction::OpenProject(project) => {
             let project = runtime.project_manager.open(project.path).map_err(|e| anyhow::anyhow!(e))?;
@@ -1784,6 +1794,41 @@ async fn apply_ui_action(
                 return Ok(());
             }
             open_project_file(app, path);
+        }
+        UiAction::ConfirmDeleteProjectEntry(path) => {
+            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("entry").to_owned();
+            app.delete_confirmation = Some(papr_core::DeletionTarget::ProjectEntry {
+                is_directory: path.is_dir(),
+                path,
+                name,
+            });
+            app.mode = AppMode::ConfirmDelete;
+        }
+        UiAction::DeleteProjectEntry(path) => {
+            let Some(project) = app.active_project.as_ref() else {
+                app.toast = Some("Could not delete entry: no project is open.".into());
+                return Ok(());
+            };
+            if path == project.path || !path.starts_with(&project.path) {
+                app.toast = Some("Could not delete entry outside the project.".into());
+                return Ok(());
+            }
+            let result = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+            if let Err(error) = result {
+                app.toast = Some(format!("Could not delete entry: {error}"));
+                return Ok(());
+            }
+            let tree_dir = app.project_tree_dir.clone().unwrap_or_else(|| project.path.clone());
+            app.project_files = project_tree_entries(&tree_dir);
+            app.project_file_selected = app.project_file_selected.min(app.project_files.len().saturating_sub(1));
+            if app.project_editor_path.as_ref() == Some(&path) {
+                app.project_editor_path = None;
+                app.project_editor_text.clear();
+                app.project_editor_dirty = false;
+                app.project_editor_cursor = 0;
+                app.project_pane = ProjectPane::FileTree;
+            }
+            app.toast = Some("Deleted".into());
         }
         UiAction::RenameProject { project, name } => {
             match runtime.project_manager.rename(&project, &name) {
@@ -1835,6 +1880,7 @@ async fn apply_ui_action(
                 }
                 app.active_project = None;
                 app.project_files.clear();
+                app.project_tree_dir = None;
                 app.project_file_selected = 0;
                 app.project_editor_path = None;
                 app.project_editor_text.clear();
@@ -4180,7 +4226,9 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         return None;
     }
     if app.project_pane == ProjectPane::FileTree && key.code == KeyCode::Left {
-        exit_project_view(app);
+        if !move_project_tree_to_parent(app) {
+            exit_project_view(app);
+        }
         return None;
     }
     // Save is mode-independent: handle it before Insert-mode text dispatch.
@@ -4265,12 +4313,21 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                     .min(app.project_files.len().saturating_sub(1));
             }
             KeyCode::Enter | KeyCode::Right => {
-                return app
-                    .project_files
-                    .get(app.project_file_selected)
-                    .cloned()
-                    .map(UiAction::OpenProjectFile);
+                if let Some(path) = app.project_files.get(app.project_file_selected).cloned() {
+                    if path.is_dir() {
+                        app.project_tree_dir = Some(path.clone());
+                        app.project_files = project_tree_entries(&path);
+                        app.project_file_selected = 0;
+                    } else {
+                        return Some(UiAction::OpenProjectFile(path));
+                    }
+                }
             }
+            KeyCode::Char('x') => return app
+                .project_files
+                .get(app.project_file_selected)
+                .cloned()
+                .map(UiAction::ConfirmDeleteProjectEntry),
             _ => {}
         },
         ProjectPane::Build => handle_project_build_key(app, key),
@@ -4441,6 +4498,29 @@ fn return_to_project_file_tree(app: &mut App) {
     app.project_editor_insert_mode = false;
     app.project_completions.clear();
     app.project_pane = ProjectPane::FileTree;
+}
+
+fn move_project_tree_to_parent(app: &mut App) -> bool {
+    let Some(project) = app.active_project.as_ref() else { return false; };
+    let root = &project.path;
+    let Some(current) = app.project_tree_dir.as_ref() else { return false; };
+    if current == root {
+        return false;
+    }
+    let Some(parent) = current.parent() else { return false; };
+    if !parent.starts_with(root) {
+        return false;
+    }
+    let previous = current.clone();
+    let parent = parent.to_path_buf();
+    app.project_tree_dir = Some(parent.clone());
+    app.project_files = project_tree_entries(&parent);
+    app.project_file_selected = app
+        .project_files
+        .iter()
+        .position(|entry| entry == &previous)
+        .unwrap_or(0);
+    true
 }
 
 fn is_project_bibtex_paste_shortcut(key: KeyEvent) -> bool {
@@ -4710,6 +4790,9 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 }
                 DeletionTarget::Collection { id, path, .. } => {
                     Some(UiAction::DeleteCollection { collection_id: id, path })
+                }
+                DeletionTarget::ProjectEntry { path, .. } => {
+                    Some(UiAction::DeleteProjectEntry(path))
                 }
             }
         }
@@ -6115,7 +6198,7 @@ mod tests {
         UiAction, build_config_editor_view, cursor_visual_position,
         handle_config_editor_insert_key, handle_downloads_key, handle_key, handle_paper_detail_key, parse_command,
         keyword_representation_targets, move_config_editor_page, refresh_downloads_from_dir,
-        accept_project_completion, create_project_file, is_project_text_file, project_files,
+        accept_project_completion, create_project_file, is_project_text_file, project_tree_entries,
         insert_project_bibtex_text,
         reload_config_editor_buffer, select_dashboard_papers, shuffle_daily_bucket,
         update_project_completions, merge_enriched_remote_paper, PaperTarget,
@@ -7170,12 +7253,54 @@ mod tests {
         assert_eq!(created, root.join("chapters/introduction.tex"));
         assert!(created.exists());
         assert!(is_project_text_file(&created));
-        assert!(project_files(&root).contains(&created));
+        assert!(project_tree_entries(&root).contains(&root.join("chapters")));
+        let folder = create_project_file(&root, "assets/").unwrap();
+        assert_eq!(folder, root.join("assets"));
+        assert!(folder.is_dir());
+        assert!(project_tree_entries(&root).contains(&folder));
         assert!(create_project_file(&root, "chapters/introduction.tex").unwrap_err().contains("already exists"));
         assert!(create_project_file(&root, "../outside.tex").is_err());
         assert!(create_project_file(&root, "/tmp/outside.tex").is_err());
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn file_tree_enters_folders_and_left_returns_to_the_parent() {
+        let root = std::env::temp_dir().join(format!("papr-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let folder = root.join("assets");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("logo.tex"), "logo").unwrap();
+
+        let mut app = project_editor_app("", 0);
+        app.active_project = Some(Project { name: "tree".into(), path: root.clone(), opened_at: 0 });
+        app.project_pane = ProjectPane::FileTree;
+        app.project_tree_dir = Some(root.clone());
+        app.project_files = project_tree_entries(&root);
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.project_tree_dir.as_deref(), Some(folder.as_path()));
+        assert_eq!(app.project_files, vec![folder.join("logo.tex")]);
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.project_tree_dir.as_deref(), Some(root.as_path()));
+        assert_eq!(app.project_files, vec![folder.clone()]);
+        assert_eq!(app.project_file_selected, 0);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn file_tree_x_requests_confirmation_for_the_selected_entry() {
+        let mut app = project_editor_app("", 0);
+        let folder = std::path::PathBuf::from("keyboard-test/assets");
+        app.project_pane = ProjectPane::FileTree;
+        app.project_files = vec![folder.clone()];
+
+        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+
+        assert!(matches!(action, Some(UiAction::ConfirmDeleteProjectEntry(path)) if path == folder));
     }
 
     #[test]
