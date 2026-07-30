@@ -395,8 +395,10 @@ struct Entry {
     categories: Vec<Category>,
     #[serde(rename = "link", default)]
     links: Vec<Link>,
-    #[serde(rename = "doi")]
-    doi: Option<String>,
+    /// arXiv may emit more than one DOI for a paper and its erratum. Keep all
+    /// values while decoding so one such record cannot invalidate the feed.
+    #[serde(rename = "doi", default)]
+    dois: Vec<String>,
     #[serde(rename = "journal_ref")]
     journal_ref: Option<String>,
 }
@@ -452,7 +454,10 @@ fn parse_feed(xml: &str) -> Result<Vec<RemotePaper>, ArxivError> {
                     .map(|category| category.term)
                     .collect(),
                 pdf_url,
-                doi: entry.doi,
+                // `RemotePaper` has one DOI field. Prefer arXiv's first
+                // non-empty value, which is the paper's primary DOI when
+                // additional values describe corrections or related work.
+                doi: entry.dois.into_iter().find(|doi| !doi.trim().is_empty()),
                 journal_ref: entry.journal_ref,
             })
         })
@@ -729,7 +734,8 @@ mod tests {
       <author><name>Ada Lovelace</name></author><category term="cs.LG"/>
       <link href="http://arxiv.org/abs/2501.00001v1" rel="alternate" type="text/html"/>
       <link title="pdf" href="https://arxiv.org/pdf/2501.00001" type="application/pdf"/>
-      <arxiv:doi>10.1000/example</arxiv:doi><arxiv:journal_ref>Example Journal</arxiv:journal_ref></entry>
+      <arxiv:doi>10.1000/example</arxiv:doi><arxiv:doi>10.1000/example-erratum</arxiv:doi>
+      <arxiv:journal_ref>Example Journal</arxiv:journal_ref></entry>
     </feed>"#;
 
     #[test]
