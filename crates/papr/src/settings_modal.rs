@@ -223,7 +223,7 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
     }
 
     // Global ? shortcut handling: toggle keyboard reference overlay when not in text editing mode.
-    if key.code == KeyCode::Char('?') && !is_editing {
+    if is_help_shortcut(key) && !is_editing {
         app.dispatch(papr_core::Command::ToggleHelp);
         return SettingsKeyResult::Handled;
     }
@@ -337,6 +337,21 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
         SettingsTab::General => handle_general_key(app, key),
         SettingsTab::Paths => handle_paths_key(app, key),
         SettingsTab::Plugins => handle_plugins_key(app, key),
+    }
+}
+
+/// Keyboard-enhancement protocols can report `?` as the physical `/` key
+/// together with `SHIFT`, instead of as the resulting character.
+fn is_help_shortcut(key: KeyEvent) -> bool {
+    key.code == KeyCode::Char('?')
+        || (key.code == KeyCode::Char('/') && key.modifiers.contains(KeyModifiers::SHIFT))
+}
+
+fn text_input_char(key: KeyEvent, character: char) -> char {
+    if key.modifiers.contains(KeyModifiers::SHIFT) && character == '/' {
+        '?'
+    } else {
+        character
     }
 }
 
@@ -567,6 +582,7 @@ fn handle_pdf_viewer_edit(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
             return SettingsKeyResult::Handled;
         }
         KeyCode::Char(c) => {
+            let c = text_input_char(key, c);
             let cur = app.settings_modal.pdf_viewer_cursor;
             app.settings_modal.pdf_viewer.insert(cur, c);
             app.settings_modal.pdf_viewer_cursor = cur + c.len_utf8();
@@ -760,6 +776,7 @@ fn handle_library_entry_edit(app: &mut App, key: KeyEvent) -> SettingsKeyResult 
             app.settings_modal.library_editing = false;
         }
         KeyCode::Char(c) => {
+            let c = text_input_char(key, c);
             if let Some(entry) = app.settings_modal.library_entries.get_mut(idx) {
                 let cur = entry.cursor;
                 entry.text.insert(cur, c);
@@ -867,6 +884,7 @@ fn handle_single_path_edit(
             _ => {}
         },
         KeyCode::Char(c) => {
+            let c = text_input_char(key, c);
             let (text, cursor) = match focus {
                 PathsTabFocus::DownloadPath => (
                     &mut app.settings_modal.download_path,
@@ -1345,6 +1363,7 @@ fn handle_keyword_entry_edit(app: &mut App, key: KeyEvent) -> SettingsKeyResult 
             app.settings_modal.keyword_editing = false;
         }
         KeyCode::Char(c) => {
+            let c = text_input_char(key, c);
             if let Some(entry) = app.settings_modal.keyword_entries.get_mut(idx) {
                 let cur = entry.cursor;
                 entry.text.insert(cur, c);
@@ -2399,7 +2418,7 @@ mod tests {
     #[test]
     fn test_question_mark_shortcut_handling() {
         let mut app = App::default();
-        let key_question = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
+        let key_question = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::SHIFT);
 
         // Outside text edit mode -> dispatches Command::ToggleHelp and returns Handled
         let res = handle_settings_key(&mut app, key_question);
