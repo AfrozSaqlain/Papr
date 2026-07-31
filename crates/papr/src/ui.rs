@@ -398,7 +398,7 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
         ListItem::new(label)
     });
     let file_tree_focused = app.content_focused && app.project_pane == ProjectPane::FileTree;
-    let tree_block = focus_block(" FILE TREE ", file_tree_focused, theme).title_bottom(
+    let tree_block = focus_block(" FILE TREE [ALT+1] ", file_tree_focused, theme).title_bottom(
         Line::styled(
             " n new · ↵/→ open ",
             if file_tree_focused {
