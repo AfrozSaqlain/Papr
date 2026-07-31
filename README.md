@@ -41,17 +41,7 @@ Papr is implemented in Rust to meet the performance, reliability, and security d
 * **Real-time Compilation:** Background compilation via `latexmk`.
 * **PDF-first Layout:** Keep the live PDF preview beside the editor; open Build only when you need diagnostics.
 * **Actionable Diagnostics:** Build output groups LaTeX errors and warnings with source locations, code snippets, hints, and a raw-log view.
-
-### Recent Updates
-
-Since the previous documentation update, Papr has added the following user-visible improvements:
-
-* **Projects workspace refresh:** The file tree, editor, PDF Preview, and Build views have clearer focus shortcuts. `main.tex` is selected in the File Tree whenever a project opens.
-* **Better LaTeX feedback:** The Build view parses compiler errors and warnings, can jump to a diagnostic's source line, and keeps the raw `latexmk` output available on demand.
-* **More capable project editor:** Vim-style navigation now includes visual-line selection, undo/redo, word deletion, `gg`/`G`, wrapped-line scrolling, and mouse-wheel scrolling. Exact clipboard pasting is supported for `.tex` and `.bib` files.
-* **Project file management:** Create nested files and folders, rename project entries, and navigate folders directly from the File Tree.
-* **Improved terminal command palette:** Press `Tab` to discover and cycle through command or path completions; commands run from the open project's folder when a project is active.
-* **More reliable previews:** The internal PDF preview refreshes correctly after project recompiles.
+* **Project Editing & Files:** Use Vim-style editing, create nested files or folders, rename project entries, and navigate the project tree without leaving Papr.
 
 ### Extensibility
 * **Process-Isolated Plugins:** Extend workflows with language-agnostic, versioned JSON plugins. Papr ships an opt-in auto-tagger and safely bounds every plugin invocation.
@@ -220,7 +210,7 @@ papr
 Papr is divided into 14 specialized **workspaces** (sections), accessible via the sidebar menu on the left side of the screen.
 
 * **Sidebar Navigation:** Press `Left Arrow` (or `h`) to move focus to the left sidebar, use `j`/`k` (or `Up`/`Down`) to highlight a section, and press `Enter` (or `l`) to open it.
-* **Quick Switcher:** Press `Ctrl+B` anywhere to open **Browse Papr** (a fast command palette) and type the name of any section to jump directly to it. Press `Ctrl+T` for the terminal command palette; when a project is open, commands run from that project's directory.
+* **Quick Switcher:** Press `Ctrl+B` anywhere to open **Browse Papr** (a fast command palette) and type the name of any section to jump directly to it. Press `Ctrl+T` for the terminal command palette; press `Tab` to find or cycle command/path completions. When a project is open, commands run from that project's directory.
 
 Here is a complete breakdown of every section in Papr, what it does, and how to use it:
 
@@ -367,7 +357,7 @@ To track reading sessions and statistics, Papr must be able to track the viewer'
 | `h` / `Esc` | Go back to previous screen |
 | `/` | Start arXiv search |
 | `Ctrl+B` | Open Browse Papr (Fast navigation command palette) |
-| `Ctrl+T` | Open terminal command palette (`Enter` runs, `Tab` completes, `Esc` closes) |
+| `Ctrl+T` | Open terminal command palette (`Enter` runs, `Tab` lists/cycles command or path completions, `Esc` closes) |
 | `?` | Toggle help |
 | `q` | Exit the application outside text input |
 
