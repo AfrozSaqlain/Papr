@@ -5,8 +5,8 @@ use std::sync::OnceLock;
 use crate::build_config_editor_view_with_scroll_mode;
 use crate::settings_modal;
 use papr_core::{
-    App, AppMode, DeletionTarget, DiscoveryStatus, DownloadStatus, Page, ProjectPane, RemotePaper,
-    Theme,
+    App, AppMode, DeletionTarget, DiscoveryStatus, DownloadStatus, Page, ProjectDiagnosticSeverity,
+    ProjectPane, RemotePaper, Theme,
 };
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::{
@@ -354,19 +354,17 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
         .active_project
         .as_ref()
         .expect("active project checked above");
-    let (file_tree_area, editor_area, build_area, preview_area) = if app.pdf_viewer == "internal" {
+    let (file_tree_area, editor_area, right_area) = if app.pdf_viewer == "internal" || app.project_pane == ProjectPane::Build {
         let panes = Layout::horizontal([
             Constraint::Length(22),
             Constraint::Ratio(1, 2),
             Constraint::Ratio(1, 2),
         ])
         .split(area);
-        let left = Layout::vertical([Constraint::Min(5), Constraint::Length(4)]).split(panes[0]);
-        (left[0], panes[1], left[1], Some(panes[2]))
+        (panes[0], panes[1], Some(panes[2]))
     } else {
         let panes = Layout::horizontal([Constraint::Length(22), Constraint::Min(10)]).split(area);
-        let right = Layout::vertical([Constraint::Min(5), Constraint::Length(4)]).split(panes[1]);
-        (panes[0], right[0], right[1], None)
+        (panes[0], panes[1], None)
     };
 
     let files = app.project_files.iter().map(|path| {
@@ -528,36 +526,77 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
             frame.render_stateful_widget(list, popup, &mut state);
         }
     }
-    let diagnostics = if app.project_build_errors.is_empty() {
-        "No compiler errors.".to_owned()
-    } else {
-        app.project_build_errors.join("\n")
-    };
-    app.project_build_viewport_height = build_area.height.saturating_sub(2) as usize;
-    let build_line_count = app.project_build_errors.len().max(1);
-    app.project_build_scroll = app
-        .project_build_scroll
-        .min(build_line_count.saturating_sub(app.project_build_viewport_height.max(1)));
-    frame.render_widget(
-        Paragraph::new(diagnostics)
-            .scroll((
-                u16::try_from(app.project_build_scroll).unwrap_or(u16::MAX),
-                0,
-            ))
-            .wrap(Wrap { trim: true })
-            .block(focus_block(
-                &format!(" BUILD [ALT+4]: {} ", app.project_build_status),
-                app.content_focused && app.project_pane == ProjectPane::Build,
-                theme,
-            )),
-        build_area,
-    );
-
-    if let Some(preview_area) = preview_area {
+    if app.project_pane == ProjectPane::Build {
+        let build_area = right_area.expect("Build view reserves the right-hand panel");
+        app.project_build_viewport_height = build_area.height.saturating_sub(2) as usize;
+        let build_title = format!(
+            " BUILD [ALT+4 · TAB PREVIEW · r {}] — {} ",
+            if app.project_build_show_raw { "DIAGNOSTICS" } else { "RAW LOG" },
+            app.project_build_status,
+        );
+        if app.project_build_show_raw {
+            let raw_log = if app.project_build_raw_log.is_empty() {
+                "No compiler output captured yet.".to_owned()
+            } else {
+                app.project_build_raw_log.join("\n")
+            };
+            let line_count = app.project_build_raw_log.len().max(1);
+            app.project_build_scroll = app
+                .project_build_scroll
+                .min(line_count.saturating_sub(app.project_build_viewport_height.max(1)));
+            frame.render_widget(
+                Paragraph::new(raw_log)
+                    .scroll((
+                        u16::try_from(app.project_build_scroll).unwrap_or(u16::MAX),
+                        0,
+                    ))
+                    .wrap(Wrap { trim: false })
+                    .block(focus_block(&build_title, app.content_focused, theme)),
+                build_area,
+            );
+        } else {
+            let items = app.project_build_diagnostics.iter().map(|diagnostic| {
+                let (symbol, label, color) = match diagnostic.severity {
+                    ProjectDiagnosticSeverity::Error => ("❌", "ERROR", theme.error),
+                    ProjectDiagnosticSeverity::Warning => ("⚠", "WARNING", theme.warning),
+                };
+                let mut lines = vec![Line::from(vec![
+                    Span::styled(format!("{symbol} {label}: "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                    Span::styled(&diagnostic.title, Style::default().fg(theme.text).add_modifier(Modifier::BOLD)),
+                ]), Line::styled(format!("   {}", diagnostic.description), Style::default().fg(theme.text))];
+                if let Some(file) = &diagnostic.file {
+                    let location = diagnostic.line.map_or_else(|| file.clone(), |line| format!("{file}:{line}"));
+                    lines.push(Line::styled(format!("   File : {location}"), Style::default().fg(theme.muted)));
+                }
+                if let Some(code) = &diagnostic.code {
+                    lines.push(Line::styled(format!("   Code : {code}"), Style::default().fg(theme.accent)));
+                }
+                if let Some(hint) = &diagnostic.hint {
+                    lines.push(Line::styled(format!("   Hint : {hint}"), Style::default().fg(theme.muted)));
+                }
+                lines.push(Line::raw(""));
+                ListItem::new(lines)
+            });
+            let empty = app.project_build_diagnostics.is_empty();
+            let list = List::new(items)
+                .block(focus_block(&build_title, app.content_focused, theme))
+                .highlight_style(Style::default().bg(theme.surface).fg(theme.accent));
+            let mut state = ListState::default().with_selected((!empty).then_some(app.project_build_selected));
+            frame.render_stateful_widget(list, build_area, &mut state);
+            if empty {
+                frame.render_widget(
+                    Paragraph::new("No compiler diagnostics.\n\nThe latest build completed cleanly.")
+                        .alignment(Alignment::Center)
+                        .style(Style::default().fg(theme.muted)),
+                    build_area,
+                );
+            }
+        }
+    } else if let Some(preview_area) = right_area {
         let preview = project.path.join("main.pdf");
         if preview.exists() && app.pdf_viewer_path.as_deref() == Some(preview.as_path()) {
             let preview_block = focus_block(
-                " PDF PREVIEW [ALT+3] ",
+                " PDF PREVIEW [ALT+3 · TAB BUILD] ",
                 app.content_focused && app.project_pane == ProjectPane::Preview,
                 theme,
             );
@@ -570,7 +609,7 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
                     .alignment(Alignment::Center)
                     .wrap(Wrap { trim: true })
                     .block(focus_block(
-                        " PDF PREVIEW [ALT+3] ",
+                        " PDF PREVIEW [ALT+3 · TAB BUILD] ",
                         app.content_focused && app.project_pane == ProjectPane::Preview,
                         theme,
                     )),

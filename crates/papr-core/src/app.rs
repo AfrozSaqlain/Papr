@@ -393,6 +393,34 @@ pub enum ProjectPane {
     Preview,
 }
 
+/// Severity assigned to a parsed LaTeX compiler diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectDiagnosticSeverity {
+    /// Compilation cannot complete successfully.
+    Error,
+    /// Compilation completed but reported a condition needing attention.
+    Warning,
+}
+
+/// A compiler diagnostic enriched with source location and context when available.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectBuildDiagnostic {
+    /// Error or warning severity.
+    pub severity: ProjectDiagnosticSeverity,
+    /// Short, scannable diagnostic category.
+    pub title: String,
+    /// Compiler-provided description.
+    pub description: String,
+    /// Project-relative source path when known.
+    pub file: Option<String>,
+    /// One-based source line when known.
+    pub line: Option<usize>,
+    /// Source text at the reported location when available.
+    pub code: Option<String>,
+    /// Additional compiler context or remediation hint.
+    pub hint: Option<String>,
+}
+
 /// Target to delete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeletionTarget {
@@ -892,14 +920,22 @@ pub struct App {
     pub project_completion_selected: usize,
     /// Last compiler status shown in the writing workspace.
     pub project_build_status: String,
-    /// Latest compiler diagnostics, preserving the last good PDF on failure.
-    pub project_build_errors: Vec<String>,
+    /// Latest structured compiler diagnostics, preserving the last good PDF on failure.
+    pub project_build_diagnostics: Vec<ProjectBuildDiagnostic>,
+    /// Raw output from the latest compiler invocation.
+    pub project_build_raw_log: Vec<String>,
+    /// Whether the Build pane is showing raw compiler output.
+    pub project_build_show_raw: bool,
+    /// Selected structured diagnostic in the Build pane.
+    pub project_build_selected: usize,
     /// First visible compiler-output line in the Projects build pane.
     pub project_build_scroll: usize,
     /// Cached content height of the Projects build pane.
     pub project_build_viewport_height: usize,
     /// Current logical Projects workspace focus.
     pub project_pane: ProjectPane,
+    /// Whether the user explicitly chose to keep the Build view visible.
+    pub project_build_pinned: bool,
     /// Pending project name while the rename prompt is open.
     pub project_rename_input: String,
     /// Byte cursor within the project name modal input.
@@ -1098,10 +1134,14 @@ impl Default for App {
             project_completions: Vec::new(),
             project_completion_selected: 0,
             project_build_status: "Idle".into(),
-            project_build_errors: Vec::new(),
+            project_build_diagnostics: Vec::new(),
+            project_build_raw_log: Vec::new(),
+            project_build_show_raw: false,
+            project_build_selected: 0,
             project_build_scroll: 0,
             project_build_viewport_height: 0,
             project_pane: ProjectPane::ProjectList,
+            project_build_pinned: false,
             project_rename_input: String::new(),
             project_rename_cursor: 0,
             project_entry_rename_path: None,

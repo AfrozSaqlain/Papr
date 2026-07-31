@@ -26,7 +26,7 @@ use papr_core::{
     App, AppMode, ArxivClient, CollectionDirectory, Command, Config, Database, DiscoveryStatus,
     DownloadEvent, DownloadManager, DownloadStatus, DownloadTask, ImportedPdf, LibraryIndexer,
     LibraryWatcher, MetadataPrompt, Page, PaperNote, Paths, PluginHost, RemotePaper, Theme, Project,
-    CitationSource, CompletionSource, ProjectManager, ProjectPane,
+    CitationSource, CompletionSource, ProjectBuildDiagnostic, ProjectDiagnosticSeverity, ProjectManager, ProjectPane,
 };
 use sha2::{Digest, Sha256};
 use tokio::{sync::{mpsc, Semaphore}, task::JoinSet};
@@ -529,14 +529,17 @@ struct ProjectCompiler {
     _watcher: RecommendedWatcher,
     pdf_changed: bool,
     build_succeeded: bool,
+    build_raw_log: Vec<String>,
     stopped: bool,
 }
 
 #[derive(Debug)]
 enum ProjectBuildEvent {
+    Started,
+    LogLine(String),
     PdfChanged,
     Succeeded,
-    Failed(String),
+    Failed,
 }
 
 impl ProjectCompiler {
@@ -589,6 +592,7 @@ impl ProjectCompiler {
             _watcher: watcher,
             pdf_changed: false,
             build_succeeded: false,
+            build_raw_log: Vec::new(),
             stopped: false,
         })
     }
@@ -617,13 +621,34 @@ impl ProjectCompiler {
         let mut changed = false;
         loop {
             match self.events.try_recv() {
+                Ok(ProjectBuildEvent::Started) => {
+                    self.pdf_changed = false;
+                    self.build_succeeded = false;
+                    self.build_raw_log.clear();
+                    app.project_build_status = "Compiling…".into();
+                    app.project_build_diagnostics.clear();
+                    app.project_build_raw_log.clear();
+                    app.project_build_selected = 0;
+                    app.project_build_scroll = 0;
+                    changed = true;
+                }
+                Ok(ProjectBuildEvent::LogLine(line)) => {
+                    const MAX_BUILD_LOG_LINES: usize = 2_000;
+                    if self.build_raw_log.len() == MAX_BUILD_LOG_LINES {
+                        self.build_raw_log.remove(0);
+                    }
+                    self.build_raw_log.push(line);
+                }
                 Ok(ProjectBuildEvent::PdfChanged) => self.pdf_changed = true,
                 Ok(ProjectBuildEvent::Succeeded) => self.build_succeeded = true,
-                Ok(ProjectBuildEvent::Failed(error)) => {
+                Ok(ProjectBuildEvent::Failed) => {
                     self.build_succeeded = false;
                     self.pdf_changed = false;
-                    app.project_build_status = "Build failed (editing continues)".into();
-                    app.project_build_errors = vec![error];
+                    app.project_build_raw_log = self.build_raw_log.clone();
+                    app.project_build_diagnostics = parse_latex_diagnostics(&self.build_raw_log, &self.project.path);
+                    app.project_build_status = "Build failed".into();
+                    app.project_build_selected = 0;
+                    app.project_pane = ProjectPane::Build;
                     changed = true;
                 }
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
@@ -634,8 +659,21 @@ impl ProjectCompiler {
             self.build_succeeded = false;
             let pdf = self.project.path.join("main.pdf");
             if pdf.exists() {
-                app.project_build_status = "Built successfully".into();
-                app.project_build_errors.clear();
+                let diagnostics = parse_latex_diagnostics(&self.build_raw_log, &self.project.path);
+                app.project_build_raw_log = self.build_raw_log.clone();
+                app.project_build_selected = 0;
+                app.project_build_status = if diagnostics.is_empty() {
+                    "Built successfully".into()
+                } else {
+                    "Built with warnings".into()
+                };
+                app.project_build_diagnostics = diagnostics;
+                // Warnings are available on demand, but only latexmk's final
+                // failure summary is allowed to interrupt the PDF preview.
+                if app.project_pane == ProjectPane::Build && !app.project_build_pinned {
+                    app.project_pane = ProjectPane::Preview;
+                }
+                self.build_raw_log.clear();
                 let page = app.pdf_viewer_page;
                 app.pdf_viewer_total_pages = get_pdf_page_count(&pdf);
                 app.pdf_viewer_page = page.min(app.pdf_viewer_total_pages.max(1));
@@ -666,13 +704,126 @@ fn spawn_latexmk_reader<R: std::io::Read + Send + 'static>(reader: R, sender: st
     std::thread::spawn(move || {
         for line in BufReader::new(reader).lines().map_while(Result::ok) {
             let normalized = line.to_ascii_lowercase();
-            if normalized.contains("all targets") && normalized.contains("up-to-date") {
+            let _ = sender.send(ProjectBuildEvent::LogLine(line.clone()));
+            if normalized.contains("applying rule 'pdflatex'") {
+                let _ = sender.send(ProjectBuildEvent::Started);
+            } else if normalized.contains("all targets") && normalized.contains("up-to-date") {
                 let _ = sender.send(ProjectBuildEvent::Succeeded);
-            } else if normalized.contains("errors, so i did not complete") {
-                let _ = sender.send(ProjectBuildEvent::Failed(line));
+            } else if normalized.contains("errors, so i did not") {
+                let _ = sender.send(ProjectBuildEvent::Failed);
             }
         }
     });
+}
+
+/// Turn TeX's line-oriented output into diagnostics that can be displayed and navigated.
+fn parse_latex_diagnostics(log: &[String], project_root: &Path) -> Vec<ProjectBuildDiagnostic> {
+    let mut diagnostics = Vec::new();
+
+    for (index, output) in log.iter().enumerate() {
+        let text = output.trim_start();
+        let (severity, description) = if let Some(error) = text.strip_prefix('!') {
+            let error = error.trim_start();
+            if error.is_empty() || error.contains("Fatal error occurred") {
+                continue;
+            }
+            (ProjectDiagnosticSeverity::Error, error.to_owned())
+        } else if text.starts_with("LaTeX Warning:")
+            || (text.starts_with("Package ") && text.contains(" Warning:"))
+            || text.starts_with("Overfull \\hbox")
+            || text.starts_with("Underfull \\hbox")
+        {
+            (ProjectDiagnosticSeverity::Warning, text.to_owned())
+        } else {
+            continue;
+        };
+
+        let source_file = compiler_source_file(log, index, project_root);
+        let source = std::fs::read_to_string(project_root.join(&source_file)).ok();
+        let (line, compiler_code) = compiler_location(log, index);
+        let code = compiler_code.or_else(|| {
+            line.and_then(|number| {
+                source
+                    .as_deref()
+                    .and_then(|contents| contents.lines().nth(number.saturating_sub(1)))
+                    .map(str::to_owned)
+            })
+        });
+        let title = diagnostic_title(severity, &description);
+        let hint = match severity {
+            ProjectDiagnosticSeverity::Error if title == "Emergency stop" => {
+                Some("Triggered after the preceding compiler error.".into())
+            }
+            ProjectDiagnosticSeverity::Error if title == "Undefined control sequence" => code
+                .as_ref()
+                .map(|command| format!("Undefined control sequence `{command}`."))
+                .or_else(|| Some(description.clone())),
+            ProjectDiagnosticSeverity::Error => Some(description.clone()),
+            ProjectDiagnosticSeverity::Warning => None,
+        };
+        diagnostics.push(ProjectBuildDiagnostic {
+            severity,
+            title,
+            description,
+            file: Some(source_file),
+            line,
+            code,
+            hint,
+        });
+    }
+    diagnostics
+}
+
+fn compiler_source_file(log: &[String], diagnostic_index: usize, project_root: &Path) -> String {
+    log[..=diagnostic_index]
+        .iter()
+        .rev()
+        .flat_map(|output| output.split(|character: char| character == '(' || character == ')' || character.is_whitespace()))
+        .filter_map(|candidate| candidate.strip_prefix("./").or(Some(candidate)))
+        .find(|candidate| candidate.ends_with(".tex") && project_root.join(candidate).is_file())
+        .unwrap_or("main.tex")
+        .to_owned()
+}
+
+fn compiler_location(log: &[String], diagnostic_index: usize) -> (Option<usize>, Option<String>) {
+    for output in log.iter().skip(diagnostic_index + 1).take(5) {
+        let text = output.trim_start();
+        let Some(rest) = text.strip_prefix("l.") else { continue; };
+        let digits = rest.chars().take_while(char::is_ascii_digit).collect::<String>();
+        let Ok(line) = digits.parse() else { continue; };
+        let code = rest[digits.len()..].trim();
+        return (Some(line), (!code.is_empty()).then(|| code.to_owned()));
+    }
+    let text = &log[diagnostic_index];
+    let marker = "on input line ";
+    if let Some(rest) = text.split(marker).nth(1) {
+        let digits = rest.chars().take_while(char::is_ascii_digit).collect::<String>();
+        if let Ok(line) = digits.parse() {
+            return (Some(line), None);
+        }
+    }
+    let marker = "at lines ";
+    if let Some(rest) = text.split(marker).nth(1) {
+        let digits = rest.chars().take_while(char::is_ascii_digit).collect::<String>();
+        if let Ok(line) = digits.parse() {
+            return (Some(line), None);
+        }
+    }
+    (None, None)
+}
+
+fn diagnostic_title(severity: ProjectDiagnosticSeverity, description: &str) -> String {
+    for title in ["Undefined control sequence", "Missing $ inserted", "Missing } inserted", "Emergency stop"] {
+        if description.starts_with(title) {
+            return title.to_owned();
+        }
+    }
+    if description.starts_with("Overfull \\hbox") { return "Overfull \\hbox".into(); }
+    if description.starts_with("Underfull \\hbox") { return "Underfull \\hbox".into(); }
+    match severity {
+        ProjectDiagnosticSeverity::Error => "LaTeX Error".into(),
+        ProjectDiagnosticSeverity::Warning => "LaTeX Warning".into(),
+    }
 }
 
 fn config_editor_wrap_rows(char_len: usize, wrap_width: usize) -> usize {
@@ -699,9 +850,13 @@ fn open_project_workspace(app: &mut App, project: Project) {
     app.project_editor_manual_scroll = false;
     app.project_editor_pending_g = false;
     app.project_build_status = "Starting latexmk…".into();
-    app.project_build_errors.clear();
+    app.project_build_diagnostics.clear();
+    app.project_build_raw_log.clear();
+    app.project_build_show_raw = false;
+    app.project_build_selected = 0;
     app.project_build_scroll = 0;
     app.project_pane = ProjectPane::FileTree;
+    app.project_build_pinned = false;
     app.active_project = Some(project);
     if let Some(project) = &app.active_project {
         let pdf = project.path.join("main.pdf");
@@ -733,7 +888,17 @@ fn start_project_compiler(runtime: &mut Runtime, app: &mut App) {
         Ok(compiler) => runtime.project_compiler = Some(compiler),
         Err(error) => {
             app.project_build_status = "Compiler unavailable".into();
-            app.project_build_errors = vec![error.to_string()];
+            app.project_build_diagnostics = vec![ProjectBuildDiagnostic {
+                severity: ProjectDiagnosticSeverity::Error,
+                title: "Compiler unavailable".into(),
+                description: error.to_string(),
+                file: None,
+                line: None,
+                code: None,
+                hint: None,
+            }];
+            app.project_pane = ProjectPane::Build;
+            app.project_build_pinned = false;
         }
     }
 }
@@ -1322,9 +1487,9 @@ async fn run(
         }
 
         if let Some(compiler) = runtime.project_compiler.as_mut() {
-            let previous = (app.project_build_status.clone(), app.project_build_errors.clone());
+            let previous = (app.project_build_status.clone(), app.project_build_diagnostics.clone());
             let preview_changed = compiler.drain_events(app);
-            if preview_changed || previous.0 != app.project_build_status || previous.1 != app.project_build_errors { state_changed = true; }
+            if preview_changed || previous.0 != app.project_build_status || previous.1 != app.project_build_diagnostics { state_changed = true; }
         }
         if let Some(indexer) = runtime.citation_index.as_ref()
             && let Some(source) = indexer.drain()
@@ -2096,7 +2261,10 @@ async fn apply_ui_action(
                 runtime.citation_source = CitationSource::default();
                 runtime.project_filesystem_watcher = None;
                 app.project_build_status = "Idle".into();
-                app.project_build_errors.clear();
+                app.project_build_diagnostics.clear();
+                app.project_build_raw_log.clear();
+                app.project_build_show_raw = false;
+                app.project_build_selected = 0;
                 app.project_build_scroll = 0;
                 app.pdf_viewer_path = None;
                 app.pdf_viewer_page = 1;
@@ -4934,23 +5102,18 @@ fn handle_project_pane_shortcut(app: &mut App, key: KeyEvent) -> bool {
         ProjectPane::ProjectList => true,
         ProjectPane::FileTree | ProjectPane::Build => app.active_project.is_some(),
         ProjectPane::Editor => app.active_project.is_some() && app.project_editor_path.is_some(),
-        ProjectPane::Preview => {
-            app.pdf_viewer == "internal"
-                && app.active_project.is_some()
-                && app.pdf_viewer_path.as_ref().is_some_and(|path| path.exists())
-        }
+        ProjectPane::Preview => app.pdf_viewer == "internal" && app.active_project.is_some(),
     };
     if available {
         app.project_pane = pane;
+        app.project_build_pinned = pane == ProjectPane::Build;
     } else {
         app.toast = Some(match pane {
             ProjectPane::Editor => "Open a source file before focusing the editor.",
             ProjectPane::Preview => {
                 if app.pdf_viewer != "internal" {
                     "PDF preview is disabled when using an external viewer."
-                } else {
-                    "PDF preview is unavailable until the first successful build."
-                }
+                } else { "Open a project before focusing this pane." }
             }
             _ => "Open a project before focusing this pane.",
         }
@@ -4965,14 +5128,36 @@ fn is_project_pane_shortcut(key: KeyEvent) -> bool {
 }
 
 fn handle_project_build_key(app: &mut App, key: KeyEvent) {
-    let line_count = app.project_build_errors.len().max(1);
+    let line_count = if app.project_build_show_raw {
+        app.project_build_raw_log.len()
+    } else {
+        app.project_build_diagnostics.len()
+    }.max(1);
     let max_scroll = line_count.saturating_sub(app.project_build_viewport_height.max(1));
     match key.code {
+        KeyCode::Tab => {
+            app.project_pane = ProjectPane::Preview;
+            app.project_build_pinned = false;
+        }
+        KeyCode::Char('r') => {
+            app.project_build_show_raw = !app.project_build_show_raw;
+            app.project_build_scroll = 0;
+        }
+        KeyCode::Enter if !app.project_build_show_raw => jump_to_project_diagnostic(app),
         KeyCode::Up | KeyCode::Char('k') => {
-            app.project_build_scroll = app.project_build_scroll.saturating_sub(1);
+            if app.project_build_show_raw {
+                app.project_build_scroll = app.project_build_scroll.saturating_sub(1);
+            } else {
+                app.project_build_selected = app.project_build_selected.saturating_sub(1);
+            }
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            app.project_build_scroll = (app.project_build_scroll + 1).min(max_scroll);
+            if app.project_build_show_raw {
+                app.project_build_scroll = (app.project_build_scroll + 1).min(max_scroll);
+            } else {
+                app.project_build_selected = (app.project_build_selected + 1)
+                    .min(app.project_build_diagnostics.len().saturating_sub(1));
+            }
         }
         KeyCode::PageUp => {
             app.project_build_scroll = app
@@ -4990,8 +5175,31 @@ fn handle_project_build_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn jump_to_project_diagnostic(app: &mut App) {
+    let Some(diagnostic) = app.project_build_diagnostics.get(app.project_build_selected) else { return; };
+    let (Some(file), Some(line)) = (&diagnostic.file, diagnostic.line) else { return; };
+    let Some(project) = app.active_project.as_ref() else { return; };
+    let path = project.path.join(file);
+    let Ok(contents) = std::fs::read_to_string(&path) else { return; };
+    let cursor = contents
+        .lines()
+        .take(line.saturating_sub(1))
+        .map(|source_line| source_line.len() + 1)
+        .sum::<usize>()
+        .min(contents.len());
+    app.project_editor_path = Some(path);
+    app.project_editor_text = contents;
+    app.project_editor_cursor = cursor;
+    app.project_editor_manual_scroll = false;
+    app.project_pane = ProjectPane::Editor;
+}
+
 fn handle_project_preview_key(app: &mut App, key: KeyEvent) {
     match key.code {
+        KeyCode::Tab => {
+            app.project_pane = ProjectPane::Build;
+            app.project_build_pinned = true;
+        }
         KeyCode::Up | KeyCode::PageUp => {
             pdf_viewer::jump_to_page(app, app.pdf_viewer_page.saturating_sub(1));
         }
@@ -6923,7 +7131,7 @@ mod tests {
         handle_project_exact_paste, insert_project_bibtex_text,
         reload_config_editor_buffer, select_dashboard_papers, shuffle_daily_bucket,
         update_project_completions, merge_enriched_remote_paper, run_terminal_command,
-        sanitize_terminal_output, PaperTarget,
+        sanitize_terminal_output, parse_latex_diagnostics, PaperTarget,
         complete_terminal_command,
     };
 
@@ -8086,6 +8294,21 @@ mod tests {
     }
 
     #[test]
+    fn project_right_panel_tab_switches_preview_and_build_views() {
+        let mut app = project_editor_app("abc", 1);
+        app.project_editor_insert_mode = false;
+        app.project_pane = ProjectPane::Preview;
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.project_pane, ProjectPane::Build);
+        assert!(app.project_build_pinned);
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.project_pane, ProjectPane::Preview);
+        assert!(!app.project_build_pinned);
+    }
+
+    #[test]
     fn project_list_right_opens_and_x_requests_confirmed_deletion() {
         let mut app = project_editor_app("", 0);
         app.project_pane = ProjectPane::ProjectList;
@@ -8342,7 +8565,8 @@ mod tests {
     fn project_build_and_preview_arrows_only_navigate_their_content() {
         let mut app = project_editor_app("abc", 1);
         app.project_editor_insert_mode = false;
-        app.project_build_errors = (0..8).map(|line| format!("error {line}")).collect();
+        app.project_build_show_raw = true;
+        app.project_build_raw_log = (0..8).map(|line| format!("output {line}")).collect();
         app.project_build_viewport_height = 2;
         app.project_pane = ProjectPane::Build;
 
@@ -8368,6 +8592,23 @@ mod tests {
         assert_eq!(app.pdf_viewer_page, 5);
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         assert_eq!(app.pdf_viewer_page, 5);
+    }
+
+    #[test]
+    fn latex_diagnostic_parser_enriches_errors_and_warnings() {
+        let log = vec![
+            "! Undefined control sequence.".into(),
+            "l.17 \\uias".into(),
+            "LaTeX Warning: Citation `example' undefined on input line 24.".into(),
+            "Latexmk: Errors, so I did not complete making targets".into(),
+        ];
+        let diagnostics = parse_latex_diagnostics(&log, std::path::Path::new("."));
+
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].title, "Undefined control sequence");
+        assert_eq!(diagnostics[0].line, Some(17));
+        assert_eq!(diagnostics[0].code.as_deref(), Some("\\uias"));
+        assert_eq!(diagnostics[1].line, Some(24));
     }
 
     #[test]
