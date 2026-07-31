@@ -533,6 +533,22 @@ struct ProjectCompiler {
     stopped: bool,
 }
 
+/// Compilation results control only the right-hand view, never keyboard focus.
+fn show_build_for_failed_compilation(app: &mut App) {
+    app.project_build_visible = true;
+    app.project_build_auto_shown = true;
+}
+
+/// Restore the preview only when it was automatically replaced after a failure.
+fn restore_preview_after_fixed_compilation(app: &mut App) {
+    if app.project_build_auto_shown {
+        if app.project_build_visible {
+            app.project_build_visible = false;
+        }
+        app.project_build_auto_shown = false;
+    }
+}
+
 #[derive(Debug)]
 enum ProjectBuildEvent {
     Started,
@@ -648,7 +664,7 @@ impl ProjectCompiler {
                     app.project_build_diagnostics = parse_latex_diagnostics(&self.build_raw_log, &self.project.path);
                     app.project_build_status = "Build failed".into();
                     app.project_build_selected = 0;
-                    app.project_pane = ProjectPane::Build;
+                    show_build_for_failed_compilation(app);
                     changed = true;
                 }
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
@@ -670,9 +686,7 @@ impl ProjectCompiler {
                 app.project_build_diagnostics = diagnostics;
                 // Warnings are available on demand, but only latexmk's final
                 // failure summary is allowed to interrupt the PDF preview.
-                if app.project_pane == ProjectPane::Build && !app.project_build_pinned {
-                    app.project_pane = ProjectPane::Preview;
-                }
+                restore_preview_after_fixed_compilation(app);
                 self.build_raw_log.clear();
                 let page = app.pdf_viewer_page;
                 app.pdf_viewer_total_pages = get_pdf_page_count(&pdf);
@@ -856,7 +870,8 @@ fn open_project_workspace(app: &mut App, project: Project) {
     app.project_build_selected = 0;
     app.project_build_scroll = 0;
     app.project_pane = ProjectPane::FileTree;
-    app.project_build_pinned = false;
+    app.project_build_visible = false;
+    app.project_build_auto_shown = false;
     app.active_project = Some(project);
     if let Some(project) = &app.active_project {
         let pdf = project.path.join("main.pdf");
@@ -901,8 +916,7 @@ fn start_project_compiler(runtime: &mut Runtime, app: &mut App) {
                 code: None,
                 hint: None,
             }];
-            app.project_pane = ProjectPane::Build;
-            app.project_build_pinned = false;
+            show_build_for_failed_compilation(app);
         }
     }
 }
@@ -5110,7 +5124,16 @@ fn handle_project_pane_shortcut(app: &mut App, key: KeyEvent) -> bool {
     };
     if available {
         app.project_pane = pane;
-        app.project_build_pinned = pane == ProjectPane::Build;
+        match pane {
+            ProjectPane::Build => {
+                app.project_build_visible = true;
+            }
+            ProjectPane::Preview => {
+                app.project_build_visible = false;
+                app.project_build_auto_shown = false;
+            }
+            ProjectPane::FileTree | ProjectPane::Editor | ProjectPane::ProjectList => {}
+        }
     } else {
         app.toast = Some(match pane {
             ProjectPane::Editor => "Open a source file before focusing the editor.",
@@ -5141,7 +5164,8 @@ fn handle_project_build_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Tab => {
             app.project_pane = ProjectPane::Preview;
-            app.project_build_pinned = false;
+            app.project_build_visible = false;
+            app.project_build_auto_shown = false;
         }
         KeyCode::Char('r') => {
             app.project_build_show_raw = !app.project_build_show_raw;
@@ -5202,7 +5226,7 @@ fn handle_project_preview_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Tab => {
             app.project_pane = ProjectPane::Build;
-            app.project_build_pinned = true;
+            app.project_build_visible = true;
         }
         KeyCode::Up | KeyCode::PageUp => {
             pdf_viewer::jump_to_page(app, app.pdf_viewer_page.saturating_sub(1));
@@ -7136,6 +7160,7 @@ mod tests {
         reload_config_editor_buffer, select_dashboard_papers, shuffle_daily_bucket,
         update_project_completions, merge_enriched_remote_paper, run_terminal_command,
         sanitize_terminal_output, parse_latex_diagnostics, PaperTarget,
+        restore_preview_after_fixed_compilation, show_build_for_failed_compilation,
         complete_terminal_command,
     };
 
@@ -8305,11 +8330,46 @@ mod tests {
 
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.project_pane, ProjectPane::Build);
-        assert!(app.project_build_pinned);
+        assert!(app.project_build_visible);
 
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.project_pane, ProjectPane::Preview);
-        assert!(!app.project_build_pinned);
+        assert!(!app.project_build_visible);
+    }
+
+    #[test]
+    fn focusing_file_tree_or_editor_keeps_the_visible_build_pane() {
+        let mut app = project_editor_app("abc", 1);
+        app.project_editor_insert_mode = false;
+        app.project_editor_path = Some(std::path::PathBuf::from("keyboard-test/main.tex"));
+        app.project_build_visible = true;
+        app.project_pane = ProjectPane::Build;
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT));
+        assert_eq!(app.project_pane, ProjectPane::FileTree);
+        assert!(app.project_build_visible);
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT));
+        assert_eq!(app.project_pane, ProjectPane::Editor);
+        assert!(app.project_build_visible);
+    }
+
+    #[test]
+    fn automatic_build_view_changes_preserve_focus_and_only_restore_after_a_failure() {
+        let mut app = project_editor_app("abc", 1);
+        app.project_editor_insert_mode = false;
+
+        show_build_for_failed_compilation(&mut app);
+        assert_eq!(app.project_pane, ProjectPane::Editor);
+        assert!(app.project_build_visible);
+
+        restore_preview_after_fixed_compilation(&mut app);
+        assert_eq!(app.project_pane, ProjectPane::Editor);
+        assert!(!app.project_build_visible);
+
+        app.project_build_visible = true;
+        restore_preview_after_fixed_compilation(&mut app);
+        assert!(app.project_build_visible);
     }
 
     #[test]

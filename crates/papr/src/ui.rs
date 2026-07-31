@@ -373,7 +373,7 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
         .active_project
         .as_ref()
         .expect("active project checked above");
-    let (file_tree_area, editor_area, right_area) = if app.pdf_viewer == "internal" || app.project_pane == ProjectPane::Build {
+    let (file_tree_area, editor_area, right_area) = if app.pdf_viewer == "internal" || app.project_build_visible {
         let panes = Layout::horizontal([
             Constraint::Length(22),
             Constraint::Ratio(1, 2),
@@ -545,7 +545,7 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
             frame.render_stateful_widget(list, popup, &mut state);
         }
     }
-    if app.project_pane == ProjectPane::Build {
+    if app.project_build_visible {
         let build_area = right_area.expect("Build view reserves the right-hand panel");
         app.project_build_viewport_height = build_area.height.saturating_sub(2) as usize;
         let build_right_title = " Alt+3 PDF PREVIEW ";
@@ -569,7 +569,7 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
                     .block(focus_block_with_right_title(
                         " BUILD [Alt+4 · Tab PREVIEW] ",
                         build_right_title,
-                        app.content_focused,
+                        app.content_focused && app.project_pane == ProjectPane::Build,
                         theme,
                     )),
                 build_area,
@@ -606,7 +606,7 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
                         .block(focus_block_with_right_title(
                             " BUILD [Alt+4 · Tab PREVIEW] ",
                             build_right_title,
-                            app.content_focused,
+                            app.content_focused && app.project_pane == ProjectPane::Build,
                             theme,
                         )),
                     build_area,
@@ -616,7 +616,7 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
                     .block(focus_block_with_right_title(
                         " BUILD [Alt+4 · Tab PREVIEW] ",
                         build_right_title,
-                        app.content_focused,
+                        app.content_focused && app.project_pane == ProjectPane::Build,
                         theme,
                     ))
                     .highlight_style(Style::default().bg(theme.surface).fg(theme.accent));
