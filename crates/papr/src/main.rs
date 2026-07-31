@@ -733,28 +733,31 @@ fn spawn_latexmk_reader<R: std::io::Read + Send + 'static>(reader: R, sender: st
 /// Turn TeX's line-oriented output into diagnostics that can be displayed and navigated.
 fn parse_latex_diagnostics(log: &[String], project_root: &Path) -> Vec<ProjectBuildDiagnostic> {
     let mut diagnostics = Vec::new();
+    let mut previous_location: Option<(usize, String, usize, Option<String>)> = None;
 
     for (index, output) in log.iter().enumerate() {
-        let text = output.trim_start();
-        let (severity, description) = if let Some(error) = text.strip_prefix('!') {
-            let error = error.trim_start();
-            if error.is_empty() || error.contains("Fatal error occurred") {
-                continue;
-            }
-            (ProjectDiagnosticSeverity::Error, error.to_owned())
-        } else if text.starts_with("LaTeX Warning:")
-            || (text.starts_with("Package ") && text.contains(" Warning:"))
-            || text.starts_with("Overfull \\hbox")
-            || text.starts_with("Underfull \\hbox")
-        {
-            (ProjectDiagnosticSeverity::Warning, text.to_owned())
-        } else {
-            continue;
-        };
+        let Some((severity, description)) = latex_diagnostic(output) else { continue; };
 
         let source_file = compiler_source_file(log, index, project_root);
         let source = std::fs::read_to_string(project_root.join(&source_file)).ok();
-        let (line, compiler_code) = compiler_location(log, index);
+        let next_diagnostic = log[index + 1..]
+            .iter()
+            .position(|output| is_latex_diagnostic(output))
+            .map_or(log.len(), |offset| index + 1 + offset);
+        let location = compiler_location(log, index, next_diagnostic).or_else(|| {
+            // TeX often emits a second, less-specific error (notably an
+            // emergency stop) after the useful location has already appeared.
+            previous_location.as_ref().and_then(|(previous_index, file, line, code)| {
+                (index.saturating_sub(*previous_index) <= 12 && *file == source_file)
+                    .then(|| (*line, code.clone()))
+            })
+        });
+        let (line, compiler_code) = location
+            .map(|(line, code)| (Some(line), code))
+            .unwrap_or((None, None));
+        if let Some(line) = line {
+            previous_location = Some((index, source_file.clone(), line, compiler_code.clone()));
+        }
         let code = compiler_code.or_else(|| {
             line.and_then(|number| {
                 source
@@ -788,42 +791,87 @@ fn parse_latex_diagnostics(log: &[String], project_root: &Path) -> Vec<ProjectBu
     diagnostics
 }
 
+fn is_latex_diagnostic(output: &str) -> bool {
+    latex_diagnostic(output).is_some()
+}
+
+fn latex_diagnostic(output: &str) -> Option<(ProjectDiagnosticSeverity, String)> {
+    let text = output.trim_start();
+    if let Some(error) = text.strip_prefix('!') {
+        let error = error.trim_start();
+        return (!error.is_empty() && !error.contains("Fatal error occurred"))
+            .then(|| (ProjectDiagnosticSeverity::Error, error.to_owned()));
+    }
+    if let Some((_, error)) = text.rsplit_once("LaTeX Error:") {
+        return Some((ProjectDiagnosticSeverity::Error, error.trim().to_owned()));
+    }
+    (text.starts_with("LaTeX Warning:")
+        || (text.starts_with("Package ") && text.contains(" Warning:"))
+        || text.starts_with("Overfull \\hbox")
+        || text.starts_with("Underfull \\hbox"))
+        .then(|| (ProjectDiagnosticSeverity::Warning, text.to_owned()))
+}
+
 fn compiler_source_file(log: &[String], diagnostic_index: usize, project_root: &Path) -> String {
     log[..=diagnostic_index]
         .iter()
         .rev()
         .flat_map(|output| output.split(|character: char| character == '(' || character == ')' || character.is_whitespace()))
-        .filter_map(|candidate| candidate.strip_prefix("./").or(Some(candidate)))
+        .filter_map(|candidate| {
+            let end = candidate.find(".tex").map(|index| index + ".tex".len())?;
+            candidate[..end].strip_prefix("./").or(Some(&candidate[..end]))
+        })
         .find(|candidate| candidate.ends_with(".tex") && project_root.join(candidate).is_file())
         .unwrap_or("main.tex")
         .to_owned()
 }
 
-fn compiler_location(log: &[String], diagnostic_index: usize) -> (Option<usize>, Option<String>) {
-    for output in log.iter().skip(diagnostic_index + 1).take(5) {
-        let text = output.trim_start();
-        let Some(rest) = text.strip_prefix("l.") else { continue; };
-        let digits = rest.chars().take_while(char::is_ascii_digit).collect::<String>();
-        let Ok(line) = digits.parse() else { continue; };
-        let code = rest[digits.len()..].trim();
-        return (Some(line), (!code.is_empty()).then(|| code.to_owned()));
+fn compiler_location(log: &[String], diagnostic_index: usize, end: usize) -> Option<(usize, Option<String>)> {
+    let mut contextual_location = None;
+    for output in &log[diagnostic_index..end] {
+        let Some((location, is_source_line)) = compiler_location_in_line(output) else {
+            continue;
+        };
+        if is_source_line {
+            return Some(location);
+        }
+        contextual_location = Some(location);
     }
-    let text = &log[diagnostic_index];
-    let marker = "on input line ";
-    if let Some(rest) = text.split(marker).nth(1) {
+    contextual_location
+}
+
+fn compiler_location_in_line(output: &str) -> Option<((usize, Option<String>), bool)> {
+    let text = output.trim();
+    if let Some(offset) = text.find("l.") {
+        let rest = &text[offset + 2..];
         let digits = rest.chars().take_while(char::is_ascii_digit).collect::<String>();
         if let Ok(line) = digits.parse() {
-            return (Some(line), None);
+            let code = rest[digits.len()..].trim();
+            return Some(((line, (!code.is_empty()).then(|| code.to_owned())), true));
         }
     }
-    let marker = "at lines ";
-    if let Some(rest) = text.split(marker).nth(1) {
-        let digits = rest.chars().take_while(char::is_ascii_digit).collect::<String>();
-        if let Ok(line) = digits.parse() {
-            return (Some(line), None);
+
+    let lower = text.to_ascii_lowercase();
+    for marker in ["on input line ", "on line ", "at line ", "at lines "] {
+        if let Some(offset) = lower.find(marker) {
+            if let Some(line) = parse_line_number(&lower[offset + marker.len()..]) {
+                return Some(((line, None), false));
+            }
         }
     }
-    (None, None)
+
+    let tex_end = lower.find(".tex")? + ".tex".len();
+    let rest = lower[tex_end..].strip_prefix(':')?;
+    let line = parse_line_number(rest)?;
+    Some(((line, None), false))
+}
+
+fn parse_line_number(text: &str) -> Option<usize> {
+    let digits = text.trim_start_matches(|character: char| !character.is_ascii_digit())
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>();
+    digits.parse().ok()
 }
 
 fn diagnostic_title(severity: ProjectDiagnosticSeverity, description: &str) -> String {
@@ -8673,6 +8721,28 @@ mod tests {
         assert_eq!(diagnostics[0].line, Some(17));
         assert_eq!(diagnostics[0].code.as_deref(), Some("\\uias"));
         assert_eq!(diagnostics[1].line, Some(24));
+    }
+
+    #[test]
+    fn latex_diagnostic_parser_carries_locations_across_related_errors_and_formats() {
+        let log = vec![
+            "! LaTeX Error: Environment equation undefined.".into(),
+            "See the LaTeX manual or LaTeX Companion for explanation.".into(),
+            "l.23 \\begin{equation}".into(),
+            "! Emergency stop.".into(),
+            "<*> main.tex".into(),
+            "./main.tex:42: LaTeX Error: Missing \\begin{document}.".into(),
+            "Package hyperref Warning: Token not allowed in a PDF string on line 51.".into(),
+        ];
+        let diagnostics = parse_latex_diagnostics(&log, std::path::Path::new("."));
+
+        assert_eq!(diagnostics.len(), 4);
+        assert_eq!(diagnostics[0].line, Some(23));
+        assert_eq!(diagnostics[0].code.as_deref(), Some("\\begin{equation}"));
+        assert_eq!(diagnostics[1].title, "Emergency stop");
+        assert_eq!(diagnostics[1].line, Some(23));
+        assert_eq!(diagnostics[2].line, Some(42));
+        assert_eq!(diagnostics[3].line, Some(51));
     }
 
     #[test]
