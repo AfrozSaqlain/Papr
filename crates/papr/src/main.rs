@@ -872,7 +872,11 @@ fn open_project_workspace(app: &mut App, project: Project) {
             }
         }
     }
-    if let Some(main) = app.project_files.iter().find(|p| p.file_name().is_some_and(|n| n == "main.tex")).cloned() {
+    if let Some((main_index, main)) = app.project_files.iter().enumerate()
+        .find(|(_, path)| path.file_name().is_some_and(|name| name == "main.tex"))
+        .map(|(index, path)| (index, path.clone()))
+    {
+        app.project_file_selected = main_index;
         if let Ok(text) = std::fs::read_to_string(&main) {
             app.project_editor_text = text;
             app.project_editor_path = Some(main);
