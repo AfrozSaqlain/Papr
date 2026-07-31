@@ -536,17 +536,11 @@ struct ProjectCompiler {
 /// Compilation results control only the right-hand view, never keyboard focus.
 fn show_build_for_failed_compilation(app: &mut App) {
     app.project_build_visible = true;
-    app.project_build_auto_shown = true;
 }
 
-/// Restore the preview only when it was automatically replaced after a failure.
-fn restore_preview_after_fixed_compilation(app: &mut App) {
-    if app.project_build_auto_shown {
-        if app.project_build_visible {
-            app.project_build_visible = false;
-        }
-        app.project_build_auto_shown = false;
-    }
+/// A clean compilation makes the newly generated PDF the active right-hand view.
+fn show_preview_after_successful_compilation(app: &mut App) {
+    app.project_build_visible = false;
 }
 
 #[derive(Debug)]
@@ -686,7 +680,7 @@ impl ProjectCompiler {
                 app.project_build_diagnostics = diagnostics;
                 // Warnings are available on demand, but only latexmk's final
                 // failure summary is allowed to interrupt the PDF preview.
-                restore_preview_after_fixed_compilation(app);
+                show_preview_after_successful_compilation(app);
                 self.build_raw_log.clear();
                 let page = app.pdf_viewer_page;
                 app.pdf_viewer_total_pages = get_pdf_page_count(&pdf);
@@ -732,32 +726,36 @@ fn spawn_latexmk_reader<R: std::io::Read + Send + 'static>(reader: R, sender: st
 
 /// Turn TeX's line-oriented output into diagnostics that can be displayed and navigated.
 fn parse_latex_diagnostics(log: &[String], project_root: &Path) -> Vec<ProjectBuildDiagnostic> {
+    let files = tex_file_context(log);
+    let locations = tex_locations(log, &files);
+    let diagnostic_indexes = log.iter().enumerate()
+        .filter_map(|(index, output)| latex_diagnostic(output).map(|diagnostic| (index, diagnostic)))
+        .collect::<Vec<_>>();
     let mut diagnostics = Vec::new();
-    let mut previous_location: Option<(usize, String, usize, Option<String>)> = None;
+    let mut previous_location = None;
 
-    for (index, output) in log.iter().enumerate() {
-        let Some((severity, description)) = latex_diagnostic(output) else { continue; };
-
-        let source_file = compiler_source_file(log, index, project_root);
-        let source = std::fs::read_to_string(project_root.join(&source_file)).ok();
-        let next_diagnostic = log[index + 1..]
-            .iter()
-            .position(|output| is_latex_diagnostic(output))
-            .map_or(log.len(), |offset| index + 1 + offset);
-        let location = compiler_location(log, index, next_diagnostic).or_else(|| {
-            // TeX often emits a second, less-specific error (notably an
-            // emergency stop) after the useful location has already appeared.
-            previous_location.as_ref().and_then(|(previous_index, file, line, code)| {
-                (index.saturating_sub(*previous_index) <= 12 && *file == source_file)
-                    .then(|| (*line, code.clone()))
-            })
-        });
-        let (line, compiler_code) = location
-            .map(|(line, code)| (Some(line), code))
+    for (position, (index, (severity, description))) in diagnostic_indexes.iter().enumerate() {
+        let next_diagnostic = diagnostic_indexes.get(position + 1).map_or(log.len(), |(index, _)| *index);
+        let source_file = files[*index].clone();
+        // TeX puts the useful `l.<n>` entry either immediately after an error,
+        // before a package-generated message, or in the enclosing log block.
+        let location = locations.iter()
+            .filter(|location| location.index >= *index && location.index < next_diagnostic)
+            .min_by_key(|location| location.index)
+            .cloned()
+            .or_else(|| locations.iter()
+                .rev()
+                .find(|location| location.index < *index && index.saturating_sub(location.index) <= 40)
+                .cloned())
+            .or_else(|| previous_location.clone());
+        let source_file = location.as_ref().map_or(source_file, |location| location.file.clone());
+        let (line, compiler_code) = location.as_ref()
+            .map(|location| (Some(location.line), location.code.clone()))
             .unwrap_or((None, None));
-        if let Some(line) = line {
-            previous_location = Some((index, source_file.clone(), line, compiler_code.clone()));
+        if let Some(location) = &location {
+            previous_location = Some(location.clone());
         }
+        let source = std::fs::read_to_string(project_root.join(&source_file)).ok();
         let code = compiler_code.or_else(|| {
             line.and_then(|number| {
                 source
@@ -766,7 +764,7 @@ fn parse_latex_diagnostics(log: &[String], project_root: &Path) -> Vec<ProjectBu
                     .map(str::to_owned)
             })
         });
-        let title = diagnostic_title(severity, &description);
+        let title = diagnostic_title(*severity, description);
         let hint = match severity {
             ProjectDiagnosticSeverity::Error if title == "Emergency stop" => {
                 Some("Triggered after the preceding compiler error.".into())
@@ -779,9 +777,9 @@ fn parse_latex_diagnostics(log: &[String], project_root: &Path) -> Vec<ProjectBu
             ProjectDiagnosticSeverity::Warning => None,
         };
         diagnostics.push(ProjectBuildDiagnostic {
-            severity,
+            severity: *severity,
             title,
-            description,
+            description: description.clone(),
             file: Some(source_file),
             line,
             code,
@@ -791,8 +789,12 @@ fn parse_latex_diagnostics(log: &[String], project_root: &Path) -> Vec<ProjectBu
     diagnostics
 }
 
-fn is_latex_diagnostic(output: &str) -> bool {
-    latex_diagnostic(output).is_some()
+#[derive(Clone)]
+struct TexLocation {
+    index: usize,
+    file: String,
+    line: usize,
+    code: Option<String>,
 }
 
 fn latex_diagnostic(output: &str) -> Option<(ProjectDiagnosticSeverity, String)> {
@@ -805,6 +807,12 @@ fn latex_diagnostic(output: &str) -> Option<(ProjectDiagnosticSeverity, String)>
     if let Some((_, error)) = text.rsplit_once("LaTeX Error:") {
         return Some((ProjectDiagnosticSeverity::Error, error.trim().to_owned()));
     }
+    if text.starts_with("Package ") && text.contains(" Error:") {
+        return Some((ProjectDiagnosticSeverity::Error, text.to_owned()));
+    }
+    if file_line_number(text).is_some() && text.to_ascii_lowercase().contains("error") {
+        return Some((ProjectDiagnosticSeverity::Error, text.to_owned()));
+    }
     (text.starts_with("LaTeX Warning:")
         || (text.starts_with("Package ") && text.contains(" Warning:"))
         || text.starts_with("Overfull \\hbox")
@@ -812,58 +820,88 @@ fn latex_diagnostic(output: &str) -> Option<(ProjectDiagnosticSeverity, String)>
         .then(|| (ProjectDiagnosticSeverity::Warning, text.to_owned()))
 }
 
-fn compiler_source_file(log: &[String], diagnostic_index: usize, project_root: &Path) -> String {
-    log[..=diagnostic_index]
-        .iter()
-        .rev()
-        .flat_map(|output| output.split(|character: char| character == '(' || character == ')' || character.is_whitespace()))
-        .filter_map(|candidate| {
-            let end = candidate.find(".tex").map(|index| index + ".tex".len())?;
-            candidate[..end].strip_prefix("./").or(Some(&candidate[..end]))
-        })
-        .find(|candidate| candidate.ends_with(".tex") && project_root.join(candidate).is_file())
-        .unwrap_or("main.tex")
-        .to_owned()
-}
-
-fn compiler_location(log: &[String], diagnostic_index: usize, end: usize) -> Option<(usize, Option<String>)> {
-    let mut contextual_location = None;
-    for output in &log[diagnostic_index..end] {
-        let Some((location, is_source_line)) = compiler_location_in_line(output) else {
-            continue;
-        };
-        if is_source_line {
-            return Some(location);
+fn tex_file_context(log: &[String]) -> Vec<String> {
+    let mut stack = vec!["main.tex".to_owned()];
+    log.iter().map(|output| {
+        let references = tex_file_references(output);
+        for file in &references {
+            if stack.last() != Some(file) {
+                stack.push(file.clone());
+            }
         }
-        contextual_location = Some(location);
-    }
-    contextual_location
+        let current = references.last().cloned()
+            .unwrap_or_else(|| stack.last().cloned().unwrap_or_else(|| "main.tex".into()));
+        let closes = output.chars().filter(|character| *character == ')').count();
+        for _ in 0..closes {
+            if stack.len() > 1 {
+                stack.pop();
+            }
+        }
+        current
+    }).collect()
 }
 
-fn compiler_location_in_line(output: &str) -> Option<((usize, Option<String>), bool)> {
+fn tex_locations(log: &[String], files: &[String]) -> Vec<TexLocation> {
+    log.iter().enumerate().filter_map(|(index, output)| {
+        let (line, code) = compiler_location_in_line(output)?;
+        let file = tex_file_references(output).last().cloned().unwrap_or_else(|| files[index].clone());
+        Some(TexLocation { index, file, line, code })
+    }).collect()
+}
+
+fn tex_file_references(output: &str) -> Vec<String> {
+    output.split(|character: char| character.is_whitespace() || matches!(character, '(' | ')' | '[' | ']' | '"' | '\''))
+        .filter_map(|candidate| {
+            let candidate = candidate.trim_start_matches("./");
+            [".tex", ".sty", ".cls", ".ltx", ".bib"].iter().find_map(|extension| {
+                candidate.find(extension).map(|index| candidate[..index + extension.len()].to_owned())
+            })
+        })
+        .collect()
+}
+
+fn compiler_location_in_line(output: &str) -> Option<(usize, Option<String>)> {
     let text = output.trim();
     if let Some(offset) = text.find("l.") {
-        let rest = &text[offset + 2..];
+        let rest = text[offset + 2..].trim_start();
         let digits = rest.chars().take_while(char::is_ascii_digit).collect::<String>();
         if let Ok(line) = digits.parse() {
             let code = rest[digits.len()..].trim();
-            return Some(((line, (!code.is_empty()).then(|| code.to_owned())), true));
+            return Some((line, (!code.is_empty()).then(|| code.to_owned())));
         }
     }
 
     let lower = text.to_ascii_lowercase();
-    for marker in ["on input line ", "on line ", "at line ", "at lines "] {
+    for marker in ["on input line ", "on line ", "at line ", "at lines ", "line "] {
         if let Some(offset) = lower.find(marker) {
             if let Some(line) = parse_line_number(&lower[offset + marker.len()..]) {
-                return Some(((line, None), false));
+                return Some((line, None));
             }
         }
     }
 
-    let tex_end = lower.find(".tex")? + ".tex".len();
-    let rest = lower[tex_end..].strip_prefix(':')?;
-    let line = parse_line_number(rest)?;
-    Some(((line, None), false))
+    for extension in [".tex", ".sty", ".cls", ".ltx", ".bib"] {
+        if let Some(offset) = lower.find(extension) {
+            let rest = lower[offset + extension.len()..].strip_prefix(':')?;
+            if let Some(line) = parse_line_number(rest) {
+                return Some((line, None));
+            }
+        }
+    }
+    None
+}
+
+fn file_line_number(output: &str) -> Option<usize> {
+    let lower = output.to_ascii_lowercase();
+    for extension in [".tex", ".sty", ".cls", ".ltx", ".bib"] {
+        if let Some(offset) = lower.find(extension) {
+            let rest = lower[offset + extension.len()..].strip_prefix(':')?;
+            if let Some(line) = parse_line_number(rest) {
+                return Some(line);
+            }
+        }
+    }
+    None
 }
 
 fn parse_line_number(text: &str) -> Option<usize> {
@@ -919,7 +957,6 @@ fn open_project_workspace(app: &mut App, project: Project) {
     app.project_build_scroll = 0;
     app.project_pane = ProjectPane::FileTree;
     app.project_build_visible = false;
-    app.project_build_auto_shown = false;
     app.active_project = Some(project);
     if let Some(project) = &app.active_project {
         let pdf = project.path.join("main.pdf");
@@ -5178,7 +5215,6 @@ fn handle_project_pane_shortcut(app: &mut App, key: KeyEvent) -> bool {
             }
             ProjectPane::Preview => {
                 app.project_build_visible = false;
-                app.project_build_auto_shown = false;
             }
             ProjectPane::FileTree | ProjectPane::Editor | ProjectPane::ProjectList => {}
         }
@@ -5213,7 +5249,6 @@ fn handle_project_build_key(app: &mut App, key: KeyEvent) {
         KeyCode::Tab => {
             app.project_pane = ProjectPane::Preview;
             app.project_build_visible = false;
-            app.project_build_auto_shown = false;
         }
         KeyCode::Char('r') => {
             app.project_build_show_raw = !app.project_build_show_raw;
@@ -7208,7 +7243,7 @@ mod tests {
         reload_config_editor_buffer, select_dashboard_papers, shuffle_daily_bucket,
         update_project_completions, merge_enriched_remote_paper, run_terminal_command,
         sanitize_terminal_output, parse_latex_diagnostics, PaperTarget,
-        restore_preview_after_fixed_compilation, show_build_for_failed_compilation,
+        show_build_for_failed_compilation, show_preview_after_successful_compilation,
         complete_terminal_command,
     };
 
@@ -8403,7 +8438,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_build_view_changes_preserve_focus_and_only_restore_after_a_failure() {
+    fn successful_compilation_restores_preview_without_changing_focus() {
         let mut app = project_editor_app("abc", 1);
         app.project_editor_insert_mode = false;
 
@@ -8411,13 +8446,13 @@ mod tests {
         assert_eq!(app.project_pane, ProjectPane::Editor);
         assert!(app.project_build_visible);
 
-        restore_preview_after_fixed_compilation(&mut app);
+        show_preview_after_successful_compilation(&mut app);
         assert_eq!(app.project_pane, ProjectPane::Editor);
         assert!(!app.project_build_visible);
 
         app.project_build_visible = true;
-        restore_preview_after_fixed_compilation(&mut app);
-        assert!(app.project_build_visible);
+        show_preview_after_successful_compilation(&mut app);
+        assert!(!app.project_build_visible);
     }
 
     #[test]
@@ -8743,6 +8778,24 @@ mod tests {
         assert_eq!(diagnostics[1].line, Some(23));
         assert_eq!(diagnostics[2].line, Some(42));
         assert_eq!(diagnostics[3].line, Some(51));
+    }
+
+    #[test]
+    fn latex_diagnostic_parser_tracks_nested_files_and_engine_style_locations() {
+        let log = vec![
+            "(./chapters/intro.tex".into(),
+            "! Package amsmath Error: Bad math environment delimiter.".into(),
+            "l. 71 \\begin{equation}".into(),
+            ")".into(),
+            "./main.tex:14: error: undefined control sequence".into(),
+        ];
+        let diagnostics = parse_latex_diagnostics(&log, std::path::Path::new("."));
+
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].file.as_deref(), Some("chapters/intro.tex"));
+        assert_eq!(diagnostics[0].line, Some(71));
+        assert_eq!(diagnostics[1].file.as_deref(), Some("main.tex"));
+        assert_eq!(diagnostics[1].line, Some(14));
     }
 
     #[test]

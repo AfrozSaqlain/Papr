@@ -936,8 +936,6 @@ pub struct App {
     pub project_pane: ProjectPane,
     /// Whether the right-hand workspace pane is showing compiler output instead of the PDF.
     pub project_build_visible: bool,
-    /// Whether a failed compilation automatically revealed the Build pane.
-    pub project_build_auto_shown: bool,
     /// Pending project name while the rename prompt is open.
     pub project_rename_input: String,
     /// Byte cursor within the project name modal input.
@@ -1144,7 +1142,6 @@ impl Default for App {
             project_build_viewport_height: 0,
             project_pane: ProjectPane::ProjectList,
             project_build_visible: false,
-            project_build_auto_shown: false,
             project_rename_input: String::new(),
             project_rename_cursor: 0,
             project_entry_rename_path: None,
