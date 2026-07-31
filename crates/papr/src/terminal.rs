@@ -3,15 +3,19 @@
 use std::io::{self, Stdout};
 
 use crossterm::{
-    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 /// Owns raw mode and alternate-screen lifetime.
 pub struct TerminalSession {
     terminal: Terminal<CrosstermBackend<Stdout>>,
+    keyboard_enhancement_enabled: bool,
 }
 
 impl TerminalSession {
@@ -23,7 +27,23 @@ impl TerminalSession {
             let _ = disable_raw_mode();
             return Err(error);
         }
+        // Conventional terminal input collapses Ctrl+Backspace into the same
+        // byte sequence as other control keys.  Kitty's progressive keyboard
+        // protocol preserves the modifier so crossterm can report it as an
+        // actual Ctrl+Backspace event.
+        let keyboard_enhancement_enabled = supports_keyboard_enhancement().unwrap_or(false)
+            && execute!(
+                stdout,
+                PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                        | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+                )
+            )
+            .is_ok();
         if let Err(error) = execute!(stdout, EnableMouseCapture) {
+            if keyboard_enhancement_enabled {
+                let _ = execute!(stdout, PopKeyboardEnhancementFlags);
+            }
             let _ = execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen);
             let _ = disable_raw_mode();
             return Err(error);
@@ -33,12 +53,15 @@ impl TerminalSession {
             Err(error) => {
                 let mut stdout = io::stdout();
                 let _ = execute!(stdout, DisableMouseCapture);
+                if keyboard_enhancement_enabled {
+                    let _ = execute!(stdout, PopKeyboardEnhancementFlags);
+                }
                 let _ = execute!(stdout, LeaveAlternateScreen);
                 let _ = disable_raw_mode();
                 return Err(error);
             }
         };
-        Ok(Self { terminal })
+        Ok(Self { terminal, keyboard_enhancement_enabled })
     }
 
     /// Borrow the ratatui terminal for drawing.
@@ -55,6 +78,9 @@ impl Drop for TerminalSession {
             DisableBracketedPaste,
             DisableMouseCapture
         );
+        if self.keyboard_enhancement_enabled {
+            let _ = execute!(self.terminal.backend_mut(), PopKeyboardEnhancementFlags);
+        }
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
         let _ = execute!(
             self.terminal.backend_mut(),

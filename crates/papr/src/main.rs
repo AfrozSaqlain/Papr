@@ -6352,18 +6352,24 @@ fn edit_text(text: &mut String, cursor: &mut usize, key: KeyEvent) -> bool {
         }
         KeyCode::Backspace => {
             if *cursor > 0 {
-                let mut prev = *cursor - 1;
-                while prev > 0 && !text.is_char_boundary(prev) {
-                    prev -= 1;
-                }
-                text.remove(prev);
+                let prev = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    prev_word_boundary(text, *cursor)
+                } else {
+                    prev_char_boundary(text, *cursor)
+                };
+                text.drain(prev..*cursor);
                 *cursor = prev;
                 changed = true;
             }
         }
         KeyCode::Delete => {
             if *cursor < text.len() {
-                text.remove(*cursor);
+                let next = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    next_word_boundary(text, *cursor)
+                } else {
+                    next_char_boundary(text, *cursor)
+                };
+                text.drain(*cursor..next);
                 changed = true;
             }
         }
@@ -6994,8 +7000,9 @@ fn handle_config_editor_key(
                 cmd.push(c);
                 app.config_editor_command = Some(cmd);
             }
-            KeyCode::Backspace => {
-                cmd.pop();
+            KeyCode::Backspace | KeyCode::Delete => {
+                let mut cursor = cmd.len();
+                let _ = edit_text(&mut cmd, &mut cursor, key);
                 app.config_editor_command = Some(cmd);
             }
             KeyCode::Enter => {
@@ -8309,6 +8316,14 @@ mod tests {
         app.project_editor_cursor = 0;
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL));
         assert_eq!(app.project_editor_text, "");
+
+        app.project_editor_text = "alpha, beta".into();
+        app.project_editor_cursor = app.project_editor_text.len();
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+        assert_eq!(app.project_editor_text, "alpha, ");
+        app.project_editor_cursor = 0;
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL));
+        assert_eq!(app.project_editor_text, ", ");
     }
 
     #[test]

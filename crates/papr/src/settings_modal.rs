@@ -574,15 +574,24 @@ fn handle_pdf_viewer_edit(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
         KeyCode::Backspace => {
             let cur = app.settings_modal.pdf_viewer_cursor;
             if cur > 0 {
-                let prev = prev_char_boundary(&app.settings_modal.pdf_viewer, cur);
-                app.settings_modal.pdf_viewer.remove(prev);
+                let prev = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    prev_word_boundary(&app.settings_modal.pdf_viewer, cur)
+                } else {
+                    prev_char_boundary(&app.settings_modal.pdf_viewer, cur)
+                };
+                app.settings_modal.pdf_viewer.drain(prev..cur);
                 app.settings_modal.pdf_viewer_cursor = prev;
             }
         }
         KeyCode::Delete => {
             let cur = app.settings_modal.pdf_viewer_cursor;
             if cur < app.settings_modal.pdf_viewer.len() {
-                app.settings_modal.pdf_viewer.remove(cur);
+                let next = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    next_word_boundary(&app.settings_modal.pdf_viewer, cur)
+                } else {
+                    next_char_boundary(&app.settings_modal.pdf_viewer, cur)
+                };
+                app.settings_modal.pdf_viewer.drain(cur..next);
             }
         }
         KeyCode::Left => {
@@ -762,8 +771,12 @@ fn handle_library_entry_edit(app: &mut App, key: KeyEvent) -> SettingsKeyResult 
             if let Some(entry) = app.settings_modal.library_entries.get_mut(idx) {
                 let cur = entry.cursor;
                 if cur > 0 {
-                    let prev = prev_char_boundary(&entry.text, cur);
-                    entry.text.remove(prev);
+                    let prev = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        prev_word_boundary(&entry.text, cur)
+                    } else {
+                        prev_char_boundary(&entry.text, cur)
+                    };
+                    entry.text.drain(prev..cur);
                     entry.cursor = prev;
                     entry.error = None;
                 }
@@ -773,7 +786,12 @@ fn handle_library_entry_edit(app: &mut App, key: KeyEvent) -> SettingsKeyResult 
             if let Some(entry) = app.settings_modal.library_entries.get_mut(idx) {
                 let cur = entry.cursor;
                 if cur < entry.text.len() {
-                    entry.text.remove(cur);
+                    let next = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        next_word_boundary(&entry.text, cur)
+                    } else {
+                        next_char_boundary(&entry.text, cur)
+                    };
+                    entry.text.drain(cur..next);
                     entry.error = None;
                 }
             }
@@ -878,8 +896,12 @@ fn handle_single_path_edit(
             };
             let cur = *cursor;
             if cur > 0 {
-                let prev = prev_char_boundary(text, cur);
-                text.remove(prev);
+                let prev = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    prev_word_boundary(text, cur)
+                } else {
+                    prev_char_boundary(text, cur)
+                };
+                text.drain(prev..cur);
                 *cursor = prev;
             }
         }
@@ -897,7 +919,12 @@ fn handle_single_path_edit(
             };
             let cur = *cursor;
             if cur < text.len() {
-                text.remove(cur);
+                let next = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    next_word_boundary(text, cur)
+                } else {
+                    next_char_boundary(text, cur)
+                };
+                text.drain(cur..next);
             }
         }
         KeyCode::Left => {
@@ -1329,8 +1356,12 @@ fn handle_keyword_entry_edit(app: &mut App, key: KeyEvent) -> SettingsKeyResult 
             if let Some(entry) = app.settings_modal.keyword_entries.get_mut(idx) {
                 let cur = entry.cursor;
                 if cur > 0 {
-                    let prev = prev_char_boundary(&entry.text, cur);
-                    entry.text.remove(prev);
+                    let prev = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        prev_word_boundary(&entry.text, cur)
+                    } else {
+                        prev_char_boundary(&entry.text, cur)
+                    };
+                    entry.text.drain(prev..cur);
                     entry.cursor = prev;
                     entry.error = None;
                 }
@@ -1340,7 +1371,12 @@ fn handle_keyword_entry_edit(app: &mut App, key: KeyEvent) -> SettingsKeyResult 
             if let Some(entry) = app.settings_modal.keyword_entries.get_mut(idx) {
                 let cur = entry.cursor;
                 if cur < entry.text.len() {
-                    entry.text.remove(cur);
+                    let next = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        next_word_boundary(&entry.text, cur)
+                    } else {
+                        next_char_boundary(&entry.text, cur)
+                    };
+                    entry.text.drain(cur..next);
                     entry.error = None;
                 }
             }
@@ -1924,36 +1960,36 @@ fn next_char_boundary(text: &str, cursor: usize) -> usize {
 }
 
 fn prev_word_boundary(text: &str, cursor: usize) -> usize {
-    if cursor == 0 {
-        return 0;
-    }
-    let bytes = text.as_bytes();
     let mut pos = cursor.min(text.len());
-    while pos > 0
-        && bytes
-            .get(pos - 1)
-            .map_or(false, |b| (*b as char).is_whitespace())
-    {
-        pos -= 1;
+    while pos > 0 && text[prev_char_boundary(text, pos)..pos].chars().next().is_some_and(char::is_whitespace) {
+        pos = prev_char_boundary(text, pos);
     }
-    while pos > 0
-        && bytes
-            .get(pos - 1)
-            .map_or(false, |b| !(*b as char).is_whitespace())
-    {
-        pos -= 1;
+    let word = pos > 0 && text[prev_char_boundary(text, pos)..pos].chars().next().is_some_and(|ch| ch.is_alphanumeric() || ch == '_');
+    while pos > 0 {
+        let previous = prev_char_boundary(text, pos);
+        let ch = text[previous..pos].chars().next().unwrap_or(' ');
+        if ch.is_whitespace() || (ch.is_alphanumeric() || ch == '_') != word { break; }
+        pos = previous;
     }
     pos
 }
 
 fn next_word_boundary(text: &str, cursor: usize) -> usize {
-    let bytes = text.as_bytes();
     let mut pos = cursor.min(text.len());
-    while pos < bytes.len() && !(bytes[pos] as char).is_whitespace() {
-        pos += 1;
-    }
-    while pos < bytes.len() && (bytes[pos] as char).is_whitespace() {
-        pos += 1;
+    if pos >= text.len() { return text.len(); }
+    let first = text[pos..].chars().next().unwrap_or(' ');
+    if first.is_whitespace() {
+        while pos < text.len() && text[pos..].chars().next().is_some_and(char::is_whitespace) {
+            pos = next_char_boundary(text, pos);
+        }
+    } else {
+        let word = first.is_alphanumeric() || first == '_';
+        while pos < text.len() {
+            let next = next_char_boundary(text, pos);
+            let ch = text[pos..next].chars().next().unwrap_or(' ');
+            if ch.is_whitespace() || (ch.is_alphanumeric() || ch == '_') != word { break; }
+            pos = next;
+        }
     }
     pos
 }
@@ -2102,6 +2138,24 @@ mod tests {
         assert!(matches!(res_edit, SettingsKeyResult::Handled));
         assert_eq!(app.settings_modal.pdf_viewer, "q");
         assert!(app.settings_modal.pdf_viewer_editing);
+    }
+
+    #[test]
+    fn text_fields_delete_words_with_control_backspace_and_delete() {
+        let mut app = App::default();
+        app.settings_modal.tab = SettingsTab::General;
+        app.settings_modal.tab_bar_focused = false;
+        app.settings_modal.general_focus = GeneralTabFocus::PdfViewer;
+        app.settings_modal.pdf_viewer_editing = true;
+        app.settings_modal.pdf_viewer = "alpha, beta".into();
+        app.settings_modal.pdf_viewer_cursor = app.settings_modal.pdf_viewer.len();
+
+        let _ = handle_settings_key(&mut app, KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+        assert_eq!(app.settings_modal.pdf_viewer, "alpha, ");
+
+        app.settings_modal.pdf_viewer_cursor = 0;
+        let _ = handle_settings_key(&mut app, KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL));
+        assert_eq!(app.settings_modal.pdf_viewer, ", ");
     }
 
     #[test]
