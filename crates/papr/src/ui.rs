@@ -82,6 +82,25 @@ fn focus_block<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> {
     block
 }
 
+/// A pane header with independent left and right titles, avoiding text overlap.
+fn focus_block_with_right_title<'a>(
+    left_title: &'a str,
+    right_title: &'a str,
+    focused: bool,
+    theme: &Theme,
+) -> Block<'a> {
+    let right_style = if focused {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.muted)
+    };
+    focus_block(left_title, focused, theme).title_top(
+        Line::styled(right_title, right_style).alignment(Alignment::Right),
+    )
+}
+
 /// Return a list selection only while the Workspace owns keyboard focus.
 ///
 /// The selected index remains in the application state at all times; omitting it
@@ -529,11 +548,7 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
     if app.project_pane == ProjectPane::Build {
         let build_area = right_area.expect("Build view reserves the right-hand panel");
         app.project_build_viewport_height = build_area.height.saturating_sub(2) as usize;
-        let build_title = format!(
-            " BUILD [ALT+4 · TAB PREVIEW · r {}] — {} ",
-            if app.project_build_show_raw { "DIAGNOSTICS" } else { "RAW LOG" },
-            app.project_build_status,
-        );
+        let build_right_title = " Alt+3 PDF PREVIEW ";
         if app.project_build_show_raw {
             let raw_log = if app.project_build_raw_log.is_empty() {
                 "No compiler output captured yet.".to_owned()
@@ -551,7 +566,12 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
                         0,
                     ))
                     .wrap(Wrap { trim: false })
-                    .block(focus_block(&build_title, app.content_focused, theme)),
+                    .block(focus_block_with_right_title(
+                        " BUILD [Alt+4 · Tab PREVIEW] ",
+                        build_right_title,
+                        app.content_focused,
+                        theme,
+                    )),
                 build_area,
             );
         } else {
@@ -578,25 +598,38 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
                 ListItem::new(lines)
             });
             let empty = app.project_build_diagnostics.is_empty();
-            let list = List::new(items)
-                .block(focus_block(&build_title, app.content_focused, theme))
-                .highlight_style(Style::default().bg(theme.surface).fg(theme.accent));
-            let mut state = ListState::default().with_selected((!empty).then_some(app.project_build_selected));
-            frame.render_stateful_widget(list, build_area, &mut state);
             if empty {
                 frame.render_widget(
                     Paragraph::new("No compiler diagnostics.\n\nThe latest build completed cleanly.")
                         .alignment(Alignment::Center)
-                        .style(Style::default().fg(theme.muted)),
+                        .style(Style::default().fg(theme.muted))
+                        .block(focus_block_with_right_title(
+                            " BUILD [Alt+4 · Tab PREVIEW] ",
+                            build_right_title,
+                            app.content_focused,
+                            theme,
+                        )),
                     build_area,
                 );
+            } else {
+                let list = List::new(items)
+                    .block(focus_block_with_right_title(
+                        " BUILD [Alt+4 · Tab PREVIEW] ",
+                        build_right_title,
+                        app.content_focused,
+                        theme,
+                    ))
+                    .highlight_style(Style::default().bg(theme.surface).fg(theme.accent));
+                let mut state = ListState::default().with_selected(Some(app.project_build_selected));
+                frame.render_stateful_widget(list, build_area, &mut state);
             }
         }
     } else if let Some(preview_area) = right_area {
         let preview = project.path.join("main.pdf");
         if preview.exists() && app.pdf_viewer_path.as_deref() == Some(preview.as_path()) {
-            let preview_block = focus_block(
-                " PDF PREVIEW [ALT+3 · TAB BUILD] ",
+            let preview_block = focus_block_with_right_title(
+                " PDF PREVIEW [Alt+3 · Tab BUILD] ",
+                " Alt+4 BUILD ",
                 app.content_focused && app.project_pane == ProjectPane::Preview,
                 theme,
             );
@@ -608,8 +641,9 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
                 Paragraph::new("Live PDF preview\nWaiting for the first successful build…")
                     .alignment(Alignment::Center)
                     .wrap(Wrap { trim: true })
-                    .block(focus_block(
-                        " PDF PREVIEW [ALT+3 · TAB BUILD] ",
+                    .block(focus_block_with_right_title(
+                        " PDF PREVIEW [Alt+3 · Tab BUILD] ",
+                        " Alt+4 BUILD ",
                         app.content_focused && app.project_pane == ProjectPane::Preview,
                         theme,
                     )),
