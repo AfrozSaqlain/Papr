@@ -39,7 +39,19 @@ Papr is implemented in Rust to meet the performance, reliability, and security d
 ### LaTeX Integration
 * **Integrated Writing Workspace:** Create, edit, and compile LaTeX manuscripts directly within the TUI.
 * **Real-time Compilation:** Background compilation via `latexmk`.
-* **Split-pane View:** Side-by-side terminal PDF preview, file tree, source editor, and build logs.
+* **PDF-first Layout:** Keep the live PDF preview beside the editor; open Build only when you need diagnostics.
+* **Actionable Diagnostics:** Build output groups LaTeX errors and warnings with source locations, code snippets, hints, and a raw-log view.
+
+### Recent Updates
+
+Since the previous documentation update, Papr has added the following user-visible improvements:
+
+* **Projects workspace refresh:** The file tree, editor, PDF Preview, and Build views have clearer focus shortcuts. `main.tex` is selected in the File Tree whenever a project opens.
+* **Better LaTeX feedback:** The Build view parses compiler errors and warnings, can jump to a diagnostic's source line, and keeps the raw `latexmk` output available on demand.
+* **More capable project editor:** Vim-style navigation now includes visual-line selection, undo/redo, word deletion, `gg`/`G`, wrapped-line scrolling, and mouse-wheel scrolling. Exact clipboard pasting is supported for `.tex` and `.bib` files.
+* **Project file management:** Create nested files and folders, rename project entries, and navigate folders directly from the File Tree.
+* **Improved terminal command palette:** Press `Tab` to discover and cycle through command or path completions; commands run from the open project's folder when a project is active.
+* **More reliable previews:** The internal PDF preview refreshes correctly after project recompiles.
 
 ### Extensibility
 * **Process-Isolated Plugins:** Extend workflows with language-agnostic, versioned JSON plugins. Papr ships an opt-in auto-tagger and safely bounds every plugin invocation.
@@ -223,11 +235,24 @@ Here is a complete breakdown of every section in Papr, what it does, and how to 
 | **Authors** | Automatically groups all papers in your local library by author name. | Select an author from the list to view all papers written by them in your collection. |
 | **Notes** | Displays a searchable catalog of all Markdown notes written for your papers. | Press `n` on any paper to open the Markdown editor. Press `Tab` to switch to styled live preview, `Esc` to save. |
 | **Downloads** | Real-time tracker for active background PDF downloads, completed downloads, and failed requests. | Monitor download progress. Select a finished download and press `Enter` to open the PDF directly. |
-| **Projects** | Integrated LaTeX writing workspace with background `latexmk` compilation and split-pane PDF preview. An open project uses the full workspace width for File Tree, Editor, Build, and (when internal viewing is enabled) PDF Preview. | Press `n` to create a project. Use `Alt+1` (File Tree), `Alt+2` (Editor with Vim mode), `Alt+3` (PDF Preview), `Alt+4` (Build Logs). |
+| **Projects** | A place to write LaTeX documents. Papr watches the project, compiles `main.tex` in the background, shows a PDF preview, and explains compiler problems. | Press `n` to create a project. Open it with `Enter`; `main.tex` is selected in the File Tree. Use `Alt+1` (File Tree), `Alt+2` (Editor), `Alt+3` (PDF Preview), and `Alt+4` (Build). |
 | **History** | Logs a chronological timeline of your recent activity, searches, downloads, and project builds. | Scroll through past actions to re-open papers or review past search terms. |
 | **Statistics** | Analytics on reading habits, total time, paper completion counts, and a 12-week reading activity heatmap. | Track your research productivity and reading habits over time. |
 | **Settings** | An interactive settings workspace for preferences, paths, themes, and plugins. | Open it from the sidebar. Its Theme tab previews built-in themes live; General and Paths stage configuration values; Plugins enables or disables discovered plugins. Press `Enter` to apply changes or `Esc` to return to the sidebar. |
 | **Credits** | Displays information about Papr's version, maintainers, open-source license, and core dependencies. | View application version metadata and component attribution. |
+
+### Using the Projects Workspace
+
+Projects is the simplest way to write a LaTeX document in Papr. A project is just a normal folder containing `main.tex`, plus any `.bib`, image, or additional `.tex` files you need.
+
+1. Open **Projects** from the sidebar and press `n` to create a project. Type a name and press `Enter`.
+2. Open the project with `Enter`. The File Tree opens with `main.tex` selected. Press `Enter` again to edit it.
+3. In the editor, press `i` to type. Press `Esc` when you are finished typing, then press `Ctrl+S` to save. Papr asks `latexmk` to compile in the background after changes are saved.
+4. Press `Alt+3` to view the PDF. This is the normal right-hand view. If the first build has not finished yet, it will say that it is waiting for a PDF.
+5. If compilation fails, Papr opens **Build** automatically. Each error or warning is listed separately. Use `Up`/`Down` (or `j`/`k`) to choose one and press `Enter` to jump to its source line.
+6. Press `Alt+4` whenever you want to inspect Build yourself. Press `r` there to switch between the clean diagnostic list and the raw compiler log. Press `Tab` to switch between Build and PDF Preview.
+
+Useful File Tree actions: press `n` to create a file (finish the name with `/` to create a folder), `R` to rename the selected item, and `x` to delete it after confirmation. Use `Left` to go up one folder level.
 
 ---
 
@@ -387,7 +412,9 @@ To track reading sessions and statistics, Papr must be able to track the viewer'
 | `Alt+1` | Focus **File Tree** pane (navigate files, press `Enter` to open) |
 | `Alt+2` | Focus **Editor** pane (edit LaTeX source code) |
 | `Alt+3` | Focus **PDF Preview** pane (scroll compiled PDF) |
-| `Alt+4` | Focus **Build Logs** pane (scroll compilation output) |
+| `Alt+4` | Focus **Build** pane (view structured compiler diagnostics) |
+
+The PDF Preview is shown by default on the right. `Tab` switches the focused right-hand panel between PDF Preview and Build. Build opens automatically only when compilation fails; successful builds keep the PDF Preview visible even when LaTeX reports warnings.
 
 #### File Tree (`Alt+1`)
 | Key | Action |
@@ -399,7 +426,7 @@ To track reading sessions and statistics, Papr must be able to track the viewer'
 | `x` | Confirm then delete the selected file or folder |
 | `Esc` | Return to the project list from the project root |
 
-The File Tree shows folders, LaTeX/project source files, and every image format supported by Papr's image library.
+The File Tree shows folders, LaTeX/project source files, and every image format supported by Papr's image library. When a project opens, `main.tex` is selected by default.
 
 #### Editor Mode (`Alt+2`)
 | Key | Action |
@@ -407,8 +434,17 @@ The File Tree shows folders, LaTeX/project source files, and every image format 
 | `i` | Enter Insert mode |
 | `Esc` | Return to the File Tree |
 | `Ctrl+S` | Save file changes to disk |
-| `Ctrl+Shift+V` | Paste clipboard text exactly into an open `.bib` file and save it |
-| `h`/`j`/`k`/`l`, `w`/`b`, `0`/`$` | Vim motions in Normal mode |
+| `Ctrl+Shift+V` | Paste clipboard text exactly into an open `.tex` or `.bib` file and save it |
+| `h`/`j`/`k`/`l`, `w`/`b`, `0`/`$`, `gg`/`G` | Vim motions in Normal mode |
+| `V`, `d`, `u`, `Ctrl+r` | Visual-line selection, delete selection, undo, redo |
+
+#### Build (`Alt+4`)
+| Key | Action |
+| :--- | :--- |
+| `Up`/`Down` or `j`/`k` | Select a diagnostic |
+| `Enter` | Open the diagnostic's source file at its reported line |
+| `r` | Toggle structured diagnostics and raw compiler output |
+| `Tab` / `Alt+3` | Return to PDF Preview |
 
 ### Internal PDF Viewer & Markdown Editor
 * **PDF Viewer:** `Esc`/`q` to exit; use `j`/`k`, `Up`/`Down`, `PageDown`/`PageUp`, or the mouse wheel to scroll.
