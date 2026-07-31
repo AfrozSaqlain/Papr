@@ -5717,8 +5717,12 @@ fn handle_discover_filter_key(app: &mut App, key: KeyEvent) -> Option<UiAction> 
         app.mode = AppMode::Normal;
         return None;
     }
+    if is_workspace_search_toggle(key) {
+        app.mode = AppMode::Normal;
+        return None;
+    }
     match key.code {
-        KeyCode::Esc | KeyCode::Char('>') => app.mode = AppMode::Normal,
+        KeyCode::Esc => app.mode = AppMode::Normal,
         KeyCode::Up => {
             app.mode = AppMode::Search;
             app.discovery.query_cursor = app.discovery.query.len();
@@ -5745,7 +5749,7 @@ fn handle_discover_filter_key(app: &mut App, key: KeyEvent) -> Option<UiAction> 
 }
 
 fn handle_workspace_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
-    if key.code == KeyCode::Char('>') {
+    if is_workspace_search_toggle(key) {
         app.mode = AppMode::Normal;
         app.content_focused = true;
         app.active_search_workspaces.remove(&app.page);
@@ -6300,7 +6304,7 @@ fn navigation_command(key: KeyEvent) -> Option<Command> {
         (KeyCode::Char('b'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(Command::TogglePalette)
         }
-        (KeyCode::Char('>'), _) => {
+        _ if is_workspace_search_toggle(key) => {
             Some(Command::ToggleWorkspaceSearch)
         }
         (KeyCode::Char('j') | KeyCode::Down, _) => Some(Command::MoveDown),
@@ -6311,6 +6315,13 @@ fn navigation_command(key: KeyEvent) -> Option<Command> {
         (KeyCode::Char('q'), _) => Some(Command::Quit),
         _ => None,
     }
+}
+
+/// Keyboard-enhancement protocols may report `>` as its physical key (`.`)
+/// plus Shift, while legacy terminals report the resulting character directly.
+fn is_workspace_search_toggle(key: KeyEvent) -> bool {
+    key.code == KeyCode::Char('>')
+        || (key.code == KeyCode::Char('.') && key.modifiers.contains(KeyModifiers::SHIFT))
 }
 
 fn edit_text(text: &mut String, cursor: &mut usize, key: KeyEvent) -> bool {
@@ -7815,6 +7826,22 @@ mod tests {
             assert_eq!(app.workspace_query, "some query");
             assert!(!app.active_search_workspaces.contains(&page));
         }
+    }
+
+    #[test]
+    fn workspace_search_accepts_enhanced_shift_period_key_events() {
+        let mut app = App {
+            page: Page::Library,
+            content_focused: true,
+            ..App::default()
+        };
+        let key = KeyEvent::new(KeyCode::Char('.'), KeyModifiers::SHIFT);
+
+        let _ = handle_key(&mut app, key);
+        assert_eq!(app.mode, AppMode::WorkspaceSearch);
+
+        let _ = handle_key(&mut app, key);
+        assert_eq!(app.mode, AppMode::Normal);
     }
 
     #[test]
