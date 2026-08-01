@@ -145,19 +145,30 @@ brew trust AfrozSaqlain/tap
 brew install papr
 ```
 
-## ❌ Shell Script Installer (Linux & macOS)
+## ✳️ Shell Script Installer (Linux & macOS)
 Install the latest pre-compiled release binary automatically:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSfL https://github.com/AfrozSaqlain/Papr/releases/latest/download/papr-tui-installer.sh | sh
 ```
 
-## ❌ PowerShell Installer (Windows)
-Run PowerShell as user and execute:
+## ✳️ PowerShell Installer (Windows)
+
+Run PowerShell as a user and execute:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/AfrozSaqlain/Papr/releases/latest/download/papr-tui-installer.ps1 | iex"
+Set-ExecutionPolicy -Scope Process Bypass
+irm https://github.com/AfrozSaqlain/Papr/releases/latest/download/papr-tui-installer.ps1 | iex
 ```
+
+This installs `papr.exe` to:
+
+```text
+%USERPROFILE%\.cargo\bin
+```
+
+If `papr` is not recognized after installation, restart your PowerShell window so the updated `PATH` is loaded.
+
 
 
 ## ❌ Debian / Ubuntu (.deb) & Fedora (.rpm) Packages
