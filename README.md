@@ -291,27 +291,127 @@ enabled_plugins = []
 
 ## Keyboard Reference
 
+The table below summarizes the most useful keys for moving around Papr and opening the main workspaces.
+
 ### Global Navigation
 | Key | Action |
 | :--- | :--- |
-| `j` / `Down` | Move down / select next item |
-| `k` / `Up` | Move up / select previous item |
-| `Enter` / `l` / `Right` | Open selected item, section, or paper |
-| `Left` | Return focus to sidebar |
-| `h` / `Esc` | Go back to previous screen |
-| `/` | Start arXiv search |
-| `Ctrl+B` | Open Browse Papr (Fast navigation command palette) |
-| `Ctrl+T` | Open terminal command palette (`Enter` runs, `Tab` lists/cycles completions) |
-| `?` | Toggle help |
-| `q` | Exit the application outside text input |
+| `?` | toggle reference |
+| `/` | toggle arXiv search |
+| `Ctrl+b` | toggle navigator |
+| `Ctrl+t` | terminal palette |
+| `Esc` | close local search |
+| `Enter / → / l` | open selected item |
+| `← / h` | return one level |
+| `q` | quit outside text input |
 
-### Workspace Panes in Projects (`Alt` + Number)
+### Paper Actions
+
+Paper rows include Library, Downloads, Bookmarks, Notes, Reading Queue, and the paper lists inside Groups or Authors.
+
 | Key | Action |
 | :--- | :--- |
-| `Alt+1` | Focus **File Tree** pane (navigate files, press `Enter` to open) |
-| `Alt+2` | Focus **Editor** pane (edit LaTeX source code) |
-| `Alt+3` | Focus **PDF Preview** pane (scroll compiled PDF) |
-| `Alt+4` | Focus **Build** pane (view structured compiler diagnostics) |
+| `Enter / → / l` | open local PDF |
+| `o` | open paper online |
+| `B` | toggle bookmark |
+| `>` | toggle local search |
+| `n` | open note |
+| `g` | assign to group |
+| `R` | rename PDF |
+| `c` | copy citation |
+| `x` | confirm then delete PDF |
+| `a` | toggle reading queue |
+| `u` | mark PDF unread |
+
+### Notes & PDF Viewer
+| Key | Action |
+| :--- | :--- |
+| `Tab` | toggle edit / preview |
+| `Esc` | save and leave note |
+
+### Internal PDF Viewer
+| Key | Action |
+| :--- | :--- |
+| `Esc / q` | close internal viewer |
+
+### Credits
+| Key | Action |
+| :--- | :--- |
+| `Enter` | open selected link |
+
+### Discover & Dashboard
+| Key | Action |
+| :--- | :--- |
+| `/` | toggle arXiv search |
+| `d` | download paper |
+| `Enter` | open downloaded PDF |
+
+### Discover
+| Key | Action |
+| :--- | :--- |
+| `/` | toggle arXiv search |
+| `Ctrl+←` | previous cached page |
+| `Ctrl+→` | next cached page |
+| `r` | retry loading failure |
+
+### Groups
+| Key | Action |
+| :--- | :--- |
+| `g` | create a group |
+
+### Queue
+| Key | Action |
+| :--- | :--- |
+| `Shift+↑` | move queued paper up |
+| `Shift+↓` | move queued paper down |
+
+### Downloads
+| Key | Action |
+| :--- | :--- |
+| `r` | retry failed download |
+
+### Project List
+| Key | Action |
+| :--- | :--- |
+| `n` | create named project |
+| `r` | refresh project list |
+| `R` | rename selected project |
+| `x` | delete selected project |
+
+### Project File Tree
+
+Shows folders, source files, and supported image files.
+
+| Key | Action |
+| :--- | :--- |
+| `Enter / →` | open file or enter folder |
+| `←` | parent folder; exit at project root |
+| `n` | create file; add / for folder |
+| `R` | rename selected file or folder |
+| `x` | confirm then delete file or folder |
+| `Esc` | return to project list at root |
+
+### Project Panes & Preview
+| Key | Action |
+| :--- | :--- |
+| `Alt+1` | focus file tree |
+| `Alt+2` | focus editor |
+| `Alt+3` | focus PDF preview |
+| `Alt+4` | focus compiler output |
+
+### Project Editor — Normal
+| Key | Action |
+| :--- | :--- |
+| `i` | enter Insert mode |
+| `w / b` | next / previous word |
+| `0/$, gg/G` | line/file bounds |
+| `x / Delete` | delete character |
+| `V, j/k, y/d` | select lines, move, yank/delete |
+| `u / Ctrl+r` | undo/redo; Ctrl+Bksp/Delete word |
+| `PgUp/PgDn` | page move; wheel scrolls |
+| `Esc` | focus file tree |
+| `Ctrl+s` | save current source |
+| `Ctrl+Shift+v` | paste exactly into .tex/.bib and save |
 
 ---
 
