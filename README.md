@@ -225,27 +225,27 @@ papr
 
 Papr is divided into 14 specialized **workspaces** (sections), accessible via the sidebar menu on the left side of the screen.
 
-* **Sidebar Navigation:** Press `Left Arrow` (or `h`) to move focus to the left sidebar, use `j`/`k` (or `Up`/`Down`) to highlight a section, and press `Enter` (or `l`) to open it.
-* **Quick Switcher:** Press `Ctrl+B` anywhere to open **Browse Papr** (a fast command palette) and type the name of any section to jump directly to it. Press `Ctrl+T` for the terminal command palette; press `Tab` to find or cycle command/path completions. When a project is open, commands run from that project's directory.
+* **Sidebar Navigation:** Use the left sidebar to move through different workspaces and open the one you want with the keyboard.
+* **Workspaces:** Each workspace lets you interact with papers, notes, downloads, groups, reading queues, and projects from one place. Press `Ctrl+B` to open **Browse Papr** or `Ctrl+T` for the terminal command palette; `Tab` cycles completions. When a project is open, commands run from that project's directory.
 
 Here is a complete breakdown of every section in Papr, what it does, and how to use it:
 
 | Workspace | Purpose & Description | How to Use |
 | :--- | :--- | :--- |
-| **Dashboard** | Serves as your main research overview. Displays reading statistics, streaks, disk storage usage, and a daily arXiv paper feed. | This is the default home screen. Set `dashboard_keywords` in `config.toml` to customize your feed. |
-| **Discover** | Allows you to search the online arXiv paper repository by title, author, category, abstract, or DOI. | Press `/` to focus search, type query and press `Enter`. Scroll results with `j`/`k`, press `Enter` for details, `d` to download. |
-| **Library** | Indexes and lists all local PDF files stored within your configured library directories. | Press `r` to scan folders. Select any paper and press `Enter` to view PDF, `n` for notes, `g` for groups, `B` for bookmarks, `R` to rename. |
-| **Reading Queue** | Prioritized backlog where you manage papers you plan to read next. | Press `a` on any paper to queue/dequeue. Reorder priority using `Shift`/`Ctrl` + `Up`/`Down`. |
-| **Groups** | Organizes your papers into filesystem-synced folders (collections). | Press `g` on a paper to assign it to a group. Papr automatically creates the folder on disk and moves the PDF. |
-| **Bookmarks** | Collects all papers you have marked as bookmarked for quick retrieval. | Press `B` on any paper across any workspace to toggle its bookmark status. |
-| **Authors** | Automatically groups all papers in your local library by author name. | Select an author from the list to view all papers written by them in your collection. |
-| **Notes** | Displays a searchable catalog of all Markdown notes written for your papers. | Press `n` on any paper to open the Markdown editor. Press `Tab` to switch to styled live preview, `Esc` to save. |
-| **Downloads** | Real-time tracker for active background PDF downloads, completed downloads, and failed requests. | Monitor download progress. Select a finished download and press `Enter` to open the PDF directly. |
-| **Projects** | A place to write LaTeX documents. Papr watches the project, compiles `main.tex` in the background, shows a PDF preview, and explains compiler problems. | Press `n` to create a project. Open it with `Enter`; `main.tex` is selected in the File Tree. Use `Alt+1` (File Tree), `Alt+2` (Editor), `Alt+3` (PDF Preview), and `Alt+4` (Build). |
-| **History** | Logs a chronological timeline of your recent activity, searches, downloads, and project builds. | Scroll through past actions to re-open papers or review past search terms. |
-| **Statistics** | Analytics on reading habits, total time, paper completion counts, and a 12-week reading activity heatmap. | Track your research productivity and reading habits over time. |
-| **Settings** | An interactive settings workspace for preferences, paths, themes, and plugins. | Open it from the sidebar. Its Theme tab previews built-in themes live; General and Paths stage configuration values; Plugins enables or disables discovered plugins. Press `Enter` to apply changes or `Esc` to return to the sidebar. |
-| **Credits** | Displays information about Papr's version, maintainers, open-source license, and core dependencies. | View application version metadata and component attribution. |
+| **Dashboard** | Shows your main research overview, including reading stats, streaks, disk usage, and a daily arXiv feed. | This is the default home screen. Set `dashboard_keywords` in `config.toml` to tailor your feed. |
+| **Discover** | Lets you search arXiv by title, author, category, abstract, or DOI from within Papr. | Press `/` to focus search, type a query, and press `Enter`. Scroll with `j`/`k`, open details with `Enter`, and use `d` to download. |
+| **Library** | Lists all local PDF files found in your configured library directories. | Press `r` to scan folders. Select a paper and press `Enter` to view PDF, `n` for notes, `g` for groups, `B` for bookmarks, `R` to rename. |
+| **Reading Queue** | Holds the prioritized backlog of papers you plan to read next. | Press `a` on any paper to queue or dequeue it. Reorder priority with `Shift`/`Ctrl` + `Up`/`Down`. |
+| **Groups** | Organizes papers into filesystem-synced folders and collections. | Press `g` on a paper to assign it to a group. Papr creates the folder on disk and moves the PDF automatically. |
+| **Bookmarks** | Collects papers you marked for quick retrieval later. | Press `B` on any paper in any workspace to toggle its bookmark status. |
+| **Authors** | Groups all papers in your local library by author name automatically. | Select an author from the list to view every paper written by them in your collection. |
+| **Notes** | Provides a searchable catalog of Markdown notes written for your papers. | Press `n` on any paper to open the Markdown editor. Press `Tab` to switch to live preview, `Esc` to save. |
+| **Downloads** | Tracks active, completed, and failed background PDF downloads in real time. | Monitor download progress. Select a finished download and press `Enter` to open the PDF directly. |
+| **Projects** | Lets you write LaTeX documents, compile `main.tex`, preview PDFs, and inspect build issues. | Press `n` to create a project. Open it with `Enter`; `main.tex` is selected in the File Tree. Use `Alt+1` (File Tree), `Alt+2` (Editor), `Alt+3` (PDF Preview), and `Alt+4` (Build). |
+| **History** | Logs a chronological timeline of recent activity, searches, downloads, and project builds. | Scroll through past actions to reopen papers or review earlier search terms. |
+| **Statistics** | Shows reading habits, total time, completion counts, and a 12-week activity heatmap. | Track your research productivity and reading habits over time. |
+| **Settings** | Provides an interactive workspace for preferences, paths, themes, and plugins. | Open it from the sidebar. Theme previews built-in themes live; General and Paths stage values; Plugins enables or disables plugins. Press `Enter` to apply changes or `Esc` to return. |
+| **Credits** | Shows Papr's version, maintainers, license, and core dependencies. | View application version metadata and component attribution. |
 
 ---
 
