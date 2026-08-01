@@ -223,7 +223,7 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
     }
 
     // Global ? shortcut handling: toggle keyboard reference overlay when not in text editing mode.
-    if is_help_shortcut(key) && !is_editing {
+    if key.code == KeyCode::Char('?') && !is_editing {
         app.dispatch(papr_core::Command::ToggleHelp);
         return SettingsKeyResult::Handled;
     }
@@ -338,13 +338,6 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
         SettingsTab::Paths => handle_paths_key(app, key),
         SettingsTab::Plugins => handle_plugins_key(app, key),
     }
-}
-
-/// Keyboard-enhancement protocols can report `?` as the physical `/` key
-/// together with `SHIFT`, instead of as the resulting character.
-fn is_help_shortcut(key: KeyEvent) -> bool {
-    key.code == KeyCode::Char('?')
-        || (key.code == KeyCode::Char('/') && key.modifiers.contains(KeyModifiers::SHIFT))
 }
 
 /// Text input receives the terminal's layout-resolved Unicode character.
@@ -2434,7 +2427,7 @@ mod tests {
     #[test]
     fn test_question_mark_shortcut_handling() {
         let mut app = App::default();
-        let key_question = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::SHIFT);
+        let key_question = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT);
 
         // Outside text edit mode -> dispatches Command::ToggleHelp and returns Handled
         let res = handle_settings_key(&mut app, key_question);

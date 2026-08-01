@@ -4451,7 +4451,7 @@ async fn apply_download_event(
 
 fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.mode == AppMode::PdfView {
-        if is_help_shortcut(key) {
+        if key.code == KeyCode::Char('?') {
             app.dispatch(Command::ToggleHelp);
             return None;
         }
@@ -4499,7 +4499,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     // Help is a global command. Resolve it before any view-specific handler
     // (notably PaperDetail) can interpret the key as navigation. Text-entry
     // contexts retain the character as normal input.
-    if is_help_shortcut(key) && !has_active_text_input(app) {
+    if key.code == KeyCode::Char('?') && !has_active_text_input(app) {
         app.dispatch(Command::ToggleHelp);
         return None;
     }
@@ -5802,23 +5802,6 @@ fn normalize_panel_navigation(mut key: KeyEvent) -> KeyEvent {
     key
 }
 
-/// Match a shifted shortcut independently of whether the terminal reports the
-/// produced character or the physical key plus `SHIFT` (as Kitty's keyboard
-/// protocol does when keyboard enhancement is enabled).
-fn is_shifted_char(key: KeyEvent, character: char, physical_key: char) -> bool {
-    key.code == KeyCode::Char(character)
-        || (key.code == KeyCode::Char(physical_key)
-            && key.modifiers.contains(KeyModifiers::SHIFT))
-}
-
-fn is_help_shortcut(key: KeyEvent) -> bool {
-    is_shifted_char(key, '?', '/')
-}
-
-fn is_bookmark_shortcut(key: KeyEvent) -> bool {
-    is_shifted_char(key, 'B', 'b')
-}
-
 fn handle_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     match key.code {
         KeyCode::Esc => app.mode = AppMode::Normal,
@@ -5868,7 +5851,7 @@ fn handle_discover_filter_key(app: &mut App, key: KeyEvent) -> Option<UiAction> 
         app.mode = AppMode::Normal;
         return None;
     }
-    if is_workspace_search_toggle(key) {
+    if key.code == KeyCode::Char('>') {
         app.mode = AppMode::Normal;
         return None;
     }
@@ -5900,7 +5883,7 @@ fn handle_discover_filter_key(app: &mut App, key: KeyEvent) -> Option<UiAction> 
 }
 
 fn handle_workspace_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
-    if is_workspace_search_toggle(key) {
+    if key.code == KeyCode::Char('>') {
         app.mode = AppMode::Normal;
         app.content_focused = true;
         app.active_search_workspaces.remove(&app.page);
@@ -5998,7 +5981,7 @@ fn bookmark_action(app: &App, key: KeyEvent) -> Option<UiAction> {
     }
     let bookmark = *app.filtered_bookmarks().get(app.bookmark_selected)?;
     match key.code {
-        _ if is_bookmark_shortcut(key) => Some(UiAction::Bookmark(PaperTarget::Local(bookmark.paper_id))),
+        KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(bookmark.paper_id))),
         KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(bookmark.paper_id))),
         KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => Some(UiAction::OpenPdf {
             paper_id: bookmark.paper_id,
@@ -6044,7 +6027,7 @@ fn handle_notes_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 path,
             })
         }
-        _ if is_bookmark_shortcut(key) => Some(UiAction::Bookmark(PaperTarget::Local(paper.id))),
+        KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(paper.id))),
         KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(paper.id))),
         KeyCode::Char('g') => Some(UiAction::Prompt(PaperTarget::Local(paper.id))),
         KeyCode::Char('R') => Some(UiAction::RenamePdf(paper.id)),
@@ -6085,7 +6068,7 @@ fn handle_reading_queue_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 path,
             })
         }
-        _ if is_bookmark_shortcut(key) => Some(UiAction::Bookmark(PaperTarget::Local(paper.id))),
+        KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(paper.id))),
         KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(paper.id))),
         KeyCode::Char('n') => Some(UiAction::OpenNote(PaperTarget::Local(paper.id))),
         KeyCode::Char('g') => Some(UiAction::Prompt(PaperTarget::Local(paper.id))),
@@ -6128,7 +6111,7 @@ fn handle_downloads_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if matches!(
         key.code,
         KeyCode::Char('R') | KeyCode::Char('g') | KeyCode::Char('n') | KeyCode::Char('c') | KeyCode::Char('x')
-    ) || is_bookmark_shortcut(key) {
+    ) || key.code == KeyCode::Char('B') {
         if let Some(task) = app.filtered_downloads().get(app.download_selected).cloned().cloned() {
             if matches!(task.status, DownloadStatus::Completed) {
                 let paper_id = task.paper_id.or_else(|| {
@@ -6154,7 +6137,7 @@ fn handle_downloads_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                     return match key.code {
                         KeyCode::Char('R') => Some(UiAction::RenamePdf(paper_id)),
                         KeyCode::Char('g') => Some(UiAction::Prompt(PaperTarget::Local(paper_id))),
-                        _ if is_bookmark_shortcut(key) => Some(UiAction::Bookmark(PaperTarget::Local(paper_id))),
+                        KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(paper_id))),
                         KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(paper_id))),
                         KeyCode::Char('n') => Some(UiAction::OpenNote(PaperTarget::Local(paper_id))),
                         KeyCode::Char('x') => Some(UiAction::ConfirmDeletePaper {
@@ -6233,7 +6216,7 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
                     }),
                 );
             }
-            _ if is_bookmark_shortcut(key) => {
+            KeyCode::Char('B') => {
                 return (
                     true,
                     app.filtered_collection_papers()
@@ -6324,7 +6307,7 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
                         return (true, None);
                     }
                 }
-                if is_bookmark_shortcut(key) {
+                if key.code == KeyCode::Char('B') {
                     return (true, Some(UiAction::Bookmark(PaperTarget::Local(paper.id))));
                 }
                 if key.code == KeyCode::Char('c') {
@@ -6382,7 +6365,7 @@ fn handle_author_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction>) {
                     }),
                 );
             }
-            _ if is_bookmark_shortcut(key) => {
+            KeyCode::Char('B') => {
                 return (
                     true,
                     app.filtered_author_papers()
@@ -6455,24 +6438,17 @@ fn navigation_command(key: KeyEvent) -> Option<Command> {
         (KeyCode::Char('b'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(Command::TogglePalette)
         }
-        _ if is_workspace_search_toggle(key) => {
+        (KeyCode::Char('>'), _) => {
             Some(Command::ToggleWorkspaceSearch)
         }
         (KeyCode::Char('j') | KeyCode::Down, _) => Some(Command::MoveDown),
         (KeyCode::Char('k') | KeyCode::Up, _) => Some(Command::MoveUp),
         (KeyCode::Enter | KeyCode::Right | KeyCode::Char('l'), _) => Some(Command::Open),
         (KeyCode::Left | KeyCode::Char('h'), _) => Some(Command::Back),
-        _ if is_help_shortcut(key) => Some(Command::ToggleHelp),
+        (KeyCode::Char('?'), _) => Some(Command::ToggleHelp),
         (KeyCode::Char('q'), _) => Some(Command::Quit),
         _ => None,
     }
-}
-
-/// Keyboard-enhancement protocols may report `>` as its physical key (`.`)
-/// plus Shift, while legacy terminals report the resulting character directly.
-fn is_workspace_search_toggle(key: KeyEvent) -> bool {
-    key.code == KeyCode::Char('>')
-        || (key.code == KeyCode::Char('.') && key.modifiers.contains(KeyModifiers::SHIFT))
 }
 
 fn edit_text(text: &mut String, cursor: &mut usize, key: KeyEvent) -> bool {
@@ -6744,12 +6720,12 @@ fn handle_modal_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
 fn handle_paper_detail_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     // Keep the detail view self-contained even if its handler is invoked from
     // a future input path: help must never fall through to detail navigation.
-    if is_help_shortcut(key) {
+    if key.code == KeyCode::Char('?') {
         app.dispatch(Command::ToggleHelp);
         return None;
     }
     if matches!(app.page, papr_core::Page::Dashboard | papr_core::Page::Discover)
-        && (matches!(key.code, KeyCode::Char('n' | 't' | 'g')) || is_bookmark_shortcut(key))
+        && matches!(key.code, KeyCode::Char('n' | 't' | 'g' | 'B'))
     {
         return None;
     }
@@ -6788,7 +6764,7 @@ fn handle_paper_detail_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 _ => UiAction::Prompt(target),
             });
         }
-        _ if is_bookmark_shortcut(key) => return selected_remote_target(app).map(UiAction::Bookmark),
+        KeyCode::Char('B') => return selected_remote_target(app).map(UiAction::Bookmark),
         _ => {}
     }
     None
@@ -6803,7 +6779,7 @@ fn handle_library_metadata_key(app: &mut App, key: KeyEvent) -> Option<UiAction>
     match key.code {
         KeyCode::Char('n') => Some(UiAction::OpenNote(target)),
         KeyCode::Char('g') => Some(UiAction::Prompt(target)),
-        _ if is_bookmark_shortcut(key) => Some(UiAction::Bookmark(target)),
+        KeyCode::Char('B') => Some(UiAction::Bookmark(target)),
         KeyCode::Char('c') => Some(UiAction::CopyCitation(target)),
         KeyCode::Char('R') => {
             if let PaperTarget::Local(id) = target {
@@ -7246,7 +7222,7 @@ fn handle_config_editor_key(
         return None;
     }
 
-    if is_help_shortcut(key) {
+    if key.code == KeyCode::Char('?') {
         app.dispatch(Command::ToggleHelp);
         return None;
     }
@@ -8039,13 +8015,13 @@ mod tests {
     }
 
     #[test]
-    fn workspace_search_accepts_enhanced_shift_period_key_events() {
+    fn workspace_search_accepts_printable_shift_period_key_events() {
         let mut app = App {
             page: Page::Library,
             content_focused: true,
             ..App::default()
         };
-        let key = KeyEvent::new(KeyCode::Char('.'), KeyModifiers::SHIFT);
+        let key = KeyEvent::new(KeyCode::Char('>'), KeyModifiers::SHIFT);
 
         let _ = handle_key(&mut app, key);
         assert_eq!(app.mode, AppMode::WorkspaceSearch);
@@ -8424,7 +8400,7 @@ mod tests {
         };
         let _ = handle_key(
             &mut pdf,
-            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT),
         );
         assert_eq!(pdf.mode, AppMode::Help);
         assert_eq!(pdf.help_return_mode, AppMode::PdfView);
@@ -8506,7 +8482,7 @@ mod tests {
 
         let action = handle_paper_detail_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT),
         );
         assert!(action.is_none());
         assert_eq!(app.mode, AppMode::Help);
@@ -9751,7 +9727,7 @@ mod tests {
         };
         let library_action = handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('B'), KeyModifiers::SHIFT),
         );
         assert!(matches!(
             library_action,
@@ -9768,7 +9744,7 @@ mod tests {
         app.collection_papers.push(paper);
         let collection_action = handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('B'), KeyModifiers::SHIFT),
         );
         assert!(matches!(
             collection_action,
@@ -9804,7 +9780,7 @@ mod tests {
         ));
         let remove = handle_key(
             &mut app,
-            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('B'), KeyModifiers::SHIFT),
         );
         assert!(matches!(
             remove,
