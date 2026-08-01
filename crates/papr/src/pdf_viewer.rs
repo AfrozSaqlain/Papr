@@ -305,6 +305,12 @@ fn render_page_blocking(
             .arg(page.to_string())
             .arg(pdf_path)
             .arg(prefix)
+            // Poppler writes recoverable parser diagnostics to stderr.  The
+            // internal viewer runs while the TUI owns that terminal, so an
+            // inherited stderr would briefly overwrite the first viewer frame.
+            // Rendering success is determined by the exit status and output
+            // image below; keep parser warnings out of the user interface.
+            .stderr(std::process::Stdio::null())
             .status()
             .context("failed to spawn pdftoppm")?;
         if !status.success() {
