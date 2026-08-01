@@ -14,7 +14,7 @@ Instead of context-switching between web browsers, reference managers, PDF viewe
 
 I wrote Papr in Rust because an academic research workspace needs to be fast, reliable, and light on system resources:
 * **Performance:** Instant application startup and rapid indexing of thousands of local PDFs.
-* **Smooth Async Concurrency:** Powered by Tokio's async runtime, Papr downloads papers, watches filesystem changes, and handles network calls in the background without freezing the UI.
+* **Async Concurrency:** Powered by Tokio's async runtime, Papr downloads papers, watches filesystem changes, and handles network calls in the background without freezing the UI.
 * **Stability & Memory Safety:** Rust's strict safety guarantees eliminate memory leaks, race conditions, and unexpected crashes mid-session.
 * **Reliable Local Storage:** Everything is stored locally in SQLite with Write-Ahead Logging (WAL) enabled, ensuring fast, ACID-compliant database operations that won't corrupt your library.
 * **Zero-Overhead Single Binary:** Compiles down to a single, self-contained binary with minimal CPU and memory usage (no heavy runtimes or Electron bloat).
