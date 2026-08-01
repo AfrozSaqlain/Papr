@@ -149,7 +149,7 @@ brew install papr
 Install the latest pre-compiled release binary automatically:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://github.com/AfrozSaqlain/Papr/releases/latest/download/papr-tui-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -sSfL https://github.com/AfrozSaqlain/Papr/releases/latest/download/papr-tui-installer.sh | sh
 ```
 
 ## ❌ PowerShell Installer (Windows)
