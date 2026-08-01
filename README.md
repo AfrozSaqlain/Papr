@@ -52,29 +52,14 @@ Papr is implemented in Rust to meet the performance, reliability, and security d
 
 Select your preferred installation method below. Pre-built binaries are available for Linux, macOS, and Windows.
 
-```text
-+-----------------------+-----------------------------+-----------------------------------------------------------------------------------------------+
-| Target Platform       | Package Manager / System    | Installation Command                                                                          |
-+-----------------------+-----------------------------+-----------------------------------------------------------------------------------------------+
-| Universal Rust        | Cargo (crates.io)           | cargo install papr-tui                                                                        |
-| Arch Linux / Manjaro  | AUR (yay / paru)            | yay -S papr-bin   or   paru -S papr-bin                                                   |
-| Linux / macOS 1-Line  | Shell Script Installer      | curl --proto '=https' --tlsv1.2 -sSf https://github.com/AfrozSaqlain/Papr/releases/latest/download/papr-tui-installer.sh | sh |
-| Windows 1-Line        | PowerShell Installer        | powershell -ExecutionPolicy Bypass -c "irm https://github.com/AfrozSaqlain/Papr/releases/latest/download/papr-tui-installer.ps1 | iex" |
-| Debian / Ubuntu / Mint| APT / dpkg (.deb)           | sudo apt install ./papr_*.deb                                                                 |
-| Fedora / RHEL / CentOS| DNF (.rpm)                  | sudo dnf install ./papr-*.rpm                                                                 |
-| openSUSE              | Zypper (.rpm)               | sudo zypper install ./papr-*.rpm                                                              |
-| macOS                 | Homebrew Tap                | brew tap AfrozSaqlain/tap && brew install papr                                                |
-+-----------------------+-----------------------------+-----------------------------------------------------------------------------------------------+
-```
-
-### Method 1: Cargo (crates.io)
+### Cargo (crates.io)
 If you already have Rust installed, install Papr directly from crates.io (the crate is published under `papr-tui` and installs the binary command `papr`):
 
 ```sh
 cargo install papr-tui
 ```
 
-### Method 2: Arch Linux (AUR)
+### Arch Linux (AUR)
 Arch Linux and Manjaro users can install the pre-compiled binary package from the Arch User Repository:
 
 ```sh
@@ -85,29 +70,31 @@ or
 paru -S papr-bin
 ```
 
-### Method 3: 1-Line Shell Script Installer (Linux & macOS)
+### macOS Homebrew Tap
+Install Papr on macOS using Homebrew:
+
+```sh
+brew tap AfrozSaqlain/tap
+brew trust AfrozSaqlain/tap
+brew install papr
+```
+
+### Shell Script Installer (Linux & macOS)
 Install the latest pre-compiled release binary automatically:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://github.com/AfrozSaqlain/Papr/releases/latest/download/papr-tui-installer.sh | sh
 ```
 
-### Method 4: 1-Line PowerShell Installer (Windows)
+### PowerShell Installer (Windows)
 Run PowerShell as user and execute:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/AfrozSaqlain/Papr/releases/latest/download/papr-tui-installer.ps1 | iex"
 ```
 
-### Method 5: macOS Homebrew Tap
-Install Papr on macOS using Homebrew:
 
-```sh
-brew tap AfrozSaqlain/tap
-brew install papr
-```
-
-### Method 6: Debian / Ubuntu (`.deb`) & Fedora (`.rpm`) Packages
+### Debian / Ubuntu (`.deb`) & Fedora (`.rpm`) Packages
 Download the `.deb` or `.rpm` package from the [Latest Release Page](https://github.com/AfrozSaqlain/Papr/releases/latest) and install:
 
 * **Debian / Ubuntu / Mint:**
