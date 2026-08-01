@@ -2044,7 +2044,7 @@ async fn run(
                     }
                 }
                 Event::Paste(text) => {
-                    handle_project_exact_paste(app, &text);
+                    paste_text_into_active_input(app, &text);
                 }
                 _ => {}
             }
@@ -2092,7 +2092,7 @@ async fn run(
                     }
                 }
                 Event::Paste(text) => {
-                    handle_project_exact_paste(app, &text);
+                    paste_text_into_active_input(app, &text);
                 }
                 _ => {}
             }
@@ -4563,6 +4563,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         app.dispatch(Command::ToggleHelp);
         return None;
     }
+    if is_text_paste_shortcut(key) && paste_clipboard_into_active_input(app) {
+        return None;
+    }
     if matches!(
         app.mode,
         AppMode::ProjectRename
@@ -5276,15 +5279,6 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         let _ = save_project_editor(app);
         return None;
     }
-    if is_project_exact_paste_shortcut(key) && is_project_exact_paste_editor(app) {
-        match read_clipboard_text() {
-            Some(text) if !text.is_empty() => {
-                handle_project_exact_paste(app, &text);
-            }
-            _ => app.toast = Some("Clipboard does not contain text to paste.".into()),
-        }
-        return None;
-    }
     if app.project_pane == ProjectPane::Editor && app.project_editor_insert_mode {
         if !app.project_completions.is_empty() {
             match key.code {
@@ -5622,10 +5616,89 @@ fn move_project_tree_to_parent(app: &mut App) -> bool {
     true
 }
 
-fn is_project_exact_paste_shortcut(key: KeyEvent) -> bool {
+fn is_text_paste_shortcut(key: KeyEvent) -> bool {
+    // Most Unix terminals encode Ctrl+Shift+V as the same control byte as
+    // Ctrl+V. Crossterm correctly reports that as Ctrl+V, but there is no
+    // Shift modifier left to inspect unless the terminal supports enhanced
+    // keyboard reporting. Accept both encodings.
     key.modifiers.contains(KeyModifiers::CONTROL)
-        && key.modifiers.contains(KeyModifiers::SHIFT)
         && matches!(key.code, KeyCode::Char('v' | 'V'))
+}
+
+/// Paste clipboard text into whichever editable control currently owns focus.
+/// This is kept ahead of workspace command handling so Ctrl+Shift+V cannot be
+/// mistaken for a navigation or single-key action.
+fn paste_clipboard_into_active_input(app: &mut App) -> bool {
+    let settings_field_active = app.page == Page::Settings
+        && app.content_focused
+        && app.mode == AppMode::Normal;
+    if !settings_field_active && !has_active_text_input(app) {
+        return false;
+    }
+    let Some(text) = read_clipboard_text().filter(|text| !text.is_empty()) else {
+        app.toast = Some("Clipboard does not contain text to paste.".into());
+        return true;
+    };
+    paste_text_into_active_input(app, &text)
+}
+
+fn paste_text_into_active_input(app: &mut App, text: &str) -> bool {
+    if app.page == Page::Settings && app.content_focused && app.mode == AppMode::Normal {
+        return settings_modal::paste_into_active_field(app, Some(text));
+    }
+
+    if !has_active_text_input(app) {
+        return false;
+    }
+    if text.is_empty() {
+        return true;
+    }
+
+    if is_project_exact_paste_editor(app) {
+        handle_project_exact_paste(app, &text);
+        return true;
+    }
+
+    let (target, cursor) = match app.mode {
+        AppMode::ProjectRename
+        | AppMode::ProjectCreate
+        | AppMode::ProjectFileCreate
+        | AppMode::ProjectEntryRename => (&mut app.project_rename_input, &mut app.project_rename_cursor),
+        AppMode::CommandPalette => (&mut app.palette_query, &mut app.palette_query_cursor),
+        AppMode::TerminalCommand => (&mut app.terminal_command, &mut app.terminal_command_cursor),
+        AppMode::Search => (&mut app.discovery.query, &mut app.discovery.query_cursor),
+        AppMode::DiscoverFilter => (&mut app.discovery.filter, &mut app.discovery.filter_cursor),
+        AppMode::WorkspaceSearch => (&mut app.workspace_query, &mut app.workspace_query_cursor),
+        AppMode::Prompt => match app.metadata_prompt.as_mut() {
+            Some(prompt) => (&mut prompt.value, &mut prompt.cursor),
+            None => return false,
+        },
+        AppMode::NoteEdit if !app.note_preview => match app.note_editor.as_mut() {
+            Some(note) => (&mut note.body, &mut note.cursor),
+            None => return false,
+        },
+        _ if app.page == Page::Projects
+            && app.content_focused
+            && app.project_pane == ProjectPane::Editor
+            && app.project_editor_insert_mode => {
+                insert_project_bibtex_text(app, &text);
+                return true;
+            }
+        _ => return false,
+    };
+    target.insert_str(*cursor, &text);
+    *cursor += text.len();
+
+    if app.mode == AppMode::CommandPalette {
+        app.palette_selected = 0;
+    }
+    if app.mode == AppMode::TerminalCommand {
+        reset_terminal_completion(app);
+    }
+    if app.mode == AppMode::DiscoverFilter {
+        app.discovery.rebuild_filter();
+    }
+    true
 }
 
 fn is_project_exact_paste_editor(app: &App) -> bool {
@@ -7068,6 +7141,12 @@ fn handle_settings_modal_key(
 ) -> Result<Option<UiAction>> {
     use settings_modal::{handle_settings_key, SettingsKeyResult, staged_config};
 
+    if is_text_paste_shortcut(key)
+        && settings_modal::paste_into_active_field(app, read_clipboard_text().as_deref())
+    {
+        return Ok(None);
+    }
+
     match handle_settings_key(app, key) {
         SettingsKeyResult::Handled => {}
 
@@ -7488,7 +7567,7 @@ mod tests {
         sanitize_terminal_output, parse_latex_diagnostics, PaperTarget,
         show_build_for_failed_compilation, show_preview_after_successful_compilation,
         complete_terminal_command, ConfigFilesystemWatcher, pdf_viewer_invocation,
-        should_open_generated_pdf,
+        is_text_paste_shortcut, paste_text_into_active_input, should_open_generated_pdf,
     };
 
     #[test]
@@ -8102,6 +8181,48 @@ mod tests {
 
         let _ = handle_key(&mut app, key);
         assert_eq!(app.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn paste_text_reaches_discovery_and_workspace_search_fields() {
+        let mut discovery = App {
+            page: Page::Discover,
+            content_focused: true,
+            mode: AppMode::Search,
+            discovery: DiscoveryState {
+                query: "ac".into(),
+                query_cursor: 1,
+                ..DiscoveryState::default()
+            },
+            ..App::default()
+        };
+        assert!(paste_text_into_active_input(&mut discovery, "β"));
+        assert_eq!(discovery.discovery.query, "aβc");
+        assert_eq!(discovery.discovery.query_cursor, "aβ".len());
+
+        let mut library = App {
+            page: Page::Library,
+            content_focused: true,
+            mode: AppMode::WorkspaceSearch,
+            workspace_query: "paper".into(),
+            workspace_query_cursor: 2,
+            ..App::default()
+        };
+        assert!(paste_text_into_active_input(&mut library, " new"));
+        assert_eq!(library.workspace_query, "pa newper");
+        assert_eq!(library.workspace_query_cursor, 6);
+    }
+
+    #[test]
+    fn paste_shortcut_accepts_terminals_that_drop_the_shift_modifier() {
+        assert!(is_text_paste_shortcut(KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(is_text_paste_shortcut(KeyEvent::new(
+            KeyCode::Char('V'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )));
     }
 
     #[test]

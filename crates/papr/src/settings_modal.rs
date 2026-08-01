@@ -193,6 +193,48 @@ pub fn sync_theme_selection_to_applied(app: &mut App) {
     }
 }
 
+/// Paste text into the settings field currently being edited. Returns false
+/// when settings focus is not in a text field, allowing normal shortcuts to
+/// continue through their existing routing.
+pub fn paste_into_active_field(app: &mut App, text: Option<&str>) -> bool {
+    if !any_field_editing(app) {
+        return false;
+    }
+    let Some(text) = text.filter(|text| !text.is_empty()) else {
+        app.toast = Some("Clipboard does not contain text to paste.".into());
+        return true;
+    };
+
+    let insert = |value: &mut String, cursor: &mut usize| {
+        value.insert_str(*cursor, text);
+        *cursor += text.len();
+    };
+    let modal = &mut app.settings_modal;
+    if modal.pdf_viewer_editing {
+        insert(&mut modal.pdf_viewer, &mut modal.pdf_viewer_cursor);
+    } else if modal.keyword_editing {
+        if let Some(entry) = modal.keyword_entries.get_mut(modal.keyword_selected) {
+            insert(&mut entry.text, &mut entry.cursor);
+            entry.error = None;
+        }
+    } else if modal.library_editing {
+        if let Some(entry) = modal.library_entries.get_mut(modal.library_selected) {
+            insert(&mut entry.text, &mut entry.cursor);
+            entry.error = None;
+        }
+    } else if modal.download_path_editing {
+        insert(&mut modal.download_path, &mut modal.download_path_cursor);
+        modal.download_path_error = None;
+    } else if modal.projects_directory_editing {
+        insert(
+            &mut modal.projects_directory,
+            &mut modal.projects_directory_cursor,
+        );
+        modal.projects_directory_error = None;
+    }
+    true
+}
+
 /// Handle a key event while focus is inside the settings workspace.
 pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
     let is_editing = any_field_editing(app);
