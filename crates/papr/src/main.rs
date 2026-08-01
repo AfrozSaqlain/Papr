@@ -2732,12 +2732,24 @@ async fn apply_ui_action(
             app.mode = AppMode::ConfirmDelete;
         }
         UiAction::DeletePaper { paper_id, path } => {
-            if let Some(p) = &path {
-                if p.exists() {
-                    let _ = std::fs::remove_file(p);
-                }
+            // Resolve the path at deletion time.  The path captured by the UI
+            // can predate a rename, while the database is updated by the
+            // rename flow and therefore names the file that must be removed.
+            let database_path = runtime
+                .database
+                .library_paper_by_id(paper_id)?
+                .and_then(|paper| paper.pdf_path)
+                .map(PathBuf::from);
+            let file_path = database_path.or(path);
+            if let Some(p) = file_path.as_ref().filter(|path| path.exists()) {
+                std::fs::remove_file(p)
+                    .with_context(|| format!("failed to delete PDF at {}", p.display()))?;
             }
             runtime.database.delete_paper(paper_id)?;
+            // Remove the in-memory task immediately as well.  Completed tasks
+            // are normally rebuilt from disk, but retaining one until the next
+            // refresh can make a just-deleted paper look downloaded.
+            app.downloads.retain(|task| task.paper_id != Some(paper_id));
             refresh_library(runtime, app)?;
             refresh_organization(&runtime.database, &runtime.library_roots, app)?;
             refresh_dashboard(runtime, app)?;
@@ -9634,6 +9646,17 @@ mod tests {
 
     #[test]
     fn downloaded_remote_paper_opens_from_metadata_without_changing_browser_shortcut() {
+        let pdf_path = std::env::temp_dir().join(format!(
+            "papr-downloaded-remote-paper-{}-{}.pdf",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after the Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::write(&pdf_path, b"%PDF-1.4 test")
+            .expect("temporary PDF fixture should be writable");
+
         for page in [Page::Dashboard, Page::Discover] {
             let remote = remote_paper("https://arxiv.org/abs/downloaded", "Downloaded paper");
             let mut app = App {
@@ -9652,7 +9675,7 @@ mod tests {
                         authors: String::new(),
                         doi: None,
                         arxiv_id: Some("https://arxiv.org/abs/downloaded".into()),
-                        pdf_path: Some("/tmp/downloaded.pdf".into()),
+                        pdf_path: Some(pdf_path.to_string_lossy().into_owned()),
                         file_size: None,
                         reading_status: "unread".into(),
                         is_favorite: false,
@@ -9666,7 +9689,7 @@ mod tests {
             assert!(matches!(
                 open,
                 Some(UiAction::OpenPdf { paper_id: 42, path })
-                    if path == std::path::Path::new("/tmp/downloaded.pdf")
+                    if path == pdf_path
             ));
 
             let browser = handle_key(&mut app, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
@@ -9675,6 +9698,7 @@ mod tests {
                 Some(UiAction::OpenBrowser(url)) if url.ends_with("/downloaded")
             ));
         }
+        std::fs::remove_file(pdf_path).expect("temporary PDF fixture should be removable");
     }
 
     #[test]

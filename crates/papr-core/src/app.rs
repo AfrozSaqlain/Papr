@@ -1243,7 +1243,15 @@ impl App {
     #[must_use]
     pub fn downloaded_remote_paper(&self, remote: &RemotePaper) -> Option<&LibraryPaper> {
         self.library.papers.iter().find(|local| {
-            if local.pdf_path.is_none() {
+            // The library list is an in-memory projection that can briefly lag
+            // behind a filesystem delete (for example after a rename followed
+            // immediately by deletion).  A stored path alone must not suppress
+            // a new download: only an existing local PDF does that.
+            if !local
+                .pdf_path
+                .as_deref()
+                .is_some_and(|path| std::path::Path::new(path).is_file())
+            {
                 return false;
             }
             if local.arxiv_id.as_deref() == Some(remote.id.as_str()) {
@@ -1748,7 +1756,7 @@ fn parse_arxiv_id(s: &str) -> Option<String> {
 mod tests {
     use chrono::Utc;
 
-    use crate::models::RemotePaper;
+    use crate::models::{LibraryPaper, RemotePaper};
 
     use super::{App, Command, DiscoveryState, Page};
 
@@ -1855,6 +1863,25 @@ mod tests {
         assert!(App::matches_query("RuSt", "rust compiler", "Authors", None, None));
         // Non-matching
         assert!(!App::matches_query("rust", "C++ compiler", "John Smith", None, None));
+    }
+
+    #[test]
+    fn missing_local_pdf_does_not_mark_remote_paper_as_downloaded() {
+        let remote = remote_paper(42);
+        let mut app = App::default();
+        app.library.papers.push(LibraryPaper {
+            id: 1,
+            title: remote.title.clone(),
+            authors: String::new(),
+            doi: None,
+            arxiv_id: Some(remote.id.clone()),
+            pdf_path: Some("/definitely/missing/papr-paper.pdf".into()),
+            file_size: None,
+            reading_status: "unread".into(),
+            is_favorite: false,
+        });
+
+        assert!(app.downloaded_remote_paper(&remote).is_none());
     }
 
     #[test]
