@@ -52,7 +52,9 @@ pub struct ProjectManager {
 impl ProjectManager {
     pub fn new(root: PathBuf) -> Result<Self, ProjectError> {
         fs::create_dir_all(&root)?;
-        Ok(Self { root })
+        // Retain a single absolute, filesystem-normalized representation for
+        // managed, external, persisted, and UI-facing project paths.
+        Ok(Self { root: fs::canonicalize(root)? })
     }
 
     #[must_use]
@@ -63,7 +65,18 @@ impl ProjectManager {
     fn read_registry(&self) -> Result<Registry, ProjectError> {
         let path = self.registry_path();
         if !path.exists() { return Ok(Registry::default()); }
-        Ok(toml::from_str(&fs::read_to_string(path)?)?)
+        let mut registry: Registry = toml::from_str(&fs::read_to_string(path)?)?;
+        // Older registries may contain relative paths. Normalize at the
+        // serialization boundary before any equality or containment check.
+        for project in &mut registry.projects {
+            if project.path.is_relative() {
+                project.path = self.root.join(&project.path);
+            }
+            if let Ok(path) = fs::canonicalize(&project.path) {
+                project.path = path;
+            }
+        }
+        Ok(registry)
     }
 
     fn write_registry(&self, registry: &Registry) -> Result<(), ProjectError> {
@@ -109,7 +122,7 @@ impl ProjectManager {
     /// Add an existing project (including one outside the managed root).
     pub fn open(&self, path: PathBuf) -> Result<Project, ProjectError> {
         if !path.is_dir() { return Err(ProjectError::NotFound(path)); }
-        let path = fs::canonicalize(&path).unwrap_or(path);
+        let path = fs::canonicalize(&path)?;
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("Untitled project").to_owned();
         let project = Project { name, path, opened_at: now() };
         let mut registry = self.read_registry()?;
@@ -124,7 +137,11 @@ impl ProjectManager {
         let new_path = project.path.parent().unwrap_or(&self.root).join(name);
         if new_path != project.path && new_path.exists() { return Err(ProjectError::AlreadyExists(name.into())); }
         fs::rename(&project.path, &new_path)?;
-        let renamed = Project { name: name.into(), path: new_path, opened_at: project.opened_at };
+        let renamed = Project {
+            name: name.into(),
+            path: fs::canonicalize(new_path)?,
+            opened_at: project.opened_at,
+        };
         let mut registry = self.read_registry()?;
         if let Some(item) = registry.projects.iter_mut().find(|p| p.path == project.path) { *item = renamed.clone(); }
         self.write_registry(&registry)?;
@@ -176,6 +193,30 @@ mod tests {
         assert_eq!(manager.list()?.len(), 2);
         fs::remove_dir_all(root)?;
         fs::remove_dir_all(external)?;
+        Ok(())
+    }
+
+    #[test]
+    fn normalizes_root_and_legacy_registry_paths() -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "papr-project-paths-{}",
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
+        let manager = ProjectManager::new(root.clone())?;
+        let created = manager.create("paper")?;
+        assert!(created.path.is_absolute());
+        assert_eq!(created.path, manager.root().join("paper"));
+
+        fs::write(
+            manager.registry_path(),
+            "[[projects]]\nname = \"paper\"\npath = \"paper\"\nopened_at = 1\n",
+        )?;
+        let projects = manager.list()?;
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].path, created.path);
+        assert!(fs::read_to_string(manager.registry_path())?
+            .contains(&created.path.display().to_string()));
+        fs::remove_dir_all(root)?;
         Ok(())
     }
 }

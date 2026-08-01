@@ -1181,11 +1181,27 @@ fn create_project_file(project_root: &Path, name: &str) -> Result<PathBuf, Strin
         return Err("enter a relative file path inside the project".into());
     }
 
-    let path = project_root.join(relative);
+    let canonical_root =
+        std::fs::canonicalize(project_root).map_err(|error| error.to_string())?;
+    let path = canonical_root.join(relative);
     let parent = path.parent().ok_or_else(|| "enter a relative file path inside the project".to_owned())?;
+
+    // Check the nearest existing ancestor before creating anything. This
+    // prevents an in-project symlink from redirecting creation outside the
+    // canonical project root.
+    let mut ancestor = parent;
+    while !ancestor.exists() {
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| "enter a relative file path inside the project".to_owned())?;
+    }
+    let canonical_ancestor =
+        std::fs::canonicalize(ancestor).map_err(|error| error.to_string())?;
+    if !canonical_ancestor.starts_with(&canonical_root) {
+        return Err("file path must stay inside the project".into());
+    }
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
 
-    let canonical_root = std::fs::canonicalize(project_root).map_err(|error| error.to_string())?;
     let canonical_parent = std::fs::canonicalize(parent).map_err(|error| error.to_string())?;
     if !canonical_parent.starts_with(&canonical_root) {
         return Err("file path must stay inside the project".into());
@@ -4450,6 +4466,16 @@ async fn apply_download_event(
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    // The event loop normally performs this filtering, but keeping it at the
+    // state-machine boundary prevents a release event delivered by an
+    // enhanced terminal from being interpreted as text after focus changes.
+    // Repeats are deliberately consumed only by the PDF viewer below.
+    if key.kind == KeyEventKind::Release {
+        return None;
+    }
+    if key.kind == KeyEventKind::Repeat && app.mode != AppMode::PdfView {
+        return None;
+    }
     if app.mode == AppMode::PdfView {
         if key.code == KeyCode::Char('?') {
             app.dispatch(Command::ToggleHelp);
@@ -7397,7 +7423,9 @@ mod tests {
     use std::{fs, thread, time::Duration};
 
     use chrono::{TimeZone, Utc};
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    };
     use papr_core::{
         App, AppMode, BookmarkSummary, CollectionSummary, Database, DiscoveryState, DownloadStatus,
         CitationEntry, CitationSource, Config, DownloadTask, LibraryPaper, Page, PaperNote, Project, ProjectPane, RemotePaper,
@@ -8827,6 +8855,32 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn project_file_creation_rejects_symlinked_parents_outside_the_project() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "papr-file-symlink-{}",
+            std::process::id()
+        ));
+        let outside = std::env::temp_dir().join(format!(
+            "papr-file-outside-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("linked")).unwrap();
+
+        assert!(create_project_file(&root, "linked/escape.tex").is_err());
+        assert!(!outside.join("escape.tex").exists());
+
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
     #[test]
     fn file_tree_enters_folders_and_left_returns_to_the_parent() {
         let root = std::env::temp_dir().join(format!("papr-tree-{}", std::process::id()));
@@ -8946,6 +9000,26 @@ mod tests {
         assert_eq!(app.project_pane, ProjectPane::ProjectList);
         assert!(app.content_focused);
         assert_eq!(app.projects_selected, 1);
+    }
+
+    #[test]
+    fn editor_escape_cycles_ignore_release_and_leave_no_text() {
+        let mut app = project_editor_app("stable", 2);
+        for _ in 0..3 {
+            app.project_pane = ProjectPane::Editor;
+            app.project_editor_insert_mode = true;
+            let mut release = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+            release.kind = KeyEventKind::Release;
+            let _ = handle_key(&mut app, release);
+            let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert_eq!(app.project_editor_text, "stable");
+            assert!(!app.project_editor_insert_mode);
+            assert_eq!(app.project_pane, ProjectPane::Editor);
+
+            let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert_eq!(app.project_pane, ProjectPane::FileTree);
+            assert_eq!(app.project_editor_text, "stable");
+        }
     }
 
     #[test]

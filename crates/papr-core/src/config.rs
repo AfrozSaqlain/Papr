@@ -47,16 +47,26 @@ impl Paths {
     ///
     /// Returns an error when platform application directories are unavailable.
     pub fn discover() -> Result<Self, ConfigError> {
-        let dirs = ProjectDirs::from("org", "papr", "papr")
+        // `organization` becomes a path component on Windows and part of the
+        // bundle identifier on macOS. Papr is independently distributed, so
+        // using its application name for both fields created `papr/papr` on
+        // Windows (and `org.papr.papr` on macOS).
+        let dirs = ProjectDirs::from("org", "", "papr")
             .ok_or(ConfigError::MissingPlatformDirectories)?;
-        Ok(Self {
+        Ok(Self::from_project_dirs(&dirs))
+    }
+
+    /// Build all application locations from one platform-directory source.
+    /// Resource names are appended exactly once and never repeat the app name.
+    fn from_project_dirs(dirs: &ProjectDirs) -> Self {
+        Self {
             config_file: dirs.config_dir().join("config.toml"),
             database_file: dirs.data_dir().join("papr.db"),
             downloads_dir: dirs.data_dir().join("papers"),
             plugins_dir: dirs.data_dir().join("plugins"),
             plugins_config_file: dirs.config_dir().join("plugins.toml"),
             projects_dir: dirs.data_dir().join("projects"),
-        })
+        }
     }
 }
 
@@ -225,7 +235,26 @@ enabled_plugins = []
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Config, Paths};
+    use directories::ProjectDirs;
+
+    #[test]
+    fn platform_paths_use_the_application_component_once() {
+        let dirs = ProjectDirs::from("org", "", "papr").unwrap();
+        #[cfg(target_os = "windows")]
+        assert_eq!(dirs.project_path(), std::path::Path::new("papr"));
+        #[cfg(target_os = "macos")]
+        assert_eq!(dirs.project_path(), std::path::Path::new("org.papr"));
+        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+        assert_eq!(dirs.project_path(), std::path::Path::new("papr"));
+
+        let paths = Paths::from_project_dirs(&dirs);
+        assert_eq!(paths.config_file.parent(), Some(dirs.config_dir()));
+        assert_eq!(paths.database_file.parent(), Some(dirs.data_dir()));
+        assert_eq!(paths.downloads_dir, dirs.data_dir().join("papers"));
+        assert_eq!(paths.plugins_dir, dirs.data_dir().join("plugins"));
+        assert_eq!(paths.projects_dir, dirs.data_dir().join("projects"));
+    }
     use serde::{Deserialize, Serialize};
 
     #[test]
