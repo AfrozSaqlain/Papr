@@ -13,13 +13,45 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-      - name: Publish to Crates.io
+      - name: Publish Crates to Crates.io Idempotently
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          cargo publish -p papr-core
+          publish_crate() {
+            local CRATE="$1"
+            local VERSION
+            VERSION=$(cargo metadata --format-version 1 | jq -r ".packages[] | select(.name == \"${CRATE}\") | .version")
+            
+            echo "Checking if ${CRATE} ${VERSION} is already published on crates.io..."
+            local HTTP_CODE
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "User-Agent: PaprCI (sqn3680@gmail.com)" "https://crates.io/api/v1/crates/${CRATE}/${VERSION}")
+            
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "${CRATE} ${VERSION} is already published. Skipping."
+              return 0
+            fi
+
+            echo "Publishing ${CRATE} ${VERSION} to crates.io..."
+            local OUTPUT
+            if OUTPUT=$(cargo publish -p "${CRATE}" 2>&1); then
+              echo "$OUTPUT"
+              echo "${CRATE} ${VERSION} published successfully!"
+              return 0
+            else
+              echo "$OUTPUT"
+              if echo "$OUTPUT" | grep -q -i "already exists"; then
+                echo "${CRATE} ${VERSION} already exists on crates.io index. Skipping."
+                return 0
+              else
+                echo "Failed to publish ${CRATE} ${VERSION} due to a genuine error."
+                return 1
+              fi
+            fi
+          }
+
+          publish_crate "papr-core"
           sleep 30
-          cargo publish -p papr-tui
+          publish_crate "papr-tui"
 
   publish-linux-packages:
     name: Build & Attach DEB / RPM Packages
@@ -70,69 +102,59 @@ jobs:
           # Extract version without 'v' prefix (e.g. 0.1.0 from v0.1.0)
           VERSION="${GITHUB_REF_NAME#v}"
           
+          echo "Waiting for GitHub Release and Linux x86_64 tarball for ${GITHUB_REF_NAME}..."
+          TARBALL_URL=""
+          SHA256=""
+
+          for i in {1..30}; do
+            RELEASE_JSON=$(curl -s -H "User-Agent: PaprCI (sqn3680@gmail.com)" "https://api.github.com/repos/AfrozSaqlain/Papr/releases/tags/${GITHUB_REF_NAME}")
+            TARBALL_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[]? | select(.name | endswith("x86_64-unknown-linux-gnu.tar.gz")) | .browser_download_url' | head -n 1)
+            
+            if [ -n "$TARBALL_URL" ] && [ "$TARBALL_URL" != "null" ]; then
+              echo "Found release asset: ${TARBALL_URL}"
+              SHA256=$(curl -sL "$TARBALL_URL" | sha256sum | awk '{print $1}')
+              if [ -n "$SHA256" ]; then
+                echo "Computed SHA256: ${SHA256}"
+                break
+              fi
+            fi
+            echo "Release asset not ready yet. Waiting for release.yml to finish (attempt ${i}/30)..."
+            sleep 20
+          done
+
+          if [ -z "$SHA256" ]; then
+            echo "Error: Release tarball asset was not found after 10 minutes."
+            exit 1
+          fi
+
           # Clone AUR package repository over SSH
           GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git clone ssh://aur@aur.archlinux.org/papr-bin.git aur-repo || true
           
           if [ -d "aur-repo" ]; then
             cd aur-repo
             
-            # Fetch latest tarball from GitHub Releases to compute exact SHA-256
-            TARBALL_URL="https://github.com/AfrozSaqlain/Papr/releases/download/${GITHUB_REF_NAME}/papr-x86_64-unknown-linux-gnu.tar.gz"
-            SHA256=$(curl -sL "$TARBALL_URL" | sha256sum | awk '{print $1}')
+            if [ ! -f "PKGBUILD" ]; then
+              echo "PKGBUILD not found. Creating initial PKGBUILD and .SRCINFO for papr-bin..."
+              echo "IyBNYWludGFpbmVyOiBBZnJveiBTYXFsYWluIDxzcW4zNjgwQGdtYWlsLmNvbT4KcGtnbmFtZT1wYXByLWJpbgpfcGtnbmFtZT1wYXByCnBrZ3Zlcj1WRVJTSU9OX1BMQUNFSE9MREVSCnBrZ3JlbD0xCnBrZ2Rlc2M9IkEga2V5Ym9hcmQtZmlyc3QgdGVybWluYWwgd29ya3NwYWNlIGZvciBhY2FkZW1pYyBwYXBlcnMiCmFyY2g9KCJ4ODZfNjQiKQp1cmw9Imh0dHBzOi8vZ2l0aHViLmNvbS9BZnJvelNhcWxhaW4vUGFwciIKbGljZW5zZT0oIk1JVCIpCnByb3ZpZGVzPSgiJHtfcGtnbmFtZX0iKQpjb25mbGljdHM9KCIke19wa2duYW1lfSIpCnNvdXJjZV94ODZfNjQ9KCIke3VybH0vcmVsZWFzZXMvZG93bmxvYWQvdiR7cGtndmVyfS8ke19wa2duYW1lfS14ODZfNjQtdW5rbm93bi1saW51eC1nbnUudGFyLmd6IikKc2hhMjU2c3Vtc194ODZfNjQ9KCJTSEEyNTZfUExBQ0VIT0xERVIiKQoKcGFja2FnZSgpIHsKICAgIGluc3RhbGwgLURtNzU1ICIke3NyY2Rpcn0vJHtfcGtnbmFtZX0iICIke3BrZ2Rpcn0vdXNyL2Jpbi8ke19wa2duYW1lfSIKICAgIGluc3RhbGwgLURtNjQ0ICIke3NyY2Rpcn0vTElDRU5TRSIgIiR7cGtnZGlyfS91c3Ivc2hhcmUvbGljZW5zZXMvJHtfcGtnbmFtZX0vTElDRU5TRSIKfQo=" | base64 -d > PKGBUILD
+              sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" PKGBUILD
+              sed -i "s/SHA256_PLACEHOLDER/${SHA256}/g" PKGBUILD
+
+              echo "cGtnYmFzZSA9IHBhcHItYmluCiAgcGtnZGVzYyA9IEEga2V5Ym9hcmQtZmlyc3QgdGVybWluYWwgd29ya3NwYWNlIGZvciBhY2FkZW1pYyBwYXBlcnMKICBwa2d2ZXIgPSBWRVJTSU9OX1BMQUNFSE9MREVSCiAgcGtncmVsID0gMQogIHVybCA9IGh0dHBzOi8vZ2l0aHViLmNvbS9BZnJvelNhcWxhaW4vUGFwcgogIGFyY2ggPSB4ODZfNjQKICBsaWNlbnNlID0gTUlUCiAgcHJvdmlkZXMgPSBwYXByCiAgY29uZmxpY3RzID0gcGFwcgogIHNvdXJjZV94ODZfNjQgPSBodHRwczovL2dpdGh1Yi5jb20vQWZyb3pTYXFsYWluL1BhcHIvcmVsZWFzZXMvZG93bmxvYWQvdlZFUlNJT05fUExBQ0VIT0xERVIvcGFwci14ODZfNjQtdW5rbm93bi1saW51eC1nbnUudGFyLmd6CiAgc2hhMjU2c3Vtc194ODZfNjQgPSBTSEEyNTZfUExBQ0VIT0xERVIKCnBrZ25hbWUgPSBwYXByLWJpbgo=" | base64 -d > .SRCINFO
+              sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" .SRCINFO
+              sed -i "s/SHA256_PLACEHOLDER/${SHA256}/g" .SRCINFO
+            else
+              echo "Updating existing PKGBUILD and .SRCINFO..."
+              sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
+              sed -i "s/sha256sums_x86_64=.*/sha256sums_x86_64=('${SHA256}')/" PKGBUILD
+              sed -i "s/pkgver = .*/pkgver = ${VERSION}/" .SRCINFO
+              sed -i "s/sha256sums_x86_64 = .*/sha256sums_x86_64 = ${SHA256}/" .SRCINFO
+            fi
             
-            if [ -n "$SHA256" ]; then
-              if [ ! -f "PKGBUILD" ]; then
-                echo "PKGBUILD not found. Creating initial PKGBUILD and .SRCINFO for papr-bin..."
-                cat <<EOF > PKGBUILD
-# Maintainer: Afroz Saqlain <sqn3680@gmail.com>
-pkgname=papr-bin
-_pkgname=papr
-pkgver=${VERSION}
-pkgrel=1
-pkgdesc="A keyboard-first terminal workspace for academic papers"
-arch=('x86_64')
-url="https://github.com/AfrozSaqlain/Papr"
-license=('MIT')
-provides=("\${_pkgname}")
-conflicts=("\${_pkgname}")
-source_x86_64=("\${url}/releases/download/v\${pkgver}/\${_pkgname}-x86_64-unknown-linux-gnu.tar.gz")
-sha256sums_x86_64=('${SHA256}')
-
-package() {
-    install -Dm755 "\${srcdir}/\${_pkgname}" "\${pkgdir}/usr/bin/\${_pkgname}"
-    install -Dm644 "\${srcdir}/LICENSE" "\${pkgdir}/usr/share/licenses/\${_pkgname}/LICENSE"
-}
-EOF
-
-                cat <<EOF > .SRCINFO
-pkgbase = papr-bin
-	pkgdesc = A keyboard-first terminal workspace for academic papers
-	pkgver = ${VERSION}
-	pkgrel = 1
-	url = https://github.com/AfrozSaqlain/Papr
-	arch = x86_64
-	license = MIT
-	provides = papr
-	conflicts = papr
-	source_x86_64 = https://github.com/AfrozSaqlain/Papr/releases/download/v${VERSION}/papr-x86_64-unknown-linux-gnu.tar.gz
-	sha256sums_x86_64 = ${SHA256}
-
-pkgname = papr-bin
-EOF
-              else
-                echo "Updating existing PKGBUILD and .SRCINFO..."
-                sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
-                sed -i "s/sha256sums_x86_64=.*/sha256sums_x86_64=('${SHA256}')/" PKGBUILD
-                sed -i "s/pkgver = .*/pkgver = ${VERSION}/" .SRCINFO
-                sed -i "s/sha256sums_x86_64 = .*/sha256sums_x86_64 = ${SHA256}/" .SRCINFO
-              fi
-              
-              if [ -n "$(git status --porcelain)" ]; then
-                git add PKGBUILD .SRCINFO
-                git commit -m "Release v${VERSION}"
-                GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin master
-              else
-                echo "No changes to commit for AUR."
-              fi
+            if [ -n "$(git status --porcelain)" ]; then
+              git add PKGBUILD .SRCINFO
+              git commit -m "Release v${VERSION}"
+              GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin master || GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin main
+            else
+              echo "No changes to commit for AUR."
             fi
           fi
