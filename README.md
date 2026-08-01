@@ -50,16 +50,63 @@ Papr is implemented in Rust to meet the performance, reliability, and security d
 
 ## Installation Guide
 
+### General System Requirements
+
+* A 64-bit Linux, macOS, or Windows system supported by Rust.
+* A modern terminal emulator with ANSI color and Unicode support (minimum **58 columns × 18 rows**).
+* Read/write access to Papr's configuration and data directories.
+* An internet connection (for arXiv search, metadata enrichment, and downloads). Local browsing works offline.
+
+### Dependencies
+
+**Required (to use Papr):**
+* **Linux Specific:** `pkg-config` and `xdg-utils`.
+
+**Optional Feature Dependencies:**
+
+| Feature | Dependencies |
+| :--- | :--- |
+| **Terminal PDF Viewer** | A Kitty- or Sixel-capable terminal, plus `poppler` (specifically `pdftoppm`). |
+| **PDF Metadata & Text** | `poppler` (specifically `pdfinfo` and `pdftotext`). |
+| **LaTeX Workspace** | `latexmk` and a TeX distribution (e.g., TeX Live). |
+| **Linux Clipboard** | `wl-clipboard` (Wayland) or `xclip` (X11). Native `arboard` fallback is included if these are unavailable. |
+| **External PDF Viewer** | The configured viewer command and its required desktop environment integration. |
+
+**Install OS-specific prerequisites:**
+
+* **Ubuntu / Debian:**
+  ```sh
+  sudo apt update && sudo apt install -y build-essential pkg-config xdg-utils poppler-utils wl-clipboard texlive latexmk git
+  ```
+* **Fedora:**
+  ```sh
+  sudo dnf install -y gcc make pkgconf-pkg-config xdg-utils poppler-utils wl-clipboard texlive-scheme-basic latexmk git
+  ```
+* **Arch Linux:**
+  ```sh
+  sudo pacman -S --noconfirm base-devel pkgconf xdg-utils poppler wl-clipboard texlive-basic texlive-latexmk git
+  ```
+* **macOS:**
+  ```sh
+  xcode-select --install
+  brew install poppler basictex git
+  ```
+
 Select your preferred installation method below. Pre-built binaries are available for Linux, macOS, and Windows.
 
-### Cargo (crates.io)
+Color coding:
+
+* Very light blue = Personally tested and verified.
+* Very light red = Not yet personally tested (expected to work, but unverified).
+
+### <span style="background-color: #dbeafe;">Cargo (crates.io)</span>
 If you already have Rust installed, install Papr directly from crates.io (the crate is published under `papr-tui` and installs the binary command `papr`):
 
 ```sh
 cargo install papr-tui
 ```
 
-### Arch Linux (AUR)
+### <span style="background-color: #dbeafe;">Arch Linux (AUR)</span>
 Arch Linux and Manjaro users can install the pre-compiled binary package from the Arch User Repository:
 
 ```sh
@@ -70,7 +117,7 @@ or
 paru -S papr-bin
 ```
 
-### macOS Homebrew Tap
+### <span style="background-color: #dbeafe;">macOS Homebrew Tap</span>
 Install Papr on macOS using Homebrew:
 
 ```sh
@@ -79,14 +126,14 @@ brew trust AfrozSaqlain/tap
 brew install papr
 ```
 
-### Shell Script Installer (Linux & macOS)
+### <span style="background-color: #fee2e2;">Shell Script Installer (Linux & macOS)</span>
 Install the latest pre-compiled release binary automatically:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://github.com/AfrozSaqlain/Papr/releases/latest/download/papr-tui-installer.sh | sh
 ```
 
-### PowerShell Installer (Windows)
+### <span style="background-color: #fee2e2;">PowerShell Installer (Windows)</span>
 Run PowerShell as user and execute:
 
 ```powershell
@@ -94,7 +141,7 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/AfrozSaqlain/Papr/
 ```
 
 
-### Debian / Ubuntu (`.deb`) & Fedora (`.rpm`) Packages
+### <span style="background-color: #fee2e2;">Debian / Ubuntu (`.deb`) & Fedora (`.rpm`) Packages</span>
 Download the `.deb` or `.rpm` package from the [Latest Release Page](https://github.com/AfrozSaqlain/Papr/releases/latest) and install:
 
 * **Debian / Ubuntu / Mint:**
@@ -112,30 +159,13 @@ Download the `.deb` or `.rpm` package from the [Latest Release Page](https://git
 
 ---
 
-## Building From Source
+<details>
+<summary>Building from Source</summary>
 
-### System Requirements
-* A 64-bit Linux, macOS, or Windows system supported by Rust.
-* A modern terminal emulator with ANSI color and Unicode support (minimum **58 columns × 18 rows**).
-* Read/write access to Papr's configuration and data directories.
-* An internet connection (for arXiv search, metadata enrichment, and downloads). Local browsing works offline.
-
-### Dependencies
-
-**Required (to build from source):**
+### Build Requirements
 * **Rust** (1.85 or newer) and Cargo (install via [rustup](https://rustup.rs/)).
 * Standard C compiler and system linker.
 * **Linux Specific:** `pkg-config` and `xdg-utils`.
-
-**Optional Feature Dependencies:**
-
-| Feature | Dependencies |
-| :--- | :--- |
-| **Terminal PDF Viewer** | A Kitty- or Sixel-capable terminal, plus `poppler` (specifically `pdftoppm`). |
-| **PDF Metadata & Text** | `poppler` (specifically `pdfinfo` and `pdftotext`). |
-| **LaTeX Workspace** | `latexmk` and a TeX distribution (e.g., TeX Live). |
-| **Linux Clipboard** | `wl-clipboard` (Wayland) or `xclip` (X11). Native `arboard` fallback is included if these are unavailable. |
-| **External PDF Viewer** | The configured viewer command and its required desktop environment integration. |
 
 ### Step 1: Install Rust & Build Prerequisites
 
@@ -178,6 +208,8 @@ If typing `papr` shows `command not found`, add `$HOME/.cargo/bin` to your shell
 echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 ```
+
+</details>
 
 ---
 
