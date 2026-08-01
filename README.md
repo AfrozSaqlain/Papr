@@ -4,7 +4,7 @@
   <img src="assets/papr.gif" alt="Demo" width="900">
 </p>
 
-Papr is a fast, keyboard-first terminal workspace I built for academic research. It brings together arXiv paper discovery, local PDF library management, reading, markdown note-taking, automatic author-based paper organization, and LaTeX manuscript editing into one terminal interface.
+Papr is a fast, keyboard-first terminal workspace built for academic research. It brings together arXiv paper discovery, local PDF library management, reading, markdown note-taking, automatic author-based paper organization, and LaTeX manuscript editing into one terminal interface.
 
 Instead of context-switching between web browsers, reference managers, PDF viewers, and text editors, Papr merges online discovery with local file organization into a distraction-free environment. Under the hood, it's built with Rust using Ratatui, Tokio, Reqwest, and SQLite, giving you a lightweight tool that runs entirely offline and keeps all your data under your local control.
 
@@ -12,7 +12,7 @@ Instead of context-switching between web browsers, reference managers, PDF viewe
 
 ## Why Rust?
 
-I wrote Papr in Rust because an academic research workspace needs to be fast, reliable, and light on system resources:
+Papr was written in Rust because an academic research workspace needs to be fast, reliable, and light on system resources:
 * **Performance:** Instant application startup and rapid indexing of thousands of local PDFs.
 * **Async Concurrency:** Powered by Tokio's async runtime, Papr downloads papers, watches filesystem changes, and handles network calls in the background without freezing the UI.
 * **Stability & Memory Safety:** Rust's strict safety guarantees eliminate memory leaks, race conditions, and unexpected crashes mid-session.
