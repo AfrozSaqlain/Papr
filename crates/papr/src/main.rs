@@ -10,6 +10,7 @@ use std::{
     collections::HashMap,
     io::{BufRead, BufReader},
     path::{Component, Path, PathBuf},
+    ffi::OsString,
     process::{Command as ProcessCommand, Stdio},
     sync::mpsc::{self as std_mpsc, TryRecvError},
     sync::Arc,
@@ -27,6 +28,7 @@ use papr_core::{
     DownloadEvent, DownloadManager, DownloadStatus, DownloadTask, ImportedPdf, LibraryIndexer,
     LibraryWatcher, MetadataPrompt, Page, PaperNote, Paths, PluginHost, RemotePaper, Theme, Project,
     CitationSource, CompletionSource, ProjectBuildDiagnostic, ProjectDiagnosticSeverity, ProjectManager, ProjectPane,
+    canonicalize_path,
 };
 use sha2::{Digest, Sha256};
 use tokio::{sync::{mpsc, Semaphore}, task::JoinSet};
@@ -582,6 +584,7 @@ struct ProjectCompiler {
     pdf_changed: bool,
     build_succeeded: bool,
     build_raw_log: Vec<String>,
+    external_pdf_opened: bool,
     stopped: bool,
 }
 
@@ -647,6 +650,7 @@ impl ProjectCompiler {
         if let Some(stderr) = child.stderr.take() {
             spawn_latexmk_reader(stderr, sender.clone());
         }
+        let external_pdf_opened = project.path.join("main.pdf").is_file();
         Ok(Self {
             project,
             child,
@@ -655,6 +659,10 @@ impl ProjectCompiler {
             pdf_changed: false,
             build_succeeded: false,
             build_raw_log: Vec::new(),
+            // Existing projects may already have been opened when their
+            // workspace was restored. New projects begin without main.pdf,
+            // so their first successful build is the one external launch.
+            external_pdf_opened,
             stopped: false,
         })
     }
@@ -742,16 +750,21 @@ impl ProjectCompiler {
                 } else {
                     pdf_viewer::reset_for_new_document(&pdf);
                     app.pdf_viewer_path = Some(pdf.clone());
-                    if app.pdf_viewer != "internal" {
-                        let viewer = app.pdf_viewer.clone();
-                        let _ = open_pdf(&viewer, &pdf, app, None, None);
-                    }
+                }
+                if should_open_generated_pdf(&app.pdf_viewer, self.external_pdf_opened) {
+                    let viewer = app.pdf_viewer.clone();
+                    let _ = open_pdf(&viewer, &pdf, app, None, None);
+                    self.external_pdf_opened = true;
                 }
                 changed = true;
             }
         }
         changed
     }
+}
+
+fn should_open_generated_pdf(viewer: &str, already_opened: bool) -> bool {
+    viewer != "internal" && !already_opened
 }
 
 impl Drop for ProjectCompiler {
@@ -1181,8 +1194,7 @@ fn create_project_file(project_root: &Path, name: &str) -> Result<PathBuf, Strin
         return Err("enter a relative file path inside the project".into());
     }
 
-    let canonical_root =
-        std::fs::canonicalize(project_root).map_err(|error| error.to_string())?;
+    let canonical_root = canonicalize_path(project_root).map_err(|error| error.to_string())?;
     let path = canonical_root.join(relative);
     let parent = path.parent().ok_or_else(|| "enter a relative file path inside the project".to_owned())?;
 
@@ -1195,14 +1207,13 @@ fn create_project_file(project_root: &Path, name: &str) -> Result<PathBuf, Strin
             .parent()
             .ok_or_else(|| "enter a relative file path inside the project".to_owned())?;
     }
-    let canonical_ancestor =
-        std::fs::canonicalize(ancestor).map_err(|error| error.to_string())?;
+    let canonical_ancestor = canonicalize_path(ancestor).map_err(|error| error.to_string())?;
     if !canonical_ancestor.starts_with(&canonical_root) {
         return Err("file path must stay inside the project".into());
     }
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
 
-    let canonical_parent = std::fs::canonicalize(parent).map_err(|error| error.to_string())?;
+    let canonical_parent = canonicalize_path(parent).map_err(|error| error.to_string())?;
     if !canonical_parent.starts_with(&canonical_root) {
         return Err("file path must stay inside the project".into());
     }
@@ -3735,16 +3746,7 @@ fn open_pdf(
         return Ok(());
     }
 
-    let absolute_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    #[cfg(target_os = "windows")]
-    let absolute_path = {
-        let path_str = absolute_path.to_string_lossy();
-        if let Some(stripped) = path_str.strip_prefix(r"\\?\") {
-            PathBuf::from(stripped)
-        } else {
-            absolute_path
-        }
-    };
+    let absolute_path = canonicalize_path(path).unwrap_or_else(|_| path.to_path_buf());
     let path = &absolute_path;
 
     if viewer == "internal" {
@@ -3771,38 +3773,9 @@ fn open_pdf(
 
 
 
-    let mut argv = parse_command(viewer)?;
-    if argv.is_empty() {
-        argv.push(default_pdf_viewer());
-    }
-    let has_placeholder = argv.iter().any(|arg| arg.contains("{path}"));
-    if has_placeholder {
-        let path_text = path.to_string_lossy();
-        for arg in &mut argv {
-            *arg = arg.replace("{path}", &path_text);
-        }
-    }
-
-    let program = argv.remove(0);
-
-    #[cfg(target_os = "windows")]
-    let program = if program.eq_ignore_ascii_case("start") {
-        argv.insert(0, program);
-        if argv.len() == 1 {
-            // Only "start" was provided, add empty title to prevent path being treated as title
-            argv.push("".to_string());
-        }
-        argv.insert(0, "/C".to_string());
-        "cmd".to_string()
-    } else {
-        program
-    };
-
+    let (program, argv) = pdf_viewer_invocation(viewer, path)?;
     let mut command = tokio::process::Command::new(&program);
     command.args(argv);
-    if !has_placeholder {
-        command.arg(path);
-    }
 
     command.stdout(Stdio::null());
     command.stderr(Stdio::null());
@@ -3825,6 +3798,46 @@ fn open_pdf(
         Err(error) => app.toast = Some(format!("Could not open PDF with {program}: {error}")),
     }
     Ok(())
+}
+
+/// Construct an external viewer invocation without a shell. This keeps
+/// configured programs such as `xdg-open` as ordinary executables and passes
+/// the PDF as one OS-native argument, including paths containing spaces.
+fn pdf_viewer_invocation(viewer: &str, path: &Path) -> Result<(String, Vec<OsString>)> {
+    let mut argv = parse_command(viewer)?;
+    if argv.is_empty() {
+        argv.push(default_pdf_viewer());
+    }
+    let has_placeholder = argv.iter().any(|arg| arg.contains("{path}"));
+    if has_placeholder {
+        let path_text = path.to_string_lossy();
+        for arg in &mut argv {
+            *arg = arg.replace("{path}", &path_text);
+        }
+    }
+
+    let program = argv.remove(0);
+    #[cfg(target_os = "windows")]
+    let (program, argv) = {
+        let mut argv = argv;
+        if program.eq_ignore_ascii_case("start") {
+            argv.insert(0, program);
+            if argv.len() == 1 {
+                // `start` treats its first quoted argument as a window title.
+                argv.push(String::new());
+            }
+            argv.insert(0, "/C".to_owned());
+            ("cmd".to_owned(), argv)
+        } else {
+            (program, argv)
+        }
+    };
+
+    let mut args = argv.into_iter().map(OsString::from).collect::<Vec<_>>();
+    if !has_placeholder {
+        args.push(path.as_os_str().to_owned());
+    }
+    Ok((program, args))
 }
 
 fn open_browser(url: &str, app: &mut App) {
@@ -3851,15 +3864,24 @@ fn open_browser(url: &str, app: &mut App) {
 fn parse_command(command: &str) -> Result<Vec<String>> {
     let mut args = Vec::new();
     let mut current = String::new();
-    let mut chars = command.chars();
+    let mut chars = command.chars().peekable();
     let mut quote = None;
     while let Some(character) = chars.next() {
         match character {
             '\\' => {
-                if let Some(next) = chars.next() {
-                    current.push(next);
-                } else {
-                    current.push(character);
+                // Preserve Windows path separators. A backslash has escape
+                // meaning only when it precedes syntax we explicitly support.
+                match chars.peek().copied() {
+                    Some(next)
+                        if next.is_whitespace()
+                            || next == '\\'
+                            || next == '\''
+                            || next == '\"' =>
+                    {
+                        current.push(next);
+                        let _ = chars.next();
+                    }
+                    _ => current.push(character),
                 }
             }
             '\'' | '"' if quote == Some(character) => quote = None,
@@ -5232,8 +5254,14 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         return None;
     }
     // Save is mode-independent: handle it before Insert-mode text dispatch.
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
-        save_project_editor(app);
+    if is_control_character_shortcut(key, 's')
+        && app.project_pane == ProjectPane::Editor
+        && app.project_editor_path.is_some()
+    {
+        // Saving is synchronous, so latexmk can observe only a complete file.
+        // The single persistent `-pvc` compiler owns rebuild scheduling; this
+        // avoids spawning overlapping compilation jobs on rapid Ctrl+S input.
+        let _ = save_project_editor(app);
         return None;
     }
     if is_project_exact_paste_shortcut(key) && is_project_exact_paste_editor(app) {
@@ -5346,6 +5374,11 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         ProjectPane::ProjectList | ProjectPane::Editor => {}
     }
     None
+}
+
+fn is_control_character_shortcut(key: KeyEvent, expected: char) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char(character) if character.eq_ignore_ascii_case(&expected))
 }
 
 /// Direct focus selection is resolved before any pane consumes its own keys.
@@ -7420,7 +7453,7 @@ fn finalize_download_task(task: &mut DownloadTask) {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, thread, time::Duration};
+    use std::{ffi::OsString, fs, thread, time::Duration};
 
     use chrono::{TimeZone, Utc};
     use crossterm::event::{
@@ -7442,7 +7475,8 @@ mod tests {
         update_project_completions, merge_enriched_remote_paper, run_terminal_command,
         sanitize_terminal_output, parse_latex_diagnostics, PaperTarget,
         show_build_for_failed_compilation, show_preview_after_successful_compilation,
-        complete_terminal_command, ConfigFilesystemWatcher,
+        complete_terminal_command, ConfigFilesystemWatcher, pdf_viewer_invocation,
+        should_open_generated_pdf,
     };
 
     #[test]
@@ -9736,7 +9770,52 @@ mod tests {
             parse_command("'tdf viewer' --flag {path}")?,
             vec!["tdf viewer", "--flag", "{path}"]
         );
+        assert_eq!(
+            parse_command(r#""C:\\Program Files\\Viewer.exe" --flag"#)?,
+            vec![r"C:\Program Files\Viewer.exe", "--flag"]
+        );
         Ok(())
+    }
+
+    #[test]
+    fn external_pdf_viewers_receive_the_pdf_as_one_native_argument() -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::path::PathBuf::from("/tmp/Papr Papers/first build.pdf");
+        let (program, args) = pdf_viewer_invocation("xdg-open", &path)?;
+        assert_eq!(program, "xdg-open");
+        assert_eq!(args, vec![path.as_os_str().to_owned()]);
+
+        let (program, args) = pdf_viewer_invocation("viewer --open={path}", &path)?;
+        assert_eq!(program, "viewer");
+        assert_eq!(args, vec![OsString::from(format!("--open={}", path.display()))]);
+        Ok(())
+    }
+
+    #[test]
+    fn generated_pdf_external_launch_is_one_shot_and_skips_embedded_viewers() {
+        assert!(should_open_generated_pdf("xdg-open", false));
+        assert!(!should_open_generated_pdf("xdg-open", true));
+        assert!(!should_open_generated_pdf("internal", false));
+    }
+
+    #[test]
+    fn control_s_is_consumed_before_editor_text_handling() {
+        let root = std::env::temp_dir().join(format!(
+            "papr-save-shortcut-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("main.tex");
+        fs::write(&source, "before").unwrap();
+
+        let mut app = project_editor_app("after", 5);
+        app.project_editor_path = Some(source.clone());
+        for code in [KeyCode::Char('s'), KeyCode::Char('S')] {
+            let _ = handle_key(&mut app, KeyEvent::new(code, KeyModifiers::CONTROL));
+            assert_eq!(app.project_editor_text, "after");
+            assert_eq!(fs::read_to_string(&source).unwrap(), "after");
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

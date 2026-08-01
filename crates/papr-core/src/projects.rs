@@ -10,6 +10,8 @@ use std::{fs, path::{Path, PathBuf}, time::{SystemTime, UNIX_EPOCH}};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::canonicalize_path;
+
 const REGISTRY_FILE: &str = ".papr-projects.toml";
 
 #[derive(Debug, Error)]
@@ -54,7 +56,7 @@ impl ProjectManager {
         fs::create_dir_all(&root)?;
         // Retain a single absolute, filesystem-normalized representation for
         // managed, external, persisted, and UI-facing project paths.
-        Ok(Self { root: fs::canonicalize(root)? })
+        Ok(Self { root: canonicalize_path(root)? })
     }
 
     #[must_use]
@@ -72,7 +74,7 @@ impl ProjectManager {
             if project.path.is_relative() {
                 project.path = self.root.join(&project.path);
             }
-            if let Ok(path) = fs::canonicalize(&project.path) {
+            if let Ok(path) = canonicalize_path(&project.path) {
                 project.path = path;
             }
         }
@@ -122,7 +124,7 @@ impl ProjectManager {
     /// Add an existing project (including one outside the managed root).
     pub fn open(&self, path: PathBuf) -> Result<Project, ProjectError> {
         if !path.is_dir() { return Err(ProjectError::NotFound(path)); }
-        let path = fs::canonicalize(&path)?;
+        let path = canonicalize_path(&path)?;
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("Untitled project").to_owned();
         let project = Project { name, path, opened_at: now() };
         let mut registry = self.read_registry()?;
@@ -139,7 +141,7 @@ impl ProjectManager {
         fs::rename(&project.path, &new_path)?;
         let renamed = Project {
             name: name.into(),
-            path: fs::canonicalize(new_path)?,
+            path: canonicalize_path(new_path)?,
             opened_at: project.opened_at,
         };
         let mut registry = self.read_registry()?;
@@ -206,6 +208,8 @@ mod tests {
         let created = manager.create("paper")?;
         assert!(created.path.is_absolute());
         assert_eq!(created.path, manager.root().join("paper"));
+        #[cfg(target_os = "windows")]
+        assert!(!created.path.to_string_lossy().starts_with(r"\\?\"));
 
         fs::write(
             manager.registry_path(),

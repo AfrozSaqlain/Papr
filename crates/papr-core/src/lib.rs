@@ -9,6 +9,7 @@ pub mod downloads;
 pub mod library;
 pub mod models;
 pub mod plugins;
+pub mod paths;
 pub mod projects;
 pub mod theme;
 
@@ -31,5 +32,6 @@ pub use plugins::{
     PluginAction, PluginCapability, PluginDiagnostic, PluginHost, PluginInfo, PluginManifest,
     PluginRequest, PluginResponse,
 };
+pub use paths::canonicalize_path;
 pub use projects::{Project, ProjectError, ProjectManager};
 pub use theme::Theme;
