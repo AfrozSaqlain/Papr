@@ -1161,7 +1161,7 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
     let available_width = area.width.saturating_sub(2) as usize;
     let items: Vec<ListItem<'_>> = match app.page {
         Page::Bookmarks => app
-            .bookmarks
+            .filtered_bookmarks()
             .iter()
             .map(|item| {
                 let lib_paper = app.library.papers.iter().find(|p| p.id == item.paper_id);
@@ -4953,6 +4953,49 @@ Image: ![plot](plot.png)[^1]
         assert!(rendered.contains("Ada Lovelace, Alan Turing"));
         assert!(rendered.contains("2026"));
         assert!(rendered.contains("Terminal Studies"));
+        Ok(())
+    }
+
+    #[test]
+    fn bookmarks_render_the_workspace_filtered_list() -> Result<(), Box<dyn std::error::Error>> {
+        let backend = TestBackend::new(100, 28);
+        let mut terminal = Terminal::new(backend)?;
+        let mut app = App {
+            page: Page::Bookmarks,
+            workspace_query: "target".into(),
+            bookmarks: vec![
+                BookmarkSummary {
+                    id: 1,
+                    paper_id: 1,
+                    paper_title: "Target paper".into(),
+                    authors: "Ada Lovelace".into(),
+                    year: None,
+                    journal: None,
+                    doi: None,
+                    pdf_path: "/tmp/target.pdf".into(),
+                    page: None,
+                    label: None,
+                },
+                BookmarkSummary {
+                    id: 2,
+                    paper_id: 2,
+                    paper_title: "Unrelated paper".into(),
+                    authors: "Alan Turing".into(),
+                    year: None,
+                    journal: None,
+                    doi: None,
+                    pdf_path: "/tmp/unrelated.pdf".into(),
+                    page: None,
+                    label: None,
+                },
+            ],
+            ..App::default()
+        };
+        let theme = Theme::load("nord")?;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let rendered = rendered_text(&terminal);
+        assert!(rendered.contains("Ada Lovelace"));
+        assert!(!rendered.contains("Alan Turing"));
         Ok(())
     }
 

@@ -7,6 +7,7 @@ use crossterm::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
+    cursor::SetCursorStyle,
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement},
 };
@@ -16,6 +17,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 pub struct TerminalSession {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     keyboard_enhancement_enabled: bool,
+    command_cursor_active: bool,
 }
 
 impl TerminalSession {
@@ -62,12 +64,29 @@ impl TerminalSession {
                 return Err(error);
             }
         };
-        Ok(Self { terminal, keyboard_enhancement_enabled })
+        Ok(Self { terminal, keyboard_enhancement_enabled, command_cursor_active: false })
     }
 
     /// Borrow the ratatui terminal for drawing.
     pub fn terminal_mut(&mut self) -> &mut Terminal<CrosstermBackend<Stdout>> {
         &mut self.terminal
+    }
+
+    /// Use a blinking bar only while the command popup owns text input.
+    pub fn set_command_cursor_active(&mut self, active: bool) -> io::Result<()> {
+        if self.command_cursor_active == active {
+            return Ok(());
+        }
+        execute!(
+            self.terminal.backend_mut(),
+            if active {
+                SetCursorStyle::BlinkingBar
+            } else {
+                SetCursorStyle::BlinkingBlock
+            }
+        )?;
+        self.command_cursor_active = active;
+        Ok(())
     }
 }
 

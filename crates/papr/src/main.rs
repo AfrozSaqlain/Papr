@@ -2084,6 +2084,7 @@ async fn run(
         // in THIS iteration, not the next one).
         if state_changed || force_redraw {
             force_redraw = false;  // consumed here
+            session.set_command_cursor_active(app.mode == AppMode::TerminalCommand)?;
             let draw_start = std::time::Instant::now();
             session
                 .terminal_mut()
@@ -4904,13 +4905,14 @@ fn run_terminal_command(app: &mut App) {
                 }
                 text.push_str(&stderr);
             }
-            if text.is_empty() {
-                text = "Command completed with no output.".into();
+            if output.status.success() {
+                text
+            } else {
+                format!(
+                    "[exit {}]\n{text}",
+                    output.status.code().map_or_else(|| "signal".to_owned(), |code| code.to_string())
+                )
             }
-            format!(
-                "[exit {}]\n{text}",
-                output.status.code().map_or_else(|| "signal".to_owned(), |code| code.to_string())
-            )
         }
         Err(error) => format!("Could not run command: {error}"),
     };
@@ -8270,6 +8272,19 @@ mod tests {
 
         assert!(app.terminal_command_output.contains(root.to_string_lossy().as_ref()));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn successful_terminal_commands_omit_exit_zero() {
+        let mut app = App::default();
+        app.terminal_command = "true".into();
+        app.terminal_command_cursor = app.terminal_command.len();
+
+        run_terminal_command(&mut app);
+
+        assert!(app.terminal_command_output.contains("$ true"));
+        assert!(!app.terminal_command_output.contains("[exit 0]"));
     }
 
     #[test]
