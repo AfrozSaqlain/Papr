@@ -80,7 +80,7 @@ jobs:
         run: cargo build --release -p papr-tui
       - name: Build DEB Package
   if: runner.os == 'Linux'
-        run: cargo deb -p papr-tui
+  run: cargo deb -p papr-tui
       - name: Build RPM Package
         run: cargo generate-rpm
       - name: Upload DEB & RPM to GitHub Release Assets
