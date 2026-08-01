@@ -34,10 +34,11 @@ impl TerminalSession {
         let keyboard_enhancement_enabled = supports_keyboard_enhancement().unwrap_or(false)
             && execute!(
                 stdout,
-                PushKeyboardEnhancementFlags(
-                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                        | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
-                )
+                // Keep escape/modifier sequences unambiguous without asking
+                // the terminal to report physical keys for ordinary text.
+                // The latter loses the layout-resolved character (for
+                // example Shift+1), which text fields need verbatim.
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
             )
             .is_ok();
         if let Err(error) = execute!(stdout, EnableMouseCapture) {

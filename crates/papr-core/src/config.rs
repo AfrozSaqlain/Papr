@@ -98,6 +98,14 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Read an existing configuration file without creating or modifying it.
+    ///
+    /// This is used by the live-reload path: an editor may briefly expose a
+    /// partially-written file, so reloading must never "upgrade" it in place.
+    pub fn load(config_file: &std::path::Path) -> Result<Self, ConfigError> {
+        Ok(toml::from_str(&fs::read_to_string(config_file)?)?)
+    }
+
     /// Load configuration, creating a documented default file when absent.
     ///
     /// # Errors
@@ -105,7 +113,7 @@ impl Config {
     /// Returns an error when the file cannot be read, written, or parsed.
     pub fn load_or_create(paths: &Paths) -> Result<Self, ConfigError> {
         if paths.config_file.exists() {
-            let mut config: Self = toml::from_str(&fs::read_to_string(&paths.config_file)?)?;
+            let mut config = Self::load(&paths.config_file)?;
             // Upgrade older configurations in place so the setting remains
             // visible and editable through Papr's normal settings workflow.
             if config.projects_directory.is_none() {

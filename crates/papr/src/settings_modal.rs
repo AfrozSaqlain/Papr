@@ -347,12 +347,9 @@ fn is_help_shortcut(key: KeyEvent) -> bool {
         || (key.code == KeyCode::Char('/') && key.modifiers.contains(KeyModifiers::SHIFT))
 }
 
-fn text_input_char(key: KeyEvent, character: char) -> char {
-    if key.modifiers.contains(KeyModifiers::SHIFT) && character == '/' {
-        '?'
-    } else {
-        character
-    }
+/// Text input receives the terminal's layout-resolved Unicode character.
+fn text_input_char(character: char) -> char {
+    character
 }
 
 fn any_field_editing(app: &App) -> bool {
@@ -582,7 +579,7 @@ fn handle_pdf_viewer_edit(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
             return SettingsKeyResult::Handled;
         }
         KeyCode::Char(c) => {
-            let c = text_input_char(key, c);
+            let c = text_input_char(c);
             let cur = app.settings_modal.pdf_viewer_cursor;
             app.settings_modal.pdf_viewer.insert(cur, c);
             app.settings_modal.pdf_viewer_cursor = cur + c.len_utf8();
@@ -776,7 +773,7 @@ fn handle_library_entry_edit(app: &mut App, key: KeyEvent) -> SettingsKeyResult 
             app.settings_modal.library_editing = false;
         }
         KeyCode::Char(c) => {
-            let c = text_input_char(key, c);
+            let c = text_input_char(c);
             if let Some(entry) = app.settings_modal.library_entries.get_mut(idx) {
                 let cur = entry.cursor;
                 entry.text.insert(cur, c);
@@ -884,7 +881,7 @@ fn handle_single_path_edit(
             _ => {}
         },
         KeyCode::Char(c) => {
-            let c = text_input_char(key, c);
+            let c = text_input_char(c);
             let (text, cursor) = match focus {
                 PathsTabFocus::DownloadPath => (
                     &mut app.settings_modal.download_path,
@@ -1363,7 +1360,7 @@ fn handle_keyword_entry_edit(app: &mut App, key: KeyEvent) -> SettingsKeyResult 
             app.settings_modal.keyword_editing = false;
         }
         KeyCode::Char(c) => {
-            let c = text_input_char(key, c);
+            let c = text_input_char(c);
             if let Some(entry) = app.settings_modal.keyword_entries.get_mut(idx) {
                 let cur = entry.cursor;
                 entry.text.insert(cur, c);
@@ -2065,6 +2062,25 @@ mod tests {
             validate_path("relative/path"),
             Some("Path must be absolute".to_owned())
         );
+    }
+
+    #[test]
+    fn settings_text_fields_keep_layout_resolved_shifted_characters() {
+        let mut app = App::default();
+        app.settings_modal.tab = SettingsTab::General;
+        app.settings_modal.tab_bar_focused = false;
+        app.settings_modal.general_focus = GeneralTabFocus::PdfViewer;
+        app.settings_modal.pdf_viewer_editing = true;
+
+        for character in ['A', '!', '?', '_'] {
+            let result = handle_settings_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::SHIFT),
+            );
+            assert!(matches!(result, SettingsKeyResult::Handled));
+            assert!(app.settings_modal.pdf_viewer.ends_with(character));
+        }
+        assert_eq!(app.settings_modal.pdf_viewer, "A!?_");
     }
 
     #[test]

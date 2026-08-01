@@ -207,6 +207,8 @@ async fn main() -> Result<()> {
     refresh_organization(&database, &library_roots, &mut app)?;
     let (watch_sender, watch_receiver) = mpsc::unbounded_channel();
     let watcher = start_library_watcher(&library_roots, watch_sender.clone())?;
+    let config_filesystem_watcher = ConfigFilesystemWatcher::start(&paths.config_file)
+        .context("failed to watch configuration file")?;
 
     let downloads = DownloadManager::new().context("failed to initialize download manager")?;
     let mut session = TerminalSession::start()?;
@@ -219,11 +221,16 @@ async fn main() -> Result<()> {
         database,
         database_file: paths.database_file.clone(),
         config_file: paths.config_file.clone(),
+        config: config.clone(),
+        config_filesystem_watcher,
+        config_reload_deadline: None,
+        config_reload_attempts: 0,
         plugins_dir: paths.plugins_dir.clone(),
         plugin_host,
         project_manager,
         project_compiler: None,
         default_downloads_dir: paths.downloads_dir.clone(),
+        default_projects_dir: paths.projects_dir.clone(),
         download_dir,
         pdf_viewer: config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer),
         primary_library_root,
@@ -396,11 +403,16 @@ struct Runtime {
     database: Database,
     database_file: PathBuf,
     config_file: PathBuf,
+    config: Config,
+    config_filesystem_watcher: ConfigFilesystemWatcher,
+    config_reload_deadline: Option<std::time::Instant>,
+    config_reload_attempts: u8,
     plugins_dir: PathBuf,
     plugin_host: PluginHost,
     project_manager: ProjectManager,
     project_compiler: Option<ProjectCompiler>,
     default_downloads_dir: PathBuf,
+    default_projects_dir: PathBuf,
     download_dir: PathBuf,
     pdf_viewer: String,
     primary_library_root: PathBuf,
@@ -417,6 +429,46 @@ struct Runtime {
     active_enrichments: std::collections::HashSet<i64>,
     citation_index: Option<CitationIndexer>,
     citation_source: CitationSource,
+}
+
+/// Watches the configuration's parent directory, rather than just the file,
+/// so editor atomic-save strategies (write temporary file, then rename) are
+/// observed on every supported platform.
+struct ConfigFilesystemWatcher {
+    events: std_mpsc::Receiver<notify::Event>,
+    _watcher: RecommendedWatcher,
+}
+
+impl ConfigFilesystemWatcher {
+    fn start(config_file: &Path) -> Result<Self> {
+        let (sender, events) = std_mpsc::channel();
+        let watch_root = config_file
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("configuration file has no parent directory"))?
+            .to_path_buf();
+        let mut watcher = RecommendedWatcher::new(move |event: notify::Result<notify::Event>| {
+            if let Ok(event) = event
+                && !matches!(event.kind, notify::EventKind::Access(_))
+            {
+                // A non-recursive directory watch is intentional. Inotify
+                // reports an atomic rename as a directory event on some
+                // systems, so filtering for an exact `config.toml` path drops
+                // the very saves we need to handle. The reload path compares
+                // the parsed configuration before rebuilding any subsystem.
+                let _ = sender.send(event);
+            }
+        }, NotifyConfig::default())?;
+        watcher.watch(&watch_root, RecursiveMode::NonRecursive)?;
+        Ok(Self { events, _watcher: watcher })
+    }
+
+    fn has_changes(&self) -> bool {
+        let mut changed = false;
+        while self.events.try_recv().is_ok() {
+            changed = true;
+        }
+        changed
+    }
 }
 
 /// Background BibTeX indexer. It watches only the active project and sends a
@@ -1589,6 +1641,58 @@ async fn run(
             state_changed = true;
         }
 
+        if runtime.config_filesystem_watcher.has_changes() {
+            runtime.config_reload_deadline = Some(
+                std::time::Instant::now() + std::time::Duration::from_millis(150),
+            );
+            runtime.config_reload_attempts = 0;
+        }
+        if let Some(deadline) = runtime.config_reload_deadline
+            && std::time::Instant::now() >= deadline
+        {
+            match Config::load(&runtime.config_file) {
+                Ok(config) => {
+                    runtime.config_reload_deadline = None;
+                    runtime.config_reload_attempts = 0;
+                    // Settings writes are applied synchronously before the
+                    // filesystem notification arrives. Do not repaint the
+                    // whole terminal for that identical follow-up event.
+                    if config == runtime.config {
+                        continue;
+                    }
+                    apply_config_update(&mut runtime, app, &config, &mut theme, &senders)?;
+                    // Do not overwrite an in-progress edit in Papr's own
+                    // editor. It will pick up the saved file when closed.
+                    if !app.config_editor_focused {
+                        reload_config_editor_buffer(app, &runtime.config_file);
+                    }
+                    sync_settings_workspace_from_config(app, &config, &theme);
+                    app.toast = Some("Configuration reloaded.".to_owned());
+                    // A theme-only update can leave the layout and cell text
+                    // unchanged. Invalidate Ratatui's previous-frame buffer
+                    // so it repaints styles immediately instead of waiting
+                    // for a navigation-driven layout change.
+                    session.terminal_mut().clear()?;
+                    force_redraw = true;
+                    state_changed = true;
+                }
+                Err(_) if runtime.config_reload_attempts < 10 => {
+                    // Editors may notify after truncating the file but before
+                    // the replacement or final write is visible. Retry for a
+                    // bounded period without ever applying invalid TOML.
+                    runtime.config_reload_attempts += 1;
+                    runtime.config_reload_deadline = Some(
+                        std::time::Instant::now() + std::time::Duration::from_millis(100),
+                    );
+                }
+                Err(error) => {
+                    runtime.config_reload_deadline = None;
+                    app.toast = Some(format!("Configuration reload failed: {error}"));
+                    state_changed = true;
+                }
+            }
+        }
+
         if let Some(compiler) = runtime.project_compiler.as_mut() {
             let previous = (app.project_build_status.clone(), app.project_build_diagnostics.clone());
             let preview_changed = compiler.drain_events(app);
@@ -1994,6 +2098,28 @@ async fn run(
     if let Some(mut compiler) = runtime.project_compiler.take() { compiler.stop(); }
     pdf_viewer::cleanup_temp_files();
     Ok(())
+}
+
+/// The settings page displays staged copies of configuration values. Keep that
+/// view synchronized with external edits without replacing text currently
+/// being typed by the user.
+fn sync_settings_workspace_from_config(app: &mut App, config: &Config, theme: &Theme) {
+    if app.page != Page::Settings
+        || app.config_editor_focused
+        || app.settings_modal.pdf_viewer_editing
+        || app.settings_modal.keyword_editing
+        || app.settings_modal.library_editing
+        || app.settings_modal.download_path_editing
+        || app.settings_modal.projects_directory_editing
+    {
+        return;
+    }
+
+    let tab = app.settings_modal.tab;
+    let tab_bar_focused = app.settings_modal.tab_bar_focused;
+    settings_modal::open_settings_modal(app, config, &theme.name);
+    app.settings_modal.tab = tab;
+    app.settings_modal.tab_bar_focused = tab_bar_focused;
 }
 
 async fn fetch_discovery_pages(
@@ -6454,23 +6580,12 @@ fn edit_text(text: &mut String, cursor: &mut usize, key: KeyEvent) -> bool {
     changed
 }
 
-/// Convert an enhanced-keyboard physical key into its printable character.
-/// Legacy terminals already report the character and therefore pass through.
+/// Return the layout-resolved character supplied by the terminal.
 fn text_input_char(key: KeyEvent) -> Option<char> {
     let KeyCode::Char(character) = key.code else {
         return None;
     };
-    if !key.modifiers.contains(KeyModifiers::SHIFT) {
-        return Some(character);
-    }
-    Some(match character {
-        'a'..='z' => character.to_ascii_uppercase(),
-        '1' => '!', '2' => '@', '3' => '#', '4' => '$', '5' => '%',
-        '6' => '^', '7' => '&', '8' => '*', '9' => '(', '0' => ')',
-        '-' => '_', '=' => '+', '[' => '{', ']' => '}', '\\' => '|',
-        ';' => ':', '\'' => '"', ',' => '<', '.' => '>', '/' => '?',
-        _ => character,
-    })
+    Some(character)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6977,56 +7092,68 @@ fn apply_config_update(
     theme: &mut Theme,
     senders: &ActionSenders,
 ) -> Result<()> {
-    let new_theme = Theme::load(&config.theme).map_err(|e| anyhow::anyhow!("Theme load failed: {e}"))?;
-    *theme = new_theme;
-
-    runtime.pdf_viewer = config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer);
-    app.pdf_viewer = runtime.pdf_viewer.clone();
-    if app.pdf_viewer != "internal" && app.project_pane == ProjectPane::Preview {
-        app.project_pane = ProjectPane::FileTree;
+    let previous = runtime.config.clone();
+    if config.theme != previous.theme {
+        let new_theme = Theme::load(&config.theme).map_err(|e| anyhow::anyhow!("Theme load failed: {e}"))?;
+        *theme = new_theme;
     }
-    if let Some(projects_directory) = config.projects_directory.clone() {
+
+    if config.pdf_viewer != previous.pdf_viewer {
+        runtime.pdf_viewer = config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer);
+        app.pdf_viewer = runtime.pdf_viewer.clone();
+        if app.pdf_viewer != "internal" && app.project_pane == ProjectPane::Preview {
+            app.project_pane = ProjectPane::FileTree;
+        }
+    }
+    if config.projects_directory != previous.projects_directory {
+        let projects_directory = config
+            .projects_directory
+            .clone()
+            .unwrap_or_else(|| runtime.default_projects_dir.clone());
         runtime.project_manager = ProjectManager::new(projects_directory)
             .map_err(|e| anyhow::anyhow!("projects directory: {e}"))?;
         app.projects = runtime.project_manager.list().unwrap_or_default();
         app.projects_selected = app.projects_selected.min(app.projects.len().saturating_sub(1));
     }
 
-    let download_dir = config.download_path.clone().unwrap_or_else(|| runtime.default_downloads_dir.clone());
-    let _ = std::fs::create_dir_all(&download_dir);
-    let download_dir = std::fs::canonicalize(&download_dir).unwrap_or(download_dir);
-    runtime.download_dir = download_dir.clone();
+    let paths_changed = config.download_path != previous.download_path
+        || config.library_folders != previous.library_folders;
+    if paths_changed {
+        let download_dir = config.download_path.clone().unwrap_or_else(|| runtime.default_downloads_dir.clone());
+        let _ = std::fs::create_dir_all(&download_dir);
+        let download_dir = std::fs::canonicalize(&download_dir).unwrap_or(download_dir);
+        runtime.download_dir = download_dir.clone();
 
-    let mut collection_roots = Vec::new();
-    for root in &config.library_folders {
-        collection_roots.push(std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()));
+        let collection_roots: Vec<_> = config.library_folders.iter()
+            .map(|root| std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
+            .collect();
+        runtime.collection_roots = collection_roots.clone();
+        let mut library_roots = collection_roots.clone();
+        if !collection_roots.iter().any(|root| download_dir.starts_with(root)) {
+            library_roots.push(download_dir.clone());
+        }
+        if let Some(root) = library_roots.first() {
+            runtime.primary_library_root = root.clone();
+        }
+        runtime.library_roots = library_roots;
+        restart_runtime_watcher(runtime)?;
+        refresh_library(runtime, app)?;
+        refresh_organization(&runtime.database, &runtime.library_roots, app)?;
+        refresh_downloads(runtime, app);
     }
-    runtime.collection_roots = collection_roots.clone();
-
-    let mut library_roots = collection_roots.clone();
-    let download_inside = collection_roots.iter().any(|root| {
-        download_dir.starts_with(root)
-    });
-    if !download_inside {
-        library_roots.push(download_dir.clone());
-    }
-    if !library_roots.is_empty() {
-        runtime.primary_library_root = library_roots[0].clone();
-    }
-    runtime.library_roots = library_roots;
 
     let old_sig = runtime.dashboard_keyword_signature.clone();
     runtime.dashboard_keywords = config.dashboard_keyword_list();
     runtime.dashboard_keyword_signature = dashboard_keyword_signature(&runtime.dashboard_keywords);
     let keywords_changed = old_sig != runtime.dashboard_keyword_signature;
 
-    restart_runtime_watcher(runtime)?;
-    refresh_library(runtime, app)?;
-    refresh_organization(&runtime.database, &runtime.library_roots, app)?;
-    refresh_dashboard(runtime, app)?;
-    refresh_downloads(runtime, app);
+    if paths_changed {
+        refresh_dashboard(runtime, app)?;
+    }
 
-    if let Ok(plugin_host) = PluginHost::discover(&runtime.plugins_dir, &config.enabled_plugins) {
+    if config.enabled_plugins != previous.enabled_plugins
+        && let Ok(plugin_host) = PluginHost::discover(&runtime.plugins_dir, &config.enabled_plugins)
+    {
         app.plugins = plugin_host.plugins();
         app.plugin_diagnostics = plugin_host.diagnostics().len();
         runtime.plugin_host = plugin_host;
@@ -7035,6 +7162,8 @@ fn apply_config_update(
     if keywords_changed {
         refresh_dashboard_papers(runtime, senders, app)?;
     }
+
+    runtime.config = config.clone();
 
     Ok(())
 }
@@ -7287,13 +7416,13 @@ fn finalize_download_task(task: &mut DownloadTask) {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, thread, time::Duration};
 
     use chrono::{TimeZone, Utc};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use papr_core::{
         App, AppMode, BookmarkSummary, CollectionSummary, Database, DiscoveryState, DownloadStatus,
-        CitationEntry, CitationSource, DownloadTask, LibraryPaper, Page, PaperNote, Project, ProjectPane, RemotePaper,
+        CitationEntry, CitationSource, Config, DownloadTask, LibraryPaper, Page, PaperNote, Project, ProjectPane, RemotePaper,
     };
     use papr_core::models::AuthorSummary;
 
@@ -7307,8 +7436,42 @@ mod tests {
         update_project_completions, merge_enriched_remote_paper, run_terminal_command,
         sanitize_terminal_output, parse_latex_diagnostics, PaperTarget,
         show_build_for_failed_compilation, show_preview_after_successful_compilation,
-        complete_terminal_command,
+        complete_terminal_command, ConfigFilesystemWatcher,
     };
+
+    #[test]
+    fn config_watcher_observes_direct_and_atomic_saves() -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "papr-config-watch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir)?;
+        let config_file = temp_dir.join("config.toml");
+        fs::write(&config_file, "theme = 'nord'\n")?;
+        let watcher = ConfigFilesystemWatcher::start(&config_file)?;
+
+        fs::write(&config_file, "theme = 'dracula'\n")?;
+        assert!(wait_for_config_event(&watcher));
+
+        let temporary = temp_dir.join(".config.toml.tmp");
+        fs::write(&temporary, "theme = 'light'\n")?;
+        fs::rename(&temporary, &config_file)?;
+        assert!(wait_for_config_event(&watcher));
+
+        fs::remove_dir_all(temp_dir)?;
+        Ok(())
+    }
+
+    fn wait_for_config_event(watcher: &ConfigFilesystemWatcher) -> bool {
+        for _ in 0..20 {
+            if watcher.has_changes() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        false
+    }
 
     #[test]
     fn test_word_wise_and_line_editing_navigation() {
@@ -9996,11 +10159,16 @@ mod tests {
             database,
             database_file,
             config_file: temp_dir.join("papr.toml"),
+            config: Config::default(),
+            config_filesystem_watcher: ConfigFilesystemWatcher::start(&temp_dir.join("papr.toml"))?,
+            config_reload_deadline: None,
+            config_reload_attempts: 0,
             plugins_dir: temp_dir.join("plugins"),
             plugin_host: papr_core::PluginHost::discover(&temp_dir.join("plugins"), &[]).unwrap(),
             project_manager: papr_core::ProjectManager::new(temp_dir.join("projects"))?,
             project_compiler: None,
             default_downloads_dir: temp_dir.clone(),
+            default_projects_dir: temp_dir.join("projects"),
             download_dir,
             pdf_viewer: "xdg-open".into(),
             primary_library_root: temp_dir.clone(),
@@ -10152,11 +10320,16 @@ print(json.dumps({"actions": actions}))
             database,
             database_file,
             config_file: temp_dir.join("papr.toml"),
+            config: Config::default(),
+            config_filesystem_watcher: ConfigFilesystemWatcher::start(&temp_dir.join("papr.toml"))?,
+            config_reload_deadline: None,
+            config_reload_attempts: 0,
             plugins_dir: plugins_dir.clone(),
             plugin_host,
             project_manager: papr_core::ProjectManager::new(temp_dir.join("projects"))?,
             project_compiler: None,
             default_downloads_dir: temp_dir.clone(),
+            default_projects_dir: temp_dir.join("projects"),
             download_dir: temp_dir.clone(),
             pdf_viewer: "xdg-open".into(),
             primary_library_root: temp_dir.clone(),
