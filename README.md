@@ -4,13 +4,13 @@
   <img src="assets/papr.gif" alt="Demo" width="900">
 </p>
 
-**Papr** is a fast, keyboard-first terminal workspace for academic research written in Rust. It unifies arXiv paper discovery, local library organization, reading, note-taking, and even LaTeX manuscript compilation into a single, cohesive interface.
+**Papr** is a fast, keyboard-first terminal workspace for academic research written in Rust. It unifies arXiv paper discovery, local library organization, reading, note-taking, and LaTeX manuscript compilation into a single, cohesive terminal interface.
 
 By merging online arXiv discovery with local file organization, Papr provides a distraction-free, keyboard-driven environment designed for focused academic research. The application is built using Ratatui, Tokio, Reqwest, and SQLite, delivering a lightweight, offline-capable utility that operates entirely under your control.
 
 ---
 
-## 🦀 Why Rust?
+## Why Rust?
 
 Papr is implemented in Rust to meet the performance, reliability, and security demands of a modern academic workflow:
 * **Performance:** Instant application startup and rapid indexing of thousands of local PDFs.
@@ -21,7 +21,7 @@ Papr is implemented in Rust to meet the performance, reliability, and security d
 
 ---
 
-## 🚀 Key Features
+## Key Features
 
 ### Discovery & Organization
 * **Integrated arXiv Search:** Search arXiv by title, author, category, abstract, or DOI. Results load incrementally, can be filtered in place, and retain cached pages for back/forward browsing.
@@ -34,7 +34,7 @@ Papr is implemented in Rust to meet the performance, reliability, and security d
 * **Built-in Terminal PDF Viewer:** View papers directly in your terminal with high-performance smooth scrolling (requires Kitty or Sixel graphics support).
 * **External Viewer Support:** Seamlessly launch PDFs in your preferred desktop viewer (e.g., Zathura, Okular) with reading time tracked.
 * **Markdown Annotation:** Write dedicated notes for each paper with a built-in Vim-inspired editor and live styled preview.
-* **Reading Queue:** Prioritize your backlog with a dedicated, sortable reading queue (reorder with `Shift`/`Ctrl` + `Up`/`Down`).
+* **Reading Queue:** Prioritize your backlog with a dedicated, sortable reading queue.
 
 ### LaTeX Integration
 * **Integrated Writing Workspace:** Create, edit, and compile LaTeX manuscripts directly within the TUI.
@@ -48,7 +48,84 @@ Papr is implemented in Rust to meet the performance, reliability, and security d
 
 ---
 
-## 📦 Requirements
+## Installation Guide
+
+Select your preferred installation method below. Pre-built binaries are available for Linux, macOS, and Windows.
+
+```text
++-----------------------+-----------------------------+-----------------------------------------------------------------------------------------------+
+| Target Platform       | Package Manager / System    | Installation Command                                                                          |
++-----------------------+-----------------------------+-----------------------------------------------------------------------------------------------+
+| Universal Rust        | Cargo (crates.io)           | cargo install papr-tui                                                                        |
+| Arch Linux / Manjaro  | AUR (yay / paru)            | yay -S papr-bin   or   paru -S papr-bin                                                   |
+| Linux / macOS 1-Line  | Shell Script Installer      | curl --proto '=https' --tlsv1.2 -sSf https://github.com/AfrozSaqlain/Papr/releases/latest/download/papr-tui-installer.sh | sh |
+| Windows 1-Line        | PowerShell Installer        | powershell -ExecutionPolicy Bypass -c "irm https://github.com/AfrozSaqlain/Papr/releases/latest/download/papr-tui-installer.ps1 | iex" |
+| Debian / Ubuntu / Mint| APT / dpkg (.deb)           | sudo apt install ./papr_*.deb                                                                 |
+| Fedora / RHEL / CentOS| DNF (.rpm)                  | sudo dnf install ./papr-*.rpm                                                                 |
+| openSUSE              | Zypper (.rpm)               | sudo zypper install ./papr-*.rpm                                                              |
+| macOS                 | Homebrew Tap                | brew tap AfrozSaqlain/tap && brew install papr                                                |
++-----------------------+-----------------------------+-----------------------------------------------------------------------------------------------+
+```
+
+### Method 1: Cargo (crates.io)
+If you already have Rust installed, install Papr directly from crates.io (the crate is published under `papr-tui` and installs the binary command `papr`):
+
+```sh
+cargo install papr-tui
+```
+
+### Method 2: Arch Linux (AUR)
+Arch Linux and Manjaro users can install the pre-compiled binary package from the Arch User Repository:
+
+```sh
+yay -S papr-bin
+```
+or
+```sh
+paru -S papr-bin
+```
+
+### Method 3: 1-Line Shell Script Installer (Linux & macOS)
+Install the latest pre-compiled release binary automatically:
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://github.com/AfrozSaqlain/Papr/releases/latest/download/papr-tui-installer.sh | sh
+```
+
+### Method 4: 1-Line PowerShell Installer (Windows)
+Run PowerShell as user and execute:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/AfrozSaqlain/Papr/releases/latest/download/papr-tui-installer.ps1 | iex"
+```
+
+### Method 5: macOS Homebrew Tap
+Install Papr on macOS using Homebrew:
+
+```sh
+brew tap AfrozSaqlain/tap
+brew install papr
+```
+
+### Method 6: Debian / Ubuntu (`.deb`) & Fedora (`.rpm`) Packages
+Download the `.deb` or `.rpm` package from the [Latest Release Page](https://github.com/AfrozSaqlain/Papr/releases/latest) and install:
+
+* **Debian / Ubuntu / Mint:**
+  ```sh
+  sudo apt install ./papr_*.deb
+  ```
+* **Fedora / RHEL / CentOS:**
+  ```sh
+  sudo dnf install ./papr-*.rpm
+  ```
+* **openSUSE:**
+  ```sh
+  sudo zypper install ./papr-*.rpm
+  ```
+
+---
+
+## Building From Source
 
 ### System Requirements
 * A 64-bit Linux, macOS, or Windows system supported by Rust.
@@ -73,131 +150,51 @@ Papr is implemented in Rust to meet the performance, reliability, and security d
 | **Linux Clipboard** | `wl-clipboard` (Wayland) or `xclip` (X11). Native `arboard` fallback is included if these are unavailable. |
 | **External PDF Viewer** | The configured viewer command and its required desktop environment integration. |
 
-> 💡 **Ready to install?** For platform-specific terminal commands to install all required and optional dependencies on Ubuntu, Fedora, Arch Linux, macOS, or Windows, see **[Step 2 of the Installation Guide](#step-2-install-system-dependencies)** below.
-
----
-
-## 🛠️ Beginner's Installation Guide
-
-If you are new to Rust or terminal tools, follow this step-by-step walkthrough to get Papr up and running in minutes.
-
 ### Step 1: Install Rust & Build Prerequisites
 
-Papr requires the Rust programming language (version 1.85 or newer).
-
-1. **Run the Rust installer:**  
-   Open your terminal application and run:
-   ```sh
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   ```
-   When prompted, press `Enter` to accept the default options. The installer automatically configures your shell startup files (`~/.bashrc`, `~/.zshrc`, or `~/.profile`) so Rust is available whenever you open a terminal in the future.
-
-2. **Activate Rust in your current terminal session:**  
-   To use Rust immediately without closing your active terminal window, load the environment:
-   ```sh
-   source "$HOME/.cargo/env"
-   ```
-
-3. **Verify installation:**  
-   Check that Cargo (Rust's package manager) is installed properly:
-   ```sh
-   cargo --version
-   ```
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+```
 
 ### Step 2: Install System Dependencies
 
-Select your operating system below and run the package command in your terminal:
-
-<details open>
-<summary><b>Ubuntu / Debian</b></summary>
-
-```sh
-sudo apt update && sudo apt install -y build-essential pkg-config xdg-utils poppler-utils wl-clipboard texlive latexmk git
-```
-</details>
-
-<details open>
-<summary><b>Fedora</b></summary>
-
-```sh
-sudo dnf install -y gcc make pkgconf-pkg-config xdg-utils poppler-utils wl-clipboard texlive-scheme-basic latexmk git
-```
-</details>
-
-<details open>
-<summary><b>Arch Linux</b></summary>
-
-```sh
-sudo pacman -S --noconfirm base-devel pkgconf xdg-utils poppler wl-clipboard texlive-basic texlive-latexmk git
-```
-</details>
-
-<details open>
-<summary><b>macOS</b></summary>
-
-First, install the Xcode Command Line Tools:
-```sh
-xcode-select --install
-```
-Then, install the remaining dependencies using Homebrew:
-```sh
-brew install poppler basictex git
-```
-</details>
-
-<details open>
-<summary><b>Windows</b></summary>
-
-Install the **MSVC C++ Build Tools** (or Visual Studio with the *Desktop development with C++* workload) before building with Rust.
-</details>
-
-<details>
-<summary><b>Installing & Setting Kitty as Default Terminal (Optional / Recommended)</b></summary>
-
-Papr's built-in PDF viewer (`pdf_viewer = "internal"`) renders crisp, high-resolution pages using the **Kitty Graphics Protocol**. 
-
-#### 1. Installation
-* **Ubuntu / Debian:** `sudo apt install kitty`
-* **Fedora:** `sudo dnf install kitty`
-* **Arch Linux:** `sudo pacman -S kitty`
-* **macOS:** `brew install --cask kitty`
-
-#### 2. Set Kitty as Default
-* **Debian / Ubuntu:** `sudo update-alternatives --config x-terminal-emulator` (Select `kitty`)
-* **GNOME:** `gsettings set org.gnome.desktop.default-applications.terminal exec 'kitty'`
-* **Shell Variable:** Add `export TERMINAL="kitty"` to your `~/.bashrc` or `~/.zshrc`.
-</details>
-
-### Step 3: Clone & Install Papr
-
-1. **Clone the repository:**
-   ```sh
-   git clone https://github.com/AfrozSaqlain/Papr.git
-   cd Papr
-   ```
-2. **Build and install Papr:**
-   ```sh
-   cargo install --path crates/papr
-   ```
-
-### Step 4: Add Cargo to your PATH
-
-If typing `papr` shows `command not found: papr`, Cargo's binary folder is not in your shell `PATH` yet. Add it permanently:
-
-* **For Bash (`~/.bashrc`):**
+* **Ubuntu / Debian:**
   ```sh
-  echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
-  source ~/.bashrc
+  sudo apt update && sudo apt install -y build-essential pkg-config xdg-utils poppler-utils wl-clipboard texlive latexmk git
   ```
-* **For Zsh (`~/.zshrc`):**
+* **Fedora:**
   ```sh
-  echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
-  source ~/.zshrc
+  sudo dnf install -y gcc make pkgconf-pkg-config xdg-utils poppler-utils wl-clipboard texlive-scheme-basic latexmk git
   ```
+* **Arch Linux:**
+  ```sh
+  sudo pacman -S --noconfirm base-devel pkgconf xdg-utils poppler wl-clipboard texlive-basic texlive-latexmk git
+  ```
+* **macOS:**
+  ```sh
+  xcode-select --install
+  brew install poppler basictex git
+  ```
+
+### Step 3: Clone & Install
+
+```sh
+git clone https://github.com/AfrozSaqlain/Papr.git
+cd Papr
+cargo install --path crates/papr
+```
+
+If typing `papr` shows `command not found`, add `$HOME/.cargo/bin` to your shell `PATH`:
+
+```sh
+echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
 
 ---
 
-## ⚡ Beginner Tutorial & App Workspaces
+## Beginner Tutorial & App Workspaces
 
 Launch Papr by typing its name in your terminal:
 
@@ -231,70 +228,9 @@ Here is a complete breakdown of every section in Papr, what it does, and how to 
 | **Settings** | An interactive settings workspace for preferences, paths, themes, and plugins. | Open it from the sidebar. Its Theme tab previews built-in themes live; General and Paths stage configuration values; Plugins enables or disables discovered plugins. Press `Enter` to apply changes or `Esc` to return to the sidebar. |
 | **Credits** | Displays information about Papr's version, maintainers, open-source license, and core dependencies. | View application version metadata and component attribution. |
 
-### Using the Projects Workspace
-
-Projects is the simplest way to write a LaTeX document in Papr. A project is just a normal folder containing `main.tex`, plus any `.bib`, image, or additional `.tex` files you need.
-
-1. Open **Projects** from the sidebar and press `n` to create a project. Type a name and press `Enter`.
-2. Open the project with `Enter`. The File Tree opens with `main.tex` selected. Press `Enter` again to edit it.
-3. In the editor, press `i` to type. Press `Esc` when you are finished typing, then press `Ctrl+S` to save. Papr asks `latexmk` to compile in the background after changes are saved.
-4. Press `Alt+3` to view the PDF. This is the normal right-hand view. If the first build has not finished yet, it will say that it is waiting for a PDF.
-5. If compilation fails, Papr opens **Build** automatically. Each error or warning is listed separately. Use `Up`/`Down` (or `j`/`k`) to choose one and press `Enter` to jump to its source line.
-6. Press `Alt+4` whenever you want to inspect Build yourself. Press `r` there to switch between the clean diagnostic list and the raw compiler log. Press `Tab` to switch between Build and PDF Preview.
-
-Useful File Tree actions: press `n` to create a file (finish the name with `/` to create a folder), `R` to rename the selected item, and `x` to delete it after confirmation. Use `Left` to go up one folder level.
-
 ---
 
-## 🔧 Troubleshooting & Setup Reference
-
-### Resolving "Command Not Found: papr"
-
-If typing `papr` gives a `command not found` error, Cargo's installation directory (`~/.cargo/bin`) is not listed in your shell's search path (`PATH`).
-
-* **Temporary Fix (Current Session Only):**  
-  Run this command in your active terminal:
-  ```sh
-  export PATH="$HOME/.cargo/bin:$PATH"
-  ```
-* **Permanent Fix:**  
-  Save the search path into your shell configuration so it loads automatically in every new terminal window:
-  * For **Bash** users:
-    ```sh
-    echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
-    source ~/.bashrc
-    ```
-  * For **Zsh** users (default on macOS):
-    ```sh
-    echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
-    source ~/.zshrc
-    ```
-
-### Configuring External PDF Viewers
-
-If your terminal does not support Kitty/Sixel image graphics, Papr's built-in viewer will not render PDF pages. You can easily configure Papr to use your operating system's default graphical PDF viewer instead:
-
-1. **Locate your configuration file:**
-   ```sh
-   papr paths
-   ```
-2. **Open `config.toml` in your preferred text editor** (e.g. `nano ~/.config/papr/config.toml`).
-3. **Set your preferred viewer command:**
-   * **Linux:** `pdf_viewer = "xdg-open"`
-   * **macOS:** `pdf_viewer = "open"`
-   * **Windows:** `pdf_viewer = "cmd /C start msedge \"\""`
-
-### Locating Data, Database & Configuration Files
-
-To view resolved paths for your configuration file, local SQLite database, downloaded papers, and projects directory, execute:
-
-```sh
-papr paths
-```
-
----
-
-## ⚙️ Configuration
+## Configuration
 
 Papr generates a default configuration file (`config.toml`) on its first launch. You can find all resolved paths by running:
 ```sh
@@ -308,13 +244,11 @@ papr paths
 | **macOS** | `~/Library/Application Support/papr/config.toml` | `~/Library/Application Support/papr/` | `~/Library/Application Support/papr/projects/` |
 | **Windows** | `%APPDATA%\papr\config.toml` | `%APPDATA%\papr\` | `%APPDATA%\papr\projects\` |
 
-`papr paths` prints the exact configuration file, SQLite database, downloads, plugins, and projects paths resolved on your machine.
-
 ### Example `config.toml`
 ```toml
 theme = "catppuccin-mocha"
-startup_page = "dashboard" # dashboard, discover, library, reading_queue, projects, and the other sidebar pages
-pdf_viewer = "zathura {path}" # Or "internal" for the terminal viewer; omit {path} to append the PDF path
+startup_page = "dashboard" # dashboard, discover, library, reading_queue, projects, etc.
+pdf_viewer = "zathura {path}" # Or "internal" for terminal viewer
 
 # Paths to recursively scan for local PDFs
 library_folders = [
@@ -334,18 +268,9 @@ dashboard_keywords = "machine learning, gravitational waves, astrophysics"
 enabled_plugins = []
 ```
 
-All eight keys shown above are the current configuration surface. On first launch Papr writes this file with `library_folders` and `download_path` set to its default downloads directory, `projects_directory` set to its default projects directory, and a platform default viewer (`xdg-open` on Linux, `open` on macOS, or `cmd /C start msedge \"\"` on Windows). Existing configurations that lack `projects_directory` are upgraded automatically. `dashboard_keywords` is case-insensitive, whitespace-normalized, and deduplicated before Papr fetches the daily feed.
-
-The Settings workspace can edit built-in themes, startup page, PDF viewer, dashboard interests, paths, and the enabled-plugin list without leaving Papr. For a custom theme file, edit `config.toml` directly.
-
-### PDF Viewers & Reading Time
-To track reading sessions and statistics, Papr must be able to track the viewer's process.
-* **Supported (tracks time):** `"internal"`, `"zathura {path}"`, `"okular {path}"`, `"evince {path}"`, `"C:\\Path\\To\\SumatraPDF.exe {path}"`.
-* **Unsupported (always reports 0s):** System launchers like `xdg-open`, macOS `open`, or background forks.
-
 ---
 
-## ⌨️ Keyboard Reference
+## Keyboard Reference
 
 ### Global Navigation
 | Key | Action |
@@ -357,46 +282,11 @@ To track reading sessions and statistics, Papr must be able to track the viewer'
 | `h` / `Esc` | Go back to previous screen |
 | `/` | Start arXiv search |
 | `Ctrl+B` | Open Browse Papr (Fast navigation command palette) |
-| `Ctrl+T` | Open terminal command palette (`Enter` runs, `Tab` lists/cycles command or path completions, `Esc` closes) |
+| `Ctrl+T` | Open terminal command palette (`Enter` runs, `Tab` lists/cycles completions) |
 | `?` | Toggle help |
 | `q` | Exit the application outside text input |
 
-### Discovery & Dashboard
-| Key | Action |
-| :--- | :--- |
-| `Enter` | Open details page for selected search result |
-| `Ctrl+Right` / `Ctrl+Left` | Browse next/previous page |
-| `d` | Download PDF |
-| `c` | Copy citation |
-| `o` | Open paper webpage in default browser |
-| `r` | Refresh/retry search |
-| `>` | Filter the loaded results |
-
-### Paper Management (Library, Queue, Groups, Bookmarks, Notes, Downloads)
-| Key | Action |
-| :--- | :--- |
-| `Enter` / `l` / `Right` | Open PDF |
-| `r` | Scan folders / retry download |
-| `n` | Edit Markdown notes |
-| `g` | Move PDF to a group folder |
-| `B` | Toggle bookmark |
-| `>` | Toggle local search |
-| `R` | Rename PDF or group |
-| `x` | Delete PDF or group |
-| `c` | Copy citation |
-| `o` | Open the paper's arXiv page (when available) |
-| `a` / `u` | Toggle the reading queue / mark a paper unread |
-
-### LaTeX Workspace
-
-#### Project List / Creation
-| Key | Action |
-| :--- | :--- |
-| `n` | Create a new LaTeX project |
-| `r` | Refresh projects list |
-| `R` / `x` | Rename / Delete selected project |
-
-#### Workspace Panes (Focused via `Alt` + Number)
+### Workspace Panes in Projects (`Alt` + Number)
 | Key | Action |
 | :--- | :--- |
 | `Alt+1` | Focus **File Tree** pane (navigate files, press `Enter` to open) |
@@ -404,196 +294,17 @@ To track reading sessions and statistics, Papr must be able to track the viewer'
 | `Alt+3` | Focus **PDF Preview** pane (scroll compiled PDF) |
 | `Alt+4` | Focus **Build** pane (view structured compiler diagnostics) |
 
-The PDF Preview is shown by default on the right. `Tab` switches the focused right-hand panel between PDF Preview and Build. Build opens automatically only when compilation fails; successful builds keep the PDF Preview visible even when LaTeX reports warnings.
-
-#### File Tree (`Alt+1`)
-| Key | Action |
-| :--- | :--- |
-| `Enter` / `Right` | Open a source file or enter the selected folder |
-| `Left` | Return to the parent folder; exit the project at its root |
-| `n` | Create a file; end the name with `/` to create a folder |
-| `R` | Rename the selected file or folder |
-| `x` | Confirm then delete the selected file or folder |
-| `Esc` | Return to the project list from the project root |
-
-The File Tree shows folders, LaTeX/project source files, and every image format supported by Papr's image library. When a project opens, `main.tex` is selected by default.
-
-#### Editor Mode (`Alt+2`)
-| Key | Action |
-| :--- | :--- |
-| `i` | Enter Insert mode |
-| `Esc` | Return to the File Tree |
-| `Ctrl+S` | Save file changes to disk |
-| `Ctrl+Shift+V` | Paste clipboard text exactly into an open `.tex` or `.bib` file and save it |
-| `h`/`j`/`k`/`l`, `w`/`b`, `0`/`$`, `gg`/`G` | Vim motions in Normal mode |
-| `V`, `d`, `u`, `Ctrl+r` | Visual-line selection, delete selection, undo, redo |
-
-#### Build (`Alt+4`)
-| Key | Action |
-| :--- | :--- |
-| `Up`/`Down` or `j`/`k` | Select a diagnostic |
-| `Enter` | Open the diagnostic's source file at its reported line |
-| `r` | Toggle structured diagnostics and raw compiler output |
-| `Tab` / `Alt+3` | Return to PDF Preview |
-
-### Internal PDF Viewer & Markdown Editor
-* **PDF Viewer:** `Esc`/`q` to exit; use `j`/`k`, `Up`/`Down`, `PageDown`/`PageUp`, or the mouse wheel to scroll.
-* **Markdown Editor:** `Tab` toggles styled preview, `Esc` saves and exits.
-
-### Settings Workspace
-* **Tabs:** `Left`/`Right` switch among Theme, General, Paths, and Plugins when the tab bar is focused; `Down`/`j`/`Enter` enters a tab. `Left` on Theme returns to Navigation instead of wrapping.
-* **Theme:** `j`/`k` previews built-in themes live; `Enter` applies the staged settings.
-* **Lists:** In dashboard keywords and path lists, `a` adds, `d`/`Delete` removes, and `K`/`J` reorders entries. In the Plugins tab, `Space` toggles the selected plugin.
-* **Apply and leave:** `Enter` writes and applies all staged changes. `Esc` stops editing a field, or returns focus to the sidebar when no field is being edited.
-
 ---
 
-## 🎨 Themes
+## Themes
 
 Papr supports over a dozen built-in themes out of the box, including:
 `catppuccin-mocha` (default), `catppuccin-macchiato`, `catppuccin-frappe`, `catppuccin-latte`, `tokyo-night`, `gruvbox`, `nord`, `dracula`, `light`, `rose-pink-dark`, `rose-pink-light`, `everforest`, `kanagawa`, `one-dark`, `cyberpunk`, `ember`, `verdant`, `lavender`, and `parchment`.
 
-You can also define custom themes. Save a TOML file with color hex codes and point the `theme` configuration to its absolute path:
-```toml
-theme = "/home/user/.config/papr/my-theme.toml"
-```
-
 ---
 
-## 🧩 Plugins
+## Running with Docker
 
-Papr supports **process-isolated plugins** written in any language (Python, Node.js, Bash, or an executable). A bundle lives under the plugins directory printed by `papr paths`, contains `plugin.toml`, and exchanges one JSON request and response over standard input/output. A plugin must be explicitly named in `enabled_plugins` before Papr runs it.
-
-Papr creates the built-in **auto-tagger** bundle when the plugins directory has no plugin bundles. It is discovered but disabled by default. The Settings → Plugins tab, `enabled_plugins` in `config.toml`, and `papr plugins` all show its status and any discovery diagnostics.
-
-Papr currently dispatches lifecycle requests for `paper_imported`, `paper_downloaded`, and `paper_opened`. Plugins can return `notify` and `add_to_collection` actions; the latter assigns the contextual local paper to a Group. The manifest also declares the protocol capabilities (`metadata-provider`, `commands`, `activity-events`, and `read-paper-metadata`). See the [plugin protocol reference](docs/PLUGINS.md) for the manifest and JSON contract.
-
-<details>
-<summary><b>Click to view the Built-In Python plugin (Auto Tagger)</b></summary>
-
-This plugin categorizes newly imported or downloaded papers from their titles. Its supplied rules create **Machine Learning**, **Quantum Computing**, or **Computer Systems & Networking** groups; the first matching rule wins. Edit `RULES` in the generated script to tailor it.
-
-**1. Plugin Location**
-Papr automatically populates built-in plugins at `~/.local/share/papr/plugins/auto-tagger`:
-```bash
-cd ~/.local/share/papr/plugins/auto-tagger
-```
-
-**2. Manifest (`plugin.toml`)**
-```toml
-id = "auto-tagger"
-name = "Auto Tagger"
-version = "1.0.0"
-api_version = 1
-description = "Automatically categorizes papers based on keyword rules"
-executable = "tagger.py"
-capabilities = ["activity-events", "read-paper-metadata"]
-```
-
-**3. Plugin Code (`tagger.py`)**
-```python
-#!/usr/bin/env python3
-"""
-Auto Tagger Plugin for Papr
----------------------------
-User Customization:
-To add your own groups and filter rules, edit the `RULES` list below.
-Each rule consists of:
-  - "group": The name of the group in Papr
-  - "keywords": Keyword, keyphrase, or regex patterns matched against titles.
-"""
-
-import json
-import re
-import sys
-
-RULES = [
-    {
-        "group": "Machine Learning",
-        "keywords": [
-            r"\bneural networks?\b",
-            r"\bdeep learning\b",
-            r"\bmachine learning\b",
-            r"\btransformers?\b",
-            r"\bllms?\b",
-            r"\breinforcement learning\b",
-            r"\bartificial intelligence\b",
-        ],
-    },
-    {
-        "group": "Quantum Computing",
-        "keywords": [
-            r"\bquantum computing\b",
-            r"\bqubits?\b",
-            r"\bquantum algorithms?\b",
-        ],
-    },
-    {
-        "group": "Computer Systems & Networking",
-        "keywords": [
-            r"\bdistributed systems?\b",
-            r"\boperating systems?\b",
-            r"\bcloud computing\b",
-            r"\bcomputer networks?\b",
-        ],
-    },
-]
-
-def main():
-    try:
-        request = json.load(sys.stdin)
-    except Exception:
-        sys.exit(1)
-
-    response = {"actions": []}
-
-    event = request.get("event")
-    if event in ("paper_imported", "paper_downloaded"):
-        paper = request.get("context", {}).get("paper", {})
-        title = paper.get("title", "")
-        if not title:
-            print(json.dumps(response))
-            return
-
-        for rule in RULES:
-            group_name = rule["group"]
-            keywords = rule.get("keywords", [])
-            if any(re.search(pattern, title, re.IGNORECASE) for pattern in keywords):
-                response["actions"].append({
-                    "type": "add_to_collection",
-                    "name": group_name
-                })
-                response["actions"].append({
-                    "type": "notify",
-                    "message": f"Added '{title[:30]}...' to {group_name}"
-                })
-                break  # Stop evaluating further rules once assigned to a group
-
-    print(json.dumps(response))
-
-if __name__ == "__main__":
-    main()
-```
-Make it executable: `chmod +x tagger.py`
-
-**4. Enabling the Plugin**
-In your `config.toml`, add:
-```toml
-enabled_plugins = ["auto-tagger"]
-```
-*(Plugins are disabled by default until added to `enabled_plugins`)*
-</details>
-
----
-
-## 🐳 Running with Docker
-
-The provided Dockerfile builds Papr with a disposable Rust stage and produces a lightweight runtime image that comes pre-bundled with LaTeX compilation tools (`latexmk` + TeX Live), Poppler PDF tools, Linux clipboard integration, and Zathura for optional external PDF viewing.
-
-> [!IMPORTANT]
-> Papr still requires an interactive terminal (`-it`). The built-in PDF viewer requires the **host terminal emulator** to support Kitty or Sixel graphics.
-
-### Build the image
 ```sh
 docker build \
   --build-arg UID="$(id -u)" \
@@ -602,13 +313,7 @@ docker build \
   .
 ```
 
-### First run and persistent state
-Create persistent host directories once:
-```sh
-mkdir -p .papr/config .papr/data papers projects
-```
-
-Run Papr interactively, binding local state:
+Run Papr interactively:
 ```sh
 docker run --rm -it \
   --name papr \
@@ -619,71 +324,29 @@ docker run --rm -it \
   papr:latest
 ```
 
-Set the container paths in `.papr/config/config.toml` (e.g. `download_path = "/papers"`).
-
-<details>
-<summary><b>Click to view Advanced GUI Viewer Setup for Docker (Wayland / X11)</b></summary>
-
-If your terminal does not support Kitty/Sixel, you can use the bundled Zathura desktop viewer by passing your host's display socket into the container. Set `pdf_viewer = "zathura {path}"` in `config.toml`.
-
-**Wayland (Linux)**
-```sh
-docker run --rm -it \
-  --name papr \
-  --env WAYLAND_DISPLAY \
-  --env XDG_RUNTIME_DIR="/run/user/$(id -u)" \
-  --mount "type=bind,src=/run/user/$(id -u),dst=/run/user/$(id -u)" \
-  --mount "type=bind,src=$PWD/.papr/config,dst=/home/papr/.config/papr" \
-  --mount "type=bind,src=$PWD/.papr/data,dst=/home/papr/.local/share/papr" \
-  --mount "type=bind,src=$PWD/papers,dst=/papers" \
-  papr:latest
-```
-
-**X11 (Linux)**
-```sh
-xhost +si:localuser:"$(id -un)"
-docker run --rm -it \
-  --name papr \
-  --env DISPLAY \
-  --mount type=bind,src=/tmp/.X11-unix,dst=/tmp/.X11-unix,readonly \
-  --mount "type=bind,src=$PWD/.papr/config,dst=/home/papr/.config/papr" \
-  --mount "type=bind,src=$PWD/.papr/data,dst=/home/papr/.local/share/papr" \
-  --mount "type=bind,src=$PWD/papers,dst=/papers" \
-  papr:latest
-xhost -si:localuser:"$(id -un)"
-```
-</details>
-
 ---
 
-## 🏗️ Architecture & CLI Utilities
+## Architecture & CLI Utilities
 
 Papr is split into two core crates:
 * **`papr-core`:** Handles database migrations, SQLite queries, configuration loading, downloading, indexing local directories, and plugin execution.
 * **`papr`:** Handles the terminal UI loop (Ratatui + Crossterm), input handling, async orchestration, and launching external viewers.
 
 **CLI Tools:**
-Run headless tasks right from the terminal:
 ```sh
 papr                         # Start the TUI
 papr paths                   # Print where configs, databases, and folders reside
 papr index                   # Scan library folders and index new files
 papr completions <SHELL>     # Generate completions (bash, zsh, fish)
 papr plugins                 # Check discovered plugins and validation diagnostics
-papr plugin <ID> <EVENT>     # Invoke an enabled plugin with an empty context (use --timeout <seconds> to override 10s)
 ```
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
-Contributions are welcome! If you would like to help improve Papr, keep these guidelines in mind:
-1. Keep modifications scoped to the appropriate crate (`papr-core` or `papr`).
-2. Avoid `unwrap`, `expect`, deliberate panics, or `unsafe` code in production paths.
-3. Database updates require append-only migrations and corresponding tests.
-4. Ratatui render functions must remain strictly pure (no external file or database reads/writes during rendering).
+Contributions are welcome! Before submitting a pull request, ensure all checks pass:
 
-Before submitting a pull request, ensure all checks pass:
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -693,6 +356,6 @@ cargo doc --workspace --no-deps
 
 ---
 
-## 📄 License
+## License
 
 Papr is open-source software distributed under the [MIT License](LICENSE).
