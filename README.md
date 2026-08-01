@@ -6,7 +6,7 @@
 
 Papr is a fast, keyboard-first terminal workspace I built for academic research. It brings together arXiv paper discovery, local PDF library management, reading, markdown note-taking, automatic author-based paper organization, and LaTeX manuscript editing into one terminal interface.
 
-Instead of context-switching between web browsers, reference managers, PDF viewers, and text editors, Papr merges online discovery with local file organization into a distraction-free environment. Under the hood, it's built with Rust using Ratatui, Tokio, Reqwest, and SQLite—giving you a lightweight tool that runs entirely offline and keeps all your data under your local control.
+Instead of context-switching between web browsers, reference managers, PDF viewers, and text editors, Papr merges online discovery with local file organization into a distraction-free environment. Under the hood, it's built with Rust using Ratatui, Tokio, Reqwest, and SQLite, giving you a lightweight tool that runs entirely offline and keeps all your data under your local control.
 
 ---
 
@@ -17,7 +17,7 @@ I wrote Papr in Rust because an academic research workspace needs to be fast, re
 * **Smooth Async Concurrency:** Powered by Tokio's async runtime, Papr downloads papers, watches filesystem changes, and handles network calls in the background without freezing the UI.
 * **Stability & Memory Safety:** Rust's strict safety guarantees eliminate memory leaks, race conditions, and unexpected crashes mid-session.
 * **Reliable Local Storage:** Everything is stored locally in SQLite with Write-Ahead Logging (WAL) enabled, ensuring fast, ACID-compliant database operations that won't corrupt your library.
-* **Zero-Overhead Single Binary:** Compiles down to a single, self-contained binary with minimal CPU and memory usage—no heavy runtimes or electron bloat.
+* **Zero-Overhead Single Binary:** Compiles down to a single, self-contained binary with minimal CPU and memory usage (no heavy runtimes or Electron bloat).
 
 ---
 
@@ -429,7 +429,7 @@ Shows folders, source files, and supported image files.
 | `Alt+3` | focus PDF preview |
 | `Alt+4` | focus compiler output |
 
-### Project Editor — Normal
+### Project Editor (Normal Mode)
 | Key | Action |
 | :--- | :--- |
 | `i` | enter Insert mode |
