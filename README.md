@@ -116,7 +116,7 @@ Select your preferred installation method below. Pre-built binaries are availabl
 Color coding:
 
 * ✳️ = Personally tested and verified.
-* ❌  = Not yet personally tested (expected to work, but unverified).
+* ❌  = Not yet personally tested.
 
 ## ✳️ Cargo (crates.io)
 If you already have Rust installed, install Papr directly from crates.io (the crate is published under `papr-tui` and installs the binary command `papr`):
