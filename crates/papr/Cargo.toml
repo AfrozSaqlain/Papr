@@ -30,3 +30,21 @@ walkdir.workspace = true
 
 [lints]
 workspace = true
+
+[package.metadata.deb]
+maintainer = "Afroz Saqlain <sqn3680@gmail.com>, Tanveer <tanveer642003@gmail.com>"
+copyright = "2026, Afroz Saqlain <sqn3680@gmail.com>"
+extended-description = "A keyboard-first terminal workspace for academic papers."
+section = "utility"
+priority = "optional"
+assets = [
+    ["target/release/papr", "usr/bin/papr", "755"],
+    ["README.md", "usr/share/doc/papr/README.md", "644"],
+    ["LICENSE", "usr/share/licenses/papr/LICENSE", "644"]
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/papr", dest = "/usr/bin/papr", mode = "755" },
+    { source = "LICENSE", dest = "/usr/share/licenses/papr/LICENSE", mode = "644" }
+]
