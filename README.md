@@ -4,7 +4,7 @@
   <img src="assets/papr.gif" alt="Demo" width="900">
 </p>
 
-**Papr** is a fast, keyboard-first terminal workspace for academic research written in Rust. It unifies arXiv paper discovery, local library organization, reading, note-taking, and LaTeX manuscript compilation into a single, cohesive terminal interface.
+**Papr** is a fast, keyboard-first terminal workspace for academic research written in Rust. It unifies arXiv paper discovery, local library organization, reading, note-taking, automatic author-based paper organization, and LaTeX manuscript compilation into a single, cohesive terminal interface.
 
 By merging online arXiv discovery with local file organization, Papr provides a distraction-free, keyboard-driven environment designed for focused academic research. The application is built using Ratatui, Tokio, Reqwest, and SQLite, delivering a lightweight, offline-capable utility that operates entirely under your control.
 
@@ -24,22 +24,22 @@ Papr is implemented in Rust to meet the performance, reliability, and security d
 ## Key Features
 
 ### Discovery & Organization
+* **Daily Research Dashboard:** Monitor reading times, streaks, disk usage, and a cached daily arXiv recommendation feed. Use normalized, comma-separated interests to tailor the feed; it remains available offline after it has been cached.
 * **Integrated arXiv Search:** Search arXiv by title, author, category, abstract, or DOI. Results load incrementally, can be filtered in place, and retain cached pages for back/forward browsing.
 * **Automatic Title Sanitization:** Background downloads are saved with clean, cross-platform filenames rather than opaque arXiv identifiers.
 * **Smart Deduplication:** Resolves database conflicts (arXiv ID, file path, DOI) by automatically merging records (preserving notes, bookmarks, and progress) during downloads and scans.
 * **Workspace Syncing:** Move papers into groups within the TUI to automatically reorganize files on your disk.
-* **Daily Research Dashboard:** Monitor reading times, streaks, disk usage, and a cached daily arXiv recommendation feed. Use normalized, comma-separated interests to tailor the feed; it remains available offline after it has been cached.
 
 ### Reading & Note-taking
 * **Built-in Terminal PDF Viewer:** View papers directly in your terminal with high-performance smooth scrolling (requires Kitty or Sixel graphics support).
-* **External Viewer Support:** Seamlessly launch PDFs in your preferred desktop viewer (e.g., Zathura, Okular) with reading time tracked.
+* **External Viewer Support:** Seamlessly launch PDFs in your preferred desktop viewer (e.g., Zathura, Okular) with reading time tracked, or your browser.
 * **Markdown Annotation:** Write dedicated notes for each paper with a built-in Vim-inspired editor and live styled preview.
 * **Reading Queue:** Prioritize your backlog with a dedicated, sortable reading queue.
 
 ### LaTeX Integration
 * **Integrated Writing Workspace:** Create, edit, and compile LaTeX manuscripts directly within the TUI.
 * **Real-time Compilation:** Background compilation via `latexmk`.
-* **PDF-first Layout:** Keep the live PDF preview beside the editor; open Build only when you need diagnostics.
+* **PDF-first Layout:** Keep the live PDF preview beside the editor; open Build logs only when you need diagnostics.
 * **Actionable Diagnostics:** Build output groups LaTeX errors and warnings with source locations, code snippets, hints, and a raw-log view.
 * **Project Editing & Files:** Use Vim-style editing, create nested files or folders, rename project entries, and navigate the project tree without leaving Papr.
 
