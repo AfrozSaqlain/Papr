@@ -52,8 +52,48 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Publish to AUR
-        uses: ksbrw/aur-release-action@v1
-        with:
-          package_name: papr-bin
-          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+      
+      - name: Install SSH key & setup Known Hosts
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur_key
+          chmod 600 ~/.ssh/aur_key
+          ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts
+
+      - name: Clone & Update AUR Package
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Extract version without 'v' prefix (e.g. 0.1.0 from v0.1.0)
+          VERSION="${GITHUB_REF_NAME#v}"
+          
+          # Clone AUR package repository over SSH
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git clone ssh://aur@aur.archlinux.org/papr-bin.git aur-repo || true
+          
+          if [ -d "aur-repo" ]; then
+            cd aur-repo
+            
+            # Fetch latest tarball from GitHub Releases to compute exact SHA-256
+            TARBALL_URL="https://github.com/AfrozSaqlain/Papr/releases/download/${GITHUB_REF_NAME}/papr-x86_64-unknown-linux-gnu.tar.gz"
+            SHA256=$(curl -sL "$TARBALL_URL" | sha256sum | awk '{print $1}')
+            
+            if [ -n "$SHA256" ]; then
+              sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
+              sed -i "s/sha256sums_x86_64=.*/sha256sums_x86_64=('${SHA256}')/" PKGBUILD
+              sed -i "s/pkgver = .*/pkgver = ${VERSION}/" .SRCINFO
+              sed -i "s/sha256sums_x86_64 = .*/sha256sums_x86_64 = ${SHA256}/" .SRCINFO
+              
+              if ! git diff --quiet; then
+                git add PKGBUILD .SRCINFO
+                git commit -m "Update to ${VERSION}"
+                GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin master
+              else
+                echo "No changes to commit for AUR."
+              fi
+            fi
+          else
+            echo "AUR repository papr-bin not initialized yet. Run Chapter 4 initial setup first."
+          fi
