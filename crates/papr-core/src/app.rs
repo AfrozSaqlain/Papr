@@ -1269,23 +1269,22 @@ impl App {
     /// Get dependencies parsed from Cargo.toml.
     pub fn get_dependencies(&self) -> Vec<(String, String)> {
         let mut deps = Vec::new();
-        if let Ok(value) = toml::from_str::<toml::Value>(include_str!("../../../Cargo.toml")) {
-            if let Some(workspace) = value.get("workspace") {
-                if let Some(dependencies) = workspace.get("dependencies") {
-                    if let Some(table) = dependencies.as_table() {
-                        for (k, v) in table {
-                            let version = match v {
-                                toml::Value::String(s) => s.clone(),
-                                toml::Value::Table(t) => {
-                                    t.get("version")
-                                        .and_then(|ver| ver.as_str())
-                                        .unwrap_or("")
-                                        .to_string()
-                                }
-                                _ => "".to_string(),
-                            };
-                            deps.push((k.clone(), version));
-                        }
+        if let Ok(value) = toml::from_str::<toml::Value>(include_str!("../Cargo.toml")) {
+            let deps_node = value.get("dependencies").or_else(|| value.get("workspace").and_then(|w| w.get("dependencies")));
+            if let Some(dependencies) = deps_node {
+                if let Some(table) = dependencies.as_table() {
+                    for (k, v) in table {
+                        let version = match v {
+                            toml::Value::String(s) => s.clone(),
+                            toml::Value::Table(t) => {
+                                t.get("version")
+                                    .and_then(|ver| ver.as_str())
+                                    .unwrap_or("")
+                                    .to_string()
+                            }
+                            _ => "".to_string(),
+                        };
+                        deps.push((k.clone(), version));
                     }
                 }
             }
