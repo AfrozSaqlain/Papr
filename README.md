@@ -99,14 +99,14 @@ Color coding:
 * Very light blue = Personally tested and verified.
 * Very light red = Not yet personally tested (expected to work, but unverified).
 
-<h3 style="color:#dbeafe;">Cargo (crates.io)</h3>
+## 🟦 Cargo (crates.io)
 If you already have Rust installed, install Papr directly from crates.io (the crate is published under `papr-tui` and installs the binary command `papr`):
 
 ```sh
 cargo install papr-tui
 ```
 
-<h3 style="color:#dbeafe;">Arch Linux (AUR)</h3>
+## 🟦 Arch Linux (AUR)
 Arch Linux and Manjaro users can install the pre-compiled binary package from the Arch User Repository:
 
 ```sh
@@ -117,7 +117,7 @@ or
 paru -S papr-bin
 ```
 
-<h3 style="color:#dbeafe;">macOS Homebrew Tap</h3>
+## 🟦 macOS Homebrew Tap
 Install Papr on macOS using Homebrew:
 
 ```sh
@@ -126,14 +126,14 @@ brew trust AfrozSaqlain/tap
 brew install papr
 ```
 
-<h3 style="color:#fee2e2;">Shell Script Installer (Linux & macOS)</h3>
+## 🟥 Shell Script Installer (Linux & macOS)
 Install the latest pre-compiled release binary automatically:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://github.com/AfrozSaqlain/Papr/releases/latest/download/papr-tui-installer.sh | sh
 ```
 
-<h3 style="color:#fee2e2;">PowerShell Installer (Windows)</h3>
+## 🟥 PowerShell Installer (Windows)
 Run PowerShell as user and execute:
 
 ```powershell
@@ -141,7 +141,7 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/AfrozSaqlain/Papr/
 ```
 
 
-<h3 style="color:#fee2e2;">Debian / Ubuntu (.deb) & Fedora (.rpm) Packages</h3>
+## 🟥 Debian / Ubuntu (.deb) & Fedora (.rpm) Packages
 Download the `.deb` or `.rpm` package from the [Latest Release Page](https://github.com/AfrozSaqlain/Papr/releases/latest) and install:
 
 * **Debian / Ubuntu / Mint:**
