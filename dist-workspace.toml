@@ -9,6 +9,8 @@ cargo-dist-version = "0.32.0"
 ci = "github"
 # The installers to generate for each app
 installers = ["shell", "powershell", "homebrew"]
+# The publish jobs to run in CI
+publish-jobs = ["homebrew"]
 # Homebrew tap repository settings
 tap = "AfrozSaqlain/homebrew-tap"
 formula = "papr"

@@ -4,6 +4,7 @@ description = "A keyboard-first terminal workspace for academic papers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 

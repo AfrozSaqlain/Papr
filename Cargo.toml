@@ -6,6 +6,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+homepage = "https://github.com/AfrozSaqlain/Papr"
 repository = "https://github.com/AfrozSaqlain/Papr"
 rust-version = "1.85"
 
