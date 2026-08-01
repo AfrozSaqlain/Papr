@@ -1,11 +1,15 @@
 [package]
-name = "papr"
+name = "papr-tui"
 description = "A keyboard-first terminal workspace for academic papers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+
+[[bin]]
+name = "papr"
+path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true

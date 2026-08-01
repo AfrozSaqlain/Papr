@@ -1872,7 +1872,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
 
 [[package]]
-name = "papr"
+name = "papr-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "directories",
+ "dunce",
+ "futures-util",
+ "notify",
+ "quick-xml 0.38.4",
+ "ratatui",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "url",
+ "walkdir",
+]
+
+[[package]]
+name = "papr-tui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1893,29 +1916,6 @@ dependencies = [
  "syntect",
  "tokio",
  "toml",
- "walkdir",
-]
-
-[[package]]
-name = "papr-core"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "directories",
- "dunce",
- "futures-util",
- "notify",
- "quick-xml 0.38.4",
- "ratatui",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "url",
  "walkdir",
 ]
 
