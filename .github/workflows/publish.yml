@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name to publish (e.g. v0.1.0)'
+        required: true
+        default: 'v0.1.0'
 
 jobs:
   publish-crates-io:
@@ -11,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref }}
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Publish Crates to Crates.io Idempotently
@@ -60,6 +68,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref }}
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-deb and cargo-generate-rpm
@@ -75,6 +85,7 @@ jobs:
       - name: Upload DEB & RPM to GitHub Release Assets
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: ${{ inputs.tag_name || github.ref_name }}
           files: |
             target/debian/*.deb
             target/generate-rpm/*.rpm
@@ -82,8 +93,12 @@ jobs:
   publish-aur:
     name: Publish to Arch Linux AUR
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref }}
       
       - name: Install SSH key & setup Known Hosts
         env:
@@ -95,26 +110,26 @@ jobs:
           ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts
 
       - name: Clone & Update AUR Package
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
+          TAG_NAME="${{ inputs.tag_name || github.ref_name }}"
           # Extract version without 'v' prefix (e.g. 0.1.0 from v0.1.0)
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${TAG_NAME#v}"
           
-          echo "Waiting for GitHub Release and Linux x86_64 tarball for ${GITHUB_REF_NAME}..."
-          TARBALL_URL=""
+          echo "Waiting for GitHub Release and Linux x86_64 tarball asset for ${TAG_NAME}..."
           SHA256=""
 
           for i in {1..30}; do
-            RELEASE_JSON=$(curl -s -H "User-Agent: PaprCI (sqn3680@gmail.com)" "https://api.github.com/repos/AfrozSaqlain/Papr/releases/tags/${GITHUB_REF_NAME}")
-            TARBALL_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[]? | select(.name | endswith("x86_64-unknown-linux-gnu.tar.gz")) | .browser_download_url' | head -n 1)
-            
-            if [ -n "$TARBALL_URL" ] && [ "$TARBALL_URL" != "null" ]; then
-              echo "Found release asset: ${TARBALL_URL}"
-              SHA256=$(curl -sL "$TARBALL_URL" | sha256sum | awk '{print $1}')
-              if [ -n "$SHA256" ]; then
-                echo "Computed SHA256: ${SHA256}"
+            rm -rf /tmp/aur-asset && mkdir -p /tmp/aur-asset
+            if gh release download "$TAG_NAME" --pattern "*x86_64-unknown-linux-gnu.tar.gz" --dir /tmp/aur-asset 2>/dev/null; then
+              TARBALL=$(find /tmp/aur-asset -type f -name "*x86_64-unknown-linux-gnu.tar.gz" | head -n 1)
+              if [ -n "$TARBALL" ] && [ -f "$TARBALL" ]; then
+                SHA256=$(sha256sum "$TARBALL" | awk '{print $1}')
+                echo "Downloaded release asset successfully! SHA256: ${SHA256}"
                 break
               fi
             fi
@@ -133,27 +148,20 @@ jobs:
           if [ -d "aur-repo" ]; then
             cd aur-repo
             
-            if [ ! -f "PKGBUILD" ]; then
-              echo "PKGBUILD not found. Creating initial PKGBUILD and .SRCINFO for papr-bin..."
-              echo "IyBNYWludGFpbmVyOiBBZnJveiBTYXFsYWluIDxzcW4zNjgwQGdtYWlsLmNvbT4KcGtnbmFtZT1wYXByLWJpbgpfcGtnbmFtZT1wYXByCnBrZ3Zlcj1WRVJTSU9OX1BMQUNFSE9MREVSCnBrZ3JlbD0xCnBrZ2Rlc2M9IkEga2V5Ym9hcmQtZmlyc3QgdGVybWluYWwgd29ya3NwYWNlIGZvciBhY2FkZW1pYyBwYXBlcnMiCmFyY2g9KCJ4ODZfNjQiKQp1cmw9Imh0dHBzOi8vZ2l0aHViLmNvbS9BZnJvelNhcWxhaW4vUGFwciIKbGljZW5zZT0oIk1JVCIpCnByb3ZpZGVzPSgiJHtfcGtnbmFtZX0iKQpjb25mbGljdHM9KCIke19wa2duYW1lfSIpCnNvdXJjZV94ODZfNjQ9KCIke3VybH0vcmVsZWFzZXMvZG93bmxvYWQvdiR7cGtndmVyfS8ke19wa2duYW1lfS14ODZfNjQtdW5rbm93bi1saW51eC1nbnUudGFyLmd6IikKc2hhMjU2c3Vtc194ODZfNjQ9KCJTSEEyNTZfUExBQ0VIT0xERVIiKQoKcGFja2FnZSgpIHsKICAgIGluc3RhbGwgLURtNzU1ICIke3NyY2Rpcn0vJHtfcGtnbmFtZX0iICIke3BrZ2Rpcn0vdXNyL2Jpbi8ke19wa2duYW1lfSIKICAgIGluc3RhbGwgLURtNjQ0ICIke3NyY2Rpcn0vTElDRU5TRSIgIiR7cGtnZGlyfS91c3Ivc2hhcmUvbGljZW5zZXMvJHtfcGtnbmFtZX0vTElDRU5TRSIKfQo=" | base64 -d > PKGBUILD
-              sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" PKGBUILD
-              sed -i "s/SHA256_PLACEHOLDER/${SHA256}/g" PKGBUILD
+            echo "Writing clean PKGBUILD and .SRCINFO for papr-bin..."
+            echo "IyBNYWludGFpbmVyOiBBZnJveiBTYXFsYWluIDxzcW4zNjgwQGdtYWlsLmNvbT4KcGtnbmFtZT1wYXByLWJpbgpfcGtnbmFtZT1wYXByCl9jcmF0ZV9uYW1lPXBhcHItdHVpCnBrZ3Zlcj1WRVJTSU9OX1BMQUNFSE9MREVSCnBrZ3JlbD0xCnBrZ2Rlc2M9IkEga2V5Ym9hcmQtZmlyc3QgdGVybWluYWwgd29ya3NwYWNlIGZvciBhY2FkZW1pYyBwYXBlcnMiCmFyY2g9KCJ4ODZfNjQiKQp1cmw9Imh0dHBzOi8vZ2l0aHViLmNvbS9BZnJvelNhcWxhaW4vUGFwciIKbGljZW5zZT0oIk1JVCIpCnByb3ZpZGVzPSgiJHtfcGtnbmFtZX0iKQpjb25mbGljdHM9KCIke19wa2duYW1lfSIpCnNvdXJjZV94ODZfNjQ9KCIke3VybH0vcmVsZWFzZXMvZG93bmxvYWQvdiR7cGtndmVyfS8ke19jcmF0ZV9uYW1lfS14ODZfNjQtdW5rbm93bi1saW51eC1nbnUudGFyLmd6IikKc2hhMjU2c3Vtc194ODZfNjQ9KCJTSEEyNTZfUExBQ0VIT0xERVIiKQoKcGFja2FnZSgpIHsKICAgIGZpbmQgIiR7c3JjZGlyfSIgLXR5cGUgZiAtbmFtZSAiJHtfcGtnbmFtZX0iIC1leGVjIGluc3RhbGwgLURtNzU1IHt9ICIke3BrZ2Rpcn0vdXNyL2Jpbi8ke19wa2duYW1lfSIgXDsKICAgIGZpbmQgIiR7c3JjZGlyfSIgLXR5cGUgZiAtbmFtZSAiTElDRU5TRSoiIC1leGVjIGluc3RhbGwgLURtNjQ0IHt9ICIke3BrZ2Rpcn0vdXNyL3NoYXJlL2xpY2Vuc2VzLyR7X3BrZ25hbWV9L0xJQ0VOU0UiIFw7Cn0K" | base64 -d > PKGBUILD
+            sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" PKGBUILD
+            sed -i "s/SHA256_PLACEHOLDER/${SHA256}/g" PKGBUILD
 
-              echo "cGtnYmFzZSA9IHBhcHItYmluCiAgcGtnZGVzYyA9IEEga2V5Ym9hcmQtZmlyc3QgdGVybWluYWwgd29ya3NwYWNlIGZvciBhY2FkZW1pYyBwYXBlcnMKICBwa2d2ZXIgPSBWRVJTSU9OX1BMQUNFSE9MREVSCiAgcGtncmVsID0gMQogIHVybCA9IGh0dHBzOi8vZ2l0aHViLmNvbS9BZnJvelNhcWxhaW4vUGFwcgogIGFyY2ggPSB4ODZfNjQKICBsaWNlbnNlID0gTUlUCiAgcHJvdmlkZXMgPSBwYXByCiAgY29uZmxpY3RzID0gcGFwcgogIHNvdXJjZV94ODZfNjQgPSBodHRwczovL2dpdGh1Yi5jb20vQWZyb3pTYXFsYWluL1BhcHIvcmVsZWFzZXMvZG93bmxvYWQvdlZFUlNJT05fUExBQ0VIT0xERVIvcGFwci14ODZfNjQtdW5rbm93bi1saW51eC1nbnUudGFyLmd6CiAgc2hhMjU2c3Vtc194ODZfNjQgPSBTSEEyNTZfUExBQ0VIT0xERVIKCnBrZ25hbWUgPSBwYXByLWJpbgo=" | base64 -d > .SRCINFO
-              sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" .SRCINFO
-              sed -i "s/SHA256_PLACEHOLDER/${SHA256}/g" .SRCINFO
-            else
-              echo "Updating existing PKGBUILD and .SRCINFO..."
-              sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
-              sed -i "s/sha256sums_x86_64=.*/sha256sums_x86_64=('${SHA256}')/" PKGBUILD
-              sed -i "s/pkgver = .*/pkgver = ${VERSION}/" .SRCINFO
-              sed -i "s/sha256sums_x86_64 = .*/sha256sums_x86_64 = ${SHA256}/" .SRCINFO
-            fi
+            echo "cGtnYmFzZSA9IHBhcHItYmluCiAgcGtnZGVzYyA9IEEga2V5Ym9hcmQtZmlyc3QgdGVybWluYWwgd29ya3NwYWNlIGZvciBhY2FkZW1pYyBwYXBlcnMKICBwa2d2ZXIgPSBWRVJTSU9OX1BMQUNFSE9MREVSCiAgcGtncmVsID0gMQogIHVybCA9IGh0dHBzOi8vZ2l0aHViLmNvbS9BZnJvelNhcWxhaW4vUGFwcgogIGFyY2ggPSB4ODZfNjQKICBsaWNlbnNlID0gTUlUCiAgcHJvdmlkZXMgPSBwYXByCiAgY29uZmxpY3RzID0gcGFwcgogIHNvdXJjZV94ODZfNjQgPSBodHRwczovL2dpdGh1Yi5jb20vQWZyb3pTYXFsYWluL1BhcHIvcmVsZWFzZXMvZG93bmxvYWQvdlZFUlNJT05fUExBQ0VIT0xERVIvcGFwci10dWkteDg2XzY0LXVua25vd24tbGludXgtZ251LnRhci5negogIHNoYTI1NnN1bXNfeDg2XzY0ID0gU0hBMjU2X1BMQUNFSE9MREVSCgpwa2duYW1lID0gcGFwci1iaW4K" | base64 -d > .SRCINFO
+            sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" .SRCINFO
+            sed -i "s/SHA256_PLACEHOLDER/${SHA256}/g" .SRCINFO
             
             if [ -n "$(git status --porcelain)" ]; then
               git add PKGBUILD .SRCINFO
               git commit -m "Release v${VERSION}"
-              GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin master || GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin main
+              CURRENT_BRANCH=$(git branch --show-current)
+              GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin "${CURRENT_BRANCH}:master" || GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin "${CURRENT_BRANCH}:main"
             else
               echo "No changes to commit for AUR."
             fi
