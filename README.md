@@ -72,6 +72,8 @@ Papr was written in Rust because an academic research workspace needs to be fast
 | **Linux Clipboard** | `wl-clipboard` (Wayland) or `xclip` (X11). Native `arboard` fallback is included if these are unavailable. |
 | **External PDF Viewer** | The configured viewer command and its required desktop environment integration. |
 
+> **Note:** Some features on Windows not work, like internal PDF viewer, as Kitty terminal is not avaiable for windows, but you can use your preferred PDF viewer to view the PDFs and by default PDFs are launched on MS Edge (which you can change to Chrome or Brave, etc) as MS Edge is readily avaiable on all Windows Platforms.
+
 **Install OS-specific prerequisites:**
 
 * **Ubuntu / Debian:**
@@ -263,15 +265,15 @@ Here is a complete breakdown of every section in Papr, what it does, and how to 
 | Workspace | Purpose & Description | How to Use |
 | :--- | :--- | :--- |
 | **Dashboard** | Shows your main research overview, including reading stats, streaks, disk usage, and a daily arXiv feed. | This is the default home screen. Set `dashboard_keywords` in `config.toml` to tailor your feed. |
-| **Discover** | Lets you search arXiv by title, author, category, abstract, or DOI from within Papr. | Press `/` to focus search, type a query, and press `Enter`. Scroll with `j`/`k`, open details with `Enter`, and use `d` to download. |
-| **Library** | Lists all local PDF files found in your configured library directories. | Press `r` to scan folders. Select a paper and press `Enter` to view PDF, `n` for notes, `g` for groups, `B` for bookmarks, `R` to rename. |
-| **Reading Queue** | Holds the prioritized backlog of papers you plan to read next. | Press `a` on any paper to queue or dequeue it. Reorder priority with `Shift`/`Ctrl` + `Up`/`Down`. |
+| **Discover** | Lets you search arXiv by title, author, category, abstract, or DOI from within Papr. | Press `/` to focus search, type a query, and press `Enter`. Open details with `Enter`, and use `d` to download or `o` to open paper in browser. |
+| **Library** | Lists all local PDF files found in your configured library directories. | Select a paper and press `Enter` to view PDF, `n` for notes, `g` for groups, `B` for bookmarks, `R` to rename, `a` to add to reading queue. |
+| **Reading Queue** | Holds the prioritized backlog of papers you plan to read next. | Press `a` on any paper to queue or dequeue it. Reorder priority with `Shift` + `Up`/`Down`. |
 | **Groups** | Organizes papers into filesystem-synced folders and collections. | Press `g` on a paper to assign it to a group. Papr creates the folder on disk and moves the PDF automatically. |
 | **Bookmarks** | Collects papers you marked for quick retrieval later. | Press `B` on any paper in any workspace to toggle its bookmark status. |
 | **Authors** | Groups all papers in your local library by author name automatically. | Select an author from the list to view every paper written by them in your collection. |
-| **Notes** | Provides a searchable catalog of Markdown notes written for your papers. | Press `n` on any paper to open the Markdown editor. Press `Tab` to switch to live preview, `Esc` to save. |
+| **Notes** | Provides a searchable catalog of Markdown notes written for your papers. | Press `n` on any paper to open the Markdown editor. Press `Tab` to switch to live preview, `Esc` to save adn exit. |
 | **Downloads** | Tracks active, completed, and failed background PDF downloads in real time. | Monitor download progress. Select a finished download and press `Enter` to open the PDF directly. |
-| **Projects** | Lets you write LaTeX documents, compile `main.tex`, preview PDFs, and inspect build issues. | Press `n` to create a project. Open it with `Enter`; `main.tex` is selected in the File Tree. Use `Alt+1` (File Tree), `Alt+2` (Editor), `Alt+3` (PDF Preview), and `Alt+4` (Build). |
+| **Projects** | Lets you write LaTeX documents, compile `main.tex`, preview PDFs, and inspect build issues. | Press `n` to create a new project. Open it with `Enter`; `main.tex` is selected in the File Tree by default. Use `Alt+1` (File Tree), `Alt+2` (Editor), `Alt+3` (PDF Preview), and `Alt+4` (Build). |
 | **History** | Logs a chronological timeline of recent activity, searches, downloads, and project builds. | Scroll through past actions to reopen papers or review earlier search terms. |
 | **Statistics** | Shows reading habits, total time, completion counts, and a 12-week activity heatmap. | Track your research productivity and reading habits over time. |
 | **Settings** | Provides an interactive workspace for preferences, paths, themes, and plugins. | Open it from the sidebar. Theme previews built-in themes live; General and Paths stage values; Plugins enables or disables plugins. Press `Enter` to apply changes or `Esc` to return. |
