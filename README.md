@@ -1,5 +1,9 @@
-# Papr
-
+<p align="center">
+  <a href="https://github.com/AfrozSaqlain/Papr">
+    <img src="./assets/logo.png" alt="Papr Logo" width="280">
+  </a>
+</p>
+ 
 <p align="center">
   <img src="assets/papr.gif" alt="Demo" width="900">
 </p>
