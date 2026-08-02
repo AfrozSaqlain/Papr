@@ -74,6 +74,8 @@ Papr was written in Rust because an academic research workspace needs to be fast
 
 > **Note:** Some features on Windows may not work, such as the internal PDF viewer, since the Kitty terminal is not available on Windows. However, you can still use your preferred PDF viewer to open PDFs. By default, PDFs are launched in Microsoft Edge (which you can change to Chrome, Brave, or any other PDF viewer), as Microsoft Edge is available on all Windows systems.
 
+> Windows users: Visual Studio Build Tools are only needed when building from source; MiKTeX (including `latexmk`) and Strawberry Perl setup for the Windows LaTeX workspace are needed to compile latex and is documented in [docs/windows.md](docs/windows.md).
+
 **Install OS-specific prerequisites:**
 
 * **Ubuntu / Debian:**
