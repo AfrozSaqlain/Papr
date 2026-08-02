@@ -72,7 +72,7 @@ Papr was written in Rust because an academic research workspace needs to be fast
 | **Linux Clipboard** | `wl-clipboard` (Wayland) or `xclip` (X11). Native `arboard` fallback is included if these are unavailable. |
 | **External PDF Viewer** | The configured viewer command and its required desktop environment integration. |
 
-> **Note:** Some features on Windows not work, like internal PDF viewer, as Kitty terminal is not avaiable for windows, but you can use your preferred PDF viewer to view the PDFs and by default PDFs are launched on MS Edge (which you can change to Chrome or Brave, etc) as MS Edge is readily avaiable on all Windows Platforms.
+> **Note:** Some features on Windows may not work, such as the internal PDF viewer, since the Kitty terminal is not available on Windows. However, you can still use your preferred PDF viewer to open PDFs. By default, PDFs are launched in Microsoft Edge (which you can change to Chrome, Brave, or any other PDF viewer), as Microsoft Edge is available on all Windows systems.
 
 **Install OS-specific prerequisites:**
 
