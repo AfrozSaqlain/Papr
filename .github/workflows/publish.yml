@@ -212,39 +212,19 @@ jobs:
             exit 1
           fi
 
-          # AUR maintenance is temporary; retry it without hiding real SSH failures.
-          AUR_REPO_DIR=""
-          for i in {1..30}; do
-            CLONE_DIR="aur-repo-${i}"
-            if CLONE_OUTPUT=$(GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git clone ssh://aur@aur.archlinux.org/papr-bin.git "${CLONE_DIR}" 2>&1); then
-              AUR_REPO_DIR="${CLONE_DIR}"
-              break
-            fi
-
-            echo "${CLONE_OUTPUT}"
-            if ! grep -Fq "AUR is down due to maintenance" <<< "${CLONE_OUTPUT}"; then
-              echo "AUR clone failed for a reason other than scheduled maintenance."
-              exit 1
-            fi
-
-            echo "AUR is under maintenance. Retrying in 20 seconds (attempt ${i}/30)..."
-            sleep 20
-          done
-
-          if [ -z "${AUR_REPO_DIR}" ]; then
-            echo "AUR remained unavailable for 10 minutes. Re-run this workflow after maintenance ends."
-            exit 1
-          fi
+          rm -rf aur-repo
+          echo "Cloning AUR package repository..."
+          git clone https://aur.archlinux.org/papr-bin.git aur-repo
           
-          if [ -d "${AUR_REPO_DIR}" ]; then
-            cd "${AUR_REPO_DIR}"
+          if [ -d "aur-repo" ]; then
+            cd aur-repo
             
             echo "Writing clean PKGBUILD and .SRCINFO for papr-bin..."
             echo "IyBNYWludGFpbmVyOiBBZnJveiBTYXFsYWluIDxzcW4zNjgwQGdtYWlsLmNvbT4KcGtnbmFtZT1wYXByLWJpbgpfcGtnbmFtZT1wYXByCl9jcmF0ZV9uYW1lPXBhcHItdHVpCnBrZ3Zlcj1WRVJTSU9OX1BMQUNFSE9MREVSCnBrZ3JlbD0xCnBrZ2Rlc2M9IkEga2V5Ym9hcmQtZmlyc3QgdGVybWluYWwgd29ya3NwYWNlIGZvciBhY2FkZW1pYyBwYXBlcnMiCmFyY2g9KCJ4ODZfNjQiKQp1cmw9Imh0dHBzOi8vZ2l0aHViLmNvbS9BZnJvelNhcWxhaW4vUGFwciIKbGljZW5zZT0oIk1JVCIpCnByb3ZpZGVzPSgiJHtfcGtnbmFtZX0iKQpjb25mbGljdHM9KCIke19wa2duYW1lfSIpCnNvdXJjZV94ODZfNjQ9KCIke3VybH0vcmVsZWFzZXMvZG93bmxvYWQvdiR7cGtndmVyfS8ke19jcmF0ZV9uYW1lfS14ODZfNjQtdW5rbm93bi1saW51eC1nbnUudGFyLmd6IikKc2hhMjU2c3Vtc194ODZfNjQ9KCJTSEEyNTZfUExBQ0VIT0xERVIiKQoKcGFja2FnZSgpIHsKICAgIGZpbmQgIiR7c3JjZGlyfSIgLXR5cGUgZiAtbmFtZSAiJHtfcGtnbmFtZX0iIC1leGVjIGluc3RhbGwgLURtNzU1IHt9ICIke3BrZ2Rpcn0vdXNyL2Jpbi8ke19wa2duYW1lfSIgXDsKICAgIGZpbmQgIiR7c3JjZGlyfSIgLXR5cGUgZiAtbmFtZSAiTElDRU5TRSoiIC1leGVjIGluc3RhbGwgLURtNjQ0IHt9ICIke3BrZ2Rpcn0vdXNyL3NoYXJlL2xpY2Vuc2VzLyR7X3BrZ25hbWV9L0xJQ0VOU0UiIFw7Cn0K" | base64 -d > PKGBUILD
             sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" PKGBUILD
             sed -i "s/SHA256_PLACEHOLDER/${SHA256}/g" PKGBUILD
 
-            echo "cGtnYmFzZSA9IHBhcHItYmluCiAgcGtnZGVzYyA9IEEga2V5Ym9hcmQtZmlyc3QgdGVybWluYWwgd29ya3NwYWNlIGZvciBhY2FkZW1pYyBwYXBlcnMKICBwa2d2ZXIgPSBWRVJTSU9OX1BMQUNFSE9MREVSCiAgcGtncmVsID0gMQogIHVybCA9IGh0dHBzOi8vZ2l0aHViLmNvbS9BZnJvelNhcWxhaW4vUGFwcgogIGFyY2ggPSB4ODZfNjQKICBsaWNlbnNlID0gTUlUCiAgcHJvdmlkZXMgPSBwYXByCiAgY29uZmxpY3RzID0gcGFwcgogIHNvdXJjZV94ODZfNjQgPSBodHRwczovL2dpdGh1Yi5jb20vQWZyb3pTYXFsYWluL1BhcHIvcmVsZWFzZXMvZG93bmxvYWQvdlZFUlNJT05fUExBQ0VIT0xERVIvcGFwci10dWkteDg2XzY0LXVua25vd24tbGludXgtZ251LnRhci5negogIHNoYTI1NnN1bXNfeDg2XzY0ID0gU0hBMjU2X1BMQUNFSE9MREVSCgpwa2duYW1lID0gcGFwci1iaW4K" | base64 -d > .SRCINFO
+            echo "cGtnYmFzZSA9IHBhcHItYmluCiAgcGtnZGVzYyA9IEEga2V5Ym9hcmQtZmlyc3QgdGVybWluYWwgd29ya3NwYWNlIGZvciBhY2FkZW1pYyBwYXBlcnMKICBwa2d2ZXIgPSBWRVJTSU9OX1BMQUNFSE9MREVSCiAgcGtncmVsID0gMQogIHVybCA9IGh0dHBzOi8vZ2l0aHViLmNvbS9BZnJvelNhcWxhaW4vUGFwcgogIGFyY2ggPSB4ODZfNjQKICBsaWNlbnNlID0gTUlTCiAgcHJvdmlkZXMgPSBwYXByCiAgY29uZmxpY3RzID0gcGFwcgogIHNvdXJjZV94ODZfNjQgPSBodHRwczovL2dpdGh1Yi5jb20vQWZyb3pTYXFsYWluL1BhcHIvcmVsZWFzZXMvZG93bmxvYWQvdlZFUlNJT05fUExBQ0VIT0xERVIvcGFwci10dWkteDg2XzY0LXVua25vd24tbGludXgtZ251LnRhci5negogIHNoYTI1NnN1bXNfeDg2XzY0ID0gU0hBMjU2X1BMQUNFSE9MREVSCgpwa2duYW1lID0gcGFwci1iaW4K" | base64 -d > .SRCINFO
             sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" .SRCINFO
             sed -i "s/SHA256_PLACEHOLDER/${SHA256}/g" .SRCINFO
             
@@ -252,7 +232,7 @@ jobs:
               git add PKGBUILD .SRCINFO
               git commit -m "Release v${VERSION}"
               CURRENT_BRANCH=$(git branch --show-current)
-              GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin "${CURRENT_BRANCH}:master" || GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin "${CURRENT_BRANCH}:main"
+              GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key -o StrictHostKeyChecking=accept-new" git push ssh://aur@aur.archlinux.org/papr-bin.git "${CURRENT_BRANCH}:master" || GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key -o StrictHostKeyChecking=accept-new" git push ssh://aur@aur.archlinux.org/papr-bin.git "${CURRENT_BRANCH}:main"
             else
               echo "No changes to commit for AUR."
             fi
