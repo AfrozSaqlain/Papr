@@ -213,7 +213,7 @@ jobs:
           fi
 
           # Clone AUR package repository over SSH
-          GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git clone ssh://aur@aur.archlinux.org/papr-bin.git aur-repo || true
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git clone ssh://aur@aur.archlinux.org/papr-bin.git aur-repo
           
           if [ -d "aur-repo" ]; then
             cd aur-repo
@@ -223,7 +223,7 @@ jobs:
             sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" PKGBUILD
             sed -i "s/SHA256_PLACEHOLDER/${SHA256}/g" PKGBUILD
 
-            echo "cGtnYmFzZSA9IHBhcHItYmluCiAgcGtnZGVzYyA9IEEga2V5Ym9hcmQtZmlyc3QgdGVybWluYWwgd29ya3NwYWNlIGZvciBhY2FkZW1pYyBwYXBlcnMKICBwa2d2ZXIgPSBWRVJTSU9OX1BMQUNFSE9MREVSCiAgcGtncmVsID0gMQogIHVybCA9IGh0dHBzOi8vZ2l0aHViLmNvbS9BZnJvelNhcWxhaW4vUGFwcgogIGFyY2ggPSB4ODZfNjQKICBsaWNlbnNlID0gTUlUCiAgcHJvdmlkZXMgPSBwYXByCiAgY29uZmxpY3RzID0gcGFwcgogIHNvdXJjZV94ODZfNjQgPSBodHRwczovL2dpdGh1Yi5jb20vQWZyb3pTYXFsYWluL1BhcHIvcmVsZWFzZXMvZG93bmxvYWQvdlZFUlNJT05fUExBQ0VIT0xERVIvcGFwci10dWkteDg2XzY0LXVua25vd24tbGludXgtZ251LnRhci5negogIHNoYTI1NnN1bXNfeDg2XzY0ID0gU0hBMjU2X1BMQUNFSE9MREVSCgpwa2duYW1lID0gcGFwci1iaW4K" | base64 -d > .SRCINFO
+            echo "cGtnYmFzZSA9IHBhcHItYmluCglwa2dkZXNjID0gQSBrZXlib2FyZC1maXJzdCB0ZXJtaW5hbCB3b3Jrc3BhY2UgZm9yIGFjYWRlbWljIHBhcGVycwoJcGtndmVyID0gVkVSU0lPTl9QTEFDRUhPTERFUgoJcGtncmVsID0gMQoJdXJsID0gaHR0cHM6Ly9naXRodWIuY29tL0Fmcm96U2FxbGFpbi9QYXByCglhcmNoID0geDg2XzY0CglsaWNlbnNlID0gTUlUCglwcm92aWRlcyA9IHBhcHIKCWNvbmZsaWN0cyA9IHBhcHIKCXNvdXJjZV94ODZfNjQgPSBodHRwczovL2dpdGh1Yi5jb20vQWZyb3pTYXFsYWluL1BhcHIvcmVsZWFzZXMvZG93bmxvYWQvdlZFUlNJT05fUExBQ0VIT0xERVIvcGFwci10dWkteDg2XzY0LXVua25vd24tbGludXgtZ251LnRhci5negoJc2hhMjU2c3Vtc194ODZfNjQgPSBTSEEyNTZfUExBQ0VIT0xERVIKCnBrZ25hbWUgPSBwYXByLWJpbgo=" | base64 -d > .SRCINFO
             sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" .SRCINFO
             sed -i "s/SHA256_PLACEHOLDER/${SHA256}/g" .SRCINFO
             
