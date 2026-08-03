@@ -14,7 +14,9 @@ on:
 jobs:
   resolve_release:
     name: Resolve completed release
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    # Manual dispatch remains available for recovery; workflow_run may only
+    # publish a successful Release workflow started by a v* tag push.
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && startsWith(github.event.workflow_run.head_branch, 'v')) }}
     runs-on: ubuntu-latest
     outputs:
       tag_name: ${{ steps.release.outputs.tag_name }}
@@ -27,10 +29,16 @@ jobs:
       - id: release
         env:
           EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_EVENT: ${{ github.event.workflow_run.event }}
+          WORKFLOW_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           WORKFLOW_SHA: ${{ github.event.workflow_run.head_sha }}
           MANUAL_TAG: ${{ inputs.tag_name }}
         run: |
           if [ "${EVENT_NAME}" = "workflow_run" ]; then
+            if [ "${WORKFLOW_EVENT}" != "push" ] || [[ "${WORKFLOW_HEAD_BRANCH}" != v* ]]; then
+              echo "Refusing to publish: Release was not a successful v* tag push."
+              exit 1
+            fi
             SOURCE_REF="${WORKFLOW_SHA}"
           else
             SOURCE_REF="${MANUAL_TAG}"
@@ -208,6 +216,11 @@ jobs:
           chmod 600 ~/.ssh/aur_key
           ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts
 
+      - name: Install makepkg
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes pacman-package-manager
+
       - name: Clone & Update AUR Package
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -241,26 +254,68 @@ jobs:
             exit 1
           fi
 
-          # Clone AUR package repository over SSH
-          GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git clone ssh://aur@aur.archlinux.org/papr-bin.git aur-repo
+          # Clone AUR package repository over SSH, retrying transient outages.
+          clone_aur() {
+            for attempt in {1..5}; do
+              rm -rf aur-repo
+              if GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key -o IdentitiesOnly=yes -o ConnectTimeout=15 -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
+                git clone ssh://aur@aur.archlinux.org/papr-bin.git aur-repo; then
+                return 0
+              fi
+              echo "AUR clone failed (attempt ${attempt}/5); retrying..."
+              sleep $((attempt * 10))
+            done
+            return 1
+          }
+
+          clone_aur
           
           if [ -d "aur-repo" ]; then
             cd aur-repo
             
-            echo "Writing clean PKGBUILD and .SRCINFO for papr-bin..."
-            echo "IyBNYWludGFpbmVyOiBBZnJveiBTYXFsYWluIDxzcW4zNjgwQGdtYWlsLmNvbT4KcGtnbmFtZT1wYXByLWJpbgpfcGtnbmFtZT1wYXByCl9jcmF0ZV9uYW1lPXBhcHItdHVpCnBrZ3Zlcj1WRVJTSU9OX1BMQUNFSE9MREVSCnBrZ3JlbD0xCnBrZ2Rlc2M9IkEga2V5Ym9hcmQtZmlyc3QgdGVybWluYWwgd29ya3NwYWNlIGZvciBhY2FkZW1pYyBwYXBlcnMiCmFyY2g9KCJ4ODZfNjQiKQp1cmw9Imh0dHBzOi8vZ2l0aHViLmNvbS9BZnJvelNhcWxhaW4vUGFwciIKbGljZW5zZT0oIk1JVCIpCnByb3ZpZGVzPSgiJHtfcGtnbmFtZX0iKQpjb25mbGljdHM9KCIke19wa2duYW1lfSIpCnNvdXJjZV94ODZfNjQ9KCIke3VybH0vcmVsZWFzZXMvZG93bmxvYWQvdiR7cGtndmVyfS8ke19jcmF0ZV9uYW1lfS14ODZfNjQtdW5rbm93bi1saW51eC1nbnUudGFyLmd6IikKc2hhMjU2c3Vtc194ODZfNjQ9KCJTSEEyNTZfUExBQ0VIT0xERVIiKQoKcGFja2FnZSgpIHsKICAgIGZpbmQgIiR7c3JjZGlyfSIgLXR5cGUgZiAtbmFtZSAiJHtfcGtnbmFtZX0iIC1leGVjIGluc3RhbGwgLURtNzU1IHt9ICIke3BrZ2Rpcn0vdXNyL2Jpbi8ke19wa2duYW1lfSIgXDsKICAgIGZpbmQgIiR7c3JjZGlyfSIgLXR5cGUgZiAtbmFtZSAiTElDRU5TRSoiIC1leGVjIGluc3RhbGwgLURtNjQ0IHt9ICIke3BrZ2Rpcn0vdXNyL3NoYXJlL2xpY2Vuc2VzLyR7X3BrZ25hbWV9L0xJQ0VOU0UiIFw7Cn0K" | base64 -d > PKGBUILD
-            sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" PKGBUILD
-            sed -i "s/SHA256_PLACEHOLDER/${SHA256}/g" PKGBUILD
+            echo "Writing PKGBUILD and generating .SRCINFO for papr-bin..."
+            printf '%s\n' \
+              '# Maintainer: Afroz Saqlain <sqn3680@gmail.com>' \
+              'pkgname=papr-bin' \
+              '_pkgname=papr' \
+              '_crate_name=papr-tui' \
+              "pkgver=${VERSION}" \
+              'pkgrel=1' \
+              'pkgdesc="A keyboard-first terminal workspace for academic papers"' \
+              'arch=("x86_64")' \
+              'url="https://github.com/AfrozSaqlain/Papr"' \
+              'license=("MIT")' \
+              'provides=("${_pkgname}")' \
+              'conflicts=("${_pkgname}")' \
+              'source_x86_64=("${url}/releases/download/v${pkgver}/${_crate_name}-x86_64-unknown-linux-gnu.tar.gz")' \
+              "sha256sums_x86_64=(\"${SHA256}\")" \
+              '' \
+              'package() {' \
+              '  find "${srcdir}" -type f -name "${_pkgname}" -exec install -Dm755 {} "${pkgdir}/usr/bin/${_pkgname}" \;' \
+              '  find "${srcdir}" -type f -name "LICENSE*" -exec install -Dm644 {} "${pkgdir}/usr/share/licenses/${_pkgname}/LICENSE" \;' \
+              '}' > PKGBUILD
 
-            echo "cGtnYmFzZSA9IHBhcHItYmluCglwa2dkZXNjID0gQSBrZXlib2FyZC1maXJzdCB0ZXJtaW5hbCB3b3Jrc3BhY2UgZm9yIGFjYWRlbWljIHBhcGVycwoJcGtndmVyID0gVkVSU0lPTl9QTEFDRUhPTERFUgoJcGtncmVsID0gMQoJdXJsID0gaHR0cHM6Ly9naXRodWIuY29tL0Fmcm96U2FxbGFpbi9QYXByCglhcmNoID0geDg2XzY0CglsaWNlbnNlID0gTUlUCglwcm92aWRlcyA9IHBhcHIKCWNvbmZsaWN0cyA9IHBhcHIKCXNvdXJjZV94ODZfNjQgPSBodHRwczovL2dpdGh1Yi5jb20vQWZyb3pTYXFsYWluL1BhcHIvcmVsZWFzZXMvZG93bmxvYWQvdlZFUlNJT05fUExBQ0VIT0xERVIvcGFwci10dWkteDg2XzY0LXVua25vd24tbGludXgtZ251LnRhci5negoJc2hhMjU2c3Vtc194ODZfNjQgPSBTSEEyNTZfUExBQ0VIT0xERVIKCnBrZ25hbWUgPSBwYXByLWJpbgo=" | base64 -d > .SRCINFO
-            sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" .SRCINFO
-            sed -i "s/SHA256_PLACEHOLDER/${SHA256}/g" .SRCINFO
+            # Generate .SRCINFO from PKGBUILD so the metadata cannot drift.
+            makepkg --printsrcinfo > .SRCINFO
             
             if [ -n "$(git status --porcelain)" ]; then
               git add PKGBUILD .SRCINFO
               git commit -m "Release v${VERSION}"
-              CURRENT_BRANCH=$(git branch --show-current)
-              GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin "${CURRENT_BRANCH}:master" || GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin "${CURRENT_BRANCH}:main"
+              push_aur() {
+                for attempt in {1..5}; do
+                  if GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key -o IdentitiesOnly=yes -o ConnectTimeout=15 -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
+                    git push origin HEAD:master || \
+                    GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key -o IdentitiesOnly=yes -o ConnectTimeout=15 -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
+                    git push origin HEAD:main; then
+                    return 0
+                  fi
+                  echo "AUR push failed (attempt ${attempt}/5); retrying..."
+                  sleep $((attempt * 10))
+                done
+                return 1
+              }
+
+              push_aur
             else
               echo "No changes to commit for AUR."
             fi
