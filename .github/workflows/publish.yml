@@ -212,11 +212,32 @@ jobs:
             exit 1
           fi
 
-          # Clone AUR package repository over SSH
-          GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git clone ssh://aur@aur.archlinux.org/papr-bin.git aur-repo
+          # AUR maintenance is temporary; retry it without hiding real SSH failures.
+          AUR_REPO_DIR=""
+          for i in {1..30}; do
+            CLONE_DIR="aur-repo-${i}"
+            if CLONE_OUTPUT=$(GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git clone ssh://aur@aur.archlinux.org/papr-bin.git "${CLONE_DIR}" 2>&1); then
+              AUR_REPO_DIR="${CLONE_DIR}"
+              break
+            fi
+
+            echo "${CLONE_OUTPUT}"
+            if ! grep -Fq "AUR is down due to maintenance" <<< "${CLONE_OUTPUT}"; then
+              echo "AUR clone failed for a reason other than scheduled maintenance."
+              exit 1
+            fi
+
+            echo "AUR is under maintenance. Retrying in 20 seconds (attempt ${i}/30)..."
+            sleep 20
+          done
+
+          if [ -z "${AUR_REPO_DIR}" ]; then
+            echo "AUR remained unavailable for 10 minutes. Re-run this workflow after maintenance ends."
+            exit 1
+          fi
           
-          if [ -d "aur-repo" ]; then
-            cd aur-repo
+          if [ -d "${AUR_REPO_DIR}" ]; then
+            cd "${AUR_REPO_DIR}"
             
             echo "Writing clean PKGBUILD and .SRCINFO for papr-bin..."
             echo "IyBNYWludGFpbmVyOiBBZnJveiBTYXFsYWluIDxzcW4zNjgwQGdtYWlsLmNvbT4KcGtnbmFtZT1wYXByLWJpbgpfcGtnbmFtZT1wYXByCl9jcmF0ZV9uYW1lPXBhcHItdHVpCnBrZ3Zlcj1WRVJTSU9OX1BMQUNFSE9MREVSCnBrZ3JlbD0xCnBrZ2Rlc2M9IkEga2V5Ym9hcmQtZmlyc3QgdGVybWluYWwgd29ya3NwYWNlIGZvciBhY2FkZW1pYyBwYXBlcnMiCmFyY2g9KCJ4ODZfNjQiKQp1cmw9Imh0dHBzOi8vZ2l0aHViLmNvbS9BZnJvelNhcWxhaW4vUGFwciIKbGljZW5zZT0oIk1JVCIpCnByb3ZpZGVzPSgiJHtfcGtnbmFtZX0iKQpjb25mbGljdHM9KCIke19wa2duYW1lfSIpCnNvdXJjZV94ODZfNjQ9KCIke3VybH0vcmVsZWFzZXMvZG93bmxvYWQvdiR7cGtndmVyfS8ke19jcmF0ZV9uYW1lfS14ODZfNjQtdW5rbm93bi1saW51eC1nbnUudGFyLmd6IikKc2hhMjU2c3Vtc194ODZfNjQ9KCJTSEEyNTZfUExBQ0VIT0xERVIiKQoKcGFja2FnZSgpIHsKICAgIGZpbmQgIiR7c3JjZGlyfSIgLXR5cGUgZiAtbmFtZSAiJHtfcGtnbmFtZX0iIC1leGVjIGluc3RhbGwgLURtNzU1IHt9ICIke3BrZ2Rpcn0vdXNyL2Jpbi8ke19wa2duYW1lfSIgXDsKICAgIGZpbmQgIiR7c3JjZGlyfSIgLXR5cGUgZiAtbmFtZSAiTElDRU5TRSoiIC1leGVjIGluc3RhbGwgLURtNjQ0IHt9ICIke3BrZ2Rpcn0vdXNyL3NoYXJlL2xpY2Vuc2VzLyR7X3BrZ25hbWV9L0xJQ0VOU0UiIFw7Cn0K" | base64 -d > PKGBUILD
