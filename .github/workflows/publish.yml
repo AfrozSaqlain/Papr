@@ -213,7 +213,7 @@ jobs:
           fi
 
           # Clone AUR package repository over SSH
-          GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git clone ssh://aur@aur.archlinux.org/papr-bin.git aur-repo || true
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git clone ssh://aur@aur.archlinux.org/papr-bin.git aur-repo
           
           if [ -d "aur-repo" ]; then
             cd aur-repo
