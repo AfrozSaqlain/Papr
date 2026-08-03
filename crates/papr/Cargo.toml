@@ -7,7 +7,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-readme = "../../README.md"
+readme = "README.md"
 
 [[bin]]
 name = "papr"
@@ -45,13 +45,13 @@ section = "utility"
 priority = "optional"
 assets = [
     ["target/release/papr", "usr/bin/papr", "755"],
-    ["../../LICENSE", "usr/share/licenses/papr/LICENSE", "644"],
-    ["../../README.md", "usr/share/doc/papr/README.md", "644"]
+    ["LICENSE", "usr/share/licenses/papr/LICENSE", "644"],
+    ["README.md", "usr/share/doc/papr/README.md", "644"]
 ]
 
 [package.metadata.generate-rpm]
 assets = [
     { source = "../../target/release/papr", dest = "/usr/bin/papr", mode = "755" },
-    { source = "../../LICENSE", dest = "/usr/share/licenses/papr/LICENSE", mode = "644" },
-    { source = "../../README.md", dest = "/usr/share/doc/papr/README.md", mode = "644" }
+    { source = "LICENSE", dest = "/usr/share/licenses/papr/LICENSE", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/papr/README.md", mode = "644" }
 ]
