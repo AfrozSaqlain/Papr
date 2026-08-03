@@ -212,9 +212,8 @@ jobs:
             exit 1
           fi
 
-          rm -rf aur-repo
-          echo "Cloning AUR package repository..."
-          git clone https://aur.archlinux.org/papr-bin.git aur-repo
+          # Clone AUR package repository over SSH
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git clone ssh://aur@aur.archlinux.org/papr-bin.git aur-repo || true
           
           if [ -d "aur-repo" ]; then
             cd aur-repo
@@ -224,7 +223,7 @@ jobs:
             sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" PKGBUILD
             sed -i "s/SHA256_PLACEHOLDER/${SHA256}/g" PKGBUILD
 
-            echo "cGtnYmFzZSA9IHBhcHItYmluCiAgcGtnZGVzYyA9IEEga2V5Ym9hcmQtZmlyc3QgdGVybWluYWwgd29ya3NwYWNlIGZvciBhY2FkZW1pYyBwYXBlcnMKICBwa2d2ZXIgPSBWRVJTSU9OX1BMQUNFSE9MREVSCiAgcGtncmVsID0gMQogIHVybCA9IGh0dHBzOi8vZ2l0aHViLmNvbS9BZnJvelNhcWxhaW4vUGFwcgogIGFyY2ggPSB4ODZfNjQKICBsaWNlbnNlID0gTUlTCiAgcHJvdmlkZXMgPSBwYXByCiAgY29uZmxpY3RzID0gcGFwcgogIHNvdXJjZV94ODZfNjQgPSBodHRwczovL2dpdGh1Yi5jb20vQWZyb3pTYXFsYWluL1BhcHIvcmVsZWFzZXMvZG93bmxvYWQvdlZFUlNJT05fUExBQ0VIT0xERVIvcGFwci10dWkteDg2XzY0LXVua25vd24tbGludXgtZ251LnRhci5negogIHNoYTI1NnN1bXNfeDg2XzY0ID0gU0hBMjU2X1BMQUNFSE9MREVSCgpwa2duYW1lID0gcGFwci1iaW4K" | base64 -d > .SRCINFO
+            echo "cGtnYmFzZSA9IHBhcHItYmluCiAgcGtnZGVzYyA9IEEga2V5Ym9hcmQtZmlyc3QgdGVybWluYWwgd29ya3NwYWNlIGZvciBhY2FkZW1pYyBwYXBlcnMKICBwa2d2ZXIgPSBWRVJTSU9OX1BMQUNFSE9MREVSCiAgcGtncmVsID0gMQogIHVybCA9IGh0dHBzOi8vZ2l0aHViLmNvbS9BZnJvelNhcWxhaW4vUGFwcgogIGFyY2ggPSB4ODZfNjQKICBsaWNlbnNlID0gTUlUCiAgcHJvdmlkZXMgPSBwYXByCiAgY29uZmxpY3RzID0gcGFwcgogIHNvdXJjZV94ODZfNjQgPSBodHRwczovL2dpdGh1Yi5jb20vQWZyb3pTYXFsYWluL1BhcHIvcmVsZWFzZXMvZG93bmxvYWQvdlZFUlNJT05fUExBQ0VIT0xERVIvcGFwci10dWkteDg2XzY0LXVua25vd24tbGludXgtZ251LnRhci5negogIHNoYTI1NnN1bXNfeDg2XzY0ID0gU0hBMjU2X1BMQUNFSE9MREVSCgpwa2duYW1lID0gcGFwci1iaW4K" | base64 -d > .SRCINFO
             sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" .SRCINFO
             sed -i "s/SHA256_PLACEHOLDER/${SHA256}/g" .SRCINFO
             
@@ -232,7 +231,7 @@ jobs:
               git add PKGBUILD .SRCINFO
               git commit -m "Release v${VERSION}"
               CURRENT_BRANCH=$(git branch --show-current)
-              GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key -o StrictHostKeyChecking=accept-new" git push ssh://aur@aur.archlinux.org/papr-bin.git "${CURRENT_BRANCH}:master" || GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key -o StrictHostKeyChecking=accept-new" git push ssh://aur@aur.archlinux.org/papr-bin.git "${CURRENT_BRANCH}:main"
+              GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin "${CURRENT_BRANCH}:master" || GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin "${CURRENT_BRANCH}:main"
             else
               echo "No changes to commit for AUR."
             fi
