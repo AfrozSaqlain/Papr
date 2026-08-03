@@ -1,9 +1,9 @@
 name: Publish Crates, Linux Packages & AUR
 
 on:
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag_name:
@@ -12,13 +12,61 @@ on:
         default: 'v0.1.0'
 
 jobs:
+  resolve_release:
+    name: Resolve completed release
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      source_ref: ${{ steps.release.outputs.source_ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.tag_name }}
+          fetch-depth: 0
+      - id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_SHA: ${{ github.event.workflow_run.head_sha }}
+          MANUAL_TAG: ${{ inputs.tag_name }}
+        run: |
+          if [ "${EVENT_NAME}" = "workflow_run" ]; then
+            SOURCE_REF="${WORKFLOW_SHA}"
+          else
+            SOURCE_REF="${MANUAL_TAG}"
+          fi
+
+          PACKAGE_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "papr-tui") | .version')
+          TAG_NAME="v${PACKAGE_VERSION}"
+          TAG_SHA=$(git rev-list -n 1 "refs/tags/${TAG_NAME}" 2>/dev/null || true)
+          if [ -z "${TAG_SHA}" ]; then
+            echo "Expected release tag ${TAG_NAME} was not found."
+            exit 1
+          fi
+
+          if [ "${EVENT_NAME}" = "workflow_run" ] && [ "${TAG_SHA}" != "${WORKFLOW_SHA}" ]; then
+            echo "Release tag ${TAG_NAME} does not point to the completed Release workflow commit."
+            exit 1
+          fi
+
+          for asset in crates/papr/README.md crates/papr/LICENSE; do
+            if [ ! -f "${asset}" ]; then
+              echo "Required package asset is missing from ${TAG_NAME}: ${asset}"
+              exit 1
+            fi
+          done
+
+          echo "tag_name=${TAG_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "source_ref=${SOURCE_REF}" >> "${GITHUB_OUTPUT}"
+
   publish-crates-io:
     name: Publish to Crates.io
+    needs: resolve_release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag_name || github.ref }}
+          ref: ${{ needs.resolve_release.outputs.source_ref }}
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Publish Crates to Crates.io Idempotently
@@ -63,13 +111,14 @@ jobs:
 
   publish-linux-packages:
     name: Build & Attach DEB / RPM Packages
+    needs: resolve_release
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag_name || github.ref }}
+          ref: ${{ needs.resolve_release.outputs.source_ref }}
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-deb and cargo-generate-rpm
@@ -80,7 +129,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG_NAME="${{ inputs.tag_name || github.ref_name }}"
+          TAG_NAME="${{ needs.resolve_release.outputs.tag_name }}"
           mkdir -p target/release
           echo "Attempting to download release binary for ${TAG_NAME}..."
           if gh release download "$TAG_NAME" --pattern "*x86_64-unknown-linux-gnu.tar.gz" --dir /tmp/release-asset 2>/dev/null; then
@@ -98,23 +147,28 @@ jobs:
         working-directory: crates/papr
         run: cargo generate-rpm
       - name: Upload DEB & RPM to GitHub Release Assets
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ inputs.tag_name || github.ref_name }}
-          files: |
-            target/debian/*.deb
-            target/generate-rpm/*.rpm
-            crates/papr/target/generate-rpm/*.rpm
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.resolve_release.outputs.tag_name }}
+        run: |
+          shopt -s nullglob
+          packages=(target/debian/*.deb target/generate-rpm/*.rpm crates/papr/target/generate-rpm/*.rpm)
+          if [ "${#packages[@]}" -eq 0 ]; then
+            echo "No DEB or RPM package was produced."
+            exit 1
+          fi
+          gh release upload "${TAG_NAME}" "${packages[@]}" --clobber
 
   publish-aur:
     name: Publish to Arch Linux AUR
+    needs: resolve_release
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag_name || github.ref }}
+          ref: ${{ needs.resolve_release.outputs.source_ref }}
       
       - name: Install SSH key & setup Known Hosts
         env:
@@ -132,7 +186,7 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          TAG_NAME="${{ inputs.tag_name || github.ref_name }}"
+          TAG_NAME="${{ needs.resolve_release.outputs.tag_name }}"
           # Extract version without 'v' prefix (e.g. 0.1.0 from v0.1.0)
           VERSION="${TAG_NAME#v}"
           
