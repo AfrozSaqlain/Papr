@@ -125,19 +125,16 @@ If you want to use kitty with Papr’s terminal PDF viewer, install it separatel
 
 Select your preferred installation method below. Pre-built binaries are available for Linux, macOS, and Windows.
 
-Color coding:
+> **Note:** Currently AUR is undergiong maintenance so please use `Shell Script Installer` method if you are on Arch Linux BTW!!!
 
-* ✳️ = Personally tested and verified.
-* ❌  = Not yet personally tested.
-
-## ✳️ Cargo (crates.io)
+## Cargo (crates.io)
 If you already have Rust installed, install Papr directly from crates.io (the crate is published under `papr-tui` and installs the binary command `papr`):
 
 ```sh
 cargo install papr-tui
 ```
 
-## ✳️ Arch Linux (AUR)
+## Arch Linux (AUR)
 Arch Linux and Manjaro users can install the pre-compiled binary package from the Arch User Repository:
 
 ```sh
@@ -148,7 +145,7 @@ or
 paru -S papr-bin
 ```
 
-## ✳️ macOS Homebrew Tap
+## macOS Homebrew Tap
 Install Papr on macOS using Homebrew:
 
 ```sh
@@ -157,14 +154,14 @@ brew trust AfrozSaqlain/tap
 brew install papr
 ```
 
-## ✳️ Shell Script Installer (Linux & macOS)
+## Shell Script Installer (Linux & macOS)
 Install the latest pre-compiled release binary automatically:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSfL https://github.com/AfrozSaqlain/Papr/releases/latest/download/papr-tui-installer.sh | sh
 ```
 
-## ✳️ PowerShell Installer (Windows)
+## PowerShell Installer (Windows)
 
 Run PowerShell as a user and execute:
 
@@ -183,7 +180,7 @@ If `papr` is not recognized after installation, restart your PowerShell window s
 
 
 
-## ❌ Debian / Ubuntu (.deb) & Fedora (.rpm) Packages
+## Debian / Ubuntu (.deb) & Fedora (.rpm) Packages
 Download the `.deb` or `.rpm` package from the [Latest Release Page](https://github.com/AfrozSaqlain/Papr/releases/latest) and install:
 
 * **Debian / Ubuntu / Mint:**
