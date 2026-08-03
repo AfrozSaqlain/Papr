@@ -82,6 +82,7 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo deb -p papr-tui
       - name: Build RPM Package
+        working-directory: crates/papr
         run: cargo generate-rpm
       - name: Upload DEB & RPM to GitHub Release Assets
         uses: softprops/action-gh-release@v1
@@ -90,6 +91,7 @@ jobs:
           files: |
             target/debian/*.deb
             target/generate-rpm/*.rpm
+            crates/papr/target/generate-rpm/*.rpm
 
   publish-aur:
     name: Publish to Arch Linux AUR
