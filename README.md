@@ -94,6 +94,11 @@ Papr was written in Rust because an academic research workspace needs to be fast
   ```sh
   sudo dnf install -y gcc make pkgconf-pkg-config xdg-utils poppler-utils wl-clipboard texlive-scheme-basic latexmk git
   ```
+
+Papr uses bundled SQLite by default, so `cargo build` and `cargo install` do not
+require SQLite development headers. Fedora package builds can opt into the
+system SQLite library with `cargo build -p papr-tui --no-default-features` and
+must install `sqlite-devel`.
 * **Arch Linux:**
   ```sh
   sudo pacman -S --noconfirm base-devel pkgconf xdg-utils poppler wl-clipboard texlive-basic texlive-latexmk git

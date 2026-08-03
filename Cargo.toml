@@ -3,7 +3,7 @@ members = ["crates/papr-core", "crates/papr"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT"
 homepage = "https://github.com/AfrozSaqlain/Papr"
@@ -23,7 +23,7 @@ notify = "8.0"
 quick-xml = { version = "0.38", features = ["serialize", "overlapped-lists"] }
 ratatui = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "stream"] }
-rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
+rusqlite = { version = "0.32", default-features = false, features = ["chrono"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"

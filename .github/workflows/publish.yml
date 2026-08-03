@@ -159,6 +159,35 @@ jobs:
           fi
           gh release upload "${TAG_NAME}" "${packages[@]}" --clobber
 
+  publish-copr:
+    name: Submit Fedora COPR build
+    needs: resolve_release
+    runs-on: ubuntu-latest
+    # copr-cli is installed from Fedora's repositories. The COPR package is
+    # configured once as an SCM package pointing at packaging/papr-tui.spec.
+    container: fedora:latest
+    env:
+      COPR_PROJECT: ${{ vars.COPR_PROJECT }}
+      COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
+      RELEASE_TAG: ${{ needs.resolve_release.outputs.tag_name }}
+    steps:
+      - name: Install COPR CLI
+        run: dnf -y install copr-cli ca-certificates
+
+      - name: Trigger COPR build
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${COPR_PROJECT:?Set the COPR_PROJECT repository variable (for example, owner/papr)}"
+          : "${COPR_CONFIG:?Set the COPR_CONFIG repository secret to your COPR CLI configuration file}"
+
+          mkdir -p "$HOME/.config"
+          printf '%s\n' "$COPR_CONFIG" > "$HOME/.config/copr"
+          chmod 600 "$HOME/.config/copr"
+
+          echo "Submitting ${RELEASE_TAG} to COPR project ${COPR_PROJECT}"
+          copr build-package "$COPR_PROJECT" --name papr-tui --nowait
+
   publish-aur:
     name: Publish to Arch Linux AUR
     needs: resolve_release
