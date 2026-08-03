@@ -76,11 +76,24 @@ jobs:
         run: |
           cargo install cargo-deb
           cargo install cargo-generate-rpm
-      - name: Build Release Binary
-        run: cargo build --release -p papr-tui
+      - name: Fetch Pre-built Release Binary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="${{ inputs.tag_name || github.ref_name }}"
+          mkdir -p target/release
+          echo "Attempting to download release binary for ${TAG_NAME}..."
+          if gh release download "$TAG_NAME" --pattern "*x86_64-unknown-linux-gnu.tar.gz" --dir /tmp/release-asset 2>/dev/null; then
+            echo "Found pre-built release binary. Extracting..."
+            tar xf /tmp/release-asset/*x86_64-unknown-linux-gnu.tar.gz -C target/release/ --strip-components=1
+            chmod +x target/release/papr
+          else
+            echo "Pre-built binary not found on release asset. Compiling binary..."
+            cargo build --release -p papr-tui
+          fi
       - name: Build DEB Package
         if: runner.os == 'Linux'
-        run: cargo deb -p papr-tui
+        run: cargo deb --no-build -p papr-tui
       - name: Build RPM Package
         working-directory: crates/papr
         run: cargo generate-rpm
