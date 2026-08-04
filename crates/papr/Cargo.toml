@@ -24,6 +24,7 @@ chrono.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 crossterm.workspace = true
+iana-time-zone.workspace = true
 papr-core = { path = "../papr-core", version = "0.1.1", default-features = false }
 ratatui.workspace = true
 ratatui-image.workspace = true

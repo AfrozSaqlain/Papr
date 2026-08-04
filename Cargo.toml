@@ -19,6 +19,7 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 directories = "6.0"
 dunce = "1.0"
 futures-util = "0.3"
+iana-time-zone = "0.1"
 notify = "8.0"
 quick-xml = { version = "0.38", features = ["serialize", "overlapped-lists"] }
 ratatui = "0.29"

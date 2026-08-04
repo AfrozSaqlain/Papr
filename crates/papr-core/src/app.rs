@@ -1267,14 +1267,36 @@ impl App {
     }
 
     /// Get dependencies parsed from Cargo.toml.
+    /// Get dependencies parsed from Cargo.toml.
     pub fn get_dependencies(&self) -> Vec<(String, String)> {
+        let mut workspace_versions = std::collections::HashMap::new();
+        if let Ok(root_val) = toml::from_str::<toml::Value>(include_str!("../../../Cargo.toml")) {
+            if let Some(ws_deps) = root_val.get("workspace").and_then(|w| w.get("dependencies")).and_then(|d| d.as_table()) {
+                for (k, v) in ws_deps {
+                    let version = match v {
+                        toml::Value::String(s) => s.clone(),
+                        toml::Value::Table(t) => {
+                            t.get("version")
+                                .and_then(|ver| ver.as_str())
+                                .unwrap_or("")
+                                .to_string()
+                        }
+                        _ => String::new(),
+                    };
+                    if !version.is_empty() {
+                        workspace_versions.insert(k.clone(), version);
+                    }
+                }
+            }
+        }
+
         let mut deps = Vec::new();
         if let Ok(value) = toml::from_str::<toml::Value>(include_str!("../Cargo.toml")) {
             let deps_node = value.get("dependencies").or_else(|| value.get("workspace").and_then(|w| w.get("dependencies")));
             if let Some(dependencies) = deps_node {
                 if let Some(table) = dependencies.as_table() {
                     for (k, v) in table {
-                        let version = match v {
+                        let mut version = match v {
                             toml::Value::String(s) => s.clone(),
                             toml::Value::Table(t) => {
                                 t.get("version")
@@ -1282,8 +1304,13 @@ impl App {
                                     .unwrap_or("")
                                     .to_string()
                             }
-                            _ => "".to_string(),
+                            _ => String::new(),
                         };
+                        if version.is_empty() {
+                            if let Some(ws_ver) = workspace_versions.get(k) {
+                                version = ws_ver.clone();
+                            }
+                        }
                         deps.push((k.clone(), version));
                     }
                 }
@@ -1323,8 +1350,13 @@ impl App {
         ];
 
         for (name, version) in self.get_dependencies() {
+            let label = if version.is_empty() {
+                name.clone()
+            } else {
+                format!("{} ({})", name, version)
+            };
             items.push(InteractiveCreditItem {
-                label: format!("{} ({})", name, version),
+                label,
                 url: format!("https://crates.io/crates/{}", name),
             });
         }

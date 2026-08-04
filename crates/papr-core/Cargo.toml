@@ -16,6 +16,7 @@ chrono.workspace = true
 directories.workspace = true
 dunce.workspace = true
 futures-util.workspace = true
+iana-time-zone.workspace = true
 notify.workspace = true
 quick-xml.workspace = true
 ratatui.workspace = true

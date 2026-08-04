@@ -2701,7 +2701,7 @@ async fn apply_ui_action(
                     authors: paper.authors.join(" and "),
                     doi: paper.doi.clone(),
                     arxiv_id: Some(paper.id.clone()),
-                    year: Some(paper.published.format("%Y").to_string()),
+                    year: Some(paper.published.with_timezone(&chrono::Local).format("%Y").to_string()),
                     journal_ref: paper.journal_ref.clone(),
                 }),
             };

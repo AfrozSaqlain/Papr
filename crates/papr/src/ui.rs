@@ -109,6 +109,139 @@ fn workspace_highlight_selection(app: &App, selected: usize) -> Option<usize> {
     app.content_focused.then_some(selected)
 }
 
+/// Resolve the user-visible timezone label for a local timestamp.
+///
+/// Priority:
+/// 1. System timezone abbreviation if available from OS (e.g. IST, CEST, EDT, JST).
+/// 2. Comprehensive IANA timezone lookup table mapping to standard abbreviations.
+/// 3. Fallback to UTC offset enclosed in parentheses, e.g. `(+05:30)` or `(-07:00)`.
+#[must_use]
+pub fn resolve_timezone_display(local: &chrono::DateTime<chrono::Local>) -> String {
+    let raw_tz = local.format("%Z").to_string();
+    let trimmed = raw_tz.trim();
+
+    // Check if OS provided a valid alphabetic abbreviation (e.g., IST, CEST, EDT, PDT, JST, UTC, AEST, BST, CET).
+    if !trimmed.is_empty()
+        && trimmed.len() <= 6
+        && trimmed.chars().all(|c| c.is_ascii_alphabetic())
+        && !trimmed.eq_ignore_ascii_case("LOCAL")
+    {
+        return trimmed.to_uppercase();
+    }
+
+    // Try mapping detected system IANA timezone identifier (e.g. "Asia/Kolkata", "America/New_York") to standard abbreviation.
+    if let Ok(iana_tz) = iana_time_zone::get_timezone() {
+        if let Some(abbr) = iana_to_abbreviation(&iana_tz, local) {
+            return abbr.to_string();
+        }
+    }
+
+    // Fallback: UTC offset enclosed in parentheses (e.g., (+05:30) or (-07:00))
+    format!("({})", local.format("%:z"))
+}
+
+fn iana_to_abbreviation(iana: &str, local: &chrono::DateTime<chrono::Local>) -> Option<&'static str> {
+    use chrono::Offset;
+    let offset_secs = local.offset().fix().local_minus_utc();
+
+    match iana {
+        // India, Sri Lanka
+        "Asia/Kolkata" | "Asia/Calcutta" | "Asia/Colombo" => Some("IST"),
+
+        // Japan, Korea
+        "Asia/Tokyo" => Some("JST"),
+        "Asia/Seoul" => Some("KST"),
+
+        // China, Hong Kong, Singapore, Taiwan, Philippines, Malaysia
+        "Asia/Shanghai" | "Asia/Chongqing" | "Asia/Harbin" | "Asia/Urumqi" | "Asia/Taipei" => Some("CST"),
+        "Asia/Hong_Kong" => Some("HKT"),
+        "Asia/Singapore" => Some("SGT"),
+        "Asia/Manila" => Some("PST"),
+        "Asia/Kuala_Lumpur" | "Asia/Kuching" => Some("MYT"),
+
+        // Australia
+        "Australia/Sydney" | "Australia/Melbourne" | "Australia/Canberra" | "Australia/Hobart" => {
+            if offset_secs == 11 * 3600 { Some("AEDT") } else { Some("AEST") }
+        }
+        "Australia/Brisbane" => Some("AEST"),
+        "Australia/Adelaide" => {
+            if offset_secs == 10 * 3600 + 1800 { Some("ACDT") } else { Some("ACST") }
+        }
+        "Australia/Darwin" => Some("ACST"),
+        "Australia/Perth" => Some("AWST"),
+
+        // New Zealand
+        "Pacific/Auckland" | "NZ" => {
+            if offset_secs == 13 * 3600 { Some("NZDT") } else { Some("NZST") }
+        }
+
+        // US & Canada Eastern
+        "America/New_York" | "America/Detroit" | "America/Toronto" | "America/Montreal"
+        | "America/Indiana/Indianapolis" | "US/Eastern" => {
+            if offset_secs == -4 * 3600 { Some("EDT") } else { Some("EST") }
+        }
+
+        // US & Canada Central
+        "America/Chicago" | "America/Winnipeg" | "America/Mexico_City" | "US/Central" => {
+            if offset_secs == -5 * 3600 { Some("CDT") } else { Some("CST") }
+        }
+
+        // US & Canada Mountain
+        "America/Denver" | "America/Edmonton" | "America/Boise" | "US/Mountain" => {
+            if offset_secs == -6 * 3600 { Some("MDT") } else { Some("MST") }
+        }
+        "America/Phoenix" => Some("MST"),
+
+        // US & Canada Pacific
+        "America/Los_Angeles" | "America/Vancouver" | "America/Tijuana" | "US/Pacific" => {
+            if offset_secs == -7 * 3600 { Some("PDT") } else { Some("PST") }
+        }
+
+        // Alaska & Hawaii
+        "America/Anchorage" => {
+            if offset_secs == -8 * 3600 { Some("AKDT") } else { Some("AKST") }
+        }
+        "Pacific/Honolulu" => Some("HST"),
+
+        // UK & Ireland
+        "Europe/London" | "Europe/Belfast" | "Europe/Dublin" => {
+            if offset_secs == 1 * 3600 { Some("BST") } else { Some("GMT") }
+        }
+
+        // Central Europe
+        "Europe/Berlin" | "Europe/Paris" | "Europe/Rome" | "Europe/Madrid" | "Europe/Amsterdam"
+        | "Europe/Brussels" | "Europe/Vienna" | "Europe/Zurich" | "Europe/Stockholm"
+        | "Europe/Oslo" | "Europe/Copenhagen" | "Europe/Prague" | "Europe/Warsaw"
+        | "Europe/Budapest" | "Europe/Belgrade" => {
+            if offset_secs == 2 * 3600 { Some("CEST") } else { Some("CET") }
+        }
+
+        // Eastern Europe
+        "Europe/Athens" | "Europe/Helsinki" | "Europe/Bucharest" | "Europe/Kiev"
+        | "Europe/Sofia" | "Europe/Tallinn" | "Europe/Riga" | "Europe/Vilnius" => {
+            if offset_secs == 3 * 3600 { Some("EEST") } else { Some("EET") }
+        }
+
+        // Moscow / Turkey / Gulf
+        "Europe/Moscow" => Some("MSK"),
+        "Europe/Istanbul" => Some("TRT"),
+        "Asia/Dubai" => Some("GST"),
+        "Asia/Riyadh" => Some("AST"),
+
+        // UTC & GMT
+        "UTC" | "Etc/UTC" | "Etc/GMT" | "GMT" => Some("UTC"),
+
+        _ => None,
+    }
+}
+
+/// Format a UTC DateTime in the system's local timezone with timezone abbreviation or parenthesized offset.
+pub fn format_local_datetime(dt: &chrono::DateTime<chrono::Utc>, fmt: &str) -> String {
+    let local = dt.with_timezone(&chrono::Local);
+    let tz = resolve_timezone_display(&local);
+    format!("{} {}", local.format(fmt), tz)
+}
+
 /// Render the complete application for the current state.
 pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     if app.mode == AppMode::PdfView {
@@ -959,7 +1092,7 @@ fn render_history(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
                 format!(
                     "{}  {}",
                     activity_kind(&activity.kind),
-                    activity.occurred_at.format("%Y-%m-%d %H:%M UTC")
+                    format_local_datetime(&activity.occurred_at, "%Y-%m-%d %H:%M")
                 ),
                 Style::default().fg(theme.muted),
             ),
@@ -2941,7 +3074,7 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
         let mut spans = vec![Span::styled(
             format!(
                 "{}  |  {}  |  {}",
-                paper.published.format("%Y-%m-%d"),
+                format_local_datetime(&paper.published, "%Y-%m-%d"),
                 compact_authors(paper),
                 paper
                     .categories
@@ -3108,14 +3241,14 @@ fn paper_detail_lines<'a>(
         Line::from(vec![
             Span::styled("Published  ", Style::default().fg(theme.muted)),
             Span::styled(
-                paper.published.format("%B %d, %Y").to_string(),
+                format_local_datetime(&paper.published, "%B %d, %Y"),
                 Style::default().fg(theme.text),
             ),
         ]),
         Line::from(vec![
             Span::styled("Updated    ", Style::default().fg(theme.muted)),
             Span::styled(
-                paper.updated.format("%B %d, %Y").to_string(),
+                format_local_datetime(&paper.updated, "%B %d, %Y"),
                 Style::default().fg(theme.text),
             ),
         ]),
@@ -3232,7 +3365,7 @@ fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
                 let mut meta_str = format!(
                     "{}  |  {}",
                     compact_authors(paper),
-                    paper.published.format("%Y-%m-%d")
+                    format_local_datetime(&paper.published, "%Y-%m-%d")
                 );
                 if let Some(status) = local_status {
                     meta_str.push_str("  |  ");
@@ -4155,6 +4288,10 @@ fn render_credits(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
             "• arboard (Cross-platform system clipboard integration)",
             Style::default().fg(theme.text),
         ),
+        Line::styled(
+            "• iana-time-zone & Chrono (Cross-platform timezone detection and formatting)",
+            Style::default().fg(theme.text),
+        ),
         Line::raw(""),
         Line::styled(
             "SPECIAL THANKS",
@@ -4875,7 +5012,11 @@ Image: ![plot](plot.png)[^1]
         let theme = Theme::load("tokyo-night")?;
 
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
-        assert!(rendered_text(&terminal).contains("A Recorded Paper"));
+        let text = rendered_text(&terminal);
+        assert!(text.contains("A Recorded Paper"));
+        let expected_time = super::format_local_datetime(&timestamp, "%Y-%m-%d %H:%M");
+        assert!(text.contains(&expected_time));
+        assert!(!text.contains("UTC"));
 
         app.page = Page::Statistics;
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
@@ -5135,5 +5276,26 @@ Image: ![plot](plot.png)[^1]
         assert_eq!(super::activity_kind("paper_created"), "Paper created");
         assert_eq!(super::activity_kind("paper_renamed"), "Paper renamed");
         assert_eq!(super::activity_kind("paper_deleted"), "Paper deleted");
+    }
+
+    #[test]
+    fn test_timezone_display_resolution() {
+        let now = chrono::Local::now();
+        let tz = super::resolve_timezone_display(&now);
+        // Ensure no bare numeric offset is displayed without parentheses
+        if tz.starts_with('+') || tz.starts_with('-') {
+            panic!("Bare numeric offset found without parentheses: {}", tz);
+        }
+        if tz.contains(':') {
+            assert!(tz.starts_with('(') && tz.ends_with(')'), "Offset must be enclosed in parentheses: {}", tz);
+        }
+
+        // Verify IANA mappings
+        assert_eq!(super::iana_to_abbreviation("Asia/Kolkata", &now), Some("IST"));
+        assert_eq!(super::iana_to_abbreviation("Asia/Tokyo", &now), Some("JST"));
+        assert_eq!(super::iana_to_abbreviation("UTC", &now), Some("UTC"));
+
+        let formatted = super::format_local_datetime(&chrono::Utc::now(), "%Y-%m-%d %H:%M");
+        assert!(formatted.contains(&tz));
     }
 }
