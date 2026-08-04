@@ -7,7 +7,7 @@ use std::{
 };
 
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use thiserror::Error;
 
 use crate::{
@@ -38,14 +38,8 @@ const MIGRATIONS: &[(i64, &str)] = &[
         7,
         include_str!("../migrations/0007_dashboard_feed_cache.sql"),
     ),
-    (
-        8,
-        include_str!("../migrations/0008_reading_queue.sql"),
-    ),
-    (
-        9,
-        include_str!("../migrations/0009_previous_status.sql"),
-    ),
+    (8, include_str!("../migrations/0008_reading_queue.sql")),
+    (9, include_str!("../migrations/0009_previous_status.sql")),
     (
         10,
         include_str!("../migrations/0010_metadata_enrichment.sql"),
@@ -63,6 +57,48 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0013_activity_kind_paper_creation_modification.sql"),
     ),
 ];
+
+/// Write a source-provided author sequence only when the paper has no canonical
+/// author metadata yet. Existing rows and their `position` values are authoritative.
+fn persist_authors_if_missing(
+    transaction: &Transaction<'_>,
+    paper_id: i64,
+    authors: &[String],
+) -> Result<(), DatabaseError> {
+    let existing_author_count: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM paper_authors WHERE paper_id = ?1",
+        [paper_id],
+        |row| row.get(0),
+    )?;
+    if existing_author_count > 0 {
+        return Ok(());
+    }
+
+    for (position, author) in authors.iter().enumerate() {
+        let author_id = if let Some(id) = transaction
+            .query_row(
+                "SELECT id FROM authors WHERE name = ?1 COLLATE NOCASE ORDER BY id LIMIT 1",
+                [author],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+        {
+            id
+        } else {
+            transaction.execute("INSERT INTO authors (name) VALUES (?1)", [author])?;
+            transaction.last_insert_rowid()
+        };
+        transaction.execute(
+            "INSERT OR IGNORE INTO paper_authors (paper_id, author_id, position) VALUES (?1, ?2, ?3)",
+            params![
+                paper_id,
+                author_id,
+                i64::try_from(position).unwrap_or(i64::MAX)
+            ],
+        )?;
+    }
+    Ok(())
+}
 
 /// Database initialization and query errors.
 #[derive(Debug, Error)]
@@ -192,7 +228,8 @@ impl Database {
     ///
     /// Returns an error when the record cannot be inserted or queried.
     pub fn import_pdf(&self, pdf: &ImportedPdf) -> Result<bool, DatabaseError> {
-        let existing: Option<(i64, String)> = self.connection
+        let existing: Option<(i64, String)> = self
+            .connection
             .query_row(
                 "SELECT id, pdf_path FROM papers WHERE content_hash = ?1 LIMIT 1",
                 params![pdf.content_hash],
@@ -215,11 +252,15 @@ impl Database {
                 return Ok(true);
             } else if pdf.path.to_string_lossy() != existing_path {
                 // Check if the new path is in a collection and the existing one is not.
-                let old_in_collection = self.connection.query_row(
-                    "SELECT COUNT(*) FROM collection_papers WHERE paper_id = ?1",
-                    [id],
-                    |row| row.get::<_, i64>(0),
-                ).unwrap_or(0) > 0;
+                let old_in_collection = self
+                    .connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM collection_papers WHERE paper_id = ?1",
+                        [id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0)
+                    > 0;
                 let new_in_collection = pdf.relative_directory.is_some();
                 if new_in_collection && !old_in_collection {
                     self.connection.execute(
@@ -302,12 +343,17 @@ impl Database {
     ///
     /// # Errors
     /// Returns an error when the database query fails.
-    pub fn paper_citation_metadata(&self, paper_id: i64) -> Result<Option<crate::models::CitationMetadata>, DatabaseError> {
+    pub fn paper_citation_metadata(
+        &self,
+        paper_id: i64,
+    ) -> Result<Option<crate::models::CitationMetadata>, DatabaseError> {
         let mut statement = self.connection.prepare(
             "SELECT p.title,
-                    COALESCE((SELECT GROUP_CONCAT(a.name, ' and ')
-                              FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
-                              WHERE pa.paper_id = p.id ORDER BY pa.position), ''),
+                    COALESCE((SELECT GROUP_CONCAT(name, ' and ')
+                              FROM (SELECT a.name
+                                    FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
+                                    WHERE pa.paper_id = p.id
+                                    ORDER BY pa.position)), ''),
                     p.doi, p.arxiv_id, strftime('%Y', p.published_at), p.journal
              FROM papers p
              WHERE p.id = ?1 LIMIT 1",
@@ -335,9 +381,11 @@ impl Database {
     pub fn library_papers(&self) -> Result<Vec<LibraryPaper>, DatabaseError> {
         let mut statement = self.connection.prepare(
             "SELECT p.id, p.title,
-                    COALESCE((SELECT GROUP_CONCAT(a.name, ', ')
-                              FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
-                              WHERE pa.paper_id = p.id ORDER BY pa.position), ''),
+                    COALESCE((SELECT GROUP_CONCAT(name, ', ')
+                              FROM (SELECT a.name
+                                    FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
+                                    WHERE pa.paper_id = p.id
+                                    ORDER BY pa.position)), ''),
                     p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
              FROM papers p
              WHERE p.pdf_path IS NOT NULL
@@ -365,12 +413,17 @@ impl Database {
     /// # Errors
     ///
     /// Returns an error when the database query fails.
-    pub fn library_paper_by_id(&self, paper_id: i64) -> Result<Option<LibraryPaper>, DatabaseError> {
+    pub fn library_paper_by_id(
+        &self,
+        paper_id: i64,
+    ) -> Result<Option<LibraryPaper>, DatabaseError> {
         let mut statement = self.connection.prepare(
             "SELECT p.id, p.title,
-                    COALESCE((SELECT GROUP_CONCAT(a.name, ', ')
-                              FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
-                              WHERE pa.paper_id = p.id ORDER BY pa.position), ''),
+                    COALESCE((SELECT GROUP_CONCAT(name, ', ')
+                              FROM (SELECT a.name
+                                    FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
+                                    WHERE pa.paper_id = p.id
+                                    ORDER BY pa.position)), ''),
                     p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
              FROM papers p
              WHERE p.id = ?1",
@@ -425,9 +478,11 @@ impl Database {
     pub fn reading_queue_papers(&self) -> Result<Vec<LibraryPaper>, DatabaseError> {
         let mut statement = self.connection.prepare(
             "SELECT p.id, p.title,
-                    COALESCE((SELECT GROUP_CONCAT(a.name, ', ')
-                              FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
-                              WHERE pa.paper_id = p.id ORDER BY pa.position), ''),
+                    COALESCE((SELECT GROUP_CONCAT(name, ', ')
+                              FROM (SELECT a.name
+                                    FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
+                                    WHERE pa.paper_id = p.id
+                                    ORDER BY pa.position)), ''),
                     p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
              FROM papers p
              JOIN reading_queue rq ON rq.paper_id = p.id
@@ -633,17 +688,29 @@ impl Database {
                 "SELECT id FROM papers
                  WHERE arxiv_id = ?1 OR (?2 IS NOT NULL AND doi = ?2)
                     OR pdf_path = ?3 OR (?4 IS NOT NULL AND content_hash = ?4)
-                 ORDER BY CASE WHEN arxiv_id = ?1 THEN 0 ELSE 1 END"
+                 ORDER BY CASE WHEN arxiv_id = ?1 THEN 0 ELSE 1 END",
             )?;
-            let rows = stmt.query_map(params![paper.id, paper.doi, pdf.path.to_string_lossy(), pdf.content_hash], |row| row.get(0))?;
+            let rows = stmt.query_map(
+                params![
+                    paper.id,
+                    paper.doi,
+                    pdf.path.to_string_lossy(),
+                    pdf.content_hash
+                ],
+                |row| row.get(0),
+            )?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
 
         let file_size = i64::try_from(pdf.file_size).unwrap_or(i64::MAX);
         let paper_id = if let Some(paper_id) = matching_ids.first().copied() {
             for id in matching_ids.into_iter().skip(1) {
-                transaction.execute("DELETE FROM paper_authors WHERE paper_id = ?1", [id]).ok();
-                transaction.execute("DELETE FROM collection_papers WHERE paper_id = ?1", [id]).ok();
+                transaction
+                    .execute("DELETE FROM paper_authors WHERE paper_id = ?1", [id])
+                    .ok();
+                transaction
+                    .execute("DELETE FROM collection_papers WHERE paper_id = ?1", [id])
+                    .ok();
                 transaction.execute("DELETE FROM papers WHERE id = ?1", [id])?;
             }
 
@@ -689,30 +756,7 @@ impl Database {
             )?;
             transaction.last_insert_rowid()
         };
-        transaction.execute("DELETE FROM paper_authors WHERE paper_id = ?1", [paper_id])?;
-        for (position, author) in paper.authors.iter().enumerate() {
-            let author_id = if let Some(id) = transaction
-                .query_row(
-                    "SELECT id FROM authors WHERE name = ?1 COLLATE NOCASE ORDER BY id LIMIT 1",
-                    [author],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?
-            {
-                id
-            } else {
-                transaction.execute("INSERT INTO authors (name) VALUES (?1)", [author])?;
-                transaction.last_insert_rowid()
-            };
-            transaction.execute(
-                "INSERT OR IGNORE INTO paper_authors (paper_id, author_id, position) VALUES (?1, ?2, ?3)",
-                params![
-                    paper_id,
-                    author_id,
-                    i64::try_from(position).unwrap_or(i64::MAX)
-                ],
-            )?;
-        }
+        persist_authors_if_missing(&transaction, paper_id, &paper.authors)?;
         transaction.commit()?;
         Ok(paper_id)
     }
@@ -766,30 +810,7 @@ impl Database {
             )?;
             transaction.last_insert_rowid()
         };
-        transaction.execute("DELETE FROM paper_authors WHERE paper_id = ?1", [paper_id])?;
-        for (position, author) in paper.authors.iter().enumerate() {
-            let author_id = if let Some(id) = transaction
-                .query_row(
-                    "SELECT id FROM authors WHERE name = ?1 COLLATE NOCASE ORDER BY id LIMIT 1",
-                    [author],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?
-            {
-                id
-            } else {
-                transaction.execute("INSERT INTO authors (name) VALUES (?1)", [author])?;
-                transaction.last_insert_rowid()
-            };
-            transaction.execute(
-                "INSERT OR IGNORE INTO paper_authors (paper_id, author_id, position) VALUES (?1, ?2, ?3)",
-                params![
-                    paper_id,
-                    author_id,
-                    i64::try_from(position).unwrap_or(i64::MAX)
-                ],
-            )?;
-        }
+        persist_authors_if_missing(&transaction, paper_id, &paper.authors)?;
         transaction.commit()?;
         Ok(paper_id)
     }
@@ -834,10 +855,8 @@ impl Database {
     /// Returns an error when the note cannot be persisted.
     pub fn save_note(&self, note: &PaperNote) -> Result<(), DatabaseError> {
         if note.body.trim().is_empty() {
-            self.connection.execute(
-                "DELETE FROM notes WHERE paper_id = ?1",
-                [note.paper_id],
-            )?;
+            self.connection
+                .execute("DELETE FROM notes WHERE paper_id = ?1", [note.paper_id])?;
         } else {
             self.connection.execute(
                 "INSERT INTO notes (paper_id, title, body) VALUES (?1, ?2, ?3)
@@ -853,9 +872,11 @@ impl Database {
     pub fn papers_with_notes(&self, roots: &[PathBuf]) -> Result<Vec<LibraryPaper>, DatabaseError> {
         let mut statement = self.connection.prepare(
             "SELECT p.id, p.title,
-                    COALESCE((SELECT GROUP_CONCAT(a.name, ', ')
-                              FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
-                              WHERE pa.paper_id = p.id ORDER BY pa.position), ''),
+                    COALESCE((SELECT GROUP_CONCAT(name, ', ')
+                              FROM (SELECT a.name
+                                    FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
+                                    WHERE pa.paper_id = p.id
+                                    ORDER BY pa.position)), ''),
                     p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
              FROM notes n JOIN papers p ON p.id = n.paper_id
              WHERE p.pdf_path IS NOT NULL
@@ -959,14 +980,15 @@ impl Database {
     }
 
     /// Load the collection papers mapping (collection_id -> vec of paper_id)
-    pub fn collection_papers_map(&self) -> Result<std::collections::HashMap<i64, Vec<i64>>, DatabaseError> {
-        let mut statement = self.connection.prepare(
-            "SELECT collection_id, paper_id FROM collection_papers"
-        )?;
+    pub fn collection_papers_map(
+        &self,
+    ) -> Result<std::collections::HashMap<i64, Vec<i64>>, DatabaseError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT collection_id, paper_id FROM collection_papers")?;
         let mut map: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
-        let rows = statement.query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-        })?;
+        let rows =
+            statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
         for row in rows {
             let (cid, pid) = row?;
             map.entry(cid).or_default().push(pid);
@@ -985,9 +1007,11 @@ impl Database {
     ) -> Result<Vec<LibraryPaper>, DatabaseError> {
         let mut statement = self.connection.prepare(
             "SELECT p.id, p.title,
-                    COALESCE((SELECT GROUP_CONCAT(a.name, ', ')
-                              FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
-                              WHERE pa.paper_id = p.id ORDER BY pa.position), ''),
+                    COALESCE((SELECT GROUP_CONCAT(name, ', ')
+                              FROM (SELECT a.name
+                                    FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
+                                    WHERE pa.paper_id = p.id
+                                    ORDER BY pa.position)), ''),
                     p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
              FROM collection_papers cp JOIN papers p ON p.id = cp.paper_id
              WHERE cp.collection_id = ?1 ORDER BY p.created_at DESC, p.id DESC",
@@ -1252,7 +1276,8 @@ impl Database {
     /// # Errors
     /// Returns an error when the deletion fails.
     pub fn delete_paper(&self, paper_id: i64) -> Result<(), DatabaseError> {
-        let title: Option<String> = self.connection
+        let title: Option<String> = self
+            .connection
             .query_row(
                 "SELECT title FROM papers WHERE id = ?1",
                 [paper_id],
@@ -1264,7 +1289,8 @@ impl Database {
             self.record_paper_activity("paper_deleted", None, Some(&t))?;
         }
 
-        self.connection.execute("DELETE FROM papers WHERE id = ?1", [paper_id])?;
+        self.connection
+            .execute("DELETE FROM papers WHERE id = ?1", [paper_id])?;
         Ok(())
     }
 
@@ -1273,7 +1299,8 @@ impl Database {
     /// # Errors
     /// Returns an error when the deletion fails.
     pub fn delete_collection(&self, collection_id: i64) -> Result<(), DatabaseError> {
-        self.connection.execute("DELETE FROM collections WHERE id = ?1", [collection_id])?;
+        self.connection
+            .execute("DELETE FROM collections WHERE id = ?1", [collection_id])?;
         Ok(())
     }
 
@@ -1325,7 +1352,8 @@ impl Database {
     /// # Errors
     /// Returns an error when the database cannot be updated.
     pub fn rename_pdf(&self, paper_id: i64, new_path: &Path) -> Result<(), DatabaseError> {
-        let old_path: Option<String> = self.connection
+        let old_path: Option<String> = self
+            .connection
             .query_row(
                 "SELECT pdf_path FROM papers WHERE id = ?1",
                 [paper_id],
@@ -1334,7 +1362,10 @@ impl Database {
             .optional()?;
 
         if let Some(ref op) = old_path {
-            let old_name = Path::new(op).file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let old_name = Path::new(op)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
             let new_name = new_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if old_name != new_name {
                 self.record_paper_activity(
@@ -1435,9 +1466,11 @@ impl Database {
     pub fn bookmarks(&self, roots: &[PathBuf]) -> Result<Vec<BookmarkSummary>, DatabaseError> {
         let mut statement = self.connection.prepare(
             "SELECT b.id, b.paper_id, p.title,
-                    COALESCE((SELECT GROUP_CONCAT(a.name, ', ')
-                              FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
-                              WHERE pa.paper_id = p.id ORDER BY pa.position), ''),
+                    COALESCE((SELECT GROUP_CONCAT(name, ', ')
+                              FROM (SELECT a.name
+                                    FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
+                                    WHERE pa.paper_id = p.id
+                                    ORDER BY pa.position)), ''),
                     substr(p.published_at, 1, 4), p.journal, p.doi, p.pdf_path,
                     b.page, b.label
              FROM bookmarks b JOIN papers p ON p.id = b.paper_id
@@ -1559,13 +1592,16 @@ impl Database {
     /// Returns an error when database operations fail.
     pub fn record_project_activity(&self, kind: &str, name: &str) -> Result<(), DatabaseError> {
         if kind == "project_opened" {
-            let recent: Option<(i64, String, String, NaiveDateTime)> = self.connection.query_row(
-                "SELECT id, kind, COALESCE(detail, ''), occurred_at
+            let recent: Option<(i64, String, String, NaiveDateTime)> = self
+                .connection
+                .query_row(
+                    "SELECT id, kind, COALESCE(detail, ''), occurred_at
                  FROM activity_log
                  ORDER BY occurred_at DESC, id DESC LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            ).optional()?;
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
 
             if let Some((id, last_kind, last_detail, occurred_at)) = recent {
                 if last_kind == "project_opened" && last_detail == name {
@@ -1600,13 +1636,24 @@ impl Database {
         paper_id: Option<i64>,
         detail: Option<&str>,
     ) -> Result<(), DatabaseError> {
-        let recent: Option<(i64, String, Option<i64>, String, NaiveDateTime)> = self.connection.query_row(
-            "SELECT id, kind, paper_id, COALESCE(detail, ''), occurred_at
+        let recent: Option<(i64, String, Option<i64>, String, NaiveDateTime)> = self
+            .connection
+            .query_row(
+                "SELECT id, kind, paper_id, COALESCE(detail, ''), occurred_at
              FROM activity_log
              ORDER BY occurred_at DESC, id DESC LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-        ).optional()?;
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?;
 
         if let Some((id, last_kind, last_paper_id, last_detail, occurred_at)) = recent {
             let same_paper = match (paper_id, last_paper_id) {
@@ -1829,7 +1876,7 @@ impl Database {
              FROM authors a
              JOIN paper_authors pa ON pa.author_id = a.id AND pa.position < 5",
         )?;
-        
+
         let mut author_counts: HashMap<i64, (String, u64)> = HashMap::new();
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
@@ -1841,7 +1888,7 @@ impl Database {
                 entry.1 += 1;
             }
         }
-        
+
         let mut result: Vec<AuthorSummary> = author_counts
             .into_iter()
             .map(|(id, (name, count))| AuthorSummary {
@@ -1850,7 +1897,7 @@ impl Database {
                 paper_count: count,
             })
             .collect();
-            
+
         result.sort_by(|a, b| {
             b.paper_count
                 .cmp(&a.paper_count)
@@ -1863,12 +1910,18 @@ impl Database {
     ///
     /// # Errors
     /// Returns an error when the query fails.
-    pub fn author_papers(&self, author_id: i64, roots: &[PathBuf]) -> Result<Vec<LibraryPaper>, DatabaseError> {
+    pub fn author_papers(
+        &self,
+        author_id: i64,
+        roots: &[PathBuf],
+    ) -> Result<Vec<LibraryPaper>, DatabaseError> {
         let mut statement = self.connection.prepare(
             "SELECT p.id, p.title,
-                    COALESCE((SELECT GROUP_CONCAT(a.name, ', ')
-                              FROM paper_authors pa2 JOIN authors a ON a.id = pa2.author_id
-                              WHERE pa2.paper_id = p.id ORDER BY pa2.position), ''),
+                    COALESCE((SELECT GROUP_CONCAT(name, ', ')
+                              FROM (SELECT a.name
+                                    FROM paper_authors pa2 JOIN authors a ON a.id = pa2.author_id
+                                    WHERE pa2.paper_id = p.id
+                                    ORDER BY pa2.position)), ''),
                     p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite
              FROM papers p
              JOIN paper_authors pa ON pa.paper_id = p.id
@@ -1984,22 +2037,37 @@ impl Database {
         paper: &RemotePaper,
     ) -> Result<(), DatabaseError> {
         let transaction = self.connection.transaction()?;
-        let existing_id: Option<i64> = transaction.query_row(
-            "SELECT id FROM papers WHERE arxiv_id = ?1 LIMIT 1",
-            params![paper.id],
-            |row| row.get(0)
-        ).optional()?;
+        let existing_id: Option<i64> = transaction
+            .query_row(
+                "SELECT id FROM papers WHERE arxiv_id = ?1 LIMIT 1",
+                params![paper.id],
+                |row| row.get(0),
+            )
+            .optional()?;
 
         let target_id = if let Some(existing) = existing_id {
             if existing != paper_id {
-                let (pdf_path, file_size): (Option<String>, Option<i64>) = transaction.query_row(
-                    "SELECT pdf_path, file_size FROM papers WHERE id = ?1",
-                    params![paper_id],
-                    |row| Ok((row.get(0)?, row.get(1)?))
-                ).optional()?.unwrap_or((None, None));
+                let (pdf_path, file_size): (Option<String>, Option<i64>) = transaction
+                    .query_row(
+                        "SELECT pdf_path, file_size FROM papers WHERE id = ?1",
+                        params![paper_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?
+                    .unwrap_or((None, None));
 
-                transaction.execute("DELETE FROM paper_authors WHERE paper_id = ?1", params![paper_id]).ok();
-                transaction.execute("DELETE FROM collection_papers WHERE paper_id = ?1", params![paper_id]).ok();
+                transaction
+                    .execute(
+                        "DELETE FROM paper_authors WHERE paper_id = ?1",
+                        params![paper_id],
+                    )
+                    .ok();
+                transaction
+                    .execute(
+                        "DELETE FROM collection_papers WHERE paper_id = ?1",
+                        params![paper_id],
+                    )
+                    .ok();
                 transaction.execute("DELETE FROM papers WHERE id = ?1", params![paper_id])?;
 
                 if let Some(path) = pdf_path {
@@ -2011,9 +2079,16 @@ impl Database {
                          published_at = ?6, updated_at = ?7, journal = COALESCE(?8, journal)
                          WHERE id = ?9",
                         params![
-                            path, file_size, paper.title, paper.abstract_text, paper.doi,
-                            paper.published.to_rfc3339(), paper.updated.to_rfc3339(), paper.journal_ref, existing
-                        ]
+                            path,
+                            file_size,
+                            paper.title,
+                            paper.abstract_text,
+                            paper.doi,
+                            paper.published.to_rfc3339(),
+                            paper.updated.to_rfc3339(),
+                            paper.journal_ref,
+                            existing
+                        ],
                     )?;
                 } else {
                     transaction.execute(
@@ -2061,30 +2136,7 @@ impl Database {
              last_enrichment_attempt = CURRENT_TIMESTAMP WHERE id = ?1",
             [target_id],
         )?;
-        transaction.execute("DELETE FROM paper_authors WHERE paper_id = ?1", [target_id])?;
-        for (position, author) in paper.authors.iter().enumerate() {
-            let author_id = if let Some(id) = transaction
-                .query_row(
-                    "SELECT id FROM authors WHERE name = ?1 COLLATE NOCASE ORDER BY id LIMIT 1",
-                    [author],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?
-            {
-                id
-            } else {
-                transaction.execute("INSERT INTO authors (name) VALUES (?1)", [author])?;
-                transaction.last_insert_rowid()
-            };
-            transaction.execute(
-                "INSERT OR IGNORE INTO paper_authors (paper_id, author_id, position) VALUES (?1, ?2, ?3)",
-                params![
-                    target_id,
-                    author_id,
-                    i64::try_from(position).unwrap_or(i64::MAX)
-                ],
-            )?;
-        }
+        persist_authors_if_missing(&transaction, target_id, &paper.authors)?;
         transaction.commit()?;
         Ok(())
     }
@@ -2658,6 +2710,64 @@ mod tests {
     }
 
     #[test]
+    fn author_order_survives_download_and_metadata_updates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut database = Database::in_memory()?;
+        let timestamp = Utc
+            .with_ymd_and_hms(2026, 2, 1, 0, 0, 0)
+            .single()
+            .ok_or("invalid test timestamp")?;
+
+        // Seed the author table in a different order from the target paper so
+        // this verifies `position`, rather than incidental author row order.
+        let seed = RemotePaper {
+            id: "https://arxiv.org/abs/2602.01000".into(),
+            title: "Seed paper".into(),
+            authors: vec!["Alpha Author".into(), "Zulu Author".into()],
+            abstract_text: String::new(),
+            published: timestamp,
+            updated: timestamp,
+            categories: vec![],
+            pdf_url: None,
+            doi: None,
+            journal_ref: None,
+        };
+        database.ensure_remote_paper(&seed)?;
+
+        let mut paper = RemotePaper {
+            id: "https://arxiv.org/abs/2602.01001".into(),
+            title: "Ordered paper".into(),
+            authors: vec!["Zulu Author".into(), "Alpha Author".into()],
+            abstract_text: "Canonical ordering test.".into(),
+            published: timestamp,
+            updated: timestamp,
+            categories: vec![],
+            pdf_url: None,
+            doi: None,
+            journal_ref: None,
+        };
+        let paper_id = database.attach_download(&paper, &imported_pdf("author-order.pdf"))?;
+
+        assert_eq!(
+            database.library_paper_by_id(paper_id)?.unwrap().authors,
+            "Zulu Author, Alpha Author"
+        );
+        assert_eq!(
+            database.paper_citation_metadata(paper_id)?.unwrap().authors,
+            "Zulu Author and Alpha Author"
+        );
+
+        // Once persisted, metadata refreshes must retain the stored sequence.
+        paper.authors.reverse();
+        database.apply_arxiv_metadata(paper_id, &paper)?;
+        assert_eq!(
+            database.library_paper_by_id(paper_id)?.unwrap().authors,
+            "Zulu Author, Alpha Author"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn recorded_opens_feed_dashboard_history_and_statistics()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::in_memory()?;
@@ -2674,7 +2784,10 @@ mod tests {
         assert_eq!(dashboard.reading.sessions, 1);
         assert_eq!(dashboard.reading.average_reading_seconds, 120);
         assert_eq!(dashboard.reading.current_streak, 1);
-        assert_eq!(dashboard.reading.most_read_journal.as_deref(), Some("Nature"));
+        assert_eq!(
+            dashboard.reading.most_read_journal.as_deref(),
+            Some("Nature")
+        );
         assert_eq!(dashboard.reading.heatmap.len(), 84);
         assert_eq!(dashboard.recent_activity.len(), 3);
         assert_eq!(dashboard.recent_activity[0].label, "gravity waves");
@@ -2684,7 +2797,8 @@ mod tests {
     }
 
     #[test]
-    fn most_read_journal_aggregates_canonical_venue_names() -> Result<(), Box<dyn std::error::Error>> {
+    fn most_read_journal_aggregates_canonical_venue_names() -> Result<(), Box<dyn std::error::Error>>
+    {
         assert_eq!(
             canonical_journal_name("Phys. Rev. D 104, 043008 (2021)"),
             "Phys. Rev. D"
@@ -2719,10 +2833,15 @@ mod tests {
         database.record_open(other, true)?;
 
         let statistics = database.reading_statistics()?;
-        assert_eq!(statistics.most_read_journal.as_deref(), Some("Phys. Rev. D"));
-        let stored: String = database
-            .connection
-            .query_row("SELECT journal FROM papers WHERE id = ?1", [first], |row| row.get(0))?;
+        assert_eq!(
+            statistics.most_read_journal.as_deref(),
+            Some("Phys. Rev. D")
+        );
+        let stored: String = database.connection.query_row(
+            "SELECT journal FROM papers WHERE id = ?1",
+            [first],
+            |row| row.get(0),
+        )?;
         assert_eq!(stored, "Phys. Rev. D 104, 043008 (2021)");
         Ok(())
     }
@@ -2763,9 +2882,14 @@ mod tests {
     }
 
     #[test]
-    fn authors_and_author_papers_stay_synchronized_with_filesystem() -> Result<(), Box<dyn std::error::Error>> {
+    fn authors_and_author_papers_stay_synchronized_with_filesystem()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut database = Database::in_memory()?;
-        let root = std::env::temp_dir().join(format!("papr-authors-sync-{}-{}", std::process::id(), Utc::now().timestamp_micros()));
+        let root = std::env::temp_dir().join(format!(
+            "papr-authors-sync-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_micros()
+        ));
         fs::create_dir_all(&root)?;
         let pdf_path = root.join("test_author_paper.pdf");
         fs::write(&pdf_path, "%PDF-1.4 test")?;
@@ -2830,7 +2954,11 @@ mod tests {
     #[test]
     fn bookmarks_stay_synchronized_with_filesystem() -> Result<(), Box<dyn std::error::Error>> {
         let mut database = Database::in_memory()?;
-        let root = std::env::temp_dir().join(format!("papr-bookmarks-sync-{}-{}", std::process::id(), Utc::now().timestamp_micros()));
+        let root = std::env::temp_dir().join(format!(
+            "papr-bookmarks-sync-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_micros()
+        ));
         fs::create_dir_all(&root)?;
         let pdf_path = root.join("test_bookmarked_paper.pdf");
         fs::write(&pdf_path, "%PDF-1.4 test")?;
@@ -2885,9 +3013,14 @@ mod tests {
     }
 
     #[test]
-    fn notes_stay_synchronized_with_filesystem_and_autodelete() -> Result<(), Box<dyn std::error::Error>> {
+    fn notes_stay_synchronized_with_filesystem_and_autodelete()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut database = Database::in_memory()?;
-        let root = std::env::temp_dir().join(format!("papr-notes-sync-{}-{}", std::process::id(), Utc::now().timestamp_micros()));
+        let root = std::env::temp_dir().join(format!(
+            "papr-notes-sync-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_micros()
+        ));
         fs::create_dir_all(&root)?;
         let pdf_path = root.join("test_noted_paper.pdf");
         fs::write(&pdf_path, "%PDF-1.4 test")?;
@@ -2982,9 +3115,13 @@ mod tests {
     #[test]
     fn reading_queue_preserves_order_and_syncs_status() -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::in_memory()?;
-        let root = std::env::temp_dir().join(format!("papr-queue-sync-{}-{}", std::process::id(), Utc::now().timestamp_micros()));
+        let root = std::env::temp_dir().join(format!(
+            "papr-queue-sync-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_micros()
+        ));
         fs::create_dir_all(&root)?;
-        
+
         let path1 = root.join("paper1.pdf");
         let path2 = root.join("paper2.pdf");
         let path3 = root.join("paper3.pdf");
@@ -3131,9 +3268,11 @@ mod tests {
         database.apply_journal_metadata(id1, "Astronomy and Computing")?;
         assert_eq!(database.papers_needing_enrichment()?.len(), 0);
         database.apply_journal_metadata(id1, "Lower Quality Name")?;
-        let journal: String = database
-            .connection
-            .query_row("SELECT journal FROM papers WHERE id = ?1", [id1], |row| row.get(0))?;
+        let journal: String = database.connection.query_row(
+            "SELECT journal FROM papers WHERE id = ?1",
+            [id1],
+            |row| row.get(0),
+        )?;
         assert_eq!(journal, "Astronomy and Computing");
         Ok(())
     }
@@ -3223,7 +3362,11 @@ mod tests {
     #[test]
     fn rename_pdf_updates_path_and_preserves_metadata() -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::in_memory()?;
-        let root = std::env::temp_dir().join(format!("papr-rename-{}-{}", std::process::id(), Utc::now().timestamp_micros()));
+        let root = std::env::temp_dir().join(format!(
+            "papr-rename-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_micros()
+        ));
         fs::create_dir_all(&root)?;
         let old_path = root.join("old_paper_name.pdf");
         fs::write(&old_path, "%PDF-1.4 old")?;
@@ -3253,7 +3396,10 @@ mod tests {
         let papers = database.library_papers()?;
         assert_eq!(papers.len(), 1);
         assert_eq!(papers[0].title, "Old Paper Name");
-        assert_eq!(papers[0].pdf_path.as_deref(), Some(new_path.to_str().unwrap()));
+        assert_eq!(
+            papers[0].pdf_path.as_deref(),
+            Some(new_path.to_str().unwrap())
+        );
 
         let queue = database.reading_queue_papers()?;
         assert_eq!(queue.len(), 1);
@@ -3282,7 +3428,8 @@ mod tests {
     }
 
     #[test]
-    fn scan_after_external_rename_preserves_a_local_paper_title() -> Result<(), Box<dyn std::error::Error>> {
+    fn scan_after_external_rename_preserves_a_local_paper_title()
+    -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::in_memory()?;
         let root = std::env::temp_dir().join(format!(
             "papr-external-rename-{}-{}",
