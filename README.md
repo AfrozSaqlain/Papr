@@ -12,7 +12,7 @@
   <img src="assets/papr.gif" alt="Demo" width="900">
 </p>
 
-Papr is a fast, terminal based workspace built for academic research. It brings together arXiv paper discovery, local PDF library management, reading, markdown note-taking, automatic author-based paper organization, and LaTeX manuscript editing into one terminal interface.
+Papr is a fast, terminal-based workspace built for academic research. It brings together a personalized daily papers feed, arXiv search, local PDF library management, reading, Markdown note-taking, automatic author-based paper organization, and LaTeX manuscript editing into a single terminal interface.
 
 Instead of context-switching between web browsers, reference managers, PDF viewers, and text editors, Papr merges online search with local file organization into a distraction-free environment. Under the hood, it's built with Rust using Ratatui, Tokio, Reqwest, and SQLite, giving you a lightweight tool that runs entirely offline and keeps all your data under your control.
 
