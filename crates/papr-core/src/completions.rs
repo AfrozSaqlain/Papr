@@ -73,10 +73,17 @@ impl CompletionSource for CitationSource {
             fuzzy_score(&query, &haystack).map(|score| (score, entry))
         }).collect::<Vec<_>>();
         matches.sort_by(|(left, left_entry), (right, right_entry)| right.cmp(left).then_with(|| left_entry.key.cmp(&right_entry.key)));
-        matches.into_iter().take(8).map(|(_, entry)| CompletionItem {
-            insert_text: entry.key.clone(),
-            label: entry.key.clone(),
-            detail: format!("{} — {} ({})", first_author(&entry.author), entry.title, entry.year),
+        matches.into_iter().take(8).map(|(_, entry)| {
+            let label = if entry.title.trim().is_empty() {
+                entry.key.clone()
+            } else {
+                entry.title.trim().to_string()
+            };
+            CompletionItem {
+                insert_text: entry.key.clone(),
+                label,
+                detail: format!("{} — {} ({})", first_author(&entry.author), entry.title, entry.year),
+            }
         }).collect()
     }
 }
@@ -110,8 +117,9 @@ fn bib_field(fields: &str, name: &str) -> Option<String> {
         start = found + name.len();
     }
     let value = fields[start..].trim_start();
-    let end = value.find(|c| c == '}' || c == '"' || c == ',').unwrap_or(value.len());
-    Some(value.trim_start_matches(['{', '"']).get(..end).unwrap_or(value).trim().replace('\n', " "))
+    let trimmed_start = value.trim_start_matches(['{', '"']);
+    let end = trimmed_start.find(|c| c == '}' || c == '"' || c == ',').unwrap_or(trimmed_start.len());
+    Some(trimmed_start.get(..end).unwrap_or(trimmed_start).trim().replace('\n', " "))
 }
 
 fn first_author(author: &str) -> String {
@@ -142,7 +150,15 @@ mod tests {
     #[test]
     fn parses_and_matches_metadata() {
         let source = CitationSource::new(CitationSource::parse_bibtex("@article{einstein1905, author = {Albert Einstein}, title = {On the Electrodynamics of Moving Bodies}, year = {1905}}"));
-        assert_eq!(source.complete("\\autocite{moving", 16)[0].label, "einstein1905");
+        assert_eq!(source.complete("\\autocite{moving", 16)[0].label, "On the Electrodynamics of Moving Bodies");
+        assert_eq!(source.complete("\\autocite{moving", 16)[0].insert_text, "einstein1905");
         assert!(citation_query("plain text", 10).is_none());
+    }
+    #[test]
+    fn falls_back_to_citation_key_when_title_is_missing() {
+        let source = CitationSource::new(CitationSource::parse_bibtex("@article{no_title_key, author = {Jane Doe}, year = {2020}}"));
+        let items = source.complete("\\cite{no_title", 14);
+        assert_eq!(items[0].label, "no_title_key");
+        assert_eq!(items[0].insert_text, "no_title_key");
     }
 }
