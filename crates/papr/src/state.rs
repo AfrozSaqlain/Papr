@@ -1,11 +1,13 @@
 //! Application state machine and navigation commands.
 
-use crate::models::{
+use papr_core::projects::ProjectBuildDiagnostic;
+use papr_core::downloads::DownloadTask;
+use papr_core::models::{
     AuthorSummary, BookmarkSummary, CollectionSummary, DashboardStats, LibraryPaper, PaperNote,
     RemotePaper, ResearchDashboard,
 };
-use crate::plugins::PluginInfo;
-use crate::projects::Project;
+use papr_core::plugins::PluginInfo;
+use papr_core::projects::Project;
 
 /// Top-level application pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -393,33 +395,7 @@ pub enum ProjectPane {
     Preview,
 }
 
-/// Severity assigned to a parsed LaTeX compiler diagnostic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProjectDiagnosticSeverity {
-    /// Compilation cannot complete successfully.
-    Error,
-    /// Compilation completed but reported a condition needing attention.
-    Warning,
-}
 
-/// A compiler diagnostic enriched with source location and context when available.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectBuildDiagnostic {
-    /// Error or warning severity.
-    pub severity: ProjectDiagnosticSeverity,
-    /// Short, scannable diagnostic category.
-    pub title: String,
-    /// Compiler-provided description.
-    pub description: String,
-    /// Project-relative source path when known.
-    pub file: Option<String>,
-    /// One-based source line when known.
-    pub line: Option<usize>,
-    /// Source text at the reported location when available.
-    pub code: Option<String>,
-    /// Additional compiler context or remediation hint.
-    pub hint: Option<String>,
-}
 
 /// Target to delete.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -735,60 +711,9 @@ pub struct LibraryState {
     pub message: Option<String>,
 }
 
-/// State of one visible background transfer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DownloadStatus {
-    /// Waiting to receive response bytes.
-    Starting,
-    /// Bytes are actively streaming.
-    Running,
-    /// Extracting metadata from PDF (inspection, etc.)
-    ExtractingMetadata,
-    /// Fetching paper metadata from online API (arXiv/Crossref)
-    Enriching,
-    /// Renaming target PDF file based on title/metadata
-    Renaming,
-    /// PDF has been finalized and indexed.
-    Completed,
-    /// Transfer or indexing failed.
-    Failed(String),
-}
 
 
-/// Download progress shown in the Downloads page and status bar.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DownloadTask {
-    /// arXiv identifier.
-    pub id: String,
-    /// Paper title.
-    pub title: String,
-    /// Persisted bytes.
-    pub downloaded: u64,
-    /// Expected response size when supplied by the server.
-    pub total: Option<u64>,
-    /// Associated database paper ID, if attached.
-    pub paper_id: Option<i64>,
-    /// Final or current PDF path on disk.
-    pub pdf_path: Option<String>,
-    /// Current transfer state.
-    pub status: DownloadStatus,
-    /// Remote paper metadata preserved for retries.
-    pub remote_paper: Option<RemotePaper>,
-    /// When the task failed (used to auto-cleanup older failures).
-    pub failed_at: Option<std::time::Instant>,
-}
 
-impl DownloadTask {
-    /// Display filename without the PDF extension, falling back to the remote paper title.
-    #[must_use]
-    pub fn display_name(&self) -> &str {
-        self.pdf_path
-            .as_deref()
-            .and_then(|path| std::path::Path::new(path).file_stem())
-            .and_then(|name| name.to_str())
-            .unwrap_or_else(|| self.title.strip_suffix(".pdf").unwrap_or(&self.title))
-    }
-}
 
 /// Commands available to keybindings and Browse Papr.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -915,7 +840,7 @@ pub struct App {
     /// Pending first `g` of the Vim-style `gg` command.
     pub project_editor_pending_g: bool,
     /// Items currently offered by the editor completion engine.
-    pub project_completions: Vec<crate::completions::CompletionItem>,
+    pub project_completions: Vec<papr_core::CompletionItem>,
     /// Selected item in the completion popup.
     pub project_completion_selected: usize,
     /// Last compiler status shown in the writing workspace.
@@ -1290,32 +1215,42 @@ impl App {
             }
         }
 
-        let mut deps = Vec::new();
-        if let Ok(value) = toml::from_str::<toml::Value>(include_str!("../Cargo.toml")) {
-            let deps_node = value.get("dependencies").or_else(|| value.get("workspace").and_then(|w| w.get("dependencies")));
-            if let Some(dependencies) = deps_node {
-                if let Some(table) = dependencies.as_table() {
-                    for (k, v) in table {
-                        let mut version = match v {
-                            toml::Value::String(s) => s.clone(),
-                            toml::Value::Table(t) => {
-                                t.get("version")
-                                    .and_then(|ver| ver.as_str())
-                                    .unwrap_or("")
-                                    .to_string()
+        let mut dep_map = std::collections::HashMap::new();
+
+        let manifests = [
+            include_str!("../Cargo.toml"),
+            include_str!("../../papr-core/Cargo.toml"),
+        ];
+
+        for manifest in manifests {
+            if let Ok(value) = toml::from_str::<toml::Value>(manifest) {
+                let deps_node = value.get("dependencies").or_else(|| value.get("workspace").and_then(|w| w.get("dependencies")));
+                if let Some(dependencies) = deps_node {
+                    if let Some(table) = dependencies.as_table() {
+                        for (k, v) in table {
+                            let mut version = match v {
+                                toml::Value::String(s) => s.clone(),
+                                toml::Value::Table(t) => {
+                                    t.get("version")
+                                        .and_then(|ver| ver.as_str())
+                                        .unwrap_or("")
+                                        .to_string()
+                                }
+                                _ => String::new(),
+                            };
+                            if version.is_empty() {
+                                if let Some(ws_ver) = workspace_versions.get(k) {
+                                    version = ws_ver.clone();
+                                }
                             }
-                            _ => String::new(),
-                        };
-                        if version.is_empty() {
-                            if let Some(ws_ver) = workspace_versions.get(k) {
-                                version = ws_ver.clone();
-                            }
+                            dep_map.insert(k.clone(), version);
                         }
-                        deps.push((k.clone(), version));
                     }
                 }
             }
         }
+
+        let mut deps: Vec<_> = dep_map.into_iter().collect();
         deps.sort_by(|a, b| a.0.cmp(&b.0));
         deps
     }
@@ -1787,7 +1722,7 @@ fn parse_arxiv_id(s: &str) -> Option<String> {
 mod tests {
     use chrono::Utc;
 
-    use crate::models::{LibraryPaper, RemotePaper};
+    use papr_core::{LibraryPaper, RemotePaper};
 
     use super::{App, Command, DiscoveryState, Page};
 

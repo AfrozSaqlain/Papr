@@ -9,13 +9,16 @@
 //! All changes are staged in [`SettingsModalState`] and written to disk
 //! when the user explicitly applies them.
 
+use crate::state::*;
+use crate::theme::*;
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use papr_core::{
-    App, AppMode, Config, GeneralTabFocus, PathEntryState, PathsTabFocus, SettingsModalState,
-    SettingsTab, Theme,
-};
+    prev_word_boundary, next_word_boundary,
+
+
+    Config,     };
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -260,23 +263,23 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
         && key.code == KeyCode::Char('b')
         && !is_editing
     {
-        app.dispatch(papr_core::Command::TogglePalette);
+        app.dispatch(Command::TogglePalette);
         return SettingsKeyResult::Handled;
     }
 
     // Global ? shortcut handling: toggle keyboard reference overlay when not in text editing mode.
     if key.code == KeyCode::Char('?') && !is_editing {
-        app.dispatch(papr_core::Command::ToggleHelp);
+        app.dispatch(Command::ToggleHelp);
         return SettingsKeyResult::Handled;
     }
 
     // Match the application's global Discover shortcut while leaving `/`
     // available as normal text in an actively edited settings field.
     if key.code == KeyCode::Char('/') && !is_editing {
-        app.page = papr_core::Page::Discover;
-        if let Some(index) = papr_core::Page::ALL
+        app.page = Page::Discover;
+        if let Some(index) = Page::ALL
             .iter()
-            .position(|&page| page == papr_core::Page::Discover)
+            .position(|&page| page == Page::Discover)
         {
             app.sidebar_index = index;
         }
@@ -917,7 +920,7 @@ fn handle_single_path_edit(
         },
         KeyCode::Char(c) => {
             let c = text_input_char(c);
-            let (text, cursor) = match focus {
+            let (text, cursor): (&mut String, &mut usize) = match focus {
                 PathsTabFocus::DownloadPath => (
                     &mut app.settings_modal.download_path,
                     &mut app.settings_modal.download_path_cursor,
@@ -933,7 +936,7 @@ fn handle_single_path_edit(
             *cursor = cur + c.len_utf8();
         }
         KeyCode::Backspace => {
-            let (text, cursor) = match focus {
+            let (text, cursor): (&mut String, &mut usize) = match focus {
                 PathsTabFocus::DownloadPath => (
                     &mut app.settings_modal.download_path,
                     &mut app.settings_modal.download_path_cursor,
@@ -956,7 +959,7 @@ fn handle_single_path_edit(
             }
         }
         KeyCode::Delete => {
-            let (text, cursor) = match focus {
+            let (text, cursor): (&mut String, &mut usize) = match focus {
                 PathsTabFocus::DownloadPath => (
                     &mut app.settings_modal.download_path,
                     &mut app.settings_modal.download_path_cursor,
@@ -978,7 +981,7 @@ fn handle_single_path_edit(
             }
         }
         KeyCode::Left => {
-            let (text, cursor) = match focus {
+            let (text, cursor): (&mut String, &mut usize) = match focus {
                 PathsTabFocus::DownloadPath => (
                     &mut app.settings_modal.download_path,
                     &mut app.settings_modal.download_path_cursor,
@@ -997,7 +1000,7 @@ fn handle_single_path_edit(
             }
         }
         KeyCode::Right => {
-            let (text, cursor) = match focus {
+            let (text, cursor): (&mut String, &mut usize) = match focus {
                 PathsTabFocus::DownloadPath => (
                     &mut app.settings_modal.download_path,
                     &mut app.settings_modal.download_path_cursor,
@@ -1027,7 +1030,7 @@ fn handle_single_path_edit(
             *cursor = 0;
         }
         KeyCode::End => {
-            let (text, cursor) = match focus {
+            let (text, cursor): (&mut String, &mut usize) = match focus {
                 PathsTabFocus::DownloadPath => (
                     &mut app.settings_modal.download_path,
                     &mut app.settings_modal.download_path_cursor,
@@ -2010,40 +2013,9 @@ fn next_char_boundary(text: &str, cursor: usize) -> usize {
     next.min(text.len())
 }
 
-fn prev_word_boundary(text: &str, cursor: usize) -> usize {
-    let mut pos = cursor.min(text.len());
-    while pos > 0 && text[prev_char_boundary(text, pos)..pos].chars().next().is_some_and(char::is_whitespace) {
-        pos = prev_char_boundary(text, pos);
-    }
-    let word = pos > 0 && text[prev_char_boundary(text, pos)..pos].chars().next().is_some_and(|ch| ch.is_alphanumeric() || ch == '_');
-    while pos > 0 {
-        let previous = prev_char_boundary(text, pos);
-        let ch = text[previous..pos].chars().next().unwrap_or(' ');
-        if ch.is_whitespace() || (ch.is_alphanumeric() || ch == '_') != word { break; }
-        pos = previous;
-    }
-    pos
-}
 
-fn next_word_boundary(text: &str, cursor: usize) -> usize {
-    let mut pos = cursor.min(text.len());
-    if pos >= text.len() { return text.len(); }
-    let first = text[pos..].chars().next().unwrap_or(' ');
-    if first.is_whitespace() {
-        while pos < text.len() && text[pos..].chars().next().is_some_and(char::is_whitespace) {
-            pos = next_char_boundary(text, pos);
-        }
-    } else {
-        let word = first.is_alphanumeric() || first == '_';
-        while pos < text.len() {
-            let next = next_char_boundary(text, pos);
-            let ch = text[pos..next].chars().next().unwrap_or(' ');
-            if ch.is_whitespace() || (ch.is_alphanumeric() || ch == '_') != word { break; }
-            pos = next;
-        }
-    }
-    pos
-}
+
+
 
 #[cfg(test)]
 mod tests {
@@ -2231,7 +2203,7 @@ mod tests {
     #[test]
     fn slash_opens_discovery_unless_a_settings_text_field_is_being_edited() {
         let mut app = App::default();
-        app.page = papr_core::Page::Settings;
+        app.page = Page::Settings;
         app.content_focused = true;
 
         let result = handle_settings_key(
@@ -2240,11 +2212,11 @@ mod tests {
         );
 
         assert!(matches!(result, SettingsKeyResult::Handled));
-        assert_eq!(app.page, papr_core::Page::Discover);
+        assert_eq!(app.page, Page::Discover);
         assert_eq!(app.mode, AppMode::Search);
         assert!(app.content_focused);
 
-        app.page = papr_core::Page::Settings;
+        app.page = Page::Settings;
         app.mode = AppMode::Normal;
         app.settings_modal.tab = SettingsTab::General;
         app.settings_modal.tab_bar_focused = false;
@@ -2259,7 +2231,7 @@ mod tests {
         );
 
         assert!(matches!(result, SettingsKeyResult::Handled));
-        assert_eq!(app.page, papr_core::Page::Settings);
+        assert_eq!(app.page, Page::Settings);
         assert_eq!(app.mode, AppMode::Normal);
         assert_eq!(app.settings_modal.pdf_viewer, "/");
     }

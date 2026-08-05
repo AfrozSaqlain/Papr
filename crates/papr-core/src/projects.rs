@@ -170,9 +170,269 @@ fn default_main_tex(title: &str) -> String {
     format!("\\documentclass[11pt]{{article}}\n\\usepackage[utf8]{{inputenc}}\n\\usepackage{{graphicx}}\n\\usepackage{{amsmath,amssymb,amsthm}}\n\\usepackage[a4paper,margin=1in]{{geometry}}\n\\usepackage{{enumerate}}\n\\usepackage{{float}}\n\n\\setlength{{\\parindent}}{{0em}}\n\n\\title{{{title}}}\n\\author{{}}\n\\date{{\\today}}\n\n\\begin{{document}}\n\\maketitle\n\n\\begin{{abstract}}\nWrite your abstract here.\n\\end{{abstract}}\n\n\\section{{Introduction}}\nStart writing.\n\n\\bibliographystyle{{plain}}\n\\bibliography{{references}}\n\\end{{document}}\n")
 }
 
+/// Turn TeX's line-oriented output into diagnostics that can be displayed and navigated.
+pub fn parse_latex_diagnostics(log: &[String], project_root: &Path) -> Vec<ProjectBuildDiagnostic> {
+    let files = tex_file_context(log);
+    let locations = tex_locations(log, &files);
+    let diagnostic_indexes = log.iter().enumerate()
+        .filter_map(|(index, output)| latex_diagnostic(output).map(|diagnostic| (index, diagnostic)))
+        .collect::<Vec<_>>();
+    let mut diagnostics = Vec::new();
+    let mut previous_location = None;
+
+    for (position, (index, (severity, description))) in diagnostic_indexes.iter().enumerate() {
+        let next_diagnostic = diagnostic_indexes.get(position + 1).map_or(log.len(), |(index, _)| *index);
+        let source_file = files[*index].clone();
+        // TeX puts the useful `l.<n>` entry either immediately after an error,
+        // before a package-generated message, or in the enclosing log block.
+        let location = locations.iter()
+            .filter(|location| location.index >= *index && location.index < next_diagnostic)
+            .min_by_key(|location| location.index)
+            .cloned()
+            .or_else(|| locations.iter()
+                .rev()
+                .find(|location| location.index < *index && index.saturating_sub(location.index) <= 40)
+                .cloned())
+            .or_else(|| previous_location.clone());
+        let source_file = location.as_ref().map_or(source_file, |location| location.file.clone());
+        let (line, compiler_code) = location.as_ref()
+            .map(|location| (Some(location.line), location.code.clone()))
+            .unwrap_or((None, None));
+        if let Some(location) = &location {
+            previous_location = Some(location.clone());
+        }
+        let source = std::fs::read_to_string(project_root.join(&source_file)).ok();
+        let code = compiler_code.or_else(|| {
+            line.and_then(|number| {
+                source
+                    .as_deref()
+                    .and_then(|contents| contents.lines().nth(number.saturating_sub(1)))
+                    .map(str::to_owned)
+            })
+        });
+        let title = diagnostic_title(*severity, description);
+        let hint = match severity {
+            ProjectDiagnosticSeverity::Error if title == "Emergency stop" => {
+                Some("Triggered after the preceding compiler error.".into())
+            }
+            ProjectDiagnosticSeverity::Error if title == "Undefined control sequence" => code
+                .as_ref()
+                .map(|command| format!("Undefined control sequence `{command}`."))
+                .or_else(|| Some(description.clone())),
+            ProjectDiagnosticSeverity::Error => Some(description.clone()),
+            ProjectDiagnosticSeverity::Warning => None,
+        };
+        diagnostics.push(ProjectBuildDiagnostic {
+            severity: *severity,
+            title,
+            description: description.clone(),
+            file: Some(source_file),
+            line,
+            code,
+            hint,
+        });
+    }
+    diagnostics
+}
+
+#[derive(Clone)]
+struct TexLocation {
+    index: usize,
+    file: String,
+    line: usize,
+    code: Option<String>,
+}
+
+fn latex_diagnostic(output: &str) -> Option<(ProjectDiagnosticSeverity, String)> {
+    let text = output.trim_start();
+    if let Some(error) = text.strip_prefix('!') {
+        let error = error.trim_start();
+        return (!error.is_empty() && !error.contains("Fatal error occurred"))
+            .then(|| (ProjectDiagnosticSeverity::Error, error.to_owned()));
+    }
+    if let Some((_, error)) = text.rsplit_once("LaTeX Error:") {
+        return Some((ProjectDiagnosticSeverity::Error, error.trim().to_owned()));
+    }
+    if text.starts_with("Package ") && text.contains(" Error:") {
+        return Some((ProjectDiagnosticSeverity::Error, text.to_owned()));
+    }
+    if file_line_number(text).is_some() && text.to_ascii_lowercase().contains("error") {
+        return Some((ProjectDiagnosticSeverity::Error, text.to_owned()));
+    }
+    (text.starts_with("LaTeX Warning:")
+        || (text.starts_with("Package ") && text.contains(" Warning:"))
+        || text.starts_with("Overfull \\hbox")
+        || text.starts_with("Underfull \\hbox"))
+        .then(|| (ProjectDiagnosticSeverity::Warning, text.to_owned()))
+}
+
+fn tex_file_context(log: &[String]) -> Vec<String> {
+    let mut stack = vec!["main.tex".to_owned()];
+    log.iter().map(|output| {
+        let references = tex_file_references(output);
+        for file in &references {
+            if stack.last() != Some(file) {
+                stack.push(file.clone());
+            }
+        }
+        let current = references.last().cloned()
+            .unwrap_or_else(|| stack.last().cloned().unwrap_or_else(|| "main.tex".into()));
+        let closes = output.chars().filter(|character| *character == ')').count();
+        for _ in 0..closes {
+            if stack.len() > 1 {
+                stack.pop();
+            }
+        }
+        current
+    }).collect()
+}
+
+fn tex_locations(log: &[String], files: &[String]) -> Vec<TexLocation> {
+    log.iter().enumerate().filter_map(|(index, output)| {
+        let (line, code) = compiler_location_in_line(output)?;
+        let file = tex_file_references(output).last().cloned().unwrap_or_else(|| files[index].clone());
+        Some(TexLocation { index, file, line, code })
+    }).collect()
+}
+
+fn tex_file_references(output: &str) -> Vec<String> {
+    output.split(|character: char| character.is_whitespace() || matches!(character, '(' | ')' | '[' | ']' | '"' | '\''))
+        .filter_map(|candidate| {
+            let candidate = candidate.trim_start_matches("./");
+            [".tex", ".sty", ".cls", ".ltx", ".bib"].iter().find_map(|extension| {
+                candidate.find(extension).map(|index| candidate[..index + extension.len()].to_owned())
+            })
+        })
+        .collect()
+}
+
+fn compiler_location_in_line(output: &str) -> Option<(usize, Option<String>)> {
+    let text = output.trim();
+    if let Some(offset) = text.find("l.") {
+        let rest = text[offset + 2..].trim_start();
+        let digits = rest.chars().take_while(char::is_ascii_digit).collect::<String>();
+        if let Ok(line) = digits.parse() {
+            let code = rest[digits.len()..].trim();
+            return Some((line, (!code.is_empty()).then(|| code.to_owned())));
+        }
+    }
+
+    let lower = text.to_ascii_lowercase();
+    for marker in ["on input line ", "on line ", "at line ", "at lines ", "line "] {
+        if let Some(offset) = lower.find(marker) {
+            if let Some(line) = parse_line_number(&lower[offset + marker.len()..]) {
+                return Some((line, None));
+            }
+        }
+    }
+
+    for extension in [".tex", ".sty", ".cls", ".ltx", ".bib"] {
+        if let Some(offset) = lower.find(extension) {
+            let rest = lower[offset + extension.len()..].strip_prefix(':')?;
+            if let Some(line) = parse_line_number(rest) {
+                return Some((line, None));
+            }
+        }
+    }
+    None
+}
+
+fn file_line_number(output: &str) -> Option<usize> {
+    let lower = output.to_ascii_lowercase();
+    for extension in [".tex", ".sty", ".cls", ".ltx", ".bib"] {
+        if let Some(offset) = lower.find(extension) {
+            let rest = lower[offset + extension.len()..].strip_prefix(':')?;
+            if let Some(line) = parse_line_number(rest) {
+                return Some(line);
+            }
+        }
+    }
+    None
+}
+
+fn parse_line_number(text: &str) -> Option<usize> {
+    let digits = text.trim_start_matches(|character: char| !character.is_ascii_digit())
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>();
+    digits.parse().ok()
+}
+
+fn diagnostic_title(severity: ProjectDiagnosticSeverity, description: &str) -> String {
+    for title in ["Undefined control sequence", "Missing $ inserted", "Missing } inserted", "Emergency stop"] {
+        if description.starts_with(title) {
+            return title.to_owned();
+        }
+    }
+    if description.starts_with("Overfull \\hbox") { return "Overfull \\hbox".into(); }
+    if description.starts_with("Underfull \\hbox") { return "Underfull \\hbox".into(); }
+    match severity {
+        ProjectDiagnosticSeverity::Error => "LaTeX Error".into(),
+        ProjectDiagnosticSeverity::Warning => "LaTeX Warning".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn latex_diagnostic_parser_enriches_errors_and_warnings() {
+        let log = vec![
+            "! Undefined control sequence.".into(),
+            "l.17 \\uias".into(),
+            "LaTeX Warning: Citation `example' undefined on input line 24.".into(),
+            "Latexmk: Errors, so I did not complete making targets".into(),
+        ];
+        let diagnostics = parse_latex_diagnostics(&log, std::path::Path::new("."));
+
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].title, "Undefined control sequence");
+        assert_eq!(diagnostics[0].line, Some(17));
+        assert_eq!(diagnostics[0].code.as_deref(), Some("\\uias"));
+        assert_eq!(diagnostics[1].line, Some(24));
+    }
+
+    #[test]
+    fn latex_diagnostic_parser_carries_locations_across_related_errors_and_formats() {
+        let log = vec![
+            "! LaTeX Error: Environment equation undefined.".into(),
+            "See the LaTeX manual or LaTeX Companion for explanation.".into(),
+            "l.23 \\begin{equation}".into(),
+            "! Emergency stop.".into(),
+            "<*> main.tex".into(),
+            "./main.tex:42: LaTeX Error: Missing \\begin{document}.".into(),
+            "Package hyperref Warning: Token not allowed in a PDF string on line 51.".into(),
+        ];
+        let diagnostics = parse_latex_diagnostics(&log, std::path::Path::new("."));
+
+        assert_eq!(diagnostics.len(), 4);
+        assert_eq!(diagnostics[0].line, Some(23));
+        assert_eq!(diagnostics[0].code.as_deref(), Some("\\begin{equation}"));
+        assert_eq!(diagnostics[1].title, "Emergency stop");
+        assert_eq!(diagnostics[1].line, Some(23));
+        assert_eq!(diagnostics[2].line, Some(42));
+        assert_eq!(diagnostics[3].line, Some(51));
+    }
+
+    #[test]
+    fn latex_diagnostic_parser_tracks_nested_files_and_engine_style_locations() {
+        let log = vec![
+            "(./chapters/intro.tex".into(),
+            "! Package amsmath Error: Bad math environment delimiter.".into(),
+            "l. 71 \\begin{equation}".into(),
+            ")".into(),
+            "./main.tex:14: error: undefined control sequence".into(),
+        ];
+        let diagnostics = parse_latex_diagnostics(&log, std::path::Path::new("."));
+
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].file.as_deref(), Some("chapters/intro.tex"));
+        assert_eq!(diagnostics[0].line, Some(71));
+        assert_eq!(diagnostics[1].file.as_deref(), Some("main.tex"));
+        assert_eq!(diagnostics[1].line, Some(14));
+    }
+
+
     #[test]
     fn creates_discovers_and_persists_external_projects() -> Result<(), Box<dyn std::error::Error>> {
         let root = std::env::temp_dir().join(format!("papr-projects-{}", now()));
@@ -223,4 +483,32 @@ mod tests {
         fs::remove_dir_all(root)?;
         Ok(())
     }
+}
+
+/// Severity assigned to a parsed LaTeX compiler diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectDiagnosticSeverity {
+    /// Compilation cannot complete successfully.
+    Error,
+    /// Compilation completed but reported a condition needing attention.
+    Warning,
+}
+
+/// A compiler diagnostic enriched with source location and context when available.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectBuildDiagnostic {
+    /// Error or warning severity.
+    pub severity: ProjectDiagnosticSeverity,
+    /// Short, scannable diagnostic category.
+    pub title: String,
+    /// Compiler-provided description.
+    pub description: String,
+    /// Project-relative source path when known.
+    pub file: Option<String>,
+    /// One-based source line when known.
+    pub line: Option<usize>,
+    /// Source text at the reported location when available.
+    pub code: Option<String>,
+    /// Additional compiler context or remediation hint.
+    pub hint: Option<String>,
 }

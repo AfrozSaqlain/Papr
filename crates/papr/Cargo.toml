@@ -38,6 +38,8 @@ pulldown-cmark.workspace = true
 syntect.workspace = true
 notify.workspace = true
 walkdir.workspace = true
+thiserror.workspace = true
+serde.workspace = true
 
 [lints]
 workspace = true

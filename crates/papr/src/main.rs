@@ -1,11 +1,16 @@
 //! `papr` executable entry point.
 
+mod state;
+pub use state::*;
+mod theme;
+pub use theme::*;
 mod terminal;
 mod ui;
 mod citation;
 mod pdf_viewer;
 mod settings_modal;
 
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     io::{BufRead, BufReader},
@@ -24,13 +29,16 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 use papr_core::{
-    App, AppMode, ArxivClient, CollectionDirectory, Command, Config, Database, DiscoveryStatus,
-    DownloadEvent, DownloadManager, DownloadStatus, DownloadTask, ImportedPdf, LibraryIndexer,
-    LibraryWatcher, MetadataPrompt, Page, PaperNote, Paths, PluginHost, RemotePaper, Theme, Project,
-    CitationSource, CompletionSource, ProjectBuildDiagnostic, ProjectDiagnosticSeverity, ProjectManager, ProjectPane,
-    canonicalize_path,
+     terminal_path_candidates, terminal_home_directory, sort_terminal_candidates, sanitize_terminal_output, parse_command, 
+    select_dashboard_papers, shuffle_daily_bucket,
+
+    expand_tabs_for_editor_view, project_editor_line_at, prev_char_boundary, next_char_boundary, cursor_from_visual_position, cursor_visual_position, config_editor_wrap_rows, config_editor_line_start, config_editor_line_end, prev_word_boundary, next_word_boundary, parse_latex_diagnostics, get_pdf_page_count, move_pdf_file, validate_collection_name,
+
+    ArxivClient, CollectionDirectory, Config, Database,     DownloadEvent, DownloadManager, DownloadStatus, DownloadTask, ImportedPdf, LibraryIndexer,
+    LibraryWatcher, PaperNote, Paths, PluginHost, RemotePaper, Project,
+    CitationSource, CompletionSource, ProjectBuildDiagnostic, ProjectDiagnosticSeverity, ProjectManager,     canonicalize_path,
 };
-use sha2::{Digest, Sha256};
+
 use tokio::{sync::{mpsc, Semaphore}, task::JoinSet};
 
 use terminal::TerminalSession;
@@ -790,214 +798,27 @@ fn spawn_latexmk_reader<R: std::io::Read + Send + 'static>(reader: R, sender: st
 }
 
 /// Turn TeX's line-oriented output into diagnostics that can be displayed and navigated.
-fn parse_latex_diagnostics(log: &[String], project_root: &Path) -> Vec<ProjectBuildDiagnostic> {
-    let files = tex_file_context(log);
-    let locations = tex_locations(log, &files);
-    let diagnostic_indexes = log.iter().enumerate()
-        .filter_map(|(index, output)| latex_diagnostic(output).map(|diagnostic| (index, diagnostic)))
-        .collect::<Vec<_>>();
-    let mut diagnostics = Vec::new();
-    let mut previous_location = None;
 
-    for (position, (index, (severity, description))) in diagnostic_indexes.iter().enumerate() {
-        let next_diagnostic = diagnostic_indexes.get(position + 1).map_or(log.len(), |(index, _)| *index);
-        let source_file = files[*index].clone();
-        // TeX puts the useful `l.<n>` entry either immediately after an error,
-        // before a package-generated message, or in the enclosing log block.
-        let location = locations.iter()
-            .filter(|location| location.index >= *index && location.index < next_diagnostic)
-            .min_by_key(|location| location.index)
-            .cloned()
-            .or_else(|| locations.iter()
-                .rev()
-                .find(|location| location.index < *index && index.saturating_sub(location.index) <= 40)
-                .cloned())
-            .or_else(|| previous_location.clone());
-        let source_file = location.as_ref().map_or(source_file, |location| location.file.clone());
-        let (line, compiler_code) = location.as_ref()
-            .map(|location| (Some(location.line), location.code.clone()))
-            .unwrap_or((None, None));
-        if let Some(location) = &location {
-            previous_location = Some(location.clone());
-        }
-        let source = std::fs::read_to_string(project_root.join(&source_file)).ok();
-        let code = compiler_code.or_else(|| {
-            line.and_then(|number| {
-                source
-                    .as_deref()
-                    .and_then(|contents| contents.lines().nth(number.saturating_sub(1)))
-                    .map(str::to_owned)
-            })
-        });
-        let title = diagnostic_title(*severity, description);
-        let hint = match severity {
-            ProjectDiagnosticSeverity::Error if title == "Emergency stop" => {
-                Some("Triggered after the preceding compiler error.".into())
-            }
-            ProjectDiagnosticSeverity::Error if title == "Undefined control sequence" => code
-                .as_ref()
-                .map(|command| format!("Undefined control sequence `{command}`."))
-                .or_else(|| Some(description.clone())),
-            ProjectDiagnosticSeverity::Error => Some(description.clone()),
-            ProjectDiagnosticSeverity::Warning => None,
-        };
-        diagnostics.push(ProjectBuildDiagnostic {
-            severity: *severity,
-            title,
-            description: description.clone(),
-            file: Some(source_file),
-            line,
-            code,
-            hint,
-        });
-    }
-    diagnostics
-}
 
-#[derive(Clone)]
-struct TexLocation {
-    index: usize,
-    file: String,
-    line: usize,
-    code: Option<String>,
-}
 
-fn latex_diagnostic(output: &str) -> Option<(ProjectDiagnosticSeverity, String)> {
-    let text = output.trim_start();
-    if let Some(error) = text.strip_prefix('!') {
-        let error = error.trim_start();
-        return (!error.is_empty() && !error.contains("Fatal error occurred"))
-            .then(|| (ProjectDiagnosticSeverity::Error, error.to_owned()));
-    }
-    if let Some((_, error)) = text.rsplit_once("LaTeX Error:") {
-        return Some((ProjectDiagnosticSeverity::Error, error.trim().to_owned()));
-    }
-    if text.starts_with("Package ") && text.contains(" Error:") {
-        return Some((ProjectDiagnosticSeverity::Error, text.to_owned()));
-    }
-    if file_line_number(text).is_some() && text.to_ascii_lowercase().contains("error") {
-        return Some((ProjectDiagnosticSeverity::Error, text.to_owned()));
-    }
-    (text.starts_with("LaTeX Warning:")
-        || (text.starts_with("Package ") && text.contains(" Warning:"))
-        || text.starts_with("Overfull \\hbox")
-        || text.starts_with("Underfull \\hbox"))
-        .then(|| (ProjectDiagnosticSeverity::Warning, text.to_owned()))
-}
 
-fn tex_file_context(log: &[String]) -> Vec<String> {
-    let mut stack = vec!["main.tex".to_owned()];
-    log.iter().map(|output| {
-        let references = tex_file_references(output);
-        for file in &references {
-            if stack.last() != Some(file) {
-                stack.push(file.clone());
-            }
-        }
-        let current = references.last().cloned()
-            .unwrap_or_else(|| stack.last().cloned().unwrap_or_else(|| "main.tex".into()));
-        let closes = output.chars().filter(|character| *character == ')').count();
-        for _ in 0..closes {
-            if stack.len() > 1 {
-                stack.pop();
-            }
-        }
-        current
-    }).collect()
-}
 
-fn tex_locations(log: &[String], files: &[String]) -> Vec<TexLocation> {
-    log.iter().enumerate().filter_map(|(index, output)| {
-        let (line, code) = compiler_location_in_line(output)?;
-        let file = tex_file_references(output).last().cloned().unwrap_or_else(|| files[index].clone());
-        Some(TexLocation { index, file, line, code })
-    }).collect()
-}
 
-fn tex_file_references(output: &str) -> Vec<String> {
-    output.split(|character: char| character.is_whitespace() || matches!(character, '(' | ')' | '[' | ']' | '"' | '\''))
-        .filter_map(|candidate| {
-            let candidate = candidate.trim_start_matches("./");
-            [".tex", ".sty", ".cls", ".ltx", ".bib"].iter().find_map(|extension| {
-                candidate.find(extension).map(|index| candidate[..index + extension.len()].to_owned())
-            })
-        })
-        .collect()
-}
 
-fn compiler_location_in_line(output: &str) -> Option<(usize, Option<String>)> {
-    let text = output.trim();
-    if let Some(offset) = text.find("l.") {
-        let rest = text[offset + 2..].trim_start();
-        let digits = rest.chars().take_while(char::is_ascii_digit).collect::<String>();
-        if let Ok(line) = digits.parse() {
-            let code = rest[digits.len()..].trim();
-            return Some((line, (!code.is_empty()).then(|| code.to_owned())));
-        }
-    }
 
-    let lower = text.to_ascii_lowercase();
-    for marker in ["on input line ", "on line ", "at line ", "at lines ", "line "] {
-        if let Some(offset) = lower.find(marker) {
-            if let Some(line) = parse_line_number(&lower[offset + marker.len()..]) {
-                return Some((line, None));
-            }
-        }
-    }
 
-    for extension in [".tex", ".sty", ".cls", ".ltx", ".bib"] {
-        if let Some(offset) = lower.find(extension) {
-            let rest = lower[offset + extension.len()..].strip_prefix(':')?;
-            if let Some(line) = parse_line_number(rest) {
-                return Some((line, None));
-            }
-        }
-    }
-    None
-}
 
-fn file_line_number(output: &str) -> Option<usize> {
-    let lower = output.to_ascii_lowercase();
-    for extension in [".tex", ".sty", ".cls", ".ltx", ".bib"] {
-        if let Some(offset) = lower.find(extension) {
-            let rest = lower[offset + extension.len()..].strip_prefix(':')?;
-            if let Some(line) = parse_line_number(rest) {
-                return Some(line);
-            }
-        }
-    }
-    None
-}
 
-fn parse_line_number(text: &str) -> Option<usize> {
-    let digits = text.trim_start_matches(|character: char| !character.is_ascii_digit())
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect::<String>();
-    digits.parse().ok()
-}
 
-fn diagnostic_title(severity: ProjectDiagnosticSeverity, description: &str) -> String {
-    for title in ["Undefined control sequence", "Missing $ inserted", "Missing } inserted", "Emergency stop"] {
-        if description.starts_with(title) {
-            return title.to_owned();
-        }
-    }
-    if description.starts_with("Overfull \\hbox") { return "Overfull \\hbox".into(); }
-    if description.starts_with("Underfull \\hbox") { return "Underfull \\hbox".into(); }
-    match severity {
-        ProjectDiagnosticSeverity::Error => "LaTeX Error".into(),
-        ProjectDiagnosticSeverity::Warning => "LaTeX Warning".into(),
-    }
-}
 
-fn config_editor_wrap_rows(char_len: usize, wrap_width: usize) -> usize {
-    if char_len == 0 {
-        1
-    } else {
-        char_len.div_ceil(wrap_width.max(1))
-    }
-}
+
+
+
+
+
+
+
+
 
 fn open_project_workspace(app: &mut App, project: Project) {
     app.project_tree_dir = Some(project.path.clone());
@@ -1254,189 +1075,19 @@ fn open_project_file(app: &mut App, path: PathBuf) {
     }
 }
 
-fn config_editor_line_start(text: &str, cursor: usize) -> usize {
-    let cursor = cursor.min(text.len());
-    text[..cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0)
-}
 
-fn config_editor_line_end(text: &str, cursor: usize) -> usize {
-    let cursor = cursor.min(text.len());
-    text[cursor..]
-        .find('\n')
-        .map(|idx| cursor + idx)
-        .unwrap_or(text.len())
-}
 
-fn prev_char_boundary(text: &str, cursor: usize) -> usize {
-    if cursor == 0 {
-        return 0;
-    }
-    let mut prev = cursor - 1;
-    while prev > 0 && !text.is_char_boundary(prev) {
-        prev -= 1;
-    }
-    prev
-}
 
-fn next_char_boundary(text: &str, cursor: usize) -> usize {
-    if cursor >= text.len() {
-        return text.len();
-    }
-    let mut next = cursor + 1;
-    while next < text.len() && !text.is_char_boundary(next) {
-        next += 1;
-    }
-    next.min(text.len())
-}
 
-fn prev_word_boundary(text: &str, cursor: usize) -> usize {
-    if cursor == 0 {
-        return 0;
-    }
-    let mut pos = cursor.min(text.len());
-    
-    // First, skip any whitespace/newlines to the left
-    while pos > 0 {
-        let prev = prev_char_boundary(text, pos);
-        let ch = text[prev..pos].chars().next().unwrap_or(' ');
-        if !ch.is_whitespace() {
-            break;
-        }
-        pos = prev;
-    }
-    
-    if pos == 0 {
-        return 0;
-    }
-    
-    // Now determine the type of character we are on
-    let prev = prev_char_boundary(text, pos);
-    let first_ch = text[prev..pos].chars().next().unwrap_or(' ');
-    let is_word_char = first_ch.is_alphanumeric() || first_ch == '_';
-    
-    // Skip characters of the same type
-    while pos > 0 {
-        let prev = prev_char_boundary(text, pos);
-        let ch = text[prev..pos].chars().next().unwrap_or(' ');
-        if ch.is_whitespace() {
-            break;
-        }
-        let ch_is_word = ch.is_alphanumeric() || ch == '_';
-        if ch_is_word != is_word_char {
-            break;
-        }
-        pos = prev;
-    }
-    
-    pos
-}
 
-fn next_word_boundary(text: &str, cursor: usize) -> usize {
-    let mut pos = cursor.min(text.len());
-    if pos >= text.len() {
-        return text.len();
-    }
-    
-    // Determine the type of character at the cursor
-    let first_ch = text[pos..].chars().next().unwrap_or(' ');
-    
-    if first_ch.is_whitespace() {
-        // Skip whitespace/newlines
-        while pos < text.len() {
-            let next = next_char_boundary(text, pos);
-            let ch = text[pos..next].chars().next().unwrap_or(' ');
-            if !ch.is_whitespace() {
-                break;
-            }
-            pos = next;
-        }
-    } else {
-        let is_word_char = first_ch.is_alphanumeric() || first_ch == '_';
-        // Skip characters of the same type
-        while pos < text.len() {
-            let next = next_char_boundary(text, pos);
-            let ch = text[pos..next].chars().next().unwrap_or(' ');
-            if ch.is_whitespace() {
-                break;
-            }
-            let ch_is_word = ch.is_alphanumeric() || ch == '_';
-            if ch_is_word != is_word_char {
-                break;
-            }
-            pos = next;
-        }
-        // Then, skip trailing whitespace
-        while pos < text.len() {
-            let next = next_char_boundary(text, pos);
-            let ch = text[pos..next].chars().next().unwrap_or(' ');
-            if !ch.is_whitespace() {
-                break;
-            }
-            pos = next;
-        }
-    }
-    
-    pos
-}
 
-fn byte_index_for_char_column(text: &str, char_col: usize) -> usize {
-    if char_col == 0 {
-        return 0;
-    }
-    text.char_indices()
-        .nth(char_col)
-        .map(|(idx, _)| idx)
-        .unwrap_or(text.len())
-}
 
-fn cursor_visual_position(text: &str, cursor: usize, wrap_width: usize) -> (usize, usize) {
-    let wrap_width = wrap_width.max(1);
-    let cursor = cursor.min(text.len());
-    let before = &text[..cursor];
-    let line_idx = before.chars().filter(|&c| c == '\n').count();
-    let line_start = config_editor_line_start(text, cursor);
-    let line_end = config_editor_line_end(text, cursor);
-    let line = &text[line_start..line_end];
-    let line_col = text[line_start..cursor].chars().count();
-    let line_len = line.chars().count();
 
-    let rows_before = text
-        .split('\n')
-        .take(line_idx)
-        .map(|segment| config_editor_wrap_rows(segment.chars().count(), wrap_width))
-        .sum::<usize>();
 
-    if line_col == line_len && line_len > 0 && line_len % wrap_width == 0 {
-        (rows_before + (line_col / wrap_width).saturating_sub(1), wrap_width - 1)
-    } else {
-        (rows_before + (line_col / wrap_width), line_col % wrap_width)
-    }
-}
 
-fn cursor_from_visual_position(
-    text: &str,
-    target_row: usize,
-    target_col: usize,
-    wrap_width: usize,
-) -> usize {
-    let wrap_width = wrap_width.max(1);
-    let mut row_base = 0_usize;
-    let mut line_start = 0_usize;
 
-    for line in text.split('\n') {
-        let line_len = line.chars().count();
-        let row_count = config_editor_wrap_rows(line_len, wrap_width);
-        if target_row < row_base + row_count {
-            let local_row = target_row - row_base;
-            let target_char_col = (local_row * wrap_width + target_col).min(line_len);
-            return line_start + byte_index_for_char_column(line, target_char_col);
-        }
-        row_base += row_count;
-        line_start += line.len() + 1;
-    }
 
-    text.len()
-}
+
 
 #[allow(dead_code)]
 fn move_config_editor_vertical(app: &mut App, row_delta: isize) {
@@ -1552,37 +1203,6 @@ pub(crate) fn build_config_editor_view_with_scroll_mode(
 
 /// Expand stored tab characters only for display. The buffer remains byte-for-
 /// byte unchanged while cursor geometry and wrapping use terminal cell widths.
-fn expand_tabs_for_editor_view(text: &str, cursor: usize, tab_width: usize) -> (String, usize) {
-    let tab_width = tab_width.max(1);
-    let cursor = cursor.min(text.len());
-    let mut display = String::with_capacity(text.len());
-    let mut display_cursor = 0;
-    let mut column = 0_usize;
-    for (byte_index, character) in text.char_indices() {
-        if byte_index == cursor {
-            display_cursor = display.len();
-        }
-        match character {
-            '\t' => {
-                let spaces = tab_width - (column % tab_width);
-                display.extend(std::iter::repeat_n(' ', spaces));
-                column += spaces;
-            }
-            '\n' => {
-                display.push(character);
-                column = 0;
-            }
-            _ => {
-                display.push(character);
-                column += 1;
-            }
-        }
-    }
-    if cursor == text.len() {
-        display_cursor = display.len();
-    }
-    (display, display_cursor)
-}
 
 struct ActionSenders {
     search: mpsc::UnboundedSender<SearchResponse>,
@@ -1733,7 +1353,7 @@ async fn run(
             state_changed = true;
         }
 
-        let project_preview_active = app.page == papr_core::Page::Projects
+        let project_preview_active = app.page == Page::Projects
             && app.active_project.is_some()
             && app.pdf_viewer_path.is_some();
         if app.mode == AppMode::PdfView || project_preview_active {
@@ -1912,7 +1532,7 @@ async fn run(
         if Some(app.page) != last_page {
             app.workspace_query.clear();
             app.workspace_query_cursor = 0;
-            if last_page == Some(papr_core::Page::Settings) {
+            if last_page == Some(Page::Settings) {
                 let original = app.settings_modal.original_theme.clone();
                 if !original.is_empty() && theme.name != original {
                     if let Ok(reverted) = Theme::load(&original) {
@@ -1922,14 +1542,14 @@ async fn run(
             }
             if matches!(
                 app.page,
-                papr_core::Page::Dashboard | papr_core::Page::History | papr_core::Page::Statistics
+                Page::Dashboard | Page::History | Page::Statistics
             ) {
                 refresh_dashboard(&runtime, app)?;
             }
             // Auto-open the settings workspace whenever the user navigates to the
             // Settings page. Read the config fresh from disk so the workspace
             // always reflects the persisted state.
-            if app.page == papr_core::Page::Settings {
+            if app.page == Page::Settings {
                 if let Ok(config) = Config::load_or_create(&Paths::discover()?) {
                     settings_modal::open_settings_modal(app, &config, &theme.name);
                 }
@@ -1984,7 +1604,7 @@ async fn run(
         // Use a dynamic timeout based on cache and animation status.
         // Only call is_animating() once per iteration (it acquires a mutex).
         let preview_active = app.mode == AppMode::PdfView
-            || (app.page == papr_core::Page::Projects
+            || (app.page == Page::Projects
                 && app.active_project.is_some()
                 && app.pdf_viewer_path.is_some());
         let animating = preview_active && pdf_viewer::is_animating();
@@ -2009,7 +1629,7 @@ async fn run(
                 Event::Key(key)
                     if key.kind == KeyEventKind::Press || (app.mode == AppMode::PdfView && key.kind == KeyEventKind::Repeat) =>
                 {
-                    if app.page == papr_core::Page::Settings && app.content_focused && app.mode == AppMode::Normal {
+                    if app.page == Page::Settings && app.content_focused && app.mode == AppMode::Normal {
                         if let Some(action) = handle_settings_modal_key(app, key, &mut runtime, &mut theme, &senders)? {
                             apply_ui_action(
                                 action,
@@ -2057,7 +1677,7 @@ async fn run(
                 Event::Key(key)
                     if key.kind == KeyEventKind::Press || (app.mode == AppMode::PdfView && key.kind == KeyEventKind::Repeat) =>
                 {
-                    if app.page == papr_core::Page::Settings && app.content_focused && app.mode == AppMode::Normal {
+                    if app.page == Page::Settings && app.content_focused && app.mode == AppMode::Normal {
                         if let Some(action) = handle_settings_modal_key(app, key, &mut runtime, &mut theme, &senders)? {
                             apply_ui_action(
                                 action,
@@ -2101,7 +1721,7 @@ async fn run(
         if got_event || animating {
             force_redraw = true;
         }
-        if got_event && app.page == papr_core::Page::Projects {
+        if got_event && app.page == Page::Projects {
             let previous = app.project_completions.clone();
             update_project_completions(app, Some(&runtime.citation_source));
             state_changed |= previous != app.project_completions;
@@ -2421,7 +2041,7 @@ async fn apply_ui_action(
         }
         UiAction::ConfirmDeleteProjectEntry(path) => {
             let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("entry").to_owned();
-            app.delete_confirmation = Some(papr_core::DeletionTarget::ProjectEntry {
+            app.delete_confirmation = Some(DeletionTarget::ProjectEntry {
                 is_directory: path.is_dir(),
                 path,
                 name,
@@ -2485,7 +2105,7 @@ async fn apply_ui_action(
             }
         }
         UiAction::ConfirmDeleteProject(project) => {
-            app.delete_confirmation = Some(papr_core::DeletionTarget::Project { project });
+            app.delete_confirmation = Some(DeletionTarget::Project { project });
             app.mode = AppMode::ConfirmDelete;
         }
         UiAction::DeleteProject(project) => {
@@ -2716,7 +2336,7 @@ async fn apply_ui_action(
             }
         }
         UiAction::ConfirmDeletePaper { paper_id, title, path } => {
-            app.delete_confirmation = Some(papr_core::DeletionTarget::Paper {
+            app.delete_confirmation = Some(DeletionTarget::Paper {
                 id: paper_id,
                 title,
                 path,
@@ -2724,7 +2344,7 @@ async fn apply_ui_action(
             app.mode = AppMode::ConfirmDelete;
         }
         UiAction::ConfirmDeleteCollection { collection_id, name, path } => {
-            app.delete_confirmation = Some(papr_core::DeletionTarget::Collection {
+            app.delete_confirmation = Some(DeletionTarget::Collection {
                 id: collection_id,
                 name,
                 path,
@@ -2970,29 +2590,9 @@ fn refresh_renamed_collection(
     Ok(())
 }
 
-fn move_pdf_file(source: &Path, destination: &Path) -> Result<()> {
-    if let Err(rename_error) = std::fs::rename(source, destination) {
-        std::fs::copy(source, destination).with_context(|| {
-            format!(
-                "failed to move PDF from {} to {}: {rename_error}",
-                source.display(),
-                destination.display()
-            )
-        })?;
-        if let Err(remove_error) = std::fs::remove_file(source) {
-            let _ = std::fs::remove_file(destination);
-            return Err(remove_error.into());
-        }
-    }
-    Ok(())
-}
 
-fn validate_collection_name(name: &str) -> Result<()> {
-    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
-        anyhow::bail!("group name must be one safe directory name");
-    }
-    Ok(())
-}
+
+
 
 fn open_collection(database: &Database, app: &mut App, collection_id: i64) -> Result<()> {
     let restore_selection = app.last_opened_collection_id == Some(collection_id);
@@ -3353,247 +2953,6 @@ async fn dashboard_papers(
 
 /// Deterministically order one keyword's eligible papers for a local day.
 ///
-/// A SHA-256 rank gives every paper an equal chance of every position and
-/// includes the date, so the selection changes each day. This avoids any
-/// dependence on arXiv response order, database iteration, or process-local
-/// RNG state. The paper ID only resolves the cryptographically negligible case
-/// of two equal ranks.
-fn shuffle_daily_bucket(papers: &mut [RemotePaper], feed_date: &str, keyword: &str) {
-    papers.sort_by_cached_key(|paper| (daily_paper_rank(feed_date, keyword, &paper.id), paper.id.clone()));
-}
-
-fn keyword_terms(keyword: &str) -> Vec<String> {
-    keyword
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|term| !term.is_empty())
-        .map(str::to_lowercase)
-        .collect()
-}
-
-fn title_match_strength(title: &str, terms: &[String]) -> usize {
-    let title = title.to_lowercase();
-    terms.iter().filter(|term| title.contains(term.as_str())).count()
-}
-
-#[derive(Debug)]
-struct DashboardCandidate {
-    paper: RemotePaper,
-    matches: Vec<KeywordMatch>,
-    daily_rank: [u8; 32],
-}
-
-#[derive(Debug)]
-struct KeywordMatch {
-    keyword_index: usize,
-    title_term_matches: usize,
-    full_title_match: bool,
-}
-
-/// Select a balanced, relevance-ranked daily dashboard feed.
-///
-/// Each keyword receives a gentle, position-weighted representation target.
-/// Greedy selection maximizes coverage of still-unmet targets, then uses a
-/// deterministic daily rank to rotate papers. A selected paper counts toward
-/// every keyword it matches, so cross-keyword papers are boosted rather than
-/// attributed to whichever bucket happened to be visited first. Title matches
-/// remain a tie-breaker after daily rotation.
-fn select_dashboard_papers(
-    buckets: Vec<(String, Vec<RemotePaper>)>,
-    limit: usize,
-    feed_date: &str,
-) -> Vec<RemotePaper> {
-    let keywords: Vec<_> = buckets
-        .iter()
-        .map(|(keyword, _)| keyword.clone())
-        .collect();
-    let terms: Vec<_> = keywords.iter().map(|keyword| keyword_terms(keyword)).collect();
-    let mut candidates = Vec::<DashboardCandidate>::new();
-    let mut candidate_indexes = HashMap::<String, usize>::new();
-    let mut available_by_keyword = vec![0_usize; buckets.len()];
-
-    for (keyword_index, (_, papers)) in buckets.into_iter().enumerate() {
-        for paper in papers {
-            let title_term_matches = title_match_strength(&paper.title, &terms[keyword_index]);
-            let full_title_match = !terms[keyword_index].is_empty()
-                && title_term_matches == terms[keyword_index].len();
-            let keyword_match = KeywordMatch {
-                keyword_index,
-                title_term_matches,
-                full_title_match,
-            };
-            if let Some(&candidate_index) = candidate_indexes.get(&paper.id) {
-                if !candidates[candidate_index]
-                    .matches
-                    .iter()
-                    .any(|matched| matched.keyword_index == keyword_index)
-                {
-                    available_by_keyword[keyword_index] += 1;
-                    candidates[candidate_index].matches.push(keyword_match);
-                }
-            } else {
-                let candidate_index = candidates.len();
-                candidate_indexes.insert(paper.id.clone(), candidate_index);
-                available_by_keyword[keyword_index] += 1;
-                candidates.push(DashboardCandidate {
-                    daily_rank: daily_paper_rank(feed_date, "dashboard", &paper.id),
-                    paper,
-                    matches: vec![keyword_match],
-                });
-            }
-        }
-    }
-
-    let targets = keyword_representation_targets(&available_by_keyword, &keywords, limit, feed_date);
-    let keyword_weights = keyword_priority_weights(&available_by_keyword);
-    let mut represented = vec![0_usize; targets.len()];
-    let mut selected = Vec::with_capacity(limit.min(candidates.len()));
-
-    while selected.len() < limit && !candidates.is_empty() {
-        let best_index = candidates
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, candidate)| {
-                let coverage_keywords = candidate
-                    .matches
-                    .iter()
-                    .filter(|matched| represented[matched.keyword_index] < targets[matched.keyword_index])
-                    .count();
-                let weighted_coverage = candidate
-                    .matches
-                    .iter()
-                    .filter_map(|matched| {
-                        let deficit = targets[matched.keyword_index]
-                            .saturating_sub(represented[matched.keyword_index]);
-                        (deficit > 0).then_some(deficit * keyword_weights[matched.keyword_index])
-                    })
-                    .sum::<usize>();
-                let full_title_matches = candidate
-                    .matches
-                    .iter()
-                    .filter(|matched| matched.full_title_match)
-                    .count();
-                let title_term_matches = candidate
-                    .matches
-                    .iter()
-                    .map(|matched| matched.title_term_matches)
-                    .sum::<usize>();
-                (
-                    coverage_keywords,
-                    candidate.matches.len(),
-                    weighted_coverage,
-                    candidate.daily_rank,
-                    full_title_matches,
-                    title_term_matches,
-                    candidate.paper.id.as_str(),
-                )
-            })
-            .map(|(index, _)| index);
-        let Some(best_index) = best_index else {
-            break;
-        };
-        let candidate = candidates.swap_remove(best_index);
-        for matched in &candidate.matches {
-            represented[matched.keyword_index] += 1;
-        }
-        selected.push(candidate.paper);
-    }
-    selected
-}
-
-fn keyword_priority_weights(available_by_keyword: &[usize]) -> Vec<usize> {
-    let active = available_by_keyword.iter().filter(|&&count| count > 0).count();
-    let mut active_rank = 0_usize;
-    available_by_keyword
-        .iter()
-        .map(|&available| {
-            if available == 0 {
-                0
-            } else {
-                // The range is intentionally narrow (at most ~10%) so keyword
-                // order is a preference, not a monopoly.
-                let weight = active * 10 + active.saturating_sub(active_rank + 1);
-                active_rank += 1;
-                weight
-            }
-        })
-        .collect()
-}
-
-fn keyword_representation_targets(
-    available_by_keyword: &[usize],
-    keywords: &[String],
-    limit: usize,
-    feed_date: &str,
-) -> Vec<usize> {
-    let active: Vec<_> = available_by_keyword
-        .iter()
-        .enumerate()
-        .filter_map(|(index, &available)| (available > 0).then_some(index))
-        .collect();
-    let mut targets = vec![0_usize; available_by_keyword.len()];
-    if active.len() > limit {
-        let weights = keyword_priority_weights(available_by_keyword);
-        let mut weighted_window: Vec<_> = active
-            .iter()
-            .map(|&index| {
-                let rank = daily_paper_rank(feed_date, "keyword-window", &keywords[index]);
-                let mut bytes = [0_u8; 8];
-                bytes.copy_from_slice(&rank[..8]);
-                let uniform = (u64::from_be_bytes(bytes) as f64 / u64::MAX as f64)
-                    .max(f64::MIN_POSITIVE);
-                // Efraimidis-Spirakis weighted sampling: higher-priority
-                // keywords have a slightly better daily chance of appearing.
-                (uniform.powf(1.0 / weights[index] as f64), index)
-            })
-            .collect();
-        weighted_window.sort_by(|left, right| right.0.total_cmp(&left.0));
-        for (_, index) in weighted_window.into_iter().take(limit) {
-            targets[index] = 1;
-        }
-        return targets;
-    }
-    for &index in active.iter().take(limit) {
-        targets[index] = 1;
-    }
-    let remaining = limit.saturating_sub(active.len().min(limit));
-    if remaining == 0 || active.is_empty() {
-        return targets;
-    }
-
-    let weights = keyword_priority_weights(available_by_keyword);
-    let weight_total: usize = active.iter().map(|&index| weights[index]).sum();
-    let mut remainders = Vec::with_capacity(active.len());
-    let mut assigned_extra = 0_usize;
-    for &index in &active {
-        let numerator = remaining * weights[index];
-        let allocation = numerator / weight_total;
-        targets[index] += allocation;
-        assigned_extra += allocation;
-        remainders.push((numerator % weight_total, index));
-    }
-    remainders.sort_by(|(left_remainder, left_index), (right_remainder, right_index)| {
-        right_remainder
-            .cmp(left_remainder)
-            .then_with(|| left_index.cmp(right_index))
-    });
-    for (_, index) in remainders
-        .into_iter()
-        .take(remaining.saturating_sub(assigned_extra))
-    {
-        targets[index] += 1;
-    }
-    targets
-}
-
-fn daily_paper_rank(feed_date: &str, keyword: &str, paper_id: &str) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"papr-dashboard-feed-v1\0");
-    for value in [feed_date, keyword, paper_id] {
-        hasher.update((value.len() as u64).to_be_bytes());
-        hasher.update(value.as_bytes());
-    }
-    hasher.finalize().into()
-}
 
 fn refresh_library(runtime: &Runtime, app: &mut App) -> Result<()> {
     app.library.papers = runtime
@@ -3679,26 +3038,6 @@ fn default_pdf_viewer() -> String {
     }
 }
 
-fn get_pdf_page_count(path: &Path) -> usize {
-    if let Ok(output) = std::process::Command::new("pdfinfo")
-        .arg(path)
-        .output()
-    {
-        if output.status.success() {
-            let text = String::from_utf8_lossy(&output.stdout);
-            for line in text.lines() {
-                if line.starts_with("Pages:") {
-                    if let Some(pages_str) = line.split_whitespace().nth(1) {
-                        if let Ok(pages) = pages_str.parse::<usize>() {
-                            return pages;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    1
-}
 
 /// Scroll the PDF viewer by `delta` rows.
 fn pdf_scroll(app: &mut App, delta: i64) {
@@ -3794,7 +3133,22 @@ fn open_pdf(
 
     match command.spawn() {
         Ok(mut child) => {
-            app.toast = Some(format!("Opened {}", path.display()));
+            let basename = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let display_name = if basename.chars().count() > 100 {
+                let extension = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+                let ext_len = if extension.is_empty() { 0 } else { extension.chars().count() + 1 };
+                let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                let take_len = 100_usize.saturating_sub(ext_len).saturating_sub(1);
+                let truncated_stem: String = stem.chars().take(take_len).collect();
+                if extension.is_empty() {
+                    format!("{}…", truncated_stem)
+                } else {
+                    format!("{}….{}", truncated_stem, extension)
+                }
+            } else {
+                basename
+            };
+            app.toast = Some(format!("Opened PDF: {}", display_name));
             if let (Some(session_id), Some(sender)) = (session_id, event_sender) {
                 let start = std::time::Instant::now();
                 tokio::spawn(async move {
@@ -3873,47 +3227,6 @@ fn open_browser(url: &str, app: &mut App) {
     });
 }
 
-fn parse_command(command: &str) -> Result<Vec<String>> {
-    let mut args = Vec::new();
-    let mut current = String::new();
-    let mut chars = command.chars().peekable();
-    let mut quote = None;
-    while let Some(character) = chars.next() {
-        match character {
-            '\\' => {
-                // Preserve Windows path separators. A backslash has escape
-                // meaning only when it precedes syntax we explicitly support.
-                match chars.peek().copied() {
-                    Some(next)
-                        if next.is_whitespace()
-                            || next == '\\'
-                            || next == '\''
-                            || next == '\"' =>
-                    {
-                        current.push(next);
-                        let _ = chars.next();
-                    }
-                    _ => current.push(character),
-                }
-            }
-            '\'' | '"' if quote == Some(character) => quote = None,
-            '\'' | '"' if quote.is_none() => quote = Some(character),
-            character if character.is_whitespace() && quote.is_none() => {
-                if !current.is_empty() {
-                    args.push(std::mem::take(&mut current));
-                }
-            }
-            _ => current.push(character),
-        }
-    }
-    if let Some(character) = quote {
-        anyhow::bail!("unterminated {character} quote in pdf_viewer");
-    }
-    if !current.is_empty() {
-        args.push(current);
-    }
-    Ok(args)
-}
 
 fn start_scan(
     pdf_roots: &[PathBuf],
@@ -4291,7 +3604,7 @@ fn discover_local_downloads(
             let content_hash = {
                 let mut hash_ok = None;
                 if let Ok(mut file) = std::fs::File::open(&pdf_path) {
-                    use sha2::{Digest, Sha256};
+                    
                     let mut hasher = Sha256::new();
                     if std::io::copy(&mut file, &mut hasher).is_ok() {
                         hash_ok = Some(format!("{:x}", hasher.finalize()));
@@ -4601,7 +3914,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 let items = app.filtered_palette_items();
                 if let Some(&page) = items.get(app.palette_selected) {
                     app.dispatch(Command::TogglePalette);
-                    if let Some(index) = papr_core::Page::ALL.iter().position(|&p| p == page) {
+                    if let Some(index) = Page::ALL.iter().position(|&p| p == page) {
                         app.sidebar_index = index;
                     }
                     app.page = page;
@@ -4684,14 +3997,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.mode == AppMode::WorkspaceSearch {
         return handle_workspace_search_key(app, key);
     }
-    if app.page == papr_core::Page::Discover
+    if app.page == Page::Discover
         && key.modifiers.contains(KeyModifiers::CONTROL)
         && key.code == KeyCode::Right
     {
         app.discovery.next_page();
         return None;
     }
-    if app.page == papr_core::Page::Discover
+    if app.page == Page::Discover
         && key.modifiers.contains(KeyModifiers::CONTROL)
         && key.code == KeyCode::Left
     {
@@ -4706,11 +4019,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     // them the key. Insert mode remains the sole editor exception above.
     if key.code == KeyCode::Char('/')
         && !(app.content_focused
-            && app.page == papr_core::Page::Projects
+            && app.page == Page::Projects
             && app.project_pane == ProjectPane::Editor
             && app.project_editor_insert_mode)
     {
-        app.page = papr_core::Page::Discover;
+        app.page = Page::Discover;
         app.sidebar_index = 1;
         app.content_focused = true;
         app.mode = AppMode::Search;
@@ -4719,12 +4032,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
     // Projects owns its raw key events. In particular, do not normalize arrow
     // keys into h/j/k/l before the currently focused pane sees them.
-    if app.page == papr_core::Page::Projects
+    if app.page == Page::Projects
         && app.content_focused
     {
         return handle_projects_key(app, key);
     }
-    if app.page == papr_core::Page::Discover
+    if app.page == Page::Discover
         && app.content_focused
         && app.mode == AppMode::Normal
         && !app.discovery.results.is_empty()
@@ -4745,7 +4058,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
 
     if !app.content_focused {
-        if app.page == papr_core::Page::Settings && matches!(key.code, KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter) {
+        if app.page == Page::Settings && matches!(key.code, KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter) {
             // Opening the settings modal is handled by the sidebar navigation
             // path; just focus content so UI is consistent.
             app.content_focused = true;
@@ -4757,11 +4070,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         return None;
     }
     // When Settings page gains content_focused, immediately open the modal.
-    if app.content_focused && app.page == papr_core::Page::Settings && app.mode == AppMode::Normal {
+    if app.content_focused && app.page == Page::Settings && app.mode == AppMode::Normal {
         // The modal will be opened by the page-change handler; just return.
     }
     if key.code == KeyCode::Char('r')
-        && app.page == papr_core::Page::Discover
+        && app.page == Page::Discover
         && !app.discovery.query.trim().is_empty()
     {
         if app.discovery.next_batch_start.is_some()
@@ -4774,7 +4087,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         app.discovery.query.clone_from(&query);
         return Some(UiAction::Search(query));
     }
-    if key.code == KeyCode::Char('r') && app.page == papr_core::Page::Library {
+    if key.code == KeyCode::Char('r') && app.page == Page::Library {
         return Some(UiAction::Reindex);
     }
     if key.code == KeyCode::Char('o') {
@@ -4782,7 +4095,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             return open_arxiv_page(app, arxiv_reference);
         }
     }
-    if matches!(app.page, papr_core::Page::Dashboard | papr_core::Page::Discover) {
+    if matches!(app.page, Page::Dashboard | Page::Discover) {
         match key.code {
             KeyCode::Char('c') => return selected_remote_target(app).map(UiAction::CopyCitation),
             KeyCode::Char('d') => return selected_remote_paper(app).cloned().map(UiAction::Download),
@@ -4807,13 +4120,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if let KeyHandling::Handled(action) = handle_dashboard_key(app, key) {
         return action.map(|action| *action);
     }
-    if app.page == papr_core::Page::Collections {
+    if app.page == Page::Collections {
         let (handled, action) = handle_collection_key(app, key);
         if handled {
             return action;
         }
     }
-    if app.page == papr_core::Page::Authors {
+    if app.page == Page::Authors {
         let (handled, action) = handle_author_key(app, key);
         if handled {
             return action;
@@ -4831,7 +4144,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if let Some(action) = handle_credits_key(app, key) {
         return Some(action);
     }
-    if app.page == papr_core::Page::Discover
+    if app.page == Page::Discover
         && key.code == KeyCode::Char('>')
         && !app.discovery.results.is_empty()
     {
@@ -4839,7 +4152,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         app.discovery.filter_cursor = app.discovery.filter.len();
         return None;
     }
-    if app.page == papr_core::Page::Discover
+    if app.page == Page::Discover
         && matches!(
             key.code,
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
@@ -4860,7 +4173,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
 
     if let Some(command) = navigation_command(key) {
-        if app.page == papr_core::Page::Discover && command == Command::MoveUp && app.discovery.selected == 0 {
+        if app.page == Page::Discover && command == Command::MoveUp && app.discovery.selected == 0 {
             app.mode = if app.discovery.results.is_empty() {
                 AppMode::Search
             } else {
@@ -4890,7 +4203,7 @@ fn has_active_text_input(app: &App) -> bool {
             | AppMode::Search
             | AppMode::DiscoverFilter
             | AppMode::WorkspaceSearch
-    ) || (app.page == papr_core::Page::Projects
+    ) || (app.page == Page::Projects
         && app.content_focused
         && app.project_pane == ProjectPane::Editor
         && app.project_editor_insert_mode)
@@ -5047,94 +4360,9 @@ fn terminal_command_candidates(prefix: &str) -> Vec<String> {
     candidates
 }
 
-fn terminal_path_candidates(prefix: &str, directory: Option<&Path>) -> Vec<String> {
-    let working_directory = directory
-        .map(Path::to_path_buf)
-        .or_else(|| std::env::current_dir().ok());
-    let Some(working_directory) = working_directory else { return Vec::new(); };
-    let (search_directory, display_parent, name_prefix) = if let Some(path) = prefix.strip_prefix("~/") {
-        let Some(home) = terminal_home_directory() else { return Vec::new(); };
-        let typed_path = Path::new(path);
-        let (parent, name_prefix) = terminal_path_parent_and_prefix(typed_path, path);
-        let search_directory = parent
-            .as_ref()
-            .map_or_else(|| home.clone(), |parent| home.join(parent));
-        let display_parent = Some(parent.as_ref().map_or_else(
-            || "~".to_owned(),
-            |parent| format!("~{}{}", std::path::MAIN_SEPARATOR, parent.display()),
-        ));
-        (search_directory, display_parent, name_prefix)
-    } else {
-        let typed_path = Path::new(prefix);
-        let (parent, name_prefix) = terminal_path_parent_and_prefix(typed_path, prefix);
-        let search_directory = parent.as_ref().map_or_else(|| working_directory.clone(), |parent| {
-            if parent.is_absolute() { parent.to_path_buf() } else { working_directory.join(parent) }
-        });
-        let display_parent = parent;
-        (search_directory, display_parent.map(|parent| parent.display().to_string()), name_prefix)
-    };
-    let Ok(entries) = std::fs::read_dir(search_directory) else { return Vec::new(); };
-    let mut candidates = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !name
-                .to_lowercase()
-                .starts_with(&name_prefix.to_lowercase())
-            {
-                return None;
-            }
-            let mut candidate = display_parent
-                .as_ref()
-                .map_or_else(|| name.clone(), |parent| format!("{parent}{}{}", std::path::MAIN_SEPARATOR, name));
-            if entry.path().is_dir() {
-                candidate.push(std::path::MAIN_SEPARATOR);
-            }
-            Some(candidate)
-        })
-        .collect::<Vec<_>>();
-    sort_terminal_candidates(&mut candidates);
-    candidates
-}
 
-fn terminal_path_parent_and_prefix(path: &Path, raw: &str) -> (Option<PathBuf>, String) {
-    let has_trailing_separator = raw.ends_with('/') || raw.ends_with(std::path::MAIN_SEPARATOR);
-    if has_trailing_separator {
-        let parent = raw.trim_end_matches(|character| {
-            character == '/' || character == std::path::MAIN_SEPARATOR
-        });
-        let parent = if parent.is_empty() {
-            PathBuf::from(std::path::MAIN_SEPARATOR.to_string())
-        } else {
-            PathBuf::from(parent)
-        };
-        (Some(parent), String::new())
-    } else {
-        (
-            path.parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .map(Path::to_path_buf),
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default()
-                .to_owned(),
-        )
-    }
-}
 
-fn sort_terminal_candidates(candidates: &mut [String]) {
-    candidates.sort_by(|left, right| {
-        left.to_lowercase()
-            .cmp(&right.to_lowercase())
-            .then_with(|| left.cmp(right))
-    });
-}
 
-fn terminal_home_directory() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-}
 
 fn change_terminal_directory(app: &mut App, path: &str) {
     let base = app
@@ -5171,12 +4399,6 @@ fn append_terminal_output(app: &mut App, command: &str, output: &str) {
     }
 }
 
-fn sanitize_terminal_output(output: &str) -> String {
-    output
-        .chars()
-        .filter(|character| matches!(character, '\n' | '\t') || !character.is_control())
-        .collect()
-}
 
 fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if handle_project_pane_shortcut(app, key) {
@@ -5886,9 +5108,6 @@ fn handle_project_editor_normal_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-fn project_editor_line_at(text: &str, cursor: usize) -> usize {
-    text[..cursor.min(text.len())].bytes().filter(|byte| *byte == b'\n').count()
-}
 
 fn project_editor_visual_byte_range(app: &App, anchor: usize) -> (usize, usize) {
     let current = project_editor_line_at(&app.project_editor_text, app.project_editor_cursor);
@@ -6019,25 +5238,25 @@ fn handle_workspace_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction>
             app.active_search_workspaces.remove(&app.page);
             if key.code == KeyCode::Down {
                 match app.page {
-                    papr_core::Page::Library => app.library.selected = 0,
-                    papr_core::Page::Downloads => app.download_selected = 0,
-                    papr_core::Page::Collections => {
+                    Page::Library => app.library.selected = 0,
+                    Page::Downloads => app.download_selected = 0,
+                    Page::Collections => {
                         if app.active_collection.is_some() {
                             app.collection_paper_selected = 0;
                         } else {
                             app.collection_selected = 0;
                         }
                     }
-                    papr_core::Page::Authors => {
+                    Page::Authors => {
                         if app.active_author.is_some() {
                             app.author_paper_selected = 0;
                         } else {
                             app.author_selected = 0;
                         }
                     }
-                    papr_core::Page::Bookmarks => app.bookmark_selected = 0,
-                    papr_core::Page::Notes => app.notes_selected = 0,
-                    papr_core::Page::ReadingQueue => app.reading_queue_selected = 0,
+                    Page::Bookmarks => app.bookmark_selected = 0,
+                    Page::Notes => app.notes_selected = 0,
+                    Page::ReadingQueue => app.reading_queue_selected = 0,
                     _ => {}
                 }
             }
@@ -6066,7 +5285,7 @@ fn handle_workspace_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction>
 }
 
 fn handle_confirm_delete_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
-    use papr_core::DeletionTarget;
+    use DeletionTarget;
     match key.code {
         KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
             let target = app.delete_confirmation.take()?;
@@ -6094,7 +5313,7 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
 }
 
 fn bookmark_action(app: &App, key: KeyEvent) -> Option<UiAction> {
-    if app.page != papr_core::Page::Bookmarks {
+    if app.page != Page::Bookmarks {
         return None;
     }
     let bookmark = *app.filtered_bookmarks().get(app.bookmark_selected)?;
@@ -6118,7 +5337,7 @@ fn bookmark_action(app: &App, key: KeyEvent) -> Option<UiAction> {
 }
 
 fn handle_credits_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
-    if app.page != papr_core::Page::Credits {
+    if app.page != Page::Credits {
         return None;
     }
     match key.code {
@@ -6132,7 +5351,7 @@ fn handle_credits_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
 }
 
 fn handle_notes_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
-    if app.page != papr_core::Page::Notes {
+    if app.page != Page::Notes {
         return None;
     }
     let paper = *app.filtered_notes_papers().get(app.notes_selected)?;
@@ -6159,7 +5378,7 @@ fn handle_notes_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
 }
 
 fn handle_reading_queue_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
-    if app.page != papr_core::Page::ReadingQueue {
+    if app.page != Page::ReadingQueue {
         return None;
     }
     
@@ -6201,7 +5420,7 @@ fn handle_reading_queue_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
 }
 
 fn handle_downloads_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
-    if app.page != papr_core::Page::Downloads {
+    if app.page != Page::Downloads {
         return None;
     }
     if key.code == KeyCode::Char('r') {
@@ -6273,7 +5492,7 @@ fn handle_downloads_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
 }
 
 fn library_action(app: &mut App, key: KeyEvent) -> Option<UiAction> {
-    if app.page != papr_core::Page::Library {
+    if app.page != Page::Library {
         return None;
     }
     if matches!(key.code, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) {
@@ -6292,7 +5511,7 @@ fn library_action(app: &mut App, key: KeyEvent) -> Option<UiAction> {
 }
 
 fn handle_dashboard_key(app: &mut App, key: KeyEvent) -> KeyHandling {
-    if app.page != papr_core::Page::Dashboard {
+    if app.page != Page::Dashboard {
         return KeyHandling::Ignored;
     }
     if matches!(
@@ -6390,7 +5609,7 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
         }
     }
     if let Some(item) = app.filtered_collections().get(app.collection_selected) {
-        use papr_core::CollectionSearchItem;
+        use CollectionSearchItem;
         match item {
             CollectionSearchItem::Collection(collection) => {
                 if matches!(key.code, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) {
@@ -6842,7 +6061,7 @@ fn handle_paper_detail_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         app.dispatch(Command::ToggleHelp);
         return None;
     }
-    if matches!(app.page, papr_core::Page::Dashboard | papr_core::Page::Discover)
+    if matches!(app.page, Page::Dashboard | Page::Discover)
         && matches!(key.code, KeyCode::Char('n' | 't' | 'g' | 'B'))
     {
         return None;
@@ -6919,7 +6138,7 @@ fn selected_remote_target(app: &App) -> Option<PaperTarget> {
 
 fn selected_remote_paper(app: &App) -> Option<&RemotePaper> {
     match app.page {
-        papr_core::Page::Dashboard => app.today_papers.get(app.today_selected),
+        Page::Dashboard => app.today_papers.get(app.today_selected),
         _ => app.discovery.selected_paper(),
     }
 }
@@ -6937,15 +6156,15 @@ fn selected_library_pdf(app: &App) -> Option<(i64, PathBuf)> {
 /// rows (for example, a group or author heading).
 fn selected_paper_arxiv_reference(app: &App) -> Option<Option<String>> {
     match app.page {
-        papr_core::Page::Dashboard => app
+        Page::Dashboard => app
             .today_papers
             .get(app.today_selected)
             .map(|paper| Some(paper.id.clone())),
-        papr_core::Page::Discover => app
+        Page::Discover => app
             .discovery
             .selected_paper()
             .map(|paper| Some(paper.id.clone())),
-        papr_core::Page::Downloads => app
+        Page::Downloads => app
             .filtered_downloads()
             .get(app.download_selected)
             .map(|task| {
@@ -6962,23 +6181,23 @@ fn selected_paper_arxiv_reference(app: &App) -> Option<Option<String>> {
                         })
                     })
             }),
-        papr_core::Page::Library
-        | papr_core::Page::ReadingQueue
-        | papr_core::Page::Collections
-        | papr_core::Page::Bookmarks
-        | papr_core::Page::Authors
-        | papr_core::Page::Notes => selected_local_paper_id(app).map(|id| {
+        Page::Library
+        | Page::ReadingQueue
+        | Page::Collections
+        | Page::Bookmarks
+        | Page::Authors
+        | Page::Notes => selected_local_paper_id(app).map(|id| {
             app.library
                 .papers
                 .iter()
                 .find(|paper| paper.id == id)
                 .and_then(|paper| paper.arxiv_id.clone())
         }),
-        papr_core::Page::Projects
-        | papr_core::Page::History
-        | papr_core::Page::Statistics
-        | papr_core::Page::Settings
-        | papr_core::Page::Credits => None,
+        Page::Projects
+        | Page::History
+        | Page::Statistics
+        | Page::Settings
+        | Page::Credits => None,
     }
 }
 
@@ -7023,11 +6242,11 @@ fn arxiv_page_url(reference: &str) -> Option<String> {
 
 fn selected_local_paper_id(app: &App) -> Option<i64> {
     match app.page {
-        papr_core::Page::Library => app
+        Page::Library => app
             .filtered_library_papers()
             .get(app.library.selected)
             .map(|paper| paper.id),
-        papr_core::Page::Downloads => app
+        Page::Downloads => app
             .filtered_downloads()
             .get(app.download_selected)
             .and_then(|task| {
@@ -7050,7 +6269,7 @@ fn selected_local_paper_id(app: &App) -> Option<i64> {
                     })
                 })
             }),
-        papr_core::Page::Collections => {
+        Page::Collections => {
             if app.active_collection.is_some() {
                 app.filtered_collection_papers()
                     .get(app.collection_paper_selected)
@@ -7059,12 +6278,12 @@ fn selected_local_paper_id(app: &App) -> Option<i64> {
                 app.filtered_collections()
                     .get(app.collection_selected)
                     .and_then(|item| match item {
-                        papr_core::CollectionSearchItem::Paper(paper, _) => Some(paper.id),
-                        papr_core::CollectionSearchItem::Collection(_) => None,
+                        CollectionSearchItem::Paper(paper, _) => Some(paper.id),
+                        CollectionSearchItem::Collection(_) => None,
                     })
             }
         }
-        papr_core::Page::Authors => {
+        Page::Authors => {
             if app.active_author.is_some() {
                 app.filtered_author_papers()
                     .get(app.author_paper_selected)
@@ -7073,25 +6292,25 @@ fn selected_local_paper_id(app: &App) -> Option<i64> {
                 None
             }
         }
-        papr_core::Page::Bookmarks => app
+        Page::Bookmarks => app
             .filtered_bookmarks()
             .get(app.bookmark_selected)
             .map(|bookmark| bookmark.paper_id),
-        papr_core::Page::Notes => app
+        Page::Notes => app
             .filtered_notes_papers()
             .get(app.notes_selected)
             .map(|paper| paper.id),
-        papr_core::Page::ReadingQueue => app
+        Page::ReadingQueue => app
             .filtered_reading_queue_papers()
             .get(app.reading_queue_selected)
             .map(|paper| paper.id),
-        papr_core::Page::Dashboard
-        | papr_core::Page::Projects
-        | papr_core::Page::Discover
-        | papr_core::Page::History
-        | papr_core::Page::Statistics
-        | papr_core::Page::Settings
-        | papr_core::Page::Credits => None,
+        Page::Dashboard
+        | Page::Projects
+        | Page::Discover
+        | Page::History
+        | Page::Statistics
+        | Page::Settings
+        | Page::Credits => None,
     }
 }
 
@@ -7175,7 +6394,7 @@ fn handle_settings_modal_key(
             if let Ok(config) = Config::load_or_create(&Paths::discover()?) {
                 settings_modal::open_settings_modal(app, &config, &original);
             }
-            app.dispatch(papr_core::Command::Quit);
+            app.dispatch(Command::Quit);
         }
 
         SettingsKeyResult::PreviewTheme(name) => {
@@ -7518,6 +6737,17 @@ fn finalize_download_task(task: &mut DownloadTask) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn editor_view_expands_tabs_and_maps_the_cursor_to_the_visible_tab_stop() {
+        let mut scroll = 0;
+        let view = build_config_editor_view("\tX", 1, 20, 4, &mut scroll);
+
+        assert_eq!(view.cursor_row, 0);
+        assert_eq!(view.cursor_col, 4);
+        assert_eq!(view.lines, vec!["  1     X"]);
+    }
+
+    use crate::state::*;
     use std::{ffi::OsString, fs, thread, time::Duration};
 
     use chrono::{TimeZone, Utc};
@@ -7525,20 +6755,22 @@ mod tests {
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
     };
     use papr_core::{
-        App, AppMode, BookmarkSummary, CollectionSummary, Database, DiscoveryState, DownloadStatus,
-        CitationEntry, CitationSource, Config, DownloadTask, LibraryPaper, Page, PaperNote, Project, ProjectPane, RemotePaper,
+        sanitize_terminal_output, parse_command,
+        cursor_visual_position, parse_latex_diagnostics,
+        BookmarkSummary, CollectionSummary, Database, DownloadStatus,
+        CitationEntry, CitationSource, Config, DownloadTask, LibraryPaper, PaperNote, Project, RemotePaper,
     };
     use papr_core::models::AuthorSummary;
 
     use super::{
-        UiAction, build_config_editor_view, cursor_visual_position,
-        handle_config_editor_insert_key, handle_downloads_key, handle_key, handle_mouse, handle_paper_detail_key, parse_command,
-        keyword_representation_targets, move_config_editor_page, refresh_downloads_from_dir,
+        UiAction, build_config_editor_view,
+        handle_config_editor_insert_key, handle_downloads_key, handle_key, handle_mouse, handle_paper_detail_key, 
+         move_config_editor_page, refresh_downloads_from_dir,
         accept_project_completion, create_project_file, is_project_text_file, project_tree_entries,
         handle_project_exact_paste, insert_project_bibtex_text,
-        reload_config_editor_buffer, select_dashboard_papers, shuffle_daily_bucket,
+        reload_config_editor_buffer, 
         update_project_completions, merge_enriched_remote_paper, run_terminal_command,
-        sanitize_terminal_output, parse_latex_diagnostics, PaperTarget,
+         PaperTarget,
         show_build_for_failed_compilation, show_preview_after_successful_compilation,
         complete_terminal_command, ConfigFilesystemWatcher, pdf_viewer_invocation,
         is_text_paste_shortcut, paste_text_into_active_input, should_open_generated_pdf,
@@ -7639,7 +6871,7 @@ mod tests {
     #[test]
     fn test_settings_workspace_ctrl_b_transfers_focus_to_command_palette() {
         let mut app = App {
-            page: papr_core::Page::Settings,
+            page: Page::Settings,
             content_focused: true,
             mode: AppMode::Normal,
             ..App::default()
@@ -7655,7 +6887,7 @@ mod tests {
 
         // When app.mode == AppMode::CommandPalette, event loop condition
         // (app.page == Page::Settings && app.content_focused && app.mode == AppMode::Normal) is false.
-        assert!(!(app.page == papr_core::Page::Settings && app.content_focused && app.mode == AppMode::Normal));
+        assert!(!(app.page == Page::Settings && app.content_focused && app.mode == AppMode::Normal));
 
         // Subsequent keys go to handle_key for CommandPalette
         let _ = handle_key(
@@ -7670,14 +6902,14 @@ mod tests {
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
         );
         assert_eq!(app.mode, AppMode::Normal);
-        assert_eq!(app.page, papr_core::Page::Settings);
+        assert_eq!(app.page, Page::Settings);
         assert!(app.content_focused);
     }
 
     #[test]
     fn test_settings_workspace_question_mark_transfers_focus_to_help() {
         let mut app = App {
-            page: papr_core::Page::Settings,
+            page: Page::Settings,
             content_focused: true,
             mode: AppMode::Normal,
             ..App::default()
@@ -7692,7 +6924,7 @@ mod tests {
         assert_eq!(app.mode, AppMode::Help);
 
         // While app.mode == AppMode::Help, key routing condition for settings workspace is false
-        assert!(!(app.page == papr_core::Page::Settings && app.content_focused && app.mode == AppMode::Normal));
+        assert!(!(app.page == Page::Settings && app.content_focused && app.mode == AppMode::Normal));
 
         // Subsequent keys go to handle_key for Help mode (scrolling)
         let _ = handle_key(
@@ -7707,7 +6939,7 @@ mod tests {
             KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
         );
         assert_eq!(app.mode, AppMode::Normal);
-        assert_eq!(app.page, papr_core::Page::Settings);
+        assert_eq!(app.page, Page::Settings);
         assert!(app.content_focused);
     }
 
@@ -7763,7 +6995,7 @@ mod tests {
         );
         assert_eq!(app.palette_query, "l");
         let items = app.filtered_palette_items();
-        assert!(items.contains(&papr_core::Page::Library));
+        assert!(items.contains(&Page::Library));
 
         // Down arrow should move selection
         let _ = handle_key(
@@ -7788,7 +7020,7 @@ mod tests {
         );
         assert!(action.is_none());
         assert_eq!(app.mode, AppMode::Search);
-        assert_eq!(app.page, papr_core::Page::Discover);
+        assert_eq!(app.page, Page::Discover);
     }
 
     #[test]
@@ -7920,7 +7152,7 @@ mod tests {
             app.page = Page::Dashboard;
 
             // Enter Dashboard - should not restore search mode since it's not active
-            app.dispatch(papr_core::Command::Open);
+            app.dispatch(Command::Open);
             assert!(app.content_focused);
             assert_eq!(app.mode, AppMode::Normal);
 
@@ -7929,7 +7161,7 @@ mod tests {
             if let Some(index) = Page::ALL.iter().position(|&p| p == page) {
                 app.sidebar_index = index;
             }
-            app.dispatch(papr_core::Command::Open);
+            app.dispatch(Command::Open);
 
             // It should enter the workspace and restore search mode and its state!
             assert!(app.content_focused);
@@ -8009,9 +7241,9 @@ mod tests {
             assert_eq!(app.discovery.scroll, 1);
 
             // Leaving Discover and returning restores the existing results-pane state.
-            app.dispatch(papr_core::Command::MoveDown);
-            app.dispatch(papr_core::Command::MoveUp);
-            app.dispatch(papr_core::Command::Open);
+            app.dispatch(Command::MoveDown);
+            app.dispatch(Command::MoveUp);
+            app.dispatch(Command::Open);
             assert!(app.content_focused);
             assert_eq!(app.page, Page::Discover);
             assert_eq!(app.mode, AppMode::Normal);
@@ -8065,9 +7297,9 @@ mod tests {
                 mode: AppMode::Normal,
                 workspace_query: "some query".to_string(),
                 workspace_query_cursor: 10,
-                library: papr_core::LibraryState {
+                library: LibraryState {
                     selected: 5,
-                    ..papr_core::LibraryState::default()
+                    ..LibraryState::default()
                 },
                 download_selected: 5,
                 collection_selected: 5,
@@ -8209,9 +7441,9 @@ mod tests {
                 page: Page::Library,
                 sidebar_index: 2,
                 content_focused: true,
-                library: papr_core::LibraryState {
+                library: LibraryState {
                     selected: 7,
-                    ..papr_core::LibraryState::default()
+                    ..LibraryState::default()
                 },
                 ..App::default()
             };
@@ -8769,15 +8001,6 @@ mod tests {
         assert_eq!(app.project_editor_cursor, "one\ntwo\nthree\n".len());
     }
 
-    #[test]
-    fn editor_view_expands_tabs_and_maps_the_cursor_to_the_visible_tab_stop() {
-        let mut scroll = 0;
-        let view = build_config_editor_view("\tX", 1, 20, 4, &mut scroll);
-
-        assert_eq!(view.cursor_row, 0);
-        assert_eq!(view.cursor_col, 4);
-        assert_eq!(view.lines, vec!["  1     X"]);
-    }
 
     #[test]
     fn project_alt_number_shortcuts_select_available_panes_directly() {
@@ -9485,10 +8708,10 @@ mod tests {
         let mut library_app = App {
             page: Page::Library,
             content_focused: true,
-            library: papr_core::LibraryState {
+            library: LibraryState {
                 papers: vec![library_paper.clone()],
                 selected: 0,
-                ..papr_core::LibraryState::default()
+                ..LibraryState::default()
             },
             ..App::default()
         };
@@ -9500,9 +8723,9 @@ mod tests {
         let mut downloads_app = App {
             page: Page::Downloads,
             content_focused: true,
-            library: papr_core::LibraryState {
+            library: LibraryState {
                 papers: vec![library_paper.clone()],
-                ..papr_core::LibraryState::default()
+                ..LibraryState::default()
             },
             downloads: vec![DownloadTask {
                 id: "paper".into(),
@@ -9618,9 +8841,9 @@ mod tests {
         let mut downloads_app = App {
             page: Page::Downloads,
             content_focused: true,
-            library: papr_core::LibraryState {
+            library: LibraryState {
                 papers: vec![library_paper],
-                ..papr_core::LibraryState::default()
+                ..LibraryState::default()
             },
             downloads: vec![DownloadTask {
                 id: "paper".into(),
@@ -9720,9 +8943,9 @@ mod tests {
         let mut app = App {
             page: Page::Library,
             content_focused: true,
-            library: papr_core::LibraryState {
+            library: LibraryState {
                 papers: vec![paper.clone()],
-                ..papr_core::LibraryState::default()
+                ..LibraryState::default()
             },
             ..App::default()
         };
@@ -9763,7 +8986,7 @@ mod tests {
                     results: (page == Page::Discover).then_some(remote).into_iter().collect(),
                     ..DiscoveryState::default()
                 },
-                library: papr_core::LibraryState {
+                library: LibraryState {
                     papers: vec![LibraryPaper {
                         id: 42,
                         title: "Downloaded paper".into(),
@@ -9775,7 +8998,7 @@ mod tests {
                         reading_status: "unread".into(),
                         is_favorite: false,
                     }],
-                    ..papr_core::LibraryState::default()
+                    ..LibraryState::default()
                 },
                 ..App::default()
             };
@@ -9804,20 +9027,20 @@ mod tests {
             page: Page::Dashboard,
             content_focused: true,
             today_papers: vec![dashboard_paper],
-            discovery: papr_core::DiscoveryState {
+            discovery: DiscoveryState {
                 query: "search".into(),
                 query_cursor: 6,
                 results: vec![discover_paper],
                 selected: 0,
                 scroll: 3,
-                status: papr_core::DiscoveryStatus::Ready,
+                status: DiscoveryStatus::Ready,
                 detail_scroll: 11,
-                ..papr_core::DiscoveryState::default()
+                ..DiscoveryState::default()
             },
             ..App::default()
         };
 
-        app.dispatch(papr_core::Command::Open);
+        app.dispatch(Command::Open);
 
         assert_eq!(app.mode, AppMode::PaperDetail);
         assert_eq!(app.paper_detail_scroll, 0);
@@ -9858,7 +9081,7 @@ mod tests {
         let mut app = App {
             page: Page::Library,
             content_focused: true,
-            library: papr_core::LibraryState {
+            library: LibraryState {
                 papers: vec![LibraryPaper {
                     id: 7,
                     title: "Paper".into(),
@@ -9870,7 +9093,7 @@ mod tests {
                     reading_status: "unread".into(),
                     is_favorite: false,
                 }],
-                ..papr_core::LibraryState::default()
+                ..LibraryState::default()
             },
             ..App::default()
         };
@@ -9991,9 +9214,9 @@ mod tests {
         let mut app = App {
             page: Page::Library,
             content_focused: true,
-            library: papr_core::LibraryState {
+            library: LibraryState {
                 papers: vec![paper.clone()],
-                ..papr_core::LibraryState::default()
+                ..LibraryState::default()
             },
             ..App::default()
         };
@@ -10060,241 +9283,15 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn daily_dashboard_permutation_is_input_order_independent_and_changes_by_date() {
-        let papers: Vec<_> = (0..30)
-            .map(|index| remote_paper(&format!("https://arxiv.org/abs/{index}"), "Paper"))
-            .collect();
-        let mut reordered = papers.clone();
-        reordered.reverse();
 
-        shuffle_daily_bucket(&mut reordered, "2026-07-19", "quantum gravity");
-        let mut same_day = papers.clone();
-        shuffle_daily_bucket(&mut same_day, "2026-07-19", "quantum gravity");
-        assert_eq!(reordered, same_day);
 
-        let mut next_day = papers;
-        shuffle_daily_bucket(&mut next_day, "2026-07-20", "quantum gravity");
-        assert_ne!(
-            same_day.iter().take(10).map(|paper| &paper.id).collect::<Vec<_>>(),
-            next_day.iter().take(10).map(|paper| &paper.id).collect::<Vec<_>>(),
-        );
-    }
 
-    #[test]
-    fn keyword_dashboard_feed_rotates_selected_papers_each_day() {
-        let papers = (0..30)
-            .map(|index| remote_paper(&format!("https://arxiv.org/abs/{index}"), "Quantum result"))
-            .collect::<Vec<_>>();
 
-        let first_day = select_dashboard_papers(
-            vec![("quantum".into(), papers.clone())],
-            10,
-            "2026-07-19",
-        );
-        let next_day = select_dashboard_papers(
-            vec![("quantum".into(), papers)],
-            10,
-            "2026-07-20",
-        );
 
-        assert_ne!(
-            first_day.iter().map(|paper| &paper.id).collect::<Vec<_>>(),
-            next_day.iter().map(|paper| &paper.id).collect::<Vec<_>>(),
-        );
-    }
 
-    #[test]
-    fn dashboard_prioritizes_papers_with_all_keyword_terms_in_the_title() {
-        let papers = vec![
-            remote_paper("https://arxiv.org/abs/abstract", "A related result"),
-            remote_paper("https://arxiv.org/abs/title-one", "Quantum gravity constraints"),
-            remote_paper("https://arxiv.org/abs/title-two", "Gravity in quantum systems"),
-        ];
 
-        let selected = select_dashboard_papers(
-            vec![("quantum gravity".into(), papers)],
-            10,
-            "2026-07-19",
-        );
 
-        assert!(selected[0].title.to_lowercase().contains("quantum"));
-        assert!(selected[0].title.to_lowercase().contains("gravity"));
-        assert!(selected[1].title.to_lowercase().contains("quantum"));
-        assert!(selected[1].title.to_lowercase().contains("gravity"));
-        assert_eq!(selected[2].id, "https://arxiv.org/abs/abstract");
-    }
 
-    #[test]
-    fn dashboard_represents_keywords_even_when_only_one_has_a_title_match() {
-        let selected = select_dashboard_papers(
-            vec![
-                (
-                    "neural networks".into(),
-                    vec![remote_paper("https://arxiv.org/abs/abstract", "A related result")],
-                ),
-                (
-                    "quantum gravity".into(),
-                    vec![remote_paper(
-                        "https://arxiv.org/abs/title",
-                        "Quantum gravity constraints",
-                    )],
-                ),
-            ],
-            10,
-            "2026-07-19",
-        );
-
-        assert_eq!(selected.len(), 2);
-        assert!(selected.iter().any(|paper| paper.id == "https://arxiv.org/abs/title"));
-        assert!(selected
-            .iter()
-            .any(|paper| paper.id == "https://arxiv.org/abs/abstract"));
-    }
-
-    #[test]
-    fn dashboard_balances_keyword_targets_before_title_quality() {
-        let first_keyword: Vec<_> = (0..10)
-            .map(|index| remote_paper(&format!("https://arxiv.org/abs/alpha-{index}"), "Alpha"))
-            .collect();
-        let second_keyword: Vec<_> = (0..10)
-            .map(|index| remote_paper(&format!("https://arxiv.org/abs/beta-{index}"), "Related work"))
-            .collect();
-        let selected = select_dashboard_papers(
-            vec![("alpha".into(), first_keyword), ("beta".into(), second_keyword)],
-            10,
-            "2026-07-19",
-        );
-
-        let first_count = selected
-            .iter()
-            .filter(|paper| paper.id.contains("alpha-"))
-            .count();
-        assert_eq!(first_count, 5);
-        assert_eq!(selected.len() - first_count, 5);
-    }
-
-    #[test]
-    fn dashboard_keyword_targets_are_balanced_with_a_gentle_earlier_preference() {
-        let keywords = |count| (0..count).map(|index| format!("keyword {index}")).collect::<Vec<_>>();
-        assert_eq!(
-            keyword_representation_targets(&[50, 50], &keywords(2), 10, "2026-07-19"),
-            vec![5, 5]
-        );
-        assert_eq!(
-            keyword_representation_targets(&[50, 50, 50], &keywords(3), 10, "2026-07-19"),
-            vec![4, 3, 3]
-        );
-        assert_eq!(
-            keyword_representation_targets(&[50, 50, 50, 50], &keywords(4), 10, "2026-07-19"),
-            vec![3, 3, 2, 2]
-        );
-        assert_eq!(
-            keyword_representation_targets(&[50, 0, 50], &keywords(3), 10, "2026-07-19"),
-            vec![5, 0, 5]
-        );
-    }
-
-    #[test]
-    fn dashboard_many_keywords_uses_a_daily_weighted_window() {
-        let keywords = (0..15)
-            .map(|index| format!("keyword {index}"))
-            .collect::<Vec<_>>();
-        let targets = keyword_representation_targets(&[50; 15], &keywords, 10, "2026-07-19");
-
-        assert_eq!(targets.iter().sum::<usize>(), 10);
-        assert_eq!(targets.iter().filter(|&&target| target == 1).count(), 10);
-    }
-
-    #[test]
-    fn dashboard_reallocates_when_a_keyword_runs_out_of_candidates() {
-        let second_keyword: Vec<_> = (0..20)
-            .map(|index| remote_paper(&format!("https://arxiv.org/abs/beta-{index}"), "Beta"))
-            .collect();
-        let selected = select_dashboard_papers(
-            vec![
-                (
-                    "alpha".into(),
-                    vec![remote_paper("https://arxiv.org/abs/alpha-only", "Alpha")],
-                ),
-                ("beta".into(), second_keyword),
-            ],
-            10,
-            "2026-07-19",
-        );
-
-        assert_eq!(selected.len(), 10);
-        assert_eq!(
-            selected
-                .iter()
-                .filter(|paper| paper.id == "https://arxiv.org/abs/alpha-only")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn a_multi_keyword_paper_counts_once_toward_each_target() {
-        let shared = remote_paper("https://arxiv.org/abs/shared", "Alpha beta gamma");
-        let bucket = |keyword: &str, count: usize| {
-            (0..count)
-                .map(|index| {
-                    remote_paper(
-                        &format!("https://arxiv.org/abs/{keyword}-{index}"),
-                        keyword,
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        let mut alpha = bucket("alpha", 4);
-        let mut beta = bucket("beta", 3);
-        let mut gamma = bucket("gamma", 3);
-        alpha.push(shared.clone());
-        beta.push(shared.clone());
-        gamma.push(shared);
-
-        let selected = select_dashboard_papers(
-            vec![
-                ("alpha".into(), alpha),
-                ("beta".into(), beta),
-                ("gamma".into(), gamma),
-            ],
-            10,
-            "2026-07-19",
-        );
-
-        assert_eq!(selected[0].id, "https://arxiv.org/abs/shared");
-        assert!(selected.iter().filter(|paper| paper.id.contains("beta-")).count() >= 2);
-        assert!(selected.iter().filter(|paper| paper.id.contains("gamma-")).count() >= 2);
-    }
-
-    #[test]
-    fn dashboard_boosts_and_deduplicates_multi_keyword_matches() {
-        let shared = remote_paper("https://arxiv.org/abs/shared", "Alpha beta methods");
-        let selected = select_dashboard_papers(
-            vec![
-                (
-                    "alpha".into(),
-                    vec![remote_paper("https://arxiv.org/abs/alpha", "Alpha result"), shared.clone()],
-                ),
-                (
-                    "beta".into(),
-                    vec![remote_paper("https://arxiv.org/abs/beta", "Beta result"), shared],
-                ),
-            ],
-            2,
-            "2026-07-19",
-        );
-
-        assert_eq!(selected[0].id, "https://arxiv.org/abs/shared");
-        assert_eq!(
-            selected
-                .iter()
-                .filter(|paper| paper.id == "https://arxiv.org/abs/shared")
-                .count(),
-            1
-        );
-    }
 
     fn remote_paper(id: &str, title: &str) -> RemotePaper {
         let timestamp = Utc
@@ -10333,9 +9330,9 @@ mod tests {
         let mut app = App {
             page: Page::Library,
             content_focused: true,
-            library: papr_core::LibraryState {
+            library: LibraryState {
                 papers: vec![paper.clone()],
-                ..papr_core::LibraryState::default()
+                ..LibraryState::default()
             },
             ..App::default()
         };
@@ -10366,10 +9363,10 @@ mod tests {
         };
 
         // MoveDown command should navigate down
-        app.dispatch(papr_core::Command::MoveDown);
+        app.dispatch(Command::MoveDown);
         assert_eq!(app.credits_selected, 1);
 
-        app.dispatch(papr_core::Command::MoveUp);
+        app.dispatch(Command::MoveUp);
         assert_eq!(app.credits_selected, 0);
 
         // Enter key should trigger UiAction::OpenBrowser(url)
@@ -10461,7 +9458,7 @@ mod tests {
             is_favorite: false,
         }];
 
-        let prompt = papr_core::MetadataPrompt {
+        let prompt = MetadataPrompt {
             paper_id: Some(paper_id),
             rename_collection_id: None,
             rename_paper_id: Some(paper_id),

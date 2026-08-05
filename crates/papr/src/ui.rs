@@ -1,13 +1,14 @@
 //! Ratatui rendering for the application shell.
 
+use crate::state::*;
+use crate::theme::*;
 use std::sync::OnceLock;
 
 use crate::build_config_editor_view_with_scroll_mode;
 use crate::settings_modal;
 use papr_core::{
-    App, AppMode, DeletionTarget, DiscoveryStatus, DownloadStatus, Page, ProjectDiagnosticSeverity,
-    ProjectPane, RemotePaper, Theme,
-};
+    DownloadStatus, ProjectDiagnosticSeverity,
+    RemotePaper, };
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::{
     Frame,
@@ -840,7 +841,7 @@ fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
         return;
     }
     let items = collections.iter().map(|item| {
-        use papr_core::CollectionSearchItem;
+        use CollectionSearchItem;
         match item {
             CollectionSearchItem::Collection(collection) => workspace_list_item(vec![
                 Line::styled(
@@ -4569,12 +4570,12 @@ fn build_paper_lines<'a>(
 
 #[cfg(test)]
 mod tests {
+    use crate::state::*;
+    use crate::theme::*;
     use chrono::{TimeZone, Utc};
     use papr_core::models::AuthorSummary;
     use papr_core::{
-        ActivityItem, App, AppMode, BookmarkSummary, CollectionSummary, DiscoveryState,
-        DiscoveryStatus, DownloadStatus, DownloadTask, LibraryPaper, Page, RemotePaper, Theme,
-    };
+        ActivityItem, BookmarkSummary, CollectionSummary,         DownloadStatus, DownloadTask, LibraryPaper, RemotePaper,     };
     use ratatui::{
         Terminal, backend::TestBackend, buffer::Buffer, layout::Rect, style::Style, widgets::Widget,
     };
@@ -4654,7 +4655,7 @@ mod tests {
         let mut app = App {
             page: Page::Library,
             content_focused: false,
-            library: papr_core::LibraryState {
+            library: LibraryState {
                 selected: 0,
                 scroll: 0,
                 papers: vec![LibraryPaper {
@@ -4668,7 +4669,7 @@ mod tests {
                     reading_status: "unread".into(),
                     is_favorite: false,
                 }],
-                ..papr_core::LibraryState::default()
+                ..LibraryState::default()
             },
             ..App::default()
         };
@@ -5187,9 +5188,9 @@ Image: ![plot](plot.png)[^1]
             failed_at: None,
         };
         let mut app = App {
-            library: papr_core::LibraryState {
+            library: LibraryState {
                 papers: vec![paper.clone()],
-                ..papr_core::LibraryState::default()
+                ..LibraryState::default()
             },
             ..App::default()
         };

@@ -1875,6 +1875,7 @@ checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
 name = "papr-core"
 version = "0.1.1"
 dependencies = [
+ "anyhow",
  "chrono",
  "directories",
  "dunce",
@@ -1882,7 +1883,6 @@ dependencies = [
  "iana-time-zone",
  "notify",
  "quick-xml 0.38.4",
- "ratatui",
  "reqwest",
  "rusqlite",
  "serde",
@@ -1913,9 +1913,11 @@ dependencies = [
  "ratatui",
  "ratatui-image",
  "reqwest",
+ "serde",
  "serde_json",
  "sha2",
  "syntect",
+ "thiserror 2.0.18",
  "tokio",
  "toml",
  "walkdir",

@@ -34,6 +34,8 @@
 //! Every cache entry is keyed by `(path, page, dpi, pixel_w)` so that
 //! different PDFs never share cached images or temp PNG files.
 
+use crate::state::*;
+
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::hash::{Hash, Hasher};
@@ -53,7 +55,7 @@ use ratatui::{
 };
 use ratatui_image::picker::Picker;
 
-use papr_core::app::App;
+
 
 // ---------------------------------------------------------------------------
 // Cache key helpers
@@ -570,7 +572,7 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             return;
         }
     };
-    let page_fit = app.page == papr_core::Page::Projects
+    let page_fit = app.page == Page::Projects
         && app.active_project.is_some()
         && app.pdf_viewer == "internal";
 
