@@ -4338,32 +4338,6 @@ fn discover_local_downloads(
     }
 }
 
-fn sanitize_download_filename_component(title: &str) -> String {
-    let sanitized: String = title
-        .chars()
-        .map(|c| match c {
-            '/' => '_',
-            '\n' | '\r' | '\t' => ' ',
-            #[cfg(windows)]
-            ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            #[cfg(windows)]
-            c if c.is_control() => ' ',
-            #[cfg(not(windows))]
-            c if c.is_control() => c,
-            c => c,
-        })
-        .collect();
-    let sanitized = sanitized.trim();
-    #[cfg(windows)]
-    {
-        sanitized.trim_end_matches(['.', ' ']).to_owned()
-    }
-    #[cfg(not(windows))]
-    {
-        sanitized.to_owned()
-    }
-}
-
 fn start_download(
     paper: RemotePaper,
     directory: &std::path::Path,
@@ -4382,7 +4356,7 @@ fn start_download(
     if pending.contains_key(&paper.id) {
         return;
     }
-    let sanitized_title = sanitize_download_filename_component(&paper.title);
+    let sanitized_title = papr_core::paths::sanitize_download_filename_component(&paper.title);
     let filename = if sanitized_title.is_empty() {
         paper
             .id
@@ -10401,20 +10375,6 @@ mod tests {
         // Enter key should trigger UiAction::OpenBrowser(url)
         let action = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(action, Some(UiAction::OpenBrowser(ref url)) if url == "https://github.com/AfrozSaqlain/Papr"));
-    }
-
-    #[test]
-    #[cfg(not(windows))]
-    fn download_filename_preserves_colon_on_supported_platforms() {
-        let sanitized = super::sanitize_download_filename_component("AntiGlitch: Better / Faster");
-        assert_eq!(sanitized, "AntiGlitch: Better _ Faster");
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn download_filename_sanitizes_colon_on_windows() {
-        let sanitized = super::sanitize_download_filename_component("AntiGlitch: Better / Faster");
-        assert_eq!(sanitized, "AntiGlitch_ Better _ Faster");
     }
 
     #[tokio::test]
