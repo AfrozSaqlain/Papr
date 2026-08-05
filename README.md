@@ -12,9 +12,9 @@
   <img src="assets/papr.gif" alt="Demo" width="900">
 </p>
 
-Papr is a fast, keyboard-first terminal workspace built for academic research. It brings together arXiv paper discovery, local PDF library management, reading, markdown note-taking, automatic author-based paper organization, and LaTeX manuscript editing into one terminal interface.
+Papr is a fast, terminal based workspace built for academic research. It brings together arXiv paper discovery, local PDF library management, reading, markdown note-taking, automatic author-based paper organization, and LaTeX manuscript editing into one terminal interface.
 
-Instead of context-switching between web browsers, reference managers, PDF viewers, and text editors, Papr merges online discovery with local file organization into a distraction-free environment. Under the hood, it's built with Rust using Ratatui, Tokio, Reqwest, and SQLite, giving you a lightweight tool that runs entirely offline and keeps all your data under your local control.
+Instead of context-switching between web browsers, reference managers, PDF viewers, and text editors, Papr merges online search with local file organization into a distraction-free environment. Under the hood, it's built with Rust using Ratatui, Tokio, Reqwest, and SQLite, giving you a lightweight tool that runs entirely offline and keeps all your data under your control.
 
 ---
 
@@ -31,9 +31,9 @@ Papr was written in Rust because an academic research workspace needs to be fast
 
 ## Key Features
 
-### Discovery & Organization
-* **Daily Research Dashboard:** Track reading time, active streaks, disk usage, and view a daily arXiv recommendation feed. Customize the feed with normalized, comma-separated interest topics, and once loaded, it stays cached for offline viewing.
-* **Integrated arXiv Search:** Search arXiv directly by title, author, category, abstract, or DOI. Search results load incrementally, let you filter on the fly, and maintain a page history with back/forward navigation.
+### Dashboard & Discovery
+* **Daily Research Dashboard:** Displays 10 new random papers daily from your predefined keywords, which you can customize in the **Settings** workspace to match your field of interest, helping you stay up to date with the latest advancements in your research area. Also lets you track reading time, active streaks, disk usage, and much more.
+* **Integrated arXiv Search:** Search arXiv directly by title, author, category, abstract, or DOI. Search results load incrementally, let you filter on the fly.
 * **Clean Filenames:** Downloads run in the background and are automatically saved with sanitized, human-readable titles instead of cryptic arXiv IDs (e.g., `2401.12345.pdf`).
 * **Smart Deduplication:** Resolves database conflicts across your library (matching arXiv ID, file path, or DOI) and merges records during downloads or scans without losing your existing notes, bookmarks, or reading progress.
 * **Workspace & Disk Sync:** Organizing papers into groups inside the TUI automatically mirrors those changes in your local folder structure on disk.
@@ -42,12 +42,12 @@ Papr was written in Rust because an academic research workspace needs to be fast
 * **In-Terminal PDF Viewing:** Read papers directly inside the terminal with smooth scrolling using Kitty or Sixel graphics protocols.
 * **External Viewer & Browser Integration:** Open PDFs in external readers like Zathura or Okular (while Papr continues tracking your reading time) or jump straight to the paper in your web browser.
 * **Markdown Annotations:** Write dedicated per-paper notes using a built-in Vim-inspired markdown editor with a live styled preview.
-* **Reading Queue:** Prioritize your reading backlog with a dedicated, sortable queue.
+* **Reading Queue:** Prioritize your reading list with a dedicated, sortable queue.
 
 ### LaTeX Integration
 * **Built-in Writing Workspace:** Create, edit, and compile LaTeX manuscripts directly within the TUI.
 * **Real-time Compilation:** Asynchronous background compilation powered by `latexmk`.
-* **PDF-First Layout:** Work with the live PDF preview side-by-side with your editor, keeping build logs out of sight until you actually need to debug.
+* **PDF-First Layout:** Work with the live PDF preview side-by-side with your editor, and also track build logs.
 * **Smart Diagnostics:** LaTeX compilation errors and warnings are cleanly grouped with exact source locations, code snippets, diagnostic hints, and a raw log view.
 * **Full Project File Management:** Navigate project tree structures, create nested files and directories, rename entries, and edit code with familiar Vim-style keybindings.
 
@@ -62,7 +62,7 @@ Papr was written in Rust because an academic research workspace needs to be fast
 
 * A 64-bit Linux, macOS, or Windows system supported by Rust.
 * A modern terminal emulator with ANSI color and Unicode support (minimum **58 columns × 18 rows**).
-* Read/write access to Papr's configuration and data directories.
+* Read/write access to Papr's configuration and data directories (you can although change data directories in Settings).
 * An internet connection (for arXiv search, metadata enrichment, and downloads). Local browsing works offline.
 
 ### Dependencies
@@ -94,11 +94,6 @@ Papr was written in Rust because an academic research workspace needs to be fast
   ```sh
   sudo dnf install -y gcc make pkgconf-pkg-config xdg-utils poppler-utils wl-clipboard texlive-scheme-basic latexmk git
   ```
-
-Papr uses bundled SQLite by default, so `cargo build` and `cargo install` do not
-require SQLite development headers. Fedora package builds can opt into the
-system SQLite library with `cargo build -p papr-tui --no-default-features` and
-must install `sqlite-devel`.
 * **Arch Linux:**
   ```sh
   sudo pacman -S --noconfirm base-devel pkgconf xdg-utils poppler wl-clipboard texlive-basic texlive-latexmk git
@@ -269,8 +264,8 @@ papr
 
 Papr is divided into 14 specialized **workspaces** (sections), accessible via the sidebar menu on the left side of the screen.
 
-* **Sidebar Navigation:** Use the left sidebar to move through different workspaces and open the one you want with the keyboard.
-* **Workspaces:** Each workspace lets you interact with papers, notes, downloads, groups, reading queues, and projects from one place. Press `Ctrl+B` to open **Browse Papr** or `Ctrl+T` for the terminal command palette; `Tab` cycles completions. When a project is open, commands run from that project's directory.
+* **Sidebar Navigation:** Use the left sidebar to move through different workspaces and open the one you want.
+* **Workspaces:** Each workspace lets you interact with papers, notes, downloads, groups, reading queues, and projects from one place. Press `Ctrl+B` to open **Browse Papr** or `Ctrl+T` for the terminal command palette. [Note: When a project is open, commands run from that project's directory.]
 
 Here is a complete breakdown of every section in Papr, what it does, and how to use it:
 
