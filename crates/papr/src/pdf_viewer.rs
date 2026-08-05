@@ -349,12 +349,22 @@ fn render_page_blocking(
 /// of `src`, copying only the needed rows (much smaller than the full page).
 fn crop_view(src: &RgbaImage, crop_y: u32, crop_h: u32) -> DynamicImage {
     let w = src.width();
+    let h = src.height();
+    if w == 0 || h == 0 || crop_h == 0 {
+        return DynamicImage::ImageRgba8(RgbaImage::new(w.max(1), crop_h.max(1)));
+    }
     let bytes_per_row = w as usize * 4;
-    let start = crop_y as usize * bytes_per_row;
-    let end = start + crop_h as usize * bytes_per_row;
+    let start = (crop_y as usize * bytes_per_row).min(src.as_raw().len());
+    let end = (start + crop_h as usize * bytes_per_row).min(src.as_raw().len());
     let slice = &src.as_raw()[start..end];
-    let buf = RgbaImage::from_raw(w, crop_h, slice.to_vec())
-        .expect("crop dimensions match slice length");
+
+    let expected_len = (w * crop_h * 4) as usize;
+    let mut data = vec![0u8; expected_len];
+    let copy_len = slice.len().min(expected_len);
+    data[..copy_len].copy_from_slice(&slice[..copy_len]);
+
+    let buf = RgbaImage::from_raw(w, crop_h, data)
+        .unwrap_or_else(|| RgbaImage::new(w, crop_h));
     DynamicImage::ImageRgba8(buf)
 }
 
@@ -1093,30 +1103,37 @@ fn crop_and_stitch(
     viewport_h: u32,
 ) -> DynamicImage {
     let w = curr_img.width();
+    if w == 0 || viewport_h == 0 {
+        return DynamicImage::ImageRgba8(RgbaImage::new(w.max(1), viewport_h.max(1)));
+    }
     let curr_h = curr_img.height();
     let curr_visible = curr_h.saturating_sub(scroll_y);
     let next_visible = viewport_h.saturating_sub(curr_visible);
 
     let mut data = vec![0u8; (w * viewport_h * 4) as usize];
+    let bytes_per_row = w as usize * 4;
 
     if curr_visible > 0 {
-        let bytes_per_row = w as usize * 4;
-        let start = scroll_y as usize * bytes_per_row;
-        let end = curr_h as usize * bytes_per_row;
+        let start = (scroll_y as usize * bytes_per_row).min(curr_img.as_raw().len());
+        let end = (start + curr_visible as usize * bytes_per_row).min(curr_img.as_raw().len());
         let slice = &curr_img.as_raw()[start..end];
-        data[0..slice.len()].copy_from_slice(slice);
+        let copy_len = slice.len().min(data.len());
+        data[0..copy_len].copy_from_slice(&slice[0..copy_len]);
     }
 
-    if next_visible > 0 {
-        let bytes_per_row = w as usize * 4;
+    if next_visible > 0 && next_img.width() == w {
         let end = (next_visible as usize * bytes_per_row).min(next_img.as_raw().len());
         let slice = &next_img.as_raw()[0..end];
-        let dest_start = curr_visible as usize * bytes_per_row;
-        let dest_end = dest_start + slice.len();
-        data[dest_start..dest_end].copy_from_slice(slice);
+        let dest_start = (curr_visible as usize * bytes_per_row).min(data.len());
+        let dest_end = (dest_start + slice.len()).min(data.len());
+        let copy_len = dest_end.saturating_sub(dest_start);
+        if copy_len > 0 {
+            data[dest_start..dest_end].copy_from_slice(&slice[0..copy_len]);
+        }
     }
 
-    let stitched = RgbaImage::from_raw(w, viewport_h, data).unwrap();
+    let stitched = RgbaImage::from_raw(w, viewport_h, data)
+        .unwrap_or_else(|| RgbaImage::new(w, viewport_h));
     DynamicImage::ImageRgba8(stitched)
 }
 
@@ -1126,20 +1143,24 @@ fn crop_single_with_padding(
     viewport_h: u32,
 ) -> DynamicImage {
     let w = curr_img.width();
+    if w == 0 || viewport_h == 0 {
+        return DynamicImage::ImageRgba8(RgbaImage::new(w.max(1), viewport_h.max(1)));
+    }
     let curr_h = curr_img.height();
     let curr_visible = curr_h.saturating_sub(scroll_y);
 
     let mut data = vec![0u8; (w * viewport_h * 4) as usize];
+    let bytes_per_row = w as usize * 4;
 
     if curr_visible > 0 {
-        let bytes_per_row = w as usize * 4;
-        let start = scroll_y as usize * bytes_per_row;
-        let end = curr_h as usize * bytes_per_row;
+        let start = (scroll_y as usize * bytes_per_row).min(curr_img.as_raw().len());
+        let end = (start + curr_visible as usize * bytes_per_row).min(curr_img.as_raw().len());
         let slice = &curr_img.as_raw()[start..end];
-        data[0..slice.len()].copy_from_slice(slice);
+        let copy_len = slice.len().min(data.len());
+        data[0..copy_len].copy_from_slice(&slice[0..copy_len]);
     }
 
-    let curr_len = (curr_visible as usize * w as usize * 4).min(data.len());
+    let curr_len = (curr_visible as usize * bytes_per_row).min(data.len());
     let padding_slice = &mut data[curr_len..];
     padding_slice.chunks_exact_mut(4).for_each(|pixel| {
         pixel[0] = 20;
@@ -1148,6 +1169,7 @@ fn crop_single_with_padding(
         pixel[3] = 255;
     });
 
-    let stitched = RgbaImage::from_raw(w, viewport_h, data).unwrap();
+    let stitched = RgbaImage::from_raw(w, viewport_h, data)
+        .unwrap_or_else(|| RgbaImage::new(w, viewport_h));
     DynamicImage::ImageRgba8(stitched)
 }

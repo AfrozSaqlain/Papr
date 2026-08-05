@@ -297,6 +297,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         | AppMode::ProjectEntryRename => {
             render_project_name_prompt(frame, app, theme)
         }
+        AppMode::ProjectCitationSearch => render_project_citation_search(frame, app, theme),
         AppMode::Normal
         | AppMode::Search
         | AppMode::DiscoverFilter
@@ -3601,6 +3602,100 @@ fn render_terminal_command(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         sections[2].x.saturating_add(1 + cursor),
         sections[2].y + 1,
     ));
+}
+
+fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
+    let area = centered(90, 24, frame.area());
+    frame.render_widget(Clear, area);
+
+    let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(4)]).split(area);
+
+    // ── Search bar ────────────────────────────────────────────────────────
+    let search_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent))
+        .title(" ADD CITATION  Ctrl+F ");
+
+    let query_text = &app.project_citation_query;
+    frame.render_widget(
+        Paragraph::new(if query_text.is_empty() {
+            "Search papers by title or author..."
+        } else {
+            query_text.as_str()
+        })
+        .block(search_block),
+        chunks[0],
+    );
+
+    let cursor_offset = app
+        .project_citation_query
+        .chars()
+        .take(app.project_citation_cursor)
+        .count();
+    frame.set_cursor_position((
+        chunks[0]
+            .x
+            .saturating_add(1)
+            .saturating_add(u16::try_from(cursor_offset).unwrap_or(0)),
+        chunks[0].y.saturating_add(1),
+    ));
+
+    // ── Results list ─────────────────────────────────────────────────────
+    // Layout: each row has a fixed right slot for the "(Added)" badge.
+    // Borders (2) + highlight symbol "> " (2) + right border (1) = 5 overhead.
+    const BADGE: &str = " (Added)";
+    const BADGE_WIDTH: usize = BADGE.len();    // 8 chars
+    let list_inner_width = (chunks[1].width as usize).saturating_sub(5);
+    // Reserve badge width plus one separator space from the title.
+    let max_title_width = list_inner_width.saturating_sub(BADGE_WIDTH + 1).max(4);
+
+    let items: Vec<ListItem> = app.project_citation_results.iter().map(|paper| {
+        // (Added) detection: compare by lowercased title against the set of
+        // BibTeX titles already indexed from the project's .bib files.
+        let is_added = !paper.title.is_empty()
+            && app.project_bib_titles.contains(&paper.title.trim().to_lowercase());
+
+        let raw_title = if paper.title.is_empty() { "[untitled]" } else { paper.title.as_str() };
+        // Truncate title so badge always fits.
+        let title_text = safe_truncate(raw_title, max_title_width);
+        // Pad to a fixed width so the badge column is always at the same offset.
+        let padded_title = format!("{:<width$}", title_text, width = max_title_width);
+
+        let badge_span = if is_added {
+            Span::styled(BADGE, Style::default().fg(theme.success).add_modifier(Modifier::BOLD))
+        } else {
+            // Reserve the column with blank space so unselected rows don't shift.
+            Span::styled(" ".repeat(BADGE_WIDTH), Style::default())
+        };
+
+        ListItem::new(Line::from(vec![
+            Span::styled(padded_title, Style::default().fg(theme.text)),
+            badge_span,
+        ]))
+    }).collect();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(" RESULTS  ↑↓ navigate  Enter add  Esc close ")
+                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                .style(Style::default().bg(theme.surface))
+                .border_style(Style::default().fg(theme.accent)),
+        )
+        .highlight_style(Style::default().bg(theme.border).fg(theme.accent))
+        .highlight_symbol("> ");
+
+    app.project_citation_selected = app
+        .project_citation_selected
+        .min(app.project_citation_results.len().saturating_sub(1));
+
+    let mut state = ListState::default()
+        .with_selected(if app.project_citation_results.is_empty() {
+            None
+        } else {
+            Some(app.project_citation_selected)
+        });
+    frame.render_stateful_widget(list, chunks[1], &mut state);
 }
 
 fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {

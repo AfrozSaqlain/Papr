@@ -180,6 +180,8 @@ pub enum AppMode {
     ProjectEntryRename,
     /// Interactive settings modal.
     SettingsModal,
+    /// Interactive citation search modal for the active project.
+    ProjectCitationSearch,
 }
 
 /// Tabs shown in the settings modal.
@@ -865,6 +867,19 @@ pub struct App {
     pub project_rename_input: String,
     /// Byte cursor within the project name modal input.
     pub project_rename_cursor: usize,
+    /// Search query in the project citation modal.
+    pub project_citation_query: String,
+    /// Byte cursor in the project citation search input.
+    pub project_citation_cursor: usize,
+    /// Matching library papers in the project citation modal.
+    pub project_citation_results: Vec<LibraryPaper>,
+    /// Selected item in the project citation modal.
+    pub project_citation_selected: usize,
+    /// Vertical scroll offset for the project citation results.
+    pub project_citation_scroll: usize,
+    /// Lowercased titles of BibTeX entries already present in the project's .bib file.
+    /// Updated whenever the CitationSource index refreshes or a new citation is inserted.
+    pub project_bib_titles: std::collections::HashSet<String>,
     /// File or folder being renamed from the active project tree.
     pub project_entry_rename_path: Option<std::path::PathBuf>,
     /// Remote paper discovery state.
@@ -1069,6 +1084,12 @@ impl Default for App {
             project_build_visible: false,
             project_rename_input: String::new(),
             project_rename_cursor: 0,
+            project_citation_query: String::new(),
+            project_citation_cursor: 0,
+            project_citation_results: Vec::new(),
+            project_citation_selected: 0,
+            project_citation_scroll: 0,
+            project_bib_titles: std::collections::HashSet::new(),
             project_entry_rename_path: None,
             discovery: DiscoveryState::default(),
             paper_detail_scroll: 0,

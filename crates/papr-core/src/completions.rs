@@ -41,6 +41,9 @@ impl CitationSource {
     /// Construct a source from already-indexed bibliography records.
     pub fn new(entries: Vec<CitationEntry>) -> Self { Self { entries } }
 
+    /// Return all indexed bibliography records (e.g. to build an "already added" set).
+    pub fn all_entries(&self) -> &[CitationEntry] { &self.entries }
+
     /// Parse the useful fields from BibTeX. This deliberately accepts common
     /// hand-written BibTeX formatting rather than requiring a strict parser.
     pub fn parse_bibtex(input: &str) -> Vec<CitationEntry> {

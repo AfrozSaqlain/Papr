@@ -330,6 +330,7 @@ enum UiAction {
     RenamePdf(i64),
     MarkUnread(i64),
     CopyCitation(PaperTarget),
+    InsertProjectCitation(papr_core::models::LibraryPaper),
     ConfirmDeletePaper { paper_id: i64, title: String, path: Option<PathBuf> },
     ConfirmDeleteCollection { collection_id: i64, name: String, path: Option<PathBuf> },
     DeletePaper { paper_id: i64, path: Option<PathBuf> },
@@ -897,6 +898,7 @@ fn start_citation_indexer(runtime: &mut Runtime, app: &mut App) {
     runtime.citation_source = CitationSource::default();
     app.project_completions.clear();
     app.project_completion_selected = 0;
+    app.project_bib_titles.clear();
 }
 
 fn restart_project_filesystem_watcher(runtime: &mut Runtime, app: &mut App) {
@@ -932,6 +934,7 @@ fn refresh_project_filesystem(runtime: &mut Runtime, app: &mut App) {
         app.project_editor_text.clear();
         app.project_editor_dirty = false;
         app.project_pane = ProjectPane::ProjectList;
+        app.project_bib_titles.clear();
         app.toast = Some("The open project was removed from disk.".into());
         return;
     }
@@ -1350,6 +1353,11 @@ async fn run(
         {
             runtime.citation_source = source;
             update_project_completions(app, Some(&runtime.citation_source));
+            app.project_bib_titles = runtime.citation_source.all_entries()
+                .iter()
+                .map(|e| e.title.trim().to_lowercase())
+                .filter(|t| !t.is_empty())
+                .collect();
             state_changed = true;
         }
 
@@ -2331,6 +2339,84 @@ async fn apply_ui_action(
                     metadata,
                     senders.app_events.clone(),
                 ));
+            } else {
+                app.toast = Some("Citation metadata not available".into());
+            }
+        }
+        UiAction::InsertProjectCitation(paper) => {
+            if let Ok(Some(metadata)) = runtime.database.paper_citation_metadata(paper.id) {
+                let mut bibtex = String::new();
+                let mut key = String::new();
+                if let Some(first_author) = metadata.authors.split(" and ").next() {
+                    let last_name = first_author.split_whitespace().last().unwrap_or(first_author);
+                    key.push_str(&last_name.to_lowercase().replace(|c: char| !c.is_alphanumeric(), ""));
+                } else {
+                    key.push_str("paper");
+                }
+                if let Some(year) = &metadata.year {
+                    key.push_str(year);
+                }
+                let first_title_word = metadata.title.split_whitespace().next().unwrap_or("").to_lowercase().replace(|c: char| !c.is_alphanumeric(), "");
+                if !first_title_word.is_empty() {
+                    key.push_str(&first_title_word);
+                }
+                if key.is_empty() {
+                    key = "citation".to_string();
+                }
+                
+                bibtex.push_str(&format!("@article{{{key},\n"));
+                bibtex.push_str(&format!("  title={{{}}},\n", metadata.title));
+                if !metadata.authors.is_empty() {
+                    bibtex.push_str(&format!("  author={{{}}},\n", metadata.authors));
+                }
+                if let Some(year) = metadata.year.as_deref().filter(|y| !y.is_empty()) {
+                    bibtex.push_str(&format!("  year={{{year}}},\n"));
+                }
+                if let Some(journal) = metadata.journal_ref.as_deref().filter(|j| !j.is_empty()) {
+                    bibtex.push_str(&format!("  journal={{{journal}}},\n"));
+                } else if let Some(arxiv_id) = &metadata.arxiv_id {
+                    let arxiv_extracted = if arxiv_id.contains("arxiv.org") {
+                        arxiv_id.split("/abs/").last().unwrap_or(arxiv_id)
+                    } else if arxiv_id.starts_with("arxiv:") {
+                        &arxiv_id[6..]
+                    } else {
+                        arxiv_id
+                    };
+                    bibtex.push_str(&format!("  journal={{arXiv preprint arXiv:{}}},\n", arxiv_extracted));
+                }
+                if let Some(doi) = metadata.doi.as_deref() {
+                    let doi_extracted = if let Some(idx) = doi.find("doi.org/") {
+                        &doi[idx + 8..]
+                    } else if let Some(idx) = doi.find("doi:") {
+                        &doi[idx + 4..]
+                    } else {
+                        doi
+                    };
+                    bibtex.push_str(&format!("  doi={{{doi_extracted}}},\n"));
+                }
+                bibtex.push_str("}\n");
+
+                if let Some(project) = &app.active_project {
+                    let bib_path = project.path.join("references.bib");
+                    let existing = std::fs::read_to_string(&bib_path).unwrap_or_default();
+                    if !existing.contains(&key) {
+                        use std::io::Write;
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&bib_path) {
+                            let _ = writeln!(f, "\n{}", bibtex);
+                            app.toast = Some(format!("Added citation {} to references.bib", key));
+                            // Eagerly mark this title as added so the modal badge
+                            // updates before the background indexer fires.
+                            let title_key = metadata.title.trim().to_lowercase();
+                            if !title_key.is_empty() {
+                                app.project_bib_titles.insert(title_key);
+                            }
+                        } else {
+                            app.toast = Some("Failed to write references.bib".into());
+                        }
+                    } else {
+                        app.toast = Some(format!("Citation {} already exists in references.bib", key));
+                    }
+                }
             } else {
                 app.toast = Some("Citation metadata not available".into());
             }
@@ -3997,6 +4083,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.mode == AppMode::WorkspaceSearch {
         return handle_workspace_search_key(app, key);
     }
+    if app.mode == AppMode::ProjectCitationSearch {
+        return handle_project_citation_search_key(app, key);
+    }
     if app.page == Page::Discover
         && key.modifiers.contains(KeyModifiers::CONTROL)
         && key.code == KeyCode::Right
@@ -4462,6 +4551,13 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         if !move_project_tree_to_parent(app) {
             exit_project_view(app);
         }
+        return None;
+    }
+    if is_control_character_shortcut(key, 'f') && app.active_project.is_some() {
+        app.project_citation_query.clear();
+        app.project_citation_cursor = 0;
+        update_project_citation_results(app);
+        app.mode = AppMode::ProjectCitationSearch;
         return None;
     }
     // Save is mode-independent: handle it before Insert-mode text dispatch.
@@ -5213,6 +5309,78 @@ fn handle_discover_filter_key(app: &mut App, key: KeyEvent) -> Option<UiAction> 
         _ => {
             if edit_text(&mut app.discovery.filter, &mut app.discovery.filter_cursor, key) {
                 app.discovery.rebuild_filter();
+            }
+        }
+    }
+    None
+}
+
+fn update_project_citation_results(app: &mut App) {
+    let query = app.project_citation_query.to_lowercase();
+    let mut results = Vec::new();
+    for paper in &app.library.papers {
+        if query.is_empty() {
+            results.push((0, paper.clone()));
+            continue;
+        }
+        let title_match = paper.title.to_lowercase().contains(&query);
+        let author_match = paper.authors.to_lowercase().contains(&query);
+        if title_match || author_match {
+            let score = if title_match { 2 } else { 1 };
+            results.push((score, paper.clone()));
+        } else {
+            // Check subsets for fuzzy
+            let mut at = 0;
+            let target = format!("{} {}", paper.title, paper.authors).to_lowercase();
+            let mut matched = true;
+            for c in query.chars() {
+                if let Some(pos) = target[at..].find(c) {
+                    at += pos + c.len_utf8();
+                } else {
+                    matched = false;
+                    break;
+                }
+            }
+            if matched {
+                results.push((0, paper.clone()));
+            }
+        }
+    }
+    results.sort_by(|a, b| b.0.cmp(&a.0));
+    app.project_citation_results = results.into_iter().map(|(_, p)| p).collect();
+    app.project_citation_selected = 0;
+    app.project_citation_scroll = 0;
+}
+
+fn handle_project_citation_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = AppMode::Normal;
+            app.project_citation_query.clear();
+            app.project_citation_results.clear();
+        }
+        KeyCode::Up => {
+            app.project_citation_selected = app.project_citation_selected.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            app.project_citation_selected = (app.project_citation_selected + 1)
+                .min(app.project_citation_results.len().saturating_sub(1));
+        }
+        KeyCode::Enter => {
+            if let Some(paper) = app.project_citation_results.get(app.project_citation_selected).cloned() {
+                return Some(UiAction::InsertProjectCitation(paper));
+            }
+        }
+        _ => {
+            let old_query = app.project_citation_query.clone();
+            if edit_text(
+                &mut app.project_citation_query,
+                &mut app.project_citation_cursor,
+                key,
+            ) {
+                if app.project_citation_query != old_query {
+                    update_project_citation_results(app);
+                }
             }
         }
     }
