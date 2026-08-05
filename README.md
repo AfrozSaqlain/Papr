@@ -32,7 +32,7 @@ Papr was written in Rust because an academic research workspace needs to be fast
 ## Key Features
 
 ### Dashboard & Discovery
-* **Daily Research Dashboard:** Displays 10 new random papers daily from your predefined keywords, which you can customize in the **Settings** workspace to match your field of interest, helping you stay up to date with the latest advancements in your research area. Also lets you track reading time, active streaks, disk usage, and much more.
+* **Daily Research Dashboard:** Displays 10 new random papers daily into your feed, from your predefined keywords, which you can customize in the **Settings** workspace to match your field of interest, helping you stay up to date with the latest advancements in your research area. Also lets you track reading time, active streaks, disk usage, and much more.
 * **Integrated arXiv Search:** Search arXiv directly by title, author, category, abstract, or DOI. Search results load incrementally, let you filter on the fly.
 * **Clean Filenames:** Downloads run in the background and are automatically saved with sanitized, human-readable titles instead of cryptic arXiv IDs (e.g., `2401.12345.pdf`).
 * **Smart Deduplication:** Resolves database conflicts across your library (matching arXiv ID, file path, or DOI) and merges records during downloads or scans without losing your existing notes, bookmarks, or reading progress.
@@ -265,25 +265,25 @@ papr
 Papr is divided into 14 specialized **workspaces** (sections), accessible via the sidebar menu on the left side of the screen.
 
 * **Sidebar Navigation:** Use the left sidebar to move through different workspaces and open the one you want.
-* **Workspaces:** Each workspace lets you interact with papers, notes, downloads, groups, reading queues, and projects from one place. Press `Ctrl+B` to open **Browse Papr** or `Ctrl+T` for the terminal command palette. [Note: When a project is open, commands run from that project's directory.]
+* **Workspaces:** Each workspace lets you interact with papers, notes, downloads, groups, reading queues, and projects from one place. Press `Ctrl+B` to open **Browse Papr** or `Ctrl+T` for the terminal command palette. [Note: When a project is open, commands in the terminal command palette runs from that project's directory.]
 
 Here is a complete breakdown of every section in Papr, what it does, and how to use it:
 
 | Workspace | Purpose & Description | How to Use |
 | :--- | :--- | :--- |
-| **Dashboard** | Shows your main research overview, including reading stats, streaks, disk usage, and a daily arXiv feed. | This is the default home screen. Set `dashboard_keywords` in `config.toml` to tailor your feed. |
-| **Discover** | Lets you search arXiv by title, author, category, abstract, or DOI from within Papr. | Press `/` to focus search, type a query, and press `Enter`. Open details with `Enter`, and use `d` to download or `o` to open paper in browser. |
-| **Library** | Lists all local PDF files found in your configured library directories. | Select a paper and press `Enter` to view PDF, `n` for notes, `g` for groups, `B` for bookmarks, `R` to rename, `a` to add to reading queue. |
-| **Reading Queue** | Holds the prioritized backlog of papers you plan to read next. | Press `a` on any paper to queue or dequeue it. Reorder priority with `Shift` + `Up`/`Down`. |
-| **Groups** | Organizes papers into filesystem-synced folders and collections. | Press `g` on a paper to assign it to a group. Papr creates the folder on disk and moves the PDF automatically. |
-| **Bookmarks** | Collects papers you marked for quick retrieval later. | Press `B` on any paper in any workspace to toggle its bookmark status. |
-| **Authors** | Groups all papers in your local library by author name automatically. | Select an author from the list to view every paper written by them in your collection. |
+| **Dashboard** | Shows your main research overview, including a daily arXiv feed, reading stats, streaks, and disk usage. | This is the default home screen. Set `dashboard_keywords` in `config.toml` to tailor your feed. Open a papepr's metadata with `Enter`, use `d` to download, `o` to open paper in browser, and `c` to just copy its citation. |
+| **Discover** | Lets you search arXiv by title, author, category, abstract, or DOI from within Papr. | Press `/` to go to search bar, type a query, and press `Enter`. Filter the results by pressing `>` and typing the keyword. Open a papepr's metadata with `Enter`, use `d` to download, `o` to open paper in browser, and `c` to just copy its citation. |
+| **Library** | Lists all local PDF files found in your configured library directories. |  See [Papr Actions](#paper-actions) for the working keybindings. |
+| **Reading Queue** | Holds the prioritized backlog of papers you plan to read next. |  See [Papr Actions](#paper-actions) and [Reading Queue](#queue) for the working keybindings.  |
+| **Groups** | Organizes papers into filesystem-synced folders and collections. |  See [Papr Actions](#paper-actions) and [Groups](#groups) for the working keybindings. |
+| **Bookmarks** | Collects papers you marked for quick retrieval later. | See [Papr Actions](#paper-actions) for the working keybindings. |
+| **Authors** | Groups all papers in your local library by author name automatically. | Select an author from the list to view every paper written by them in your library. |
 | **Notes** | Provides a searchable catalog of Markdown notes written for your papers. | Press `n` on any paper to open the Markdown editor. Press `Tab` to switch to live preview, `Esc` to save adn exit. |
-| **Downloads** | Tracks active, completed, and failed background PDF downloads in real time. | Monitor download progress. Select a finished download and press `Enter` to open the PDF directly. |
-| **Projects** | Lets you write LaTeX documents, compile `main.tex`, preview PDFs, and inspect build issues. | Press `n` to create a new project. Open it with `Enter`; `main.tex` is selected in the File Tree by default. Use `Alt+1` (File Tree), `Alt+2` (Editor), `Alt+3` (PDF Preview), and `Alt+4` (Build). |
-| **History** | Logs a chronological timeline of recent activity, searches, downloads, and project builds. | Scroll through past actions to reopen papers or review earlier search terms. |
-| **Statistics** | Shows reading habits, total time, completion counts, and a 12-week activity heatmap. | Track your research productivity and reading habits over time. |
-| **Settings** | Provides an interactive workspace for preferences, paths, themes, and plugins. | Open it from the sidebar. Theme previews built-in themes live; General and Paths stage values; Plugins enables or disables plugins. Press `Enter` to apply changes or `Esc` to return. |
+| **Downloads** | Tracks active, completed, and failed background PDF downloads in real time. | See [Papr Actions](#paper-actions) and [Downloads](#downloads) for the working keybindings. |
+| **Projects** | Lets you write LaTeX documents, compile `main.tex`, preview PDFs, and inspect build issues. | See [Project List](#project-list), [Project File Tree](#project-file-tree), [Project Panes](#project-panes), and [Project Editor](#project-editor-(normal-mode)) for the working keybindings. |
+| **History** | Logs a chronological timeline of recent activity, searches, downloads, and project builds. | This workspace is currently read-only and intended for viewing insights. **Any ideas are welcome.** |
+| **Statistics** | Shows reading habits, reading streak, total and average reading time, most readd author, most read journal, and a 12-week activity heatmap. | Track your research productivity and reading habits over time. This workspace is currently read-only and intended for viewing insights. **But ideas are welcome.** |
+| **Settings** | Provides an interactive workspace for preferences, paths, themes, and plugins. | Customize themes (with live preview), dashboard keywords, library/download/project paths, and plugin settings. Follow on-screen instructions. |
 | **Credits** | Shows Papr's version, maintainers, license, and core dependencies. | View application version metadata and component attribution. |
 
 ---
@@ -430,7 +430,7 @@ Shows folders, source files, and supported image files.
 | `x` | confirm then delete file or folder |
 | `Esc` | return to project list at root |
 
-### Project Panes & Preview
+### Project Panes
 | Key | Action |
 | :--- | :--- |
 | `Alt+1` | focus file tree |
