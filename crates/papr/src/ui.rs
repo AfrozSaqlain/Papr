@@ -348,7 +348,9 @@ fn render_project_name_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     };
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(app.project_rename_input.as_str()).block(focus_block(title, true, theme)),
+        Paragraph::new(app.project_rename_input.as_str())
+            .style(Style::default().bg(theme.surface))
+            .block(focus_block(title, true, theme)),
         popup,
     );
     let cursor_columns = app.project_rename_input[..app
@@ -3583,17 +3585,19 @@ fn render_terminal_command(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     .split(area);
     frame.render_widget(
         Paragraph::new(output_lines)
+            .style(Style::default().bg(theme.surface))
             .wrap(Wrap { trim: false })
             .block(focus_block(" TERMINAL OUTPUT ", false, theme)),
         sections[0],
     );
     frame.render_widget(
         Paragraph::new(format!("cwd: {working_directory}"))
-            .style(Style::default().fg(theme.muted)),
+            .style(Style::default().fg(theme.muted).bg(theme.surface)),
         sections[1],
     );
     frame.render_widget(
         Paragraph::new(app.terminal_command.as_str())
+            .style(Style::default().bg(theme.surface))
             .block(focus_block(" TERMINAL — ENTER RUN  ESC CLOSE ", true, theme)),
         sections[2],
     );
@@ -3633,7 +3637,9 @@ fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &
         ))
     };
     frame.render_widget(
-        Paragraph::new(search_content).block(search_block),
+        Paragraph::new(search_content)
+            .style(Style::default().bg(theme.surface))
+            .block(search_block),
         chunks[0],
     );
 
@@ -3740,6 +3746,7 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         } else {
             query_text.as_str()
         })
+        .style(Style::default().bg(theme.surface))
         .block(search_block),
         chunks[0],
     );
