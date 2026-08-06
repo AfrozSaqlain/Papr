@@ -80,8 +80,9 @@ Papr was written in Rust because an academic research workspace needs to be fast
 | **Linux Clipboard** | `wl-clipboard` (Wayland) or `xclip` (X11). Native `arboard` fallback is included if these are unavailable. |
 | **External PDF Viewer** | The configured viewer command and its required desktop environment integration. |
 
-> **Note:** Some features on Windows may not work, such as the internal PDF viewer, since the Kitty terminal is not available on Windows. However, you can still use your preferred PDF viewer to open PDFs. By default, PDFs are launched in Microsoft Edge (which you can change to Chrome, Brave, or any other PDF viewer), as Microsoft Edge is available on all Windows systems.
-
+> [!IMPORTANT]
+> Some features on Windows may not work, such as the internal PDF viewer, since the Kitty terminal is not available on Windows. However, you can still use your preferred PDF viewer to open PDFs. By default, PDFs are launched in Microsoft Edge (which you can change to Chrome, Brave, or any other PDF viewer), as Microsoft Edge is available on all Windows systems.
+> 
 > Windows users: Visual Studio Build Tools are only needed when building from source; MiKTeX (including `latexmk`) and Strawberry Perl are the Windows LaTeX workspace prerequisites documented in [docs/windows.md](docs/windows.md).
 
 **Install OS-specific prerequisites:**
@@ -125,7 +126,7 @@ If you want to use kitty with Papr’s terminal PDF viewer, install it separatel
 
 Select your preferred installation method below. Pre-built binaries are available for Linux, macOS, and Windows.
 
-> **Note:** Currently AUR is undergiong maintenance so please use `Shell Script Installer` method if you are on Arch Linux BTW!!!
+> [!CAUTION] Currently AUR is undergiong maintenance so please use `Shell Script Installer` method if you are on Arch Linux BTW!!!
 
 ## Cargo (crates.io)
 If you already have Rust installed, install Papr directly from crates.io (the crate is published under `papr-tui` and installs the binary command `papr`):
@@ -489,8 +490,8 @@ docker run --rm -it \
 ## Architecture & CLI Utilities
 
 Papr is split into two core crates:
-* **`papr-core`:** Handles database migrations, SQLite queries, configuration loading, downloading, indexing local directories, and plugin execution.
-* **`papr`:** Handles the terminal UI loop (Ratatui + Crossterm), input handling, async orchestration, and launching external viewers.
+* **`papr-core`:** Handles database migrations, SQLite queries, configuration loading, downloading, indexing local directories, LaTeX project compilation, and plugin execution.
+* **`papr`:** Handles the terminal UI loop (Ratatui + Crossterm), input handling, async orchestration, PDF viewing, and launching external tools.
 
 **CLI Tools:**
 ```sh
