@@ -754,32 +754,72 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
                 build_area,
             );
         } else {
+            let content_width = build_area.width as usize;
             let items = app.project_build_diagnostics.iter().map(|diagnostic| {
                 let (symbol, label, color) = match diagnostic.severity {
                     ProjectDiagnosticSeverity::Error => ("❌", "ERROR", theme.error),
                     ProjectDiagnosticSeverity::Warning => ("⚠", "WARNING", theme.warning),
                 };
-                let mut lines = vec![Line::from(vec![
-                    Span::styled(format!("{symbol} {label}: "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-                    Span::styled(&diagnostic.title, Style::default().fg(theme.text).add_modifier(Modifier::BOLD)),
-                ])];
+                let mut lines = Vec::new();
+                let label_prefix = format!("{symbol} {label}: ");
+                let header_lines = wrap_text_to_spans(
+                    &label_prefix,
+                    &diagnostic.title,
+                    content_width,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                );
+                lines.extend(header_lines);
+
                 if !diagnostic.description.is_empty() && diagnostic.description != diagnostic.title {
-                    lines.push(Line::styled(format!("   {}", diagnostic.description), Style::default().fg(theme.text)));
+                    let desc_lines = wrap_text_to_spans(
+                        "   ",
+                        &diagnostic.description,
+                        content_width,
+                        Style::default().fg(theme.muted),
+                        Style::default().fg(theme.text),
+                    );
+                    lines.extend(desc_lines);
                 }
+
                 if let Some(file) = &diagnostic.file {
                     let location = match (diagnostic.line, diagnostic.col) {
                         (Some(line), Some(col)) => format!("{file}:{line}:{col}"),
                         (Some(line), None) => format!("{file}:{line}"),
                         (None, _) => file.clone(),
                     };
-                    lines.push(Line::styled(format!("   File : {location}"), Style::default().fg(theme.muted)));
+                    let file_lines = wrap_text_to_spans(
+                        "   File : ",
+                        &location,
+                        content_width,
+                        Style::default().fg(theme.muted),
+                        Style::default().fg(theme.muted),
+                    );
+                    lines.extend(file_lines);
                 }
+
                 if let Some(code) = &diagnostic.code {
-                    lines.push(Line::styled(format!("   Code : {code}"), Style::default().fg(theme.accent)));
+                    let code_lines = wrap_text_to_spans(
+                        "   Code : ",
+                        code,
+                        content_width,
+                        Style::default().fg(theme.muted),
+                        Style::default().fg(theme.accent),
+                    );
+                    lines.extend(code_lines);
                 }
+
                 if let Some(hint) = &diagnostic.hint {
-                    lines.push(Line::styled(format!("   Hint : {hint}"), Style::default().fg(theme.muted)));
+                    let hint_lines = wrap_text_to_spans(
+                        "   Hint : ",
+                        hint,
+                        content_width,
+                        Style::default().fg(theme.muted),
+                        Style::default().fg(theme.muted),
+                    );
+                    lines.extend(hint_lines);
                 }
+
                 lines.push(Line::raw(""));
                 ListItem::new(lines)
             });
@@ -4567,6 +4607,125 @@ fn safe_truncate(s: &str, max_width: usize) -> String {
         truncated.push_str("...");
         truncated
     }
+}
+
+fn wrap_text_to_spans(
+    label_prefix: &str,
+    text: &str,
+    avail_width: usize,
+    label_style: Style,
+    text_style: Style,
+) -> Vec<Line<'static>> {
+    let avail = avail_width.saturating_sub(2).max(15);
+    let label_len = label_prefix.chars().count();
+    let indent = " ".repeat(label_len);
+    let first_max = avail.saturating_sub(label_len).max(5);
+    let cont_max = avail.saturating_sub(indent.len()).max(5);
+
+    let mut result_lines = Vec::new();
+    let mut is_first_line_of_section = true;
+
+    for raw_line in text.lines() {
+        let words: Vec<&str> = raw_line.split_whitespace().collect();
+        if words.is_empty() {
+            let prefix = if is_first_line_of_section {
+                label_prefix.to_string()
+            } else {
+                indent.clone()
+            };
+            result_lines.push(Line::from(vec![
+                Span::styled(prefix, label_style),
+            ]));
+            is_first_line_of_section = false;
+            continue;
+        }
+
+        let mut current_prefix = if is_first_line_of_section {
+            label_prefix.to_string()
+        } else {
+            indent.clone()
+        };
+        let mut current_max = if is_first_line_of_section {
+            first_max
+        } else {
+            cont_max
+        };
+        let mut current_words = Vec::new();
+        let mut current_len = 0;
+
+        for word in words {
+            let word_len = word.chars().count();
+            if current_words.is_empty() {
+                if word_len > current_max {
+                    let chars: Vec<char> = word.chars().collect();
+                    let mut start = 0;
+                    while start < chars.len() {
+                        let end = (start + current_max).min(chars.len());
+                        let chunk: String = chars[start..end].iter().collect();
+                        result_lines.push(Line::from(vec![
+                            Span::styled(current_prefix.clone(), label_style),
+                            Span::styled(chunk, text_style),
+                        ]));
+                        start = end;
+                        current_prefix = indent.clone();
+                        current_max = cont_max;
+                        is_first_line_of_section = false;
+                    }
+                } else {
+                    current_words.push(word);
+                    current_len = word_len;
+                }
+            } else if current_len + 1 + word_len <= current_max {
+                current_words.push(word);
+                current_len += 1 + word_len;
+            } else {
+                let line_str = current_words.join(" ");
+                result_lines.push(Line::from(vec![
+                    Span::styled(current_prefix.clone(), label_style),
+                    Span::styled(line_str, text_style),
+                ]));
+                current_prefix = indent.clone();
+                current_max = cont_max;
+                is_first_line_of_section = false;
+                current_words.clear();
+
+                if word_len > current_max {
+                    let chars: Vec<char> = word.chars().collect();
+                    let mut start = 0;
+                    while start < chars.len() {
+                        let end = (start + current_max).min(chars.len());
+                        let chunk: String = chars[start..end].iter().collect();
+                        result_lines.push(Line::from(vec![
+                            Span::styled(current_prefix.clone(), label_style),
+                            Span::styled(chunk, text_style),
+                        ]));
+                        start = end;
+                    }
+                    current_len = 0;
+                } else {
+                    current_words.push(word);
+                    current_len = word_len;
+                }
+            }
+        }
+
+        if !current_words.is_empty() {
+            let line_str = current_words.join(" ");
+            result_lines.push(Line::from(vec![
+                Span::styled(current_prefix, label_style),
+                Span::styled(line_str, text_style),
+            ]));
+            is_first_line_of_section = false;
+        }
+    }
+
+    if result_lines.is_empty() {
+        result_lines.push(Line::from(vec![
+            Span::styled(label_prefix.to_string(), label_style),
+        ]));
+    }
+
+    result_lines
 }
 
 fn build_paper_lines<'a>(
