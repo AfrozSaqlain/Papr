@@ -428,6 +428,7 @@ Shows folders, source files, and supported image files.
 | `n` | create file; add / for folder |
 | `R` | rename selected file or folder |
 | `x` | confirm then delete file or folder |
+| `Ctrl+f` | search and add citation |
 | `Esc` | return to project list at root |
 
 ### Project Panes
@@ -450,6 +451,7 @@ Shows folders, source files, and supported image files.
 | `PgUp/PgDn` | page move; wheel scrolls |
 | `Esc` | focus file tree |
 | `Ctrl+s` | save current source |
+| `Ctrl+f` | search and add citation |
 | `Ctrl+Shift+v` | paste exactly into .tex/.bib and save |
 
 ---

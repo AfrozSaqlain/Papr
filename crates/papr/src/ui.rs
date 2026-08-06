@@ -307,10 +307,14 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     }
 
     let project_editor_focused = app.page == Page::Projects
+        && app.mode == AppMode::Normal
         && app.content_focused
         && app.project_pane == ProjectPane::Editor;
+    let config_editor_focused = app.page == Page::Settings
+        && app.mode == AppMode::Normal
+        && app.config_editor_focused;
     let cursor_style =
-        if (app.page == Page::Settings && app.config_editor_focused) || project_editor_focused {
+        if config_editor_focused || project_editor_focused {
             if app.config_editor_insert_mode
                 || (project_editor_focused && app.project_editor_insert_mode)
             {
@@ -3617,13 +3621,19 @@ fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &
         .title(" ADD CITATION  Ctrl+F ");
 
     let query_text = &app.project_citation_query;
+    let search_content = if query_text.is_empty() {
+        Line::from(Span::styled(
+            "Search papers by title or author...",
+            Style::default().fg(theme.muted),
+        ))
+    } else {
+        Line::from(Span::styled(
+            query_text.as_str(),
+            Style::default().fg(theme.text),
+        ))
+    };
     frame.render_widget(
-        Paragraph::new(if query_text.is_empty() {
-            "Search papers by title or author..."
-        } else {
-            query_text.as_str()
-        })
-        .block(search_block),
+        Paragraph::new(search_content).block(search_block),
         chunks[0],
     );
 
@@ -3646,8 +3656,8 @@ fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &
     const BADGE: &str = " (Added)";
     const BADGE_WIDTH: usize = BADGE.len();    // 8 chars
     let list_inner_width = (chunks[1].width as usize).saturating_sub(5);
-    // Reserve badge width plus one separator space from the title.
     let max_title_width = list_inner_width.saturating_sub(BADGE_WIDTH + 1).max(4);
+    let max_authors_width = max_title_width + BADGE_WIDTH + 1;
 
     let items: Vec<ListItem> = app.project_citation_results.iter().map(|paper| {
         // (Added) detection: compare by lowercased title against the set of
@@ -3668,10 +3678,22 @@ fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &
             Span::styled(" ".repeat(BADGE_WIDTH), Style::default())
         };
 
-        ListItem::new(Line::from(vec![
+        let title_line = Line::from(vec![
             Span::styled(padded_title, Style::default().fg(theme.text)),
             badge_span,
-        ]))
+        ]);
+
+        let raw_authors = if paper.authors.trim().is_empty() {
+            "Unknown authors"
+        } else {
+            paper.authors.trim()
+        };
+        let authors_text = safe_truncate(raw_authors, max_authors_width);
+        let authors_line = Line::from(vec![
+            Span::styled(authors_text, Style::default().fg(theme.muted)),
+        ]);
+
+        workspace_list_item(vec![title_line, authors_line])
     }).collect();
 
     let list = List::new(items)
@@ -4243,6 +4265,7 @@ fn keyboard_reference() -> Vec<HelpSection> {
                 ("n", "create file; add / for folder"),
                 ("R", "rename selected file or folder"),
                 ("x", "confirm then delete file or folder"),
+                ("Ctrl+f", "search and add citation"),
                 ("Esc", "return to project list at root"),
             ],
         },
@@ -4710,8 +4733,8 @@ mod tests {
             .collect();
         let max_h3 = *heights_3col.iter().max().unwrap();
         let min_h3 = *heights_3col.iter().min().unwrap();
-        // Heights should be well balanced: max height should be <= 40 lines and diff <= 10 lines
-        assert!(max_h3 <= 40, "Max height in 3-col layout should be <= 40, got {}", max_h3);
+        // Heights should be well balanced: max height should be <= 42 lines and diff <= 10 lines
+        assert!(max_h3 <= 42, "Max height in 3-col layout should be <= 42, got {}", max_h3);
         assert!(max_h3 - min_h3 <= 10, "Height diff in 3-col layout should be <= 10, got {}", max_h3 - min_h3);
 
         // Check 2-column layout on medium screen
