@@ -32,7 +32,7 @@ use papr_core::{
      terminal_path_candidates, terminal_home_directory, sort_terminal_candidates, sanitize_terminal_output, parse_command, 
     select_dashboard_papers, shuffle_daily_bucket,
 
-    expand_tabs_for_editor_view, project_editor_line_at, prev_char_boundary, next_char_boundary, cursor_from_visual_position, cursor_visual_position, config_editor_wrap_rows, config_editor_line_start, config_editor_line_end, prev_word_boundary, next_word_boundary, parse_latex_diagnostics, get_pdf_page_count, move_pdf_file, validate_collection_name,
+    expand_tabs_for_editor_view, project_editor_line_at, prev_char_boundary, next_char_boundary, cursor_from_visual_position, cursor_visual_position, config_editor_wrap_rows, config_editor_line_start, config_editor_line_end, prev_word_boundary, next_word_boundary, parse_project_diagnostics, get_pdf_page_count, move_pdf_file, validate_collection_name,
 
     ArxivClient, CollectionDirectory, Config, Database,     DownloadEvent, DownloadManager, DownloadStatus, DownloadTask, ImportedPdf, LibraryIndexer,
     LibraryWatcher, PaperNote, Paths, PluginHost, RemotePaper, Project,
@@ -740,6 +740,14 @@ impl ProjectCompiler {
                         self.build_raw_log.remove(0);
                     }
                     self.build_raw_log.push(line);
+                    if app.project_build_status == "Build failed" || app.project_build_status == "Compiling…" {
+                        let new_diags = parse_project_diagnostics(&self.build_raw_log, &self.project.path, self.is_typst);
+                        if !new_diags.is_empty() || !app.project_build_diagnostics.is_empty() {
+                            app.project_build_diagnostics = new_diags;
+                            app.project_build_raw_log = self.build_raw_log.clone();
+                            changed = true;
+                        }
+                    }
                 }
                 Ok(ProjectBuildEvent::PdfChanged) => self.pdf_changed = true,
                 Ok(ProjectBuildEvent::Succeeded) => self.build_succeeded = true,
@@ -747,7 +755,7 @@ impl ProjectCompiler {
                     self.build_succeeded = false;
                     self.pdf_changed = false;
                     app.project_build_raw_log = self.build_raw_log.clone();
-                    app.project_build_diagnostics = parse_latex_diagnostics(&self.build_raw_log, &self.project.path);
+                    app.project_build_diagnostics = parse_project_diagnostics(&self.build_raw_log, &self.project.path, self.is_typst);
                     app.project_build_status = "Build failed".into();
                     app.project_build_selected = 0;
                     show_build_for_failed_compilation(app);
@@ -780,7 +788,7 @@ impl ProjectCompiler {
             self.build_succeeded = false;
             let pdf = self.project.path.join("main.pdf");
             if pdf.exists() {
-                let diagnostics = parse_latex_diagnostics(&self.build_raw_log, &self.project.path);
+                let diagnostics = parse_project_diagnostics(&self.build_raw_log, &self.project.path, self.is_typst);
                 app.project_build_raw_log = self.build_raw_log.clone();
                 app.project_build_selected = 0;
                 app.project_build_status = if diagnostics.is_empty() {
@@ -927,6 +935,7 @@ fn start_project_compiler(runtime: &mut Runtime, app: &mut App) {
                 description: error.to_string(),
                 file: None,
                 line: None,
+                col: None,
                 code: None,
                 hint: None,
             }];

@@ -762,9 +762,16 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
                 let mut lines = vec![Line::from(vec![
                     Span::styled(format!("{symbol} {label}: "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
                     Span::styled(&diagnostic.title, Style::default().fg(theme.text).add_modifier(Modifier::BOLD)),
-                ]), Line::styled(format!("   {}", diagnostic.description), Style::default().fg(theme.text))];
+                ])];
+                if !diagnostic.description.is_empty() && diagnostic.description != diagnostic.title {
+                    lines.push(Line::styled(format!("   {}", diagnostic.description), Style::default().fg(theme.text)));
+                }
                 if let Some(file) = &diagnostic.file {
-                    let location = diagnostic.line.map_or_else(|| file.clone(), |line| format!("{file}:{line}"));
+                    let location = match (diagnostic.line, diagnostic.col) {
+                        (Some(line), Some(col)) => format!("{file}:{line}:{col}"),
+                        (Some(line), None) => format!("{file}:{line}"),
+                        (None, _) => file.clone(),
+                    };
                     lines.push(Line::styled(format!("   File : {location}"), Style::default().fg(theme.muted)));
                 }
                 if let Some(code) = &diagnostic.code {
