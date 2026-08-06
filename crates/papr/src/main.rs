@@ -198,8 +198,10 @@ async fn main() -> Result<()> {
         stats: dashboard.counts,
         dashboard,
         pdf_viewer: config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer),
+        project_create_compiler: config.default_project_compiler.clone(),
         ..App::default()
     };
+    settings_modal::open_settings_modal(&mut app, &config, &theme.name);
     app.plugins = plugin_host.plugins();
     app.plugin_diagnostics = plugin_host.diagnostics().len();
     app.config_editor_text = std::fs::read_to_string(&paths.config_file).unwrap_or_default();
@@ -342,7 +344,7 @@ enum UiAction {
     ClosePdf,
     RetryDownload { id: String, paper: RemotePaper },
     RefreshProjects,
-    CreateProject(String),
+    CreateProject { name: String, compiler: String },
     CreateProjectFile(String),
     OpenProject(Project),
     OpenProjectFile(PathBuf),
@@ -584,7 +586,7 @@ fn accept_project_completion(app: &mut App) -> bool {
     true
 }
 
-/// Cross-platform lifecycle wrapper for the persistent latexmk watcher.
+/// Cross-platform lifecycle wrapper for the persistent latexmk/typst watcher.
 struct ProjectCompiler {
     project: Project,
     child: std::process::Child,
@@ -595,6 +597,8 @@ struct ProjectCompiler {
     build_raw_log: Vec<String>,
     external_pdf_opened: bool,
     stopped: bool,
+    /// True when this project is compiled with `typst watch` instead of `latexmk`.
+    is_typst: bool,
 }
 
 /// Compilation results control only the right-hand view, never keyboard focus.
@@ -623,6 +627,15 @@ impl ProjectCompiler {
         let mut watcher = RecommendedWatcher::new(
             move |event: notify::Result<notify::Event>| {
                 if let Ok(event) = event
+                    // Only react to actual writes (Modify / Create), never to
+                    // Access or Open events.  pdftoppm reads main.pdf every
+                    // time it renders a page; without this filter those reads
+                    // would send a spurious PdfChanged that prevents the
+                    // pdf_changed-alone gate used by Typst from working.
+                    && matches!(
+                        event.kind,
+                        notify::EventKind::Modify(_) | notify::EventKind::Create(_)
+                    )
                     // The watcher is non-recursive and scoped to this project;
                     // matching the basename tolerates canonical-path differences
                     // reported by platform backends.
@@ -635,9 +648,18 @@ impl ProjectCompiler {
         )?;
         watcher.watch(&project.path, RecursiveMode::NonRecursive)?;
 
-        let mut command = ProcessCommand::new("latexmk");
+        let is_typst = project.path.join("main.typ").exists();
+        let mut command = if is_typst {
+            let mut cmd = ProcessCommand::new("typst");
+            cmd.args(["watch", "main.typ"]);
+            cmd
+        } else {
+            let mut cmd = ProcessCommand::new("latexmk");
+            cmd.args(["-pdf", "-pvc", "-view=none", "main.tex"]);
+            cmd
+        };
+
         command
-            .args(["-pdf", "-pvc", "-view=none", "main.tex"])
             .current_dir(&project.path)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -652,7 +674,7 @@ impl ProjectCompiler {
         }
         let mut child = command
             .spawn()
-            .context("latexmk is not available; install a TeX distribution and latexmk")?;
+            .context(if is_typst { "typst is not available; install it to compile Typst projects" } else { "latexmk is not available; install a TeX distribution and latexmk" })?;
         if let Some(stdout) = child.stdout.take() {
             spawn_latexmk_reader(stdout, sender.clone());
         }
@@ -673,6 +695,7 @@ impl ProjectCompiler {
             // so their first successful build is the one external launch.
             external_pdf_opened,
             stopped: false,
+            is_typst,
         })
     }
 
@@ -733,7 +756,26 @@ impl ProjectCompiler {
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
-        if self.pdf_changed && self.build_succeeded {
+        // For LaTeX (latexmk): both pdf_changed AND build_succeeded are required.
+        // latexmk runs multiple compilation passes and may write partial PDFs
+        // during intermediate steps; waiting for its explicit success log line
+        // ensures we only reload after the final, complete PDF is on disk.
+        //
+        // For Typst (typst watch): typst writes main.pdf exactly once per
+        // compilation, only when the build succeeds.  The watcher is now
+        // filtered to fire only on Modify/Create events (not Access/Open),
+        // so pdf_changed=true is a reliable signal that a fresh, complete
+        // PDF is ready.  build_succeeded is NOT required because:
+        //   1. Typst compilation takes ~2ms; the inotify MODIFY event and the
+        //      "compiled successfully" stderr line race each other unpredictably.
+        //   2. Using pdf_changed alone is safe: the filter prevents the
+        //      spurious PdfChanged that pdftoppm reads previously caused.
+        let ready = if self.is_typst {
+            self.pdf_changed
+        } else {
+            self.pdf_changed && self.build_succeeded
+        };
+        if ready {
             self.pdf_changed = false;
             self.build_succeeded = false;
             let pdf = self.project.path.join("main.pdf");
@@ -787,11 +829,11 @@ fn spawn_latexmk_reader<R: std::io::Read + Send + 'static>(reader: R, sender: st
         for line in BufReader::new(reader).lines().map_while(Result::ok) {
             let normalized = line.to_ascii_lowercase();
             let _ = sender.send(ProjectBuildEvent::LogLine(line.clone()));
-            if normalized.contains("applying rule 'pdflatex'") {
+            if normalized.contains("applying rule 'pdflatex'") || normalized.contains("compiling ...") {
                 let _ = sender.send(ProjectBuildEvent::Started);
-            } else if normalized.contains("all targets") && normalized.contains("up-to-date") {
+            } else if (normalized.contains("all targets") && normalized.contains("up-to-date")) || normalized.contains("compiled successfully") {
                 let _ = sender.send(ProjectBuildEvent::Succeeded);
-            } else if normalized.contains("errors, so i did not") {
+            } else if normalized.contains("errors, so i did not") || normalized.contains("compiled with errors") {
                 let _ = sender.send(ProjectBuildEvent::Failed);
             }
         }
@@ -860,7 +902,7 @@ fn open_project_workspace(app: &mut App, project: Project) {
         }
     }
     if let Some((main_index, main)) = app.project_files.iter().enumerate()
-        .find(|(_, path)| path.file_name().is_some_and(|name| name == "main.tex"))
+        .find(|(_, path)| path.file_name().is_some_and(|name| name == "main.tex" || name == "main.typ"))
         .map(|(index, path)| (index, path.clone()))
     {
         app.project_file_selected = main_index;
@@ -999,7 +1041,7 @@ fn project_tree_entries(directory: &Path) -> Vec<PathBuf> {
 }
 
 fn is_project_text_file(path: &Path) -> bool {
-    path.extension().is_some_and(|ext| matches!(ext.to_str(), Some("tex" | "bib" | "sty" | "cls" | "md" | "txt")))
+    path.extension().is_some_and(|ext| matches!(ext.to_str(), Some("tex" | "bib" | "sty" | "cls" | "md" | "txt" | "typ")))
 }
 
 fn is_project_tree_file(path: &Path) -> bool {
@@ -1977,9 +2019,9 @@ async fn apply_ui_action(
             app.projects = runtime.project_manager.list().map_err(|e| anyhow::anyhow!(e))?;
             app.projects_selected = app.projects_selected.min(app.projects.len().saturating_sub(1));
         }
-        UiAction::CreateProject(name) => {
+        UiAction::CreateProject { name, compiler } => {
             let name = name.trim();
-            let project = match runtime.project_manager.create(name) {
+            let project = match runtime.project_manager.create(name, &compiler) {
                 Ok(project) => project,
                 Err(error) => {
                     app.toast = Some(format!("Could not create project: {error}"));
@@ -3925,7 +3967,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 app.project_rename_input.clear();
                 app.project_rename_cursor = 0;
                 if creating_project {
-                    return Some(UiAction::CreateProject(name));
+                    return Some(UiAction::CreateProject {
+                        name,
+                        compiler: app.project_create_compiler.clone(),
+                    });
                 }
                 if creating_file {
                     return Some(UiAction::CreateProjectFile(name));
@@ -3938,6 +3983,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 }
                 let project = app.active_project.clone().or_else(|| app.projects.get(app.projects_selected).cloned());
                 return project.map(|project| UiAction::RenameProject { project, name });
+            }
+            KeyCode::Tab | KeyCode::BackTab if app.mode == AppMode::ProjectCreate => {
+                if app.project_create_compiler == "typst" {
+                    app.project_create_compiler = "latex".to_owned();
+                } else {
+                    app.project_create_compiler = "typst".to_owned();
+                }
             }
             _ => {
                 let _ = edit_text(
@@ -4463,6 +4515,11 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             KeyCode::Char('n') => {
                 app.project_rename_input.clear();
                 app.project_rename_cursor = 0;
+                app.project_create_compiler = if !app.settings_modal.default_project_compiler.is_empty() {
+                    app.settings_modal.default_project_compiler.clone()
+                } else {
+                    "latex".to_owned()
+                };
                 app.mode = AppMode::ProjectCreate;
             }
             KeyCode::Char('r') => return Some(UiAction::RefreshProjects),
@@ -6616,6 +6673,8 @@ fn apply_config_update(
     }
 
     runtime.config = config.clone();
+    app.project_create_compiler = config.default_project_compiler.clone();
+    app.settings_modal.default_project_compiler = config.default_project_compiler.clone();
 
     Ok(())
 }
@@ -8266,8 +8325,23 @@ mod tests {
         assert_eq!(app.project_rename_input, "pap");
 
         let action = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(action, Some(UiAction::CreateProject(name)) if name == "pap"));
+        assert!(matches!(action, Some(UiAction::CreateProject { name, .. }) if name == "pap"));
         assert_eq!(app.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn project_creation_preselects_configured_default_compiler() {
+        let mut app = App {
+            page: Page::Projects,
+            content_focused: true,
+            project_pane: ProjectPane::ProjectList,
+            ..App::default()
+        };
+        app.settings_modal.default_project_compiler = "typst".to_string();
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::ProjectCreate);
+        assert_eq!(app.project_create_compiler, "typst");
     }
 
     #[test]

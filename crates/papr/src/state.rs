@@ -275,6 +275,8 @@ pub enum GeneralTabFocus {
     PdfViewer,
     /// dashboard_keywords list.
     DashboardKeywords,
+    /// default_project_compiler.
+    DefaultProjectCompiler,
     /// enabled_plugins toggle list.
     EnabledPlugins,
 }
@@ -309,6 +311,8 @@ pub struct SettingsModalState {
     pub keyword_editing: bool,
     /// Staged enabled_plugins list.
     pub enabled_plugins: Vec<String>,
+    /// Staged default_project_compiler value.
+    pub default_project_compiler: String,
     /// Focus within the General tab.
     pub general_focus: GeneralTabFocus,
     // --- Paths tab ---
@@ -361,6 +365,7 @@ impl Default for SettingsModalState {
             keyword_selected: 0,
             keyword_editing: false,
             enabled_plugins: Vec::new(),
+            default_project_compiler: String::new(),
             general_focus: GeneralTabFocus::default(),
             library_entries: Vec::new(),
             library_selected: 0,
@@ -865,6 +870,8 @@ pub struct App {
     pub project_build_visible: bool,
     /// Pending project name while the rename prompt is open.
     pub project_rename_input: String,
+    /// Selected compiler for project creation.
+    pub project_create_compiler: String,
     /// Byte cursor within the project name modal input.
     pub project_rename_cursor: usize,
     /// Search query in the project citation modal.
@@ -1083,6 +1090,7 @@ impl Default for App {
             project_pane: ProjectPane::ProjectList,
             project_build_visible: false,
             project_rename_input: String::new(),
+            project_create_compiler: "latex".to_owned(),
             project_rename_cursor: 0,
             project_citation_query: String::new(),
             project_citation_cursor: 0,

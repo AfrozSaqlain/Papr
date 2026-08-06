@@ -88,6 +88,8 @@ pub struct Config {
     pub projects_directory: Option<PathBuf>,
     /// Comma-separated search terms used for dashboard recommendations.
     pub dashboard_keywords: String,
+    /// Default project compiler (e.g. latex, typst).
+    pub default_project_compiler: String,
     /// Plugin identifiers explicitly allowed to execute.
     pub enabled_plugins: Vec<String>,
 }
@@ -102,6 +104,7 @@ impl Default for Config {
             download_path: None,
             projects_directory: None,
             dashboard_keywords: String::new(),
+            default_project_compiler: "latex".into(),
             enabled_plugins: Vec::new(),
         }
     }
@@ -188,11 +191,14 @@ library_folders = [
 # Destination for downloaded papers.
 download_path = {downloads_dir_str}
 
-# Default directory for LaTeX writing projects.
+# Default directory for writing projects.
 projects_directory = {projects_dir_str}
 
 # Comma-separated search terms used for dashboard recommendations.
 dashboard_keywords = ""
+
+# Default project compiler (latex or typst).
+default_project_compiler = "latex"
 
 # Plugin identifiers explicitly allowed to execute.
 enabled_plugins = []

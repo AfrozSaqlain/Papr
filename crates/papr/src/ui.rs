@@ -332,12 +332,14 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
 }
 
 fn render_project_name_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
+    let is_create = app.mode == AppMode::ProjectCreate;
+    let height = if is_create { 8 } else { 4 };
     let area = frame.area();
     let popup = Rect::new(
         area.x + area.width / 4,
-        area.y + area.height / 2 - 2,
+        area.y.saturating_add(area.height / 2).saturating_sub(height / 2),
         area.width / 2,
-        4,
+        height,
     );
     let title = match app.mode {
         AppMode::ProjectCreate => " NEW PROJECT — ENTER CREATE  ESC CANCEL ",
@@ -347,18 +349,54 @@ fn render_project_name_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         _ => unreachable!("project prompt rendered outside a project prompt mode"),
     };
     frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Paragraph::new(app.project_rename_input.as_str())
-            .style(Style::default().bg(theme.surface))
-            .block(focus_block(title, true, theme)),
-        popup,
-    );
-    let cursor_columns = app.project_rename_input[..app
-        .project_rename_cursor
-        .min(app.project_rename_input.len())]
-        .chars()
-        .count() as u16;
-    frame.set_cursor_position((popup.x.saturating_add(1 + cursor_columns), popup.y + 1));
+    frame.render_widget(Block::default().style(Style::default().bg(theme.surface)), popup);
+
+    if is_create {
+        let chunks = Layout::vertical([Constraint::Length(3), Constraint::Length(3)])
+            .margin(1)
+            .split(popup);
+        
+        frame.render_widget(
+            Paragraph::new(app.project_rename_input.as_str())
+                .block(focus_block(title, true, theme)),
+            chunks[0],
+        );
+
+        let compiler_label = match app.project_create_compiler.as_str() {
+            "typst" => "Typst",
+            _ => "LaTeX",
+        };
+        let compiler_text = format!(" ◄  {}  ► ", compiler_label);
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                compiler_text,
+                Style::default()
+                    .fg(theme.text)
+            ))
+            .block(focus_block(" Compiler (Tab to cycle) ", false, theme)),
+            chunks[1],
+        );
+
+        let cursor_columns = app.project_rename_input[..app
+            .project_rename_cursor
+            .min(app.project_rename_input.len())]
+            .chars()
+            .count() as u16;
+        frame.set_cursor_position((chunks[0].x.saturating_add(1 + cursor_columns), chunks[0].y + 1));
+    } else {
+        frame.render_widget(
+            Paragraph::new(app.project_rename_input.as_str())
+                .style(Style::default().bg(theme.surface))
+                .block(focus_block(title, true, theme)),
+            popup,
+        );
+        let cursor_columns = app.project_rename_input[..app
+            .project_rename_cursor
+            .min(app.project_rename_input.len())]
+            .chars()
+            .count() as u16;
+        frame.set_cursor_position((popup.x.saturating_add(1 + cursor_columns), popup.y + 1));
+    }
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
@@ -2524,6 +2562,10 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let width = 64;
     let area = centered(width, height, frame.area());
     frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.surface)),
+        area,
+    );
 
     let lines = vec![
         Line::raw(""),
@@ -2550,10 +2592,14 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
                 .add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.error));
+        .border_style(Style::default().fg(theme.error))
+        .style(Style::default().bg(theme.surface));
 
     frame.render_widget(
-        Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
+        Paragraph::new(lines)
+            .style(Style::default().fg(theme.text).bg(theme.surface))
+            .block(block)
+            .wrap(Wrap { trim: true }),
         area,
     );
 }

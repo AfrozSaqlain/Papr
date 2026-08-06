@@ -75,6 +75,7 @@ pub fn open_settings_modal(app: &mut App, config: &Config, current_theme_name: &
     modal.keyword_selected = 0;
     modal.keyword_editing = false;
     modal.enabled_plugins = config.enabled_plugins.clone();
+    modal.default_project_compiler = config.default_project_compiler.clone();
     modal.general_focus = GeneralTabFocus::StartupPage;
 
     // Paths tab
@@ -162,6 +163,7 @@ pub fn staged_config(modal: &SettingsModalState, options: &[String], base: &Conf
         download_path,
         projects_directory,
         dashboard_keywords,
+        default_project_compiler: modal.default_project_compiler.clone(),
         enabled_plugins: modal.enabled_plugins.clone(),
         ..base.clone()
     }
@@ -291,11 +293,14 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
 
     // Check if current context requires Left/Right for its own control-specific functionality:
     //   • In active text edit mode: Left/Right moves text cursor.
-    //   • In General tab when startup_page selector is focused: Left/Right cycles startup pages.
+    //   • In General tab when startup_page or default_project_compiler selector is focused: Left/Right cycles options.
     let consumes_left_right = is_editing
         || (app.settings_modal.tab == SettingsTab::General
             && !app.settings_modal.tab_bar_focused
-            && app.settings_modal.general_focus == GeneralTabFocus::StartupPage);
+            && matches!(
+                app.settings_modal.general_focus,
+                GeneralTabFocus::StartupPage | GeneralTabFocus::DefaultProjectCompiler
+            ));
 
     // Universal Left / Right Arrow tab cycling across all tabs (where not consumed by control):
     if matches!(key.code, KeyCode::Left | KeyCode::Right) && !consumes_left_right {
@@ -532,7 +537,7 @@ fn handle_general_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
                 if len > 0 && app.settings_modal.keyword_selected + 1 < len {
                     app.settings_modal.keyword_selected += 1;
                 } else {
-                    app.settings_modal.general_focus = GeneralTabFocus::EnabledPlugins;
+                    app.settings_modal.general_focus = GeneralTabFocus::DefaultProjectCompiler;
                 }
             }
             KeyCode::Enter => {
@@ -580,13 +585,31 @@ fn handle_general_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
             _ => {}
         },
 
-        GeneralTabFocus::EnabledPlugins => match key.code {
+        GeneralTabFocus::DefaultProjectCompiler => match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 app.settings_modal.general_focus = GeneralTabFocus::DashboardKeywords;
                 if !app.settings_modal.keyword_entries.is_empty() {
                     app.settings_modal.keyword_selected =
                         app.settings_modal.keyword_entries.len() - 1;
                 }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.settings_modal.general_focus = GeneralTabFocus::EnabledPlugins;
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') => {
+                if app.settings_modal.default_project_compiler == "typst" {
+                    app.settings_modal.default_project_compiler = "latex".to_owned();
+                } else {
+                    app.settings_modal.default_project_compiler = "typst".to_owned();
+                }
+            }
+            KeyCode::Enter => return SettingsKeyResult::Apply,
+            _ => {}
+        },
+
+        GeneralTabFocus::EnabledPlugins => match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.settings_modal.general_focus = GeneralTabFocus::DefaultProjectCompiler;
             }
             KeyCode::Down | KeyCode::Char('j') => {}
             KeyCode::Char(' ') => {
@@ -1483,6 +1506,7 @@ fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
         Constraint::Length(3),
         Constraint::Length(3),
         Constraint::Length(kw_height),
+        Constraint::Length(3),
         Constraint::Min(3),
     ])
     .margin(1)
@@ -1553,6 +1577,30 @@ fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
         is_body_active && app.settings_modal.general_focus == GeneralTabFocus::DashboardKeywords;
     render_dashboard_keywords(frame, chunks[2], app, keywords_focused, theme);
 
+    // default_project_compiler
+    let compiler_focused =
+        is_body_active && app.settings_modal.general_focus == GeneralTabFocus::DefaultProjectCompiler;
+    let compiler_block = focused_block(" Default Project Compiler (◄/► to cycle) ", compiler_focused, theme);
+    let compiler_label = match app.settings_modal.default_project_compiler.as_str() {
+        "typst" => "Typst",
+        _ => "LaTeX",
+    };
+    let compiler_text = format!(" ◄  {}  ► ", compiler_label);
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            compiler_text,
+            Style::default()
+                .fg(if compiler_focused { theme.text } else { theme.muted })
+                .add_modifier(if compiler_focused {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ))
+        .block(compiler_block),
+        chunks[3],
+    );
+
     // enabled_plugins
     let plugins_focused =
         is_body_active && app.settings_modal.general_focus == GeneralTabFocus::EnabledPlugins;
@@ -1576,7 +1624,7 @@ fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
             plugins_focused,
             theme,
         )),
-        chunks[3],
+        chunks[4],
     );
 }
 
@@ -2463,5 +2511,30 @@ mod tests {
         assert_ne!(app.mode, AppMode::Help);
         assert!(app.settings_modal.pdf_viewer_editing);
         assert_eq!(app.settings_modal.pdf_viewer, "zathura?");
+    }
+
+    #[test]
+    fn test_default_project_compiler_left_right_arrow_keys() {
+        let mut app = App::default();
+        app.settings_modal.tab = SettingsTab::General;
+        app.settings_modal.tab_bar_focused = false;
+        app.settings_modal.general_focus = GeneralTabFocus::DefaultProjectCompiler;
+        app.settings_modal.default_project_compiler = "latex".to_string();
+
+        let key_right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        let res = handle_settings_key(&mut app, key_right);
+
+        // Arrow key should cycle compiler to "typst", stay on General tab, and return Handled
+        assert!(matches!(res, SettingsKeyResult::Handled));
+        assert_eq!(app.settings_modal.tab, SettingsTab::General);
+        assert_eq!(app.settings_modal.default_project_compiler, "typst");
+
+        let key_left = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        let res = handle_settings_key(&mut app, key_left);
+
+        // Arrow key should cycle compiler back to "latex", stay on General tab, and return Handled
+        assert!(matches!(res, SettingsKeyResult::Handled));
+        assert_eq!(app.settings_modal.tab, SettingsTab::General);
+        assert_eq!(app.settings_modal.default_project_compiler, "latex");
     }
 }

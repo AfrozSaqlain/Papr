@@ -109,15 +109,21 @@ impl ProjectManager {
     }
 
     /// Create a conventional, immediately-compilable LaTeX project.
-    pub fn create(&self, name: &str) -> Result<Project, ProjectError> {
+    pub fn create(&self, name: &str, compiler: &str) -> Result<Project, ProjectError> {
         validate_name(name)?;
         let path = self.root.join(name);
         if path.exists() { return Err(ProjectError::AlreadyExists(name.into())); }
         fs::create_dir_all(path.join("figures"))?;
         fs::create_dir_all(path.join("sections"))?;
-        fs::write(path.join("main.tex"), default_main_tex(name))?;
-        fs::write(path.join("references.bib"), "% Add BibTeX entries here.\n")?;
-        fs::write(path.join(".gitignore"), "*.aux\n*.bbl\n*.blg\n*.fdb_latexmk\n*.fls\n*.log\n*.out\n*.pdf\n")?;
+        if compiler == "typst" {
+            fs::write(path.join("main.typ"), default_main_typ(name))?;
+            fs::write(path.join("references.bib"), "% Add BibTeX entries here.\n")?;
+            fs::write(path.join(".gitignore"), "*.pdf\n")?;
+        } else {
+            fs::write(path.join("main.tex"), default_main_tex(name))?;
+            fs::write(path.join("references.bib"), "% Add BibTeX entries here.\n")?;
+            fs::write(path.join(".gitignore"), "*.aux\n*.bbl\n*.blg\n*.fdb_latexmk\n*.fls\n*.log\n*.out\n*.pdf\n")?;
+        }
         self.open(path)
     }
 
@@ -168,6 +174,25 @@ fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default
 
 fn default_main_tex(title: &str) -> String {
     format!("\\documentclass[11pt]{{article}}\n\\usepackage[utf8]{{inputenc}}\n\\usepackage{{graphicx}}\n\\usepackage{{amsmath,amssymb,amsthm}}\n\\usepackage[a4paper,margin=1in]{{geometry}}\n\\usepackage{{enumerate}}\n\\usepackage{{float}}\n\n\\setlength{{\\parindent}}{{0em}}\n\n\\title{{{title}}}\n\\author{{}}\n\\date{{\\today}}\n\n\\begin{{document}}\n\\maketitle\n\n\\begin{{abstract}}\nWrite your abstract here.\n\\end{{abstract}}\n\n\\section{{Introduction}}\nStart writing.\n\n\\bibliographystyle{{plain}}\n\\bibliography{{references}}\n\\end{{document}}\n")
+}
+
+fn default_main_typ(title: &str) -> String {
+    format!(
+r#"#set document(title: "{title}")
+#set page(paper: "a4", margin: 1in)
+
+#align(center)[
+  #text(17pt, weight: "bold")[{title}]
+]
+
+#v(2em)
+
+= Introduction
+Start writing.
+
+#bibliography("references.bib")
+"#
+    )
 }
 
 /// Turn TeX's line-oriented output into diagnostics that can be displayed and navigated.
