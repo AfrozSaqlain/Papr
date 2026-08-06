@@ -497,47 +497,26 @@ fn render_kitty_placeholders(
     let cols = area.width.min(encoded.cols);
 
     let [id_extra, id_r, id_g, id_b] = encoded.image_id.to_be_bytes();
-    let id_color = format!("\x1b[38;2;{id_r};{id_g};{id_b}m");
+    let fg_color = Color::Rgb(id_r, id_g, id_b);
+    let mut wrote_payload = false;
 
     for y in 0..rows {
-        let mut symbol = if y == 0 {
-            encoded.transmit_seq.clone()
-        } else {
-            String::new()
-        };
-
-        let save_len: usize = 3 + id_color.len() + (4 * 4);
-        const RESTORE_LEN: usize = 19;
-        symbol.reserve(save_len + (cols as usize * 4) + RESTORE_LEN);
-
-        write!(
-            symbol,
-            "\x1b[s{id_color}\u{10EEEE}{}{}{}",
-            diacritic(y),
-            diacritic(0),
-            diacritic(u16::from(id_extra))
-        )
-        .unwrap();
-
-        symbol.extend(std::iter::repeat_n('\u{10EEEE}', (cols as usize).saturating_sub(1)));
-
-        for x in 1..cols {
+        for x in 0..cols {
             if let Some(cell) = buf.cell_mut((area.left() + x, area.top() + y)) {
-                cell.set_skip(true);
+                let mut symbol = String::new();
+                if !wrote_payload {
+                    symbol.push_str(&encoded.transmit_seq);
+                    wrote_payload = true;
+                }
+                
+                symbol.push('\u{10EEEE}');
+                symbol.push(diacritic(y));
+                symbol.push(diacritic(x));
+                symbol.push(diacritic(u16::from(id_extra)));
+
+                cell.set_symbol(&symbol);
+                cell.set_fg(fg_color);
             }
-        }
-
-        // Ratatui writes the whole placeholder row from one buffer cell. The
-        // terminal cursor must be restored and advanced to the end of the
-        // widget, exactly as the upstream ratatui-image Kitty protocol does;
-        // otherwise subsequent split-pane cells are emitted at the wrong
-        // terminal coordinates and leave rectangular gaps.
-        let right = area.width.saturating_sub(1);
-        let down = area.height.saturating_sub(1);
-        write!(symbol, "\x1b[u\x1b[{right}C\x1b[{down}B").unwrap();
-
-        if let Some(cell) = buf.cell_mut((area.left(), area.top() + y)) {
-            cell.set_symbol(&symbol);
         }
     }
 }
@@ -784,10 +763,18 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 let id = g.next_kitty_id;
                 g.next_kitty_id = g.next_kitty_id.wrapping_add(1).max(1);
                 let transmit_seq = kitty_transmit(&cropped, id);
+                
+                // Write the APC sequence directly to stdout out-of-band.
+                // This prevents Ratatui from seeing it as a massive string and skipping cells,
+                // which caused the black bar at the top-left corner.
+                use std::io::Write;
+                let _ = std::io::stdout().write_all(transmit_seq.as_bytes());
+                let _ = std::io::stdout().flush();
+
                 let [_id_extra, id_r, id_g, id_b] = id.to_be_bytes();
                 let id_color = format!("\x1b[38;2;{id_r};{id_g};{id_b}m");
                 g.last_encoded = Some(EncodedFrame {
-                    transmit_seq,
+                    transmit_seq: String::new(), // Already sent out-of-band
                     image_id: id,
                     cols: pdf_area.width,
                     rows: pdf_area.height,
