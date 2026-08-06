@@ -464,7 +464,7 @@ Papr supports over a dozen built-in themes out of the box, including:
 
 ---
 
-## Running with Docker
+## Running with Docker (Under Development)
 
 ```sh
 docker build \
@@ -474,16 +474,66 @@ docker build \
   .
 ```
 
-Run Papr interactively:
+Run Papr interactively. To ensure full functionality (like opening links in your host browser, system clipboard, and external PDF viewers like Zathura), you must pass your display and D-Bus sockets into the container.
+
+First, create the required directories on your host so Docker can bind mount them successfully:
+```sh
+mkdir -p .papr/config .papr/data papers projects
+```
+
+**For Wayland:**
 ```sh
 docker run --rm -it \
   --name papr \
+  --env WAYLAND_DISPLAY=$WAYLAND_DISPLAY \
+  --env XDG_RUNTIME_DIR=/run/user/1000 \
+  --env DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/1000/bus" \
+  --env XDG_CURRENT_DESKTOP=GNOME \
+  --mount "type=bind,src=$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY,dst=/run/user/1000/$WAYLAND_DISPLAY,readonly" \
+  --mount "type=bind,src=/run/user/$(id -u)/bus,dst=/run/user/1000/bus,readonly" \
   --mount "type=bind,src=$PWD/.papr/config,dst=/home/papr/.config/papr" \
   --mount "type=bind,src=$PWD/.papr/data,dst=/home/papr/.local/share/papr" \
   --mount "type=bind,src=$PWD/papers,dst=/papers" \
   --mount "type=bind,src=$PWD/projects,dst=/projects" \
   papr:latest
 ```
+
+**For X11:**
+```sh
+docker run --rm -it \
+  --name papr \
+  --env DISPLAY=$DISPLAY \
+  --env DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/1000/bus" \
+  --env XDG_CURRENT_DESKTOP=GNOME \
+  --mount "type=bind,src=/tmp/.X11-unix,dst=/tmp/.X11-unix,readonly" \
+  --mount "type=bind,src=/run/user/$(id -u)/bus,dst=/run/user/1000/bus,readonly" \
+  --mount "type=bind,src=$PWD/.papr/config,dst=/home/papr/.config/papr" \
+  --mount "type=bind,src=$PWD/.papr/data,dst=/home/papr/.local/share/papr" \
+  --mount "type=bind,src=$PWD/papers,dst=/papers" \
+  --mount "type=bind,src=$PWD/projects,dst=/projects" \
+  papr:latest
+```
+
+**For macOS (using XQuartz for Clipboard & External Viewers):**
+macOS does not natively use X11. To sync the clipboard from the Docker container to your Mac and use external Linux GUI apps (like Zathura), you need XQuartz:
+1. Install XQuartz: `brew install --cask xquartz`
+2. Open XQuartz, go to **Preferences > Security**, and check **"Allow connections from network clients"**. Restart XQuartz.
+3. In your macOS terminal, allow connections: `xhost + 127.0.0.1`
+4. Run the container and point the display to the host:
+
+```sh
+docker run --rm -it \
+  --name papr \
+  --env DISPLAY=host.docker.internal:0 \
+  --mount "type=bind,src=$PWD/.papr/config,dst=/home/papr/.config/papr" \
+  --mount "type=bind,src=$PWD/.papr/data,dst=/home/papr/.local/share/papr" \
+  --mount "type=bind,src=$PWD/papers,dst=/papers" \
+  --mount "type=bind,src=$PWD/projects,dst=/projects" \
+  papr:latest
+```
+
+*(Note: Opening web links via the `o` key from Docker on macOS requires complex URL forwarding. For the best experience on macOS with all features working out of the box, we recommend using the native Homebrew installation instead of Docker.)*
+
 
 ---
 
