@@ -1,48 +1,119 @@
 use papr_core::models::CitationMetadata;
+use std::path::PathBuf;
 
-pub async fn fetch_and_copy_citation(
-    metadata: CitationMetadata,
-    sender: tokio::sync::mpsc::UnboundedSender<crate::AppEvent>,
-) {
+/// Fetch the canonical BibTeX for `metadata`.
+///
+/// Priority:
+/// 1. DOI → `doi.org` content-negotiation (returns the publisher's own record)
+/// 2. arXiv ID → `arxiv.org/bibtex/` endpoint
+/// 3. Best-effort local generation (no network required)
+///
+/// Returns `(citation_key, bibtex_string)`.
+pub async fn fetch_bibtex(metadata: &CitationMetadata) -> (String, String) {
+    // 1. Try DOI
     if let Some(doi) = metadata.doi.as_deref().and_then(extract_doi) {
-        if let Ok(client) = reqwest::Client::new()
+        if let Ok(response) = reqwest::Client::new()
             .get(format!("https://doi.org/{}", doi))
             .header("Accept", "application/x-bibtex")
             .send()
             .await
         {
-            if client.status().is_success() {
-                if let Ok(bibtex) = client.text().await {
-                    if copy_to_clipboard(&bibtex) {
-                        let _ = sender.send(crate::AppEvent::Toast("Citation copied to clipboard (DOI)".into()));
-                        return;
+            if response.status().is_success() {
+                if let Ok(bibtex) = response.text().await {
+                    if !bibtex.trim().is_empty() {
+                        // Extract key from the BibTeX string (first token after `{`)
+                        let key = bibtex
+                            .trim()
+                            .trim_start_matches('@')
+                            .find('{')
+                            .and_then(|i| {
+                                bibtex.trim().trim_start_matches('@')[i + 1..]
+                                    .split(',')
+                                    .next()
+                                    .map(|k| k.trim().to_string())
+                            })
+                            .unwrap_or_else(|| best_effort_key(metadata));
+                        return (key, bibtex);
                     }
                 }
             }
         }
     }
 
-    let arxiv_id_opt = metadata.arxiv_id.as_deref().and_then(extract_arxiv);
-    if let Some(arxiv_id) = &arxiv_id_opt {
-        if let Ok(client) = reqwest::Client::new()
+    // 2. Try arXiv
+    if let Some(arxiv_id) = metadata.arxiv_id.as_deref().and_then(extract_arxiv) {
+        if let Ok(response) = reqwest::Client::new()
             .get(format!("https://arxiv.org/bibtex/{}", arxiv_id))
             .send()
             .await
         {
-            if client.status().is_success() {
-                if let Ok(bibtex) = client.text().await {
-                    if copy_to_clipboard(&bibtex) {
-                        let _ = sender.send(crate::AppEvent::Toast("Citation copied to clipboard (arXiv)".into()));
-                        return;
+            if response.status().is_success() {
+                if let Ok(bibtex) = response.text().await {
+                    if !bibtex.trim().is_empty() {
+                        let key = bibtex
+                            .trim()
+                            .trim_start_matches('@')
+                            .find('{')
+                            .and_then(|i| {
+                                bibtex.trim().trim_start_matches('@')[i + 1..]
+                                    .split(',')
+                                    .next()
+                                    .map(|k| k.trim().to_string())
+                            })
+                            .unwrap_or_else(|| best_effort_key(metadata));
+                        return (key, bibtex);
                     }
                 }
             }
         }
     }
 
-    // Best-effort local generation
+    // 3. Best-effort local generation
+    generate_bibtex(metadata)
+}
+
+pub async fn fetch_and_copy_citation(
+    metadata: CitationMetadata,
+    sender: tokio::sync::mpsc::UnboundedSender<crate::AppEvent>,
+) {
+    let (_, bibtex) = fetch_bibtex(&metadata).await;
+
+    let source = if bibtex.trim().contains("doi.org") || bibtex.trim().contains("doi =") {
+        "(DOI)"
+    } else if bibtex.trim().contains("arXiv") || bibtex.trim().contains("arxiv") {
+        "(arXiv)"
+    } else {
+        "(Generated)"
+    };
+
+    if copy_to_clipboard(&bibtex) {
+        let _ = sender.send(crate::AppEvent::Toast(
+            format!("Citation copied to clipboard {}", source),
+        ));
+    } else {
+        let _ = sender.send(crate::AppEvent::Toast("Failed to write to clipboard".into()));
+    }
+}
+
+pub async fn fetch_and_insert_project_citation(
+    metadata: CitationMetadata,
+    bib_path: PathBuf,
+    sender: tokio::sync::mpsc::UnboundedSender<crate::AppEvent>,
+) {
+    let (key, bibtex) = fetch_bibtex(&metadata).await;
+    let title = metadata.title.clone();
+    let _ = sender.send(crate::AppEvent::ProjectCitationReady {
+        key,
+        bibtex,
+        title,
+        bib_path,
+    });
+}
+
+
+pub fn generate_bibtex(metadata: &CitationMetadata) -> (String, String) {
     let mut bibtex = String::new();
-    let key = best_effort_key(&metadata);
+    let key = best_effort_key(metadata);
     bibtex.push_str(&format!("@article{{{key},\n"));
     bibtex.push_str(&format!("  title={{{}}},\n", metadata.title));
     if !metadata.authors.is_empty() {
@@ -53,19 +124,14 @@ pub async fn fetch_and_copy_citation(
     }
     if let Some(journal) = metadata.journal_ref.as_deref().filter(|j| !j.is_empty()) {
         bibtex.push_str(&format!("  journal={{{journal}}},\n"));
-    } else if let Some(arxiv_id) = arxiv_id_opt.as_deref() {
+    } else if let Some(arxiv_id) = metadata.arxiv_id.as_deref().and_then(extract_arxiv) {
         bibtex.push_str(&format!("  journal={{arXiv preprint arXiv:{arxiv_id}}},\n"));
     }
     if let Some(doi) = metadata.doi.as_deref().and_then(extract_doi) {
         bibtex.push_str(&format!("  doi={{{doi}}},\n"));
     }
     bibtex.push_str("}\n");
-
-    if copy_to_clipboard(&bibtex) {
-        let _ = sender.send(crate::AppEvent::Toast("Citation copied to clipboard (Generated)".into()));
-    } else {
-        let _ = sender.send(crate::AppEvent::Toast("Failed to write to clipboard".into()));
-    }
+    (key, bibtex)
 }
 
 fn extract_arxiv(s: &str) -> Option<String> {

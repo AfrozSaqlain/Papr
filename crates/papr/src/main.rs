@@ -1234,6 +1234,12 @@ struct MetadataEnrichment {
 enum AppEvent {
     ReadingSessionCompleted { session_id: i64, duration_s: u64 },
     Toast(String),
+    ProjectCitationReady {
+        key: String,
+        bibtex: String,
+        title: String,
+        bib_path: std::path::PathBuf,
+    },
 }
 
 #[derive(Debug)]
@@ -1534,6 +1540,26 @@ async fn run(
                 }
                 AppEvent::Toast(message) => {
                     app.toast = Some(message);
+                }
+                AppEvent::ProjectCitationReady { key, bibtex, title, bib_path } => {
+                    let existing = std::fs::read_to_string(&bib_path).unwrap_or_default();
+                    if !existing.contains(&key) {
+                        use std::io::Write;
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&bib_path) {
+                            let _ = writeln!(f, "\n{}", bibtex);
+                            app.toast = Some(format!("Added citation {} to references.bib", key));
+                            // Eagerly mark this title as added so the modal badge
+                            // updates before the background indexer fires.
+                            let title_key = title.trim().to_lowercase();
+                            if !title_key.is_empty() {
+                                app.project_bib_titles.insert(title_key);
+                            }
+                        } else {
+                            app.toast = Some("Failed to write references.bib".into());
+                        }
+                    } else {
+                        app.toast = Some(format!("Citation {} already exists in references.bib", key));
+                    }
                 }
             }
         }
@@ -2345,77 +2371,14 @@ async fn apply_ui_action(
         }
         UiAction::InsertProjectCitation(paper) => {
             if let Ok(Some(metadata)) = runtime.database.paper_citation_metadata(paper.id) {
-                let mut bibtex = String::new();
-                let mut key = String::new();
-                if let Some(first_author) = metadata.authors.split(" and ").next() {
-                    let last_name = first_author.split_whitespace().last().unwrap_or(first_author);
-                    key.push_str(&last_name.to_lowercase().replace(|c: char| !c.is_alphanumeric(), ""));
-                } else {
-                    key.push_str("paper");
-                }
-                if let Some(year) = &metadata.year {
-                    key.push_str(year);
-                }
-                let first_title_word = metadata.title.split_whitespace().next().unwrap_or("").to_lowercase().replace(|c: char| !c.is_alphanumeric(), "");
-                if !first_title_word.is_empty() {
-                    key.push_str(&first_title_word);
-                }
-                if key.is_empty() {
-                    key = "citation".to_string();
-                }
-                
-                bibtex.push_str(&format!("@article{{{key},\n"));
-                bibtex.push_str(&format!("  title={{{}}},\n", metadata.title));
-                if !metadata.authors.is_empty() {
-                    bibtex.push_str(&format!("  author={{{}}},\n", metadata.authors));
-                }
-                if let Some(year) = metadata.year.as_deref().filter(|y| !y.is_empty()) {
-                    bibtex.push_str(&format!("  year={{{year}}},\n"));
-                }
-                if let Some(journal) = metadata.journal_ref.as_deref().filter(|j| !j.is_empty()) {
-                    bibtex.push_str(&format!("  journal={{{journal}}},\n"));
-                } else if let Some(arxiv_id) = &metadata.arxiv_id {
-                    let arxiv_extracted = if arxiv_id.contains("arxiv.org") {
-                        arxiv_id.split("/abs/").last().unwrap_or(arxiv_id)
-                    } else if arxiv_id.starts_with("arxiv:") {
-                        &arxiv_id[6..]
-                    } else {
-                        arxiv_id
-                    };
-                    bibtex.push_str(&format!("  journal={{arXiv preprint arXiv:{}}},\n", arxiv_extracted));
-                }
-                if let Some(doi) = metadata.doi.as_deref() {
-                    let doi_extracted = if let Some(idx) = doi.find("doi.org/") {
-                        &doi[idx + 8..]
-                    } else if let Some(idx) = doi.find("doi:") {
-                        &doi[idx + 4..]
-                    } else {
-                        doi
-                    };
-                    bibtex.push_str(&format!("  doi={{{doi_extracted}}},\n"));
-                }
-                bibtex.push_str("}\n");
-
                 if let Some(project) = &app.active_project {
                     let bib_path = project.path.join("references.bib");
-                    let existing = std::fs::read_to_string(&bib_path).unwrap_or_default();
-                    if !existing.contains(&key) {
-                        use std::io::Write;
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&bib_path) {
-                            let _ = writeln!(f, "\n{}", bibtex);
-                            app.toast = Some(format!("Added citation {} to references.bib", key));
-                            // Eagerly mark this title as added so the modal badge
-                            // updates before the background indexer fires.
-                            let title_key = metadata.title.trim().to_lowercase();
-                            if !title_key.is_empty() {
-                                app.project_bib_titles.insert(title_key);
-                            }
-                        } else {
-                            app.toast = Some("Failed to write references.bib".into());
-                        }
-                    } else {
-                        app.toast = Some(format!("Citation {} already exists in references.bib", key));
-                    }
+                    app.toast = Some("Fetching citation...".into());
+                    tokio::spawn(citation::fetch_and_insert_project_citation(
+                        metadata,
+                        bib_path,
+                        senders.app_events.clone(),
+                    ));
                 }
             } else {
                 app.toast = Some("Citation metadata not available".into());
