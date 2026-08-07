@@ -128,7 +128,8 @@ If you want to use kitty with Papr’s terminal PDF viewer, install it separatel
 
 Select your preferred installation method below. Pre-built binaries are available for Linux, macOS, and Windows.
 
-> [!CAUTION] Currently AUR is undergiong maintenance so please use `Shell Script Installer` method if you are on Arch Linux BTW!!!
+> [!CAUTION]
+> Currently AUR is undergiong maintenance so please use `Shell Script Installer` method if you are on Arch Linux BTW!!!
 
 ## Cargo (crates.io)
 If you already have Rust installed, install Papr directly from crates.io (the crate is published under `papr-tui` and installs the binary command `papr`):
