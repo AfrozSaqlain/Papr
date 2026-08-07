@@ -315,7 +315,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         && app.config_editor_focused;
     let cursor_style =
         if config_editor_focused || project_editor_focused {
-            if app.config_editor_insert_mode
+            if project_editor_focused && app.project_editor_pending_sequence.is_some() {
+                crossterm::cursor::SetCursorStyle::SteadyUnderScore
+            } else if app.config_editor_insert_mode
                 || (project_editor_focused && app.project_editor_insert_mode)
             {
                 crossterm::cursor::SetCursorStyle::BlinkingBar
@@ -4380,12 +4382,13 @@ fn keyboard_reference() -> Vec<HelpSection> {
             ],
         },
         HelpSection {
-            title: "PROJECT EDITOR — NORMAL",
+            title: "PROJECT EDITOR (NORMAL MODE)",
             scope: &[],
             entries: &[
                 ("i", "enter Insert mode"),
                 ("w / b", "next / previous word"),
                 ("0/$, gg/G", "line/file bounds"),
+                ("dd", "delete current line"),
                 ("x / Delete", "delete character"),
                 ("V, j/k, y/d", "select lines, move, yank/delete"),
                 ("u / Ctrl+r", "undo/redo; Ctrl+Bksp/Delete word"),

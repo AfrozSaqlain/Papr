@@ -970,7 +970,7 @@ fn open_project_workspace(app: &mut App, project: Project) {
     app.project_editor_redo.clear();
     app.project_editor_scroll = 0;
     app.project_editor_manual_scroll = false;
-    app.project_editor_pending_g = false;
+    app.project_editor_pending_sequence = None;
     app.project_build_status = if project.path.join("main.typ").exists() {
         "Starting embedded Typst…".into()
     } else {
@@ -1211,7 +1211,7 @@ fn open_project_file(app: &mut App, path: PathBuf) {
             app.project_editor_redo.clear();
             app.project_editor_scroll = 0;
             app.project_editor_manual_scroll = false;
-            app.project_editor_pending_g = false;
+            app.project_editor_pending_sequence = None;
             app.project_pane = ProjectPane::Editor;
         }
         Err(error) => app.toast = Some(format!("Could not open file: {error}")),
@@ -1427,6 +1427,9 @@ async fn run(
         // state_changed drives non-PDF redraws; force_redraw (for PDF/animation)
         // is consumed and reset at the bottom of the loop after drawing.
         let mut state_changed = force_redraw;
+        if expire_project_editor_pending_sequence(app) {
+            state_changed = true;
+        }
 
         let project_files_changed = runtime
             .project_filesystem_watcher
@@ -4652,6 +4655,12 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
     if key.code == KeyCode::Esc
         && app.project_pane == ProjectPane::Editor
+        && app.project_editor_pending_sequence.take().is_some()
+    {
+        return None;
+    }
+    if key.code == KeyCode::Esc
+        && app.project_pane == ProjectPane::Editor
         && app.project_editor_visual_line_anchor.is_some()
     {
         app.project_editor_visual_line_anchor = None;
@@ -4991,6 +5000,7 @@ fn exit_project_view(app: &mut App) {
     }
     app.project_editor_insert_mode = false;
     app.project_completions.clear();
+    app.project_editor_pending_sequence = None;
     app.project_pane = ProjectPane::ProjectList;
 }
 
@@ -5003,6 +5013,7 @@ fn return_to_project_file_tree(app: &mut App) {
     }
     app.project_editor_insert_mode = false;
     app.project_completions.clear();
+    app.project_editor_pending_sequence = None;
     app.project_pane = ProjectPane::FileTree;
 }
 
@@ -5045,7 +5056,7 @@ fn paste_clipboard_into_active_input(app: &mut App) -> bool {
     let settings_field_active = app.page == Page::Settings
         && app.content_focused
         && app.mode == AppMode::Normal;
-    if !settings_field_active && !has_active_text_input(app) {
+    if !settings_field_active && !has_active_text_input(app) && !is_project_editor_active(app) {
         return false;
     }
     let Some(text) = read_clipboard_text().filter(|text| !text.is_empty()) else {
@@ -5060,6 +5071,13 @@ fn paste_text_into_active_input(app: &mut App, text: &str) -> bool {
         return settings_modal::paste_into_active_field(app, Some(text));
     }
 
+    // Pasting is an explicit request to edit.  Enter Insert mode first when
+    // invoked from Normal mode, then use the same editor insertion path.
+    if is_project_editor_active(app) && !app.project_editor_insert_mode {
+        app.project_editor_insert_mode = true;
+        app.project_editor_visual_line_anchor = None;
+        app.project_editor_pending_sequence = None;
+    }
     if !has_active_text_input(app) {
         return false;
     }
@@ -5090,10 +5108,7 @@ fn paste_text_into_active_input(app: &mut App, text: &str) -> bool {
             Some(note) => (&mut note.body, &mut note.cursor),
             None => return false,
         },
-        _ if app.page == Page::Projects
-            && app.content_focused
-            && app.project_pane == ProjectPane::Editor
-            && app.project_editor_insert_mode => {
+        _ if is_project_editor_active(app) && app.project_editor_insert_mode => {
                 insert_project_bibtex_text(app, &text);
                 return true;
             }
@@ -5114,10 +5129,14 @@ fn paste_text_into_active_input(app: &mut App, text: &str) -> bool {
     true
 }
 
-fn is_project_exact_paste_editor(app: &App) -> bool {
+fn is_project_editor_active(app: &App) -> bool {
     app.page == Page::Projects
         && app.content_focused
         && app.project_pane == ProjectPane::Editor
+}
+
+fn is_project_exact_paste_editor(app: &App) -> bool {
+    is_project_editor_active(app)
         && app.project_editor_path.as_ref().is_some_and(|path| {
             path.extension()
                 .is_some_and(|extension| {
@@ -5211,16 +5230,13 @@ fn read_clipboard_text() -> Option<String> {
 /// Projects intentionally uses the same movement primitives as Settings.  The
 /// only project-specific concern is persistence, handled by Ctrl+S above.
 fn handle_project_editor_normal_key(app: &mut App, key: KeyEvent) {
-    if key.code == KeyCode::Char('g') && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
-        if app.project_editor_pending_g {
-            app.project_editor_cursor = 0;
-            app.project_editor_scroll = 0;
-            app.project_editor_manual_scroll = false;
-        }
-        app.project_editor_pending_g = !app.project_editor_pending_g;
+    if resolve_project_editor_pending_sequence(app, key) {
         return;
     }
-    app.project_editor_pending_g = false;
+    if let Some(first_key) = project_editor_sequence_starter(app, key) {
+        begin_project_editor_pending_sequence(app, first_key);
+        return;
+    }
     let movement = match key.code {
         KeyCode::Left | KeyCode::Char('h') => Some(KeyCode::Left),
         KeyCode::Right | KeyCode::Char('l') => Some(KeyCode::Right),
@@ -5319,6 +5335,86 @@ fn handle_project_editor_normal_key(app: &mut App, key: KeyEvent) {
         }
         _ => {}
     }
+}
+
+const PROJECT_EDITOR_PENDING_SEQUENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Return a supported first key only when it is valid in the current editor
+/// mode. Add future multi-key commands here and their second-key action below.
+fn project_editor_sequence_starter(app: &App, key: KeyEvent) -> Option<char> {
+    if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('g') => Some('g'),
+        KeyCode::Char('d') if app.project_editor_visual_line_anchor.is_none() => Some('d'),
+        _ => None,
+    }
+}
+
+fn begin_project_editor_pending_sequence(app: &mut App, first_key: char) {
+    app.project_editor_pending_sequence = Some(ProjectEditorPendingSequence {
+        first_key,
+        started_at: std::time::Instant::now(),
+    });
+}
+
+/// Consume a completed or cancelled sequence. Returning `false` means the
+/// second key was invalid, so the normal handler processes it as a fresh key.
+fn resolve_project_editor_pending_sequence(app: &mut App, key: KeyEvent) -> bool {
+    let Some(sequence) = app.project_editor_pending_sequence.take() else {
+        return false;
+    };
+    if key.code == KeyCode::Esc {
+        return true;
+    }
+    match (sequence.first_key, key.code) {
+        ('g', KeyCode::Char('g')) => {
+            app.project_editor_cursor = 0;
+            app.project_editor_scroll = 0;
+            app.project_editor_manual_scroll = false;
+            true
+        }
+        ('d', KeyCode::Char('d')) => {
+            delete_project_editor_current_line(app);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn expire_project_editor_pending_sequence(app: &mut App) -> bool {
+    app.project_editor_pending_sequence.is_some_and(|sequence| {
+        sequence.started_at.elapsed() >= PROJECT_EDITOR_PENDING_SEQUENCE_TIMEOUT
+    }) && app.project_editor_pending_sequence.take().is_some()
+}
+
+fn delete_project_editor_current_line(app: &mut App) {
+    if app.project_editor_text.is_empty() {
+        return;
+    }
+    let cursor = app.project_editor_cursor.min(app.project_editor_text.len());
+    let start = config_editor_line_start(&app.project_editor_text, cursor);
+    let end = app.project_editor_text[cursor..]
+        .find('\n')
+        .map(|offset| cursor + offset + 1)
+        .unwrap_or(app.project_editor_text.len());
+    // A cursor after a final newline is on the trailing empty line. Deleting
+    // it removes that newline, leaving the preceding line as the cursor line.
+    let (start, end) = if start == end && start == app.project_editor_text.len() && start > 0 {
+        (start - 1, end)
+    } else {
+        (start, end)
+    };
+    if start == end {
+        return;
+    }
+    record_project_editor_change(app);
+    app.project_editor_text.drain(start..end);
+    app.project_editor_cursor = start.min(app.project_editor_text.len());
+    app.project_editor_dirty = true;
+    app.project_editor_manual_scroll = false;
+    app.project_completions.clear();
 }
 
 /// Apply motions that have identical cursor semantics in Normal and Visual
@@ -7160,8 +7256,9 @@ mod tests {
          PaperTarget,
         show_build_for_failed_compilation, show_preview_after_successful_compilation,
         complete_terminal_command, ConfigFilesystemWatcher, pdf_viewer_invocation,
-        is_text_paste_shortcut, paste_text_into_active_input, should_open_generated_pdf,
+        expire_project_editor_pending_sequence, is_text_paste_shortcut, paste_text_into_active_input, should_open_generated_pdf,
         run_typst_compiler, ProjectBuildEvent,
+        PROJECT_EDITOR_PENDING_SEQUENCE_TIMEOUT,
     };
 
     #[test]
@@ -8018,6 +8115,21 @@ mod tests {
     }
 
     #[test]
+    fn project_editor_paste_from_normal_mode_enters_insert_and_matches_insert_mode() {
+        let mut normal = project_editor_app("before", 3);
+        normal.project_editor_insert_mode = false;
+        let mut insert = project_editor_app("before", 3);
+
+        assert!(paste_text_into_active_input(&mut normal, " pasted"));
+        assert!(paste_text_into_active_input(&mut insert, " pasted"));
+
+        assert_eq!(normal.project_editor_text, insert.project_editor_text);
+        assert_eq!(normal.project_editor_cursor, insert.project_editor_cursor);
+        assert!(normal.project_editor_insert_mode);
+        assert!(normal.project_editor_dirty);
+    }
+
+    #[test]
     fn project_tex_paste_uses_the_same_exact_text_path() {
         let pasted = "\\section{Exact}\n  text   stays\n";
         let mut app = project_editor_app("before", 6);
@@ -8426,9 +8538,17 @@ mod tests {
         assert!(!app.project_editor_manual_scroll);
 
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(app.project_editor_pending_sequence.map(|sequence| sequence.first_key), Some('g'));
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
         assert_eq!(app.project_editor_cursor, 0);
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT));
+        assert_eq!(app.project_editor_cursor, "one\ntwo\nthree\n".len());
+
+        // An invalid second key cancels `g` and is then handled normally.
+        app.project_editor_cursor += 2;
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE));
+        assert!(app.project_editor_pending_sequence.is_none());
         assert_eq!(app.project_editor_cursor, "one\ntwo\nthree\n".len());
     }
 
@@ -8461,6 +8581,49 @@ mod tests {
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('%'), KeyModifiers::SHIFT));
         assert_eq!(app.project_editor_cursor, "first\n\nsecond\n\n(third".len());
         assert_eq!(app.project_editor_visual_line_anchor, Some(3));
+    }
+
+    #[test]
+    fn project_editor_dd_deletes_lines_and_cancels_pending_operator() {
+        let mut app = project_editor_app("one\ntwo\nthree", "one\n".len());
+        app.project_editor_insert_mode = false;
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(app.project_editor_pending_sequence.map(|sequence| sequence.first_key), Some('d'));
+        assert_eq!(app.project_editor_text, "one\ntwo\nthree");
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(app.project_editor_text, "one\nthree");
+        assert_eq!(app.project_editor_cursor, "one\n".len());
+        assert!(app.project_editor_pending_sequence.is_none());
+        assert!(app.project_editor_dirty);
+
+        // A non-`d` second key cancels the operator and retains that key's
+        // ordinary Normal-mode behavior.
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(app.project_editor_text, "one\nhree");
+        assert!(app.project_editor_pending_sequence.is_none());
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.project_editor_pending_sequence.is_none());
+
+        app.project_editor_pending_sequence = Some(ProjectEditorPendingSequence {
+            first_key: 'd',
+            started_at: std::time::Instant::now() - PROJECT_EDITOR_PENDING_SEQUENCE_TIMEOUT,
+        });
+        assert!(expire_project_editor_pending_sequence(&mut app));
+        assert!(app.project_editor_pending_sequence.is_none());
+    }
+
+    #[test]
+    fn project_editor_dd_removes_a_final_trailing_newline_line() {
+        let mut app = project_editor_app("one\n", 4);
+        app.project_editor_insert_mode = false;
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(app.project_editor_text, "one");
+        assert_eq!(app.project_editor_cursor, 3);
     }
 
 

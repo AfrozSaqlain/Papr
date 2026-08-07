@@ -48,6 +48,7 @@ Papr was written in Rust because an academic research workspace needs to be fast
 * **Built-in Writing Workspace:** Create, edit, and compile LaTeX or Typst manuscripts directly within the TUI.
 * **Real-time Compilation:** Asynchronous background compilation powered by `latexmk` for LaTeX and an embedded Typst compiler for Typst.
 * **No Typst Installation Required:** Typst compilation, PDF export, system and bundled fonts, and Typst Universe package support are built into Papr.
+* **Typst Package Imports:** In a Typst project, import local `.typ` files from the project directory, published Typst Universe packages in the `@preview` namespace, or system-local packages in the `@local` namespace. Papr supports packages compatible with its embedded Typst version. Universe packages are downloaded on first use and cached for subsequent offline builds.
 * **PDF-First Layout:** Work with the live PDF preview side-by-side with your editor, and also track build logs.
 * **Smart Diagnostics:** LaTeX and native Typst diagnostics are grouped with exact source locations, code snippets, diagnostic hints, and a raw log view.
 * **Full Project File Management:** Navigate project tree structures, create nested files and directories, rename entries, and edit code with familiar Vim-style keybindings.
@@ -78,7 +79,7 @@ Papr was written in Rust because an academic research workspace needs to be fast
 | **Terminal PDF Viewer** | A Kitty- or Sixel-capable terminal, plus `poppler` (specifically `pdftoppm`). Kitty is optional and not installed automatically. |
 | **PDF Metadata & Text** | `poppler` (specifically `pdfinfo` and `pdftotext`). |
 | **LaTeX Workspace** | `latexmk` and a TeX distribution (e.g., TeX Live). |
-| **Typst Workspace** | None. The Typst compiler and baseline fonts are embedded. Internet access is needed only when a project first downloads an uncached Typst Universe package. |
+| **Typst Workspace** | None. The Typst compiler and baseline fonts are embedded. Typst projects can import local modules, compatible `@preview` Typst Universe packages, and system-local `@local` packages. Internet access is needed only when a project first downloads an uncached Universe package. |
 | **Linux Clipboard** | `wl-clipboard` (Wayland) or `xclip` (X11). Native `arboard` fallback is included if these are unavailable. |
 | **External PDF Viewer** | The configured viewer command and its required desktop environment integration. |
 
@@ -443,20 +444,17 @@ Shows folders, source files, and supported image files.
 | `Alt+3` | focus PDF preview |
 | `Alt+4` | focus compiler output |
 
-### Project Editor (Normal Mode)
+### Project Editor 
+
+For the complete Normal, Insert, and Visual Line mode reference, see
+[Projects editor keyboard reference](docs/PROJECT_EDITOR_KEYBINDINGS.md).
+
 | Key | Action |
 | :--- | :--- |
-| `i` | enter Insert mode |
-| `w / b` | next / previous word |
-| `0/$, gg/G` | line/file bounds |
-| `x / Delete` | delete character |
-| `V, j/k, y/d` | select lines, move, yank/delete |
-| `u / Ctrl+r` | undo/redo; Ctrl+Bksp/Delete word |
-| `PgUp/PgDn` | page move; wheel scrolls |
-| `Esc` | focus file tree |
+| `Esc` | focus file tree (when in editor or PDF preview pane) |
 | `Ctrl+s` | save current source |
 | `Ctrl+f` | search and add citation |
-| `Ctrl+Shift+v` | paste exactly into .tex/.bib and save |
+| `Ctrl+Shift+v` | paste clipboard text |
 
 ---
 

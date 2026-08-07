@@ -42,6 +42,17 @@ pub enum Page {
     Credits,
 }
 
+/// The initial key and start time of a multi-key Normal-mode editor command.
+/// Keep this deliberately data-only: command dispatch belongs to the editor
+/// key handler, making new sequences a small match-arm addition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectEditorPendingSequence {
+    /// The first key that began the sequence, such as `g` or `d`.
+    pub first_key: char,
+    /// The instant at which the first key was received.
+    pub started_at: std::time::Instant,
+}
+
 impl Page {
     /// Whether this page supports local/workspace search.
     #[must_use]
@@ -844,8 +855,8 @@ pub struct App {
     pub project_editor_viewport_height: usize,
     /// Whether mouse-wheel scrolling is temporarily controlling the editor viewport.
     pub project_editor_manual_scroll: bool,
-    /// Pending first `g` of the Vim-style `gg` command.
-    pub project_editor_pending_g: bool,
+    /// Pending first key of a multi-key Normal-mode editor command.
+    pub project_editor_pending_sequence: Option<ProjectEditorPendingSequence>,
     /// Items currently offered by the editor completion engine.
     pub project_completions: Vec<papr_core::CompletionItem>,
     /// Selected item in the completion popup.
@@ -1077,7 +1088,7 @@ impl Default for App {
             project_editor_wrap_width: 1,
             project_editor_viewport_height: 0,
             project_editor_manual_scroll: false,
-            project_editor_pending_g: false,
+            project_editor_pending_sequence: None,
             project_completions: Vec::new(),
             project_completion_selected: 0,
             project_build_status: "Idle".into(),
