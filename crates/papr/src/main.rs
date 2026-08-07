@@ -5235,6 +5235,9 @@ fn handle_project_editor_normal_key(app: &mut App, key: KeyEvent) {
         let _ = edit_text(&mut app.project_editor_text, &mut app.project_editor_cursor, movement_key);
         return;
     }
+    if handle_project_editor_motion(app, key) {
+        return;
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
         redo_project_editor_change(app);
         return;
@@ -5265,13 +5268,6 @@ fn handle_project_editor_normal_key(app: &mut App, key: KeyEvent) {
     }
     match key.code {
         KeyCode::Char('i') => app.project_editor_insert_mode = true,
-        KeyCode::Char('G') => {
-            app.project_editor_cursor = config_editor_line_start(
-                &app.project_editor_text,
-                app.project_editor_text.len(),
-            );
-            app.project_editor_manual_scroll = false;
-        }
         KeyCode::Char('V') => {
             app.project_editor_visual_line_anchor = Some(project_editor_line_at(
                 &app.project_editor_text,
@@ -5323,6 +5319,106 @@ fn handle_project_editor_normal_key(app: &mut App, key: KeyEvent) {
         }
         _ => {}
     }
+}
+
+/// Apply motions that have identical cursor semantics in Normal and Visual
+/// Line mode.  Keeping them ahead of the Visual Line command branch means a
+/// motion extends the existing selection instead of being consumed there.
+fn handle_project_editor_motion(app: &mut App, key: KeyEvent) -> bool {
+    let target = match key.code {
+        KeyCode::Char('G') => Some(config_editor_line_start(
+            &app.project_editor_text,
+            app.project_editor_text.len(),
+        )),
+        KeyCode::Char('{') => Some(project_editor_previous_paragraph(
+            &app.project_editor_text,
+            app.project_editor_cursor,
+        )),
+        KeyCode::Char('}') => Some(project_editor_next_paragraph(
+            &app.project_editor_text,
+            app.project_editor_cursor,
+        )),
+        KeyCode::Char('%') => project_editor_matching_delimiter(
+            &app.project_editor_text,
+            app.project_editor_cursor,
+        ),
+        _ => None,
+    };
+    let Some(target) = target else { return false; };
+    app.project_editor_cursor = target;
+    app.project_editor_manual_scroll = false;
+    true
+}
+
+fn project_editor_previous_paragraph(text: &str, cursor: usize) -> usize {
+    let lines = text.split('\n').collect::<Vec<_>>();
+    let current = project_editor_line_at(text, cursor);
+    let mut line = current.saturating_sub(1);
+    while line > 0 && lines.get(line).is_some_and(|line| line.trim().is_empty()) {
+        line -= 1;
+    }
+    while line > 0 && lines.get(line - 1).is_some_and(|line| !line.trim().is_empty()) {
+        line -= 1;
+    }
+    project_editor_line_start_at(text, line)
+}
+
+fn project_editor_next_paragraph(text: &str, cursor: usize) -> usize {
+    let lines = text.split('\n').collect::<Vec<_>>();
+    let mut line = project_editor_line_at(text, cursor);
+    while line < lines.len() && lines.get(line).is_some_and(|line| !line.trim().is_empty()) {
+        line += 1;
+    }
+    while line < lines.len() && lines.get(line).is_some_and(|line| line.trim().is_empty()) {
+        line += 1;
+    }
+    project_editor_line_start_at(text, line.min(lines.len().saturating_sub(1)))
+}
+
+fn project_editor_line_start_at(text: &str, line: usize) -> usize {
+    text.split('\n').take(line).map(|line| line.len() + 1).sum()
+}
+
+fn project_editor_matching_delimiter(text: &str, cursor: usize) -> Option<usize> {
+    let cursor = cursor.min(text.len());
+    let (delimiter_index, delimiter) = text[cursor..]
+        .chars()
+        .next()
+        .map(|character| (cursor, character))?;
+    let (open, close, forward) = match delimiter {
+        '(' => ('(', ')', true),
+        '[' => ('[', ']', true),
+        '{' => ('{', '}', true),
+        ')' => ('(', ')', false),
+        ']' => ('[', ']', false),
+        '}' => ('{', '}', false),
+        _ => return None,
+    };
+    let mut depth = 0_usize;
+    if forward {
+        for (offset, character) in text[delimiter_index..].char_indices() {
+            if character == open {
+                depth += 1;
+            } else if character == close {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(delimiter_index + offset);
+                }
+            }
+        }
+    } else {
+        for (index, character) in text[..=delimiter_index].char_indices().rev() {
+            if character == close {
+                depth += 1;
+            } else if character == open {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+        }
+    }
+    None
 }
 
 
@@ -8334,6 +8430,37 @@ mod tests {
         assert_eq!(app.project_editor_cursor, 0);
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT));
         assert_eq!(app.project_editor_cursor, "one\ntwo\nthree\n".len());
+    }
+
+    #[test]
+    fn project_editor_visual_line_motions_extend_the_selection() {
+        let mut app = project_editor_app("first\n\nsecond\n\n(third)\nlast", "first\n\nsecond\n".len());
+        app.project_editor_insert_mode = false;
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT));
+        assert_eq!(app.project_editor_visual_line_anchor, Some(3));
+
+        // `gg` and `G` are motions while Visual Line mode is active; neither
+        // should leave the mode or reset its anchor.
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(app.project_editor_cursor, 0);
+        assert_eq!(app.project_editor_visual_line_anchor, Some(3));
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT));
+        assert_eq!(app.project_editor_cursor, "first\n\nsecond\n\n(third)\n".len());
+        assert_eq!(app.project_editor_visual_line_anchor, Some(3));
+
+        // Paragraph and delimiter motions use the same cursor path in Visual
+        // Line and Normal mode, so they also extend the selection.
+        app.project_editor_cursor = "first\n\nsecond\n".len();
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('}'), KeyModifiers::SHIFT));
+        assert_eq!(app.project_editor_cursor, "first\n\nsecond\n\n".len());
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('{'), KeyModifiers::SHIFT));
+        assert_eq!(app.project_editor_cursor, "first\n\n".len());
+        app.project_editor_cursor = "first\n\nsecond\n\n".len();
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('%'), KeyModifiers::SHIFT));
+        assert_eq!(app.project_editor_cursor, "first\n\nsecond\n\n(third".len());
+        assert_eq!(app.project_editor_visual_line_anchor, Some(3));
     }
 
 
