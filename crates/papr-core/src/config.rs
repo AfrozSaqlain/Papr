@@ -36,7 +36,7 @@ pub struct Paths {
     pub plugins_dir: PathBuf,
     /// Plugin configuration file.
     pub plugins_config_file: PathBuf,
-    /// Default directory for managed LaTeX projects.
+    /// Default directory for managed writing projects.
     pub projects_dir: PathBuf,
 }
 

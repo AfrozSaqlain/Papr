@@ -7,6 +7,13 @@ papr is a Cargo workspace with two ownership boundaries:
 - papr owns terminal lifecycle, keyboard mapping, asynchronous orchestration,
   external viewer launching, and ratatui rendering.
 
+Writing projects share one build-event contract. LaTeX projects keep a
+persistent `latexmk` subprocess, while Typst projects compile in a background
+thread through `papr-core`'s embedded Typst world. The world provides
+project-rooted files, lazy system and bundled fonts, cached Typst Universe packages,
+native source diagnostics, and PDF export. Filesystem events are debounced and
+the world is reused so live builds retain Typst's incremental source cache.
+
 The UI mutates an explicit App state machine through semantic actions.
 Network requests, hashing, filesystem events, and downloads communicate with
 the event loop through Tokio channels. Rendering never performs I/O.

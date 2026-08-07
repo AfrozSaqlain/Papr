@@ -30,7 +30,7 @@ pub enum Page {
     Notes,
     /// Background transfers.
     Downloads,
-    /// Integrated LaTeX writing projects.
+    /// Integrated LaTeX and Typst writing projects.
     Projects,
     /// Reading activity timeline.
     History,

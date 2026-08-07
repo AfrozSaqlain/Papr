@@ -1,6 +1,6 @@
 # Windows Setup
 
-Concise setup notes for Windows users. Visual Studio Build Tools are only needed when building Papr from source; MiKTeX, `latexmk`, and Strawberry Perl are the Windows LaTeX workspace prerequisites.
+Concise setup notes for Windows users. Visual Studio Build Tools are only needed when building Papr from source; MiKTeX, `latexmk`, and Strawberry Perl are the Windows LaTeX workspace prerequisites. Typst support is embedded in Papr and needs no separate installation.
 
 ## Visual Studio Build Tools
 

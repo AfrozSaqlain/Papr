@@ -1,4 +1,4 @@
-//! Filesystem-backed LaTeX project management.
+//! Filesystem-backed LaTeX and Typst project management.
 //!
 //! Project metadata intentionally lives beside the configured project root so
 //! it survives database rebuilds and can be used by every frontend.
@@ -108,7 +108,7 @@ impl ProjectManager {
         Ok(projects)
     }
 
-    /// Create a conventional, immediately-compilable LaTeX project.
+    /// Create a conventional, immediately-compilable LaTeX or Typst project.
     pub fn create(&self, name: &str, compiler: &str) -> Result<Project, ProjectError> {
         validate_name(name)?;
         let path = self.root.join(name);
@@ -259,135 +259,6 @@ pub fn parse_latex_diagnostics(log: &[String], project_root: &Path) -> Vec<Proje
         });
     }
     diagnostics
-}
-
-/// Turn Typst stderr output into structured diagnostics that can be displayed and navigated.
-pub fn parse_typst_diagnostics(log: &[String], project_root: &Path) -> Vec<ProjectBuildDiagnostic> {
-    let mut diagnostics = Vec::new();
-    let mut current_diag: Option<ProjectBuildDiagnostic> = None;
-
-    for raw_line in log {
-        let line = strip_ansi_codes(raw_line);
-        let trimmed = line.trim();
-
-        if trimmed.starts_with("error:") || trimmed.starts_with("warning:") {
-            if let Some(diag) = current_diag.take() {
-                diagnostics.push(diag);
-            }
-            let is_error = trimmed.starts_with("error:");
-            let severity = if is_error {
-                ProjectDiagnosticSeverity::Error
-            } else {
-                ProjectDiagnosticSeverity::Warning
-            };
-            let prefix_len = if is_error { 6 } else { 8 };
-            let description = trimmed[prefix_len..].trim().to_string();
-            let title = description.clone();
-
-            current_diag = Some(ProjectBuildDiagnostic {
-                severity,
-                title,
-                description,
-                file: None,
-                line: None,
-                col: None,
-                code: None,
-                hint: None,
-            });
-            continue;
-        }
-
-        if let Some(ref mut diag) = current_diag {
-            if (trimmed.contains("┌─") || trimmed.contains("-->")) && diag.file.is_none() {
-                let loc_str = if let Some(idx) = trimmed.find("┌─") {
-                    trimmed[idx + "┌─".len()..].trim()
-                } else if let Some(idx) = trimmed.find("-->") {
-                    trimmed[idx + "-->".len()..].trim()
-                } else {
-                    ""
-                };
-                let parts: Vec<&str> = loc_str.split(':').collect();
-                if !parts.is_empty() {
-                    let raw_path = PathBuf::from(parts[0].trim());
-                    let rel_path = if let Ok(stripped) = raw_path.strip_prefix(project_root) {
-                        stripped.to_string_lossy().into_owned()
-                    } else {
-                        parts[0].trim().to_string()
-                    };
-                    diag.file = Some(rel_path);
-
-                    if parts.len() > 1 {
-                        diag.line = parts[1].trim().parse::<usize>().ok();
-                    }
-                    if parts.len() > 2 {
-                        diag.col = parts[2].trim().parse::<usize>().ok();
-                    }
-                }
-            } else if trimmed.starts_with("= hint:") || trimmed.starts_with("hint:") {
-                let hint_str = if let Some(idx) = trimmed.find("hint:") {
-                    trimmed[idx + "hint:".len()..].trim().to_string()
-                } else {
-                    trimmed.to_string()
-                };
-                diag.hint = Some(hint_str);
-            } else if diag.code.is_none() && (trimmed.contains('│') || trimmed.contains('|')) {
-                let parts: Vec<&str> = if trimmed.contains('│') {
-                    trimmed.splitn(2, '│').collect()
-                } else {
-                    trimmed.splitn(2, '|').collect()
-                };
-                if parts.len() == 2 {
-                    let num_part = parts[0].trim();
-                    let code_part = parts[1].trim();
-                    if !num_part.is_empty() && num_part.chars().all(|c| c.is_ascii_digit()) && !code_part.is_empty() {
-                        diag.code = Some(code_part.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some(diag) = current_diag {
-        diagnostics.push(diag);
-    }
-
-    for diag in &mut diagnostics {
-        if diag.code.is_none() {
-            if let (Some(file), Some(line_num)) = (&diag.file, diag.line) {
-                if let Ok(source) = std::fs::read_to_string(project_root.join(file)) {
-                    diag.code = source.lines().nth(line_num.saturating_sub(1)).map(|s| s.trim().to_owned());
-                }
-            }
-        }
-    }
-
-    diagnostics
-}
-
-/// Dispatches log parsing to LaTeX or Typst diagnostic parsers.
-pub fn parse_project_diagnostics(log: &[String], project_root: &Path, is_typst: bool) -> Vec<ProjectBuildDiagnostic> {
-    if is_typst {
-        parse_typst_diagnostics(log, project_root)
-    } else {
-        parse_latex_diagnostics(log, project_root)
-    }
-}
-
-fn strip_ansi_codes(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut in_escape = false;
-    for c in s.chars() {
-        if c == '\x1b' {
-            in_escape = true;
-        } else if in_escape {
-            if c.is_ascii_alphabetic() {
-                in_escape = false;
-            }
-        } else {
-            result.push(c);
-        }
-    }
-    result
 }
 
 #[derive(Clone)]
@@ -639,46 +510,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn typst_diagnostic_parser_parses_errors_warnings_col_and_hints() {
-        let log = vec![
-            "watching main.typ".into(),
-            "writing to main.pdf".into(),
-            "[23:46:09] compiled with errors".into(),
-            "error: expected length or auto, found integer".into(),
-            "  ┌─ main.typ:1:17".into(),
-            "  │".into(),
-            "1 │ #set page(width: 10)".into(),
-            "  │                  ^^".into(),
-            "  │".into(),
-            "  = hint: a length needs a unit - did you mean 10pt?".into(),
-            "warning: content labelled multiple times".into(),
-            "  ┌─ main.typ:5:0".into(),
-            "  │".into(),
-            "5 │ = Section".into(),
-            "  │ ^^^^^^^^^".into(),
-            "  │".into(),
-            "  = hint: only the last label is used, the rest are ignored".into(),
-        ];
-        let diagnostics = parse_typst_diagnostics(&log, std::path::Path::new("."));
-
-        assert_eq!(diagnostics.len(), 2);
-        assert_eq!(diagnostics[0].severity, ProjectDiagnosticSeverity::Error);
-        assert_eq!(diagnostics[0].title, "expected length or auto, found integer");
-        assert_eq!(diagnostics[0].file.as_deref(), Some("main.typ"));
-        assert_eq!(diagnostics[0].line, Some(1));
-        assert_eq!(diagnostics[0].col, Some(17));
-        assert_eq!(diagnostics[0].code.as_deref(), Some("#set page(width: 10)"));
-        assert_eq!(diagnostics[0].hint.as_deref(), Some("a length needs a unit - did you mean 10pt?"));
-
-        assert_eq!(diagnostics[1].severity, ProjectDiagnosticSeverity::Warning);
-        assert_eq!(diagnostics[1].title, "content labelled multiple times");
-        assert_eq!(diagnostics[1].file.as_deref(), Some("main.typ"));
-        assert_eq!(diagnostics[1].line, Some(5));
-        assert_eq!(diagnostics[1].col, Some(0));
-        assert_eq!(diagnostics[1].code.as_deref(), Some("= Section"));
-        assert_eq!(diagnostics[1].hint.as_deref(), Some("only the last label is used, the rest are ignored"));
-    }
 }
 
 /// Severity assigned to a parsed LaTeX compiler diagnostic.

@@ -25,7 +25,7 @@ Recommends:     xclip
 %description
 Papr is a keyboard-first terminal workspace for academic research. It
 provides paper discovery, local PDF library management, reading, notes,
-metadata enrichment, and LaTeX project support in a terminal interface.
+metadata enrichment, and LaTeX and embedded Typst project support in a terminal interface.
 
 %prep
 %autosetup -n Papr-%{version}
@@ -52,4 +52,3 @@ install -Dpm0644 README.md %{buildroot}%{_docdir}/%{name}/README.md
 %changelog
 * Mon Aug 03 2026 Papr contributors <papr@example.invalid> - 0.1.1-1
 - Initial Fedora COPR package
-

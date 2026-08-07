@@ -18,7 +18,7 @@ use std::{
     ffi::OsString,
     process::{Command as ProcessCommand, Stdio},
     sync::mpsc::{self as std_mpsc, TryRecvError},
-    sync::Arc,
+    sync::{Arc, atomic::{AtomicBool, Ordering}},
 };
 
 use anyhow::{Context, Result};
@@ -32,11 +32,12 @@ use papr_core::{
      terminal_path_candidates, terminal_home_directory, sort_terminal_candidates, sanitize_terminal_output, parse_command, 
     select_dashboard_papers, shuffle_daily_bucket,
 
-    expand_tabs_for_editor_view, project_editor_line_at, prev_char_boundary, next_char_boundary, cursor_from_visual_position, cursor_visual_position, config_editor_wrap_rows, config_editor_line_start, config_editor_line_end, prev_word_boundary, next_word_boundary, parse_project_diagnostics, get_pdf_page_count, move_pdf_file, validate_collection_name,
+    expand_tabs_for_editor_view, project_editor_line_at, prev_char_boundary, next_char_boundary, cursor_from_visual_position, cursor_visual_position, config_editor_wrap_rows, config_editor_line_start, config_editor_line_end, prev_word_boundary, next_word_boundary, parse_latex_diagnostics, get_pdf_page_count, move_pdf_file, validate_collection_name,
 
     ArxivClient, CollectionDirectory, Config, Database,     DownloadEvent, DownloadManager, DownloadStatus, DownloadTask, ImportedPdf, LibraryIndexer,
     LibraryWatcher, PaperNote, Paths, PluginHost, RemotePaper, Project,
-    CitationSource, CompletionSource, ProjectBuildDiagnostic, ProjectDiagnosticSeverity, ProjectManager,     canonicalize_path,
+    CitationSource, CompletionSource, ProjectBuildDiagnostic, ProjectDiagnosticSeverity, ProjectManager,
+    TypstCompileResult, TypstCompiler, canonicalize_path,
 };
 
 use tokio::{sync::{mpsc, Semaphore}, task::JoinSet};
@@ -586,10 +587,10 @@ fn accept_project_completion(app: &mut App) -> bool {
     true
 }
 
-/// Cross-platform lifecycle wrapper for the persistent latexmk/typst watcher.
+/// Cross-platform lifecycle wrapper for project compilation.
 struct ProjectCompiler {
     project: Project,
-    child: std::process::Child,
+    backend: ProjectCompilerBackend,
     events: std_mpsc::Receiver<ProjectBuildEvent>,
     _watcher: RecommendedWatcher,
     pdf_changed: bool,
@@ -597,8 +598,15 @@ struct ProjectCompiler {
     build_raw_log: Vec<String>,
     external_pdf_opened: bool,
     stopped: bool,
-    /// True when this project is compiled with `typst watch` instead of `latexmk`.
-    is_typst: bool,
+}
+
+enum ProjectCompilerBackend {
+    Latex(std::process::Child),
+    Typst {
+        wake: std_mpsc::Sender<()>,
+        stopping: Arc<AtomicBool>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    },
 }
 
 /// Compilation results control only the right-hand view, never keyboard focus.
@@ -618,27 +626,72 @@ enum ProjectBuildEvent {
     PdfChanged,
     Succeeded,
     Failed,
+    TypstFinished(TypstCompileResult),
 }
 
 impl ProjectCompiler {
     fn start(project: Project) -> Result<Self> {
+        if project.path.join("main.typ").exists() {
+            Self::start_typst(project)
+        } else {
+            Self::start_latex(project)
+        }
+    }
+
+    fn start_typst(project: Project) -> Result<Self> {
+        let (sender, events) = std_mpsc::channel();
+        let (wake, changes) = std_mpsc::channel();
+        let watch_sender = wake.clone();
+        let mut watcher = RecommendedWatcher::new(
+            move |event: notify::Result<notify::Event>| {
+                if let Ok(event) = event
+                    && !matches!(event.kind, notify::EventKind::Access(_))
+                    && event.paths.iter().any(|path| {
+                        path.file_name().is_none_or(|name| {
+                            name != "main.pdf"
+                                && name != ".papr-main.pdf.tmp"
+                                && name != ".papr-projects.toml"
+                        })
+                    })
+                {
+                    let _ = watch_sender.send(());
+                }
+            },
+            NotifyConfig::default(),
+        )?;
+        watcher.watch(&project.path, RecursiveMode::Recursive)?;
+
+        let compiler = TypstCompiler::new(&project.path)?;
+        let stopping = Arc::new(AtomicBool::new(false));
+        let worker_stopping = stopping.clone();
+        let worker = std::thread::spawn(move || {
+            run_typst_compiler(compiler, &changes, &sender, &worker_stopping);
+        });
+        let external_pdf_opened = project.path.join("main.pdf").is_file();
+        Ok(Self {
+            project,
+            backend: ProjectCompilerBackend::Typst {
+                wake,
+                stopping,
+                worker: Some(worker),
+            },
+            events,
+            _watcher: watcher,
+            pdf_changed: false,
+            build_succeeded: false,
+            build_raw_log: Vec::new(),
+            external_pdf_opened,
+            stopped: false,
+        })
+    }
+
+    fn start_latex(project: Project) -> Result<Self> {
         let (sender, events) = std_mpsc::channel();
         let watch_sender = sender.clone();
         let mut watcher = RecommendedWatcher::new(
             move |event: notify::Result<notify::Event>| {
                 if let Ok(event) = event
-                    // Only react to actual writes (Modify / Create), never to
-                    // Access or Open events.  pdftoppm reads main.pdf every
-                    // time it renders a page; without this filter those reads
-                    // would send a spurious PdfChanged that prevents the
-                    // pdf_changed-alone gate used by Typst from working.
-                    && matches!(
-                        event.kind,
-                        notify::EventKind::Modify(_) | notify::EventKind::Create(_)
-                    )
-                    // The watcher is non-recursive and scoped to this project;
-                    // matching the basename tolerates canonical-path differences
-                    // reported by platform backends.
+                    && matches!(event.kind, notify::EventKind::Modify(_) | notify::EventKind::Create(_))
                     && event.paths.iter().any(|path| path.file_name().is_some_and(|name| name == "main.pdf"))
                 {
                     let _ = watch_sender.send(ProjectBuildEvent::PdfChanged);
@@ -648,16 +701,8 @@ impl ProjectCompiler {
         )?;
         watcher.watch(&project.path, RecursiveMode::NonRecursive)?;
 
-        let is_typst = project.path.join("main.typ").exists();
-        let mut command = if is_typst {
-            let mut cmd = ProcessCommand::new("typst");
-            cmd.args(["watch", "main.typ"]);
-            cmd
-        } else {
-            let mut cmd = ProcessCommand::new("latexmk");
-            cmd.args(["-pdf", "-pvc", "-view=none", "main.tex"]);
-            cmd
-        };
+        let mut command = ProcessCommand::new("latexmk");
+        command.args(["-pdf", "-pvc", "-view=none", "main.tex"]);
 
         command
             .current_dir(&project.path)
@@ -674,7 +719,7 @@ impl ProjectCompiler {
         }
         let mut child = command
             .spawn()
-            .context(if is_typst { "typst is not available; install it to compile Typst projects" } else { "latexmk is not available; install a TeX distribution and latexmk" })?;
+            .context("latexmk is not available; install a TeX distribution and latexmk")?;
         if let Some(stdout) = child.stdout.take() {
             spawn_latexmk_reader(stdout, sender.clone());
         }
@@ -684,7 +729,7 @@ impl ProjectCompiler {
         let external_pdf_opened = project.path.join("main.pdf").is_file();
         Ok(Self {
             project,
-            child,
+            backend: ProjectCompilerBackend::Latex(child),
             events,
             _watcher: watcher,
             pdf_changed: false,
@@ -695,7 +740,6 @@ impl ProjectCompiler {
             // so their first successful build is the one external launch.
             external_pdf_opened,
             stopped: false,
-            is_typst,
         })
     }
 
@@ -704,18 +748,29 @@ impl ProjectCompiler {
             return;
         }
         self.stopped = true;
-        #[cfg(unix)]
-        {
-            let process_group = format!("-{}", self.child.id());
-            let _ = ProcessCommand::new("kill")
-                .args(["-KILL", "--", &process_group])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+        match &mut self.backend {
+            ProjectCompilerBackend::Latex(child) => {
+                #[cfg(unix)]
+                {
+                    let process_group = format!("-{}", child.id());
+                    let _ = ProcessCommand::new("kill")
+                        .args(["-KILL", "--", &process_group])
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            ProjectCompilerBackend::Typst { wake, stopping, worker } => {
+                stopping.store(true, Ordering::Release);
+                let _ = wake.send(());
+                if let Some(worker) = worker.take() {
+                    let _ = worker.join();
+                }
+            }
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 
     /// Consume build and filesystem events. No filesystem metadata is polled.
@@ -741,7 +796,7 @@ impl ProjectCompiler {
                     }
                     self.build_raw_log.push(line);
                     if app.project_build_status == "Build failed" || app.project_build_status == "Compiling…" {
-                        let new_diags = parse_project_diagnostics(&self.build_raw_log, &self.project.path, self.is_typst);
+                        let new_diags = parse_latex_diagnostics(&self.build_raw_log, &self.project.path);
                         if !new_diags.is_empty() || !app.project_build_diagnostics.is_empty() {
                             app.project_build_diagnostics = new_diags;
                             app.project_build_raw_log = self.build_raw_log.clone();
@@ -755,40 +810,44 @@ impl ProjectCompiler {
                     self.build_succeeded = false;
                     self.pdf_changed = false;
                     app.project_build_raw_log = self.build_raw_log.clone();
-                    app.project_build_diagnostics = parse_project_diagnostics(&self.build_raw_log, &self.project.path, self.is_typst);
+                    app.project_build_diagnostics = parse_latex_diagnostics(&self.build_raw_log, &self.project.path);
                     app.project_build_status = "Build failed".into();
                     app.project_build_selected = 0;
                     show_build_for_failed_compilation(app);
                     changed = true;
                 }
+                Ok(ProjectBuildEvent::TypstFinished(result)) => {
+                    self.pdf_changed = false;
+                    self.build_succeeded = false;
+                    self.build_raw_log = result.raw_log.clone();
+                    app.project_build_raw_log = result.raw_log;
+                    app.project_build_diagnostics = result.diagnostics;
+                    app.project_build_selected = 0;
+                    if result.success {
+                        app.project_build_status = if app.project_build_diagnostics.is_empty() {
+                            "Built successfully".into()
+                        } else {
+                            "Built with warnings".into()
+                        };
+                        show_preview_after_successful_compilation(app);
+                        changed |= self.activate_pdf(app);
+                    } else {
+                        app.project_build_status = "Build failed".into();
+                        show_build_for_failed_compilation(app);
+                        changed = true;
+                    }
+                }
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
-        // For LaTeX (latexmk): both pdf_changed AND build_succeeded are required.
-        // latexmk runs multiple compilation passes and may write partial PDFs
-        // during intermediate steps; waiting for its explicit success log line
-        // ensures we only reload after the final, complete PDF is on disk.
-        //
-        // For Typst (typst watch): typst writes main.pdf exactly once per
-        // compilation, only when the build succeeds.  The watcher is now
-        // filtered to fire only on Modify/Create events (not Access/Open),
-        // so pdf_changed=true is a reliable signal that a fresh, complete
-        // PDF is ready.  build_succeeded is NOT required because:
-        //   1. Typst compilation takes ~2ms; the inotify MODIFY event and the
-        //      "compiled successfully" stderr line race each other unpredictably.
-        //   2. Using pdf_changed alone is safe: the filter prevents the
-        //      spurious PdfChanged that pdftoppm reads previously caused.
-        let ready = if self.is_typst {
-            self.pdf_changed
-        } else {
-            self.pdf_changed && self.build_succeeded
-        };
-        if ready {
+        // latexmk runs multiple compilation passes and may write partial PDFs;
+        // require both the filesystem event and its final success message.
+        if self.pdf_changed && self.build_succeeded {
             self.pdf_changed = false;
             self.build_succeeded = false;
             let pdf = self.project.path.join("main.pdf");
             if pdf.exists() {
-                let diagnostics = parse_project_diagnostics(&self.build_raw_log, &self.project.path, self.is_typst);
+                let diagnostics = parse_latex_diagnostics(&self.build_raw_log, &self.project.path);
                 app.project_build_raw_log = self.build_raw_log.clone();
                 app.project_build_selected = 0;
                 app.project_build_status = if diagnostics.is_empty() {
@@ -801,24 +860,50 @@ impl ProjectCompiler {
                 // failure summary is allowed to interrupt the PDF preview.
                 show_preview_after_successful_compilation(app);
                 self.build_raw_log.clear();
-                let page = app.pdf_viewer_page;
-                app.pdf_viewer_total_pages = get_pdf_page_count(&pdf);
-                app.pdf_viewer_page = page.min(app.pdf_viewer_total_pages.max(1));
-                if app.pdf_viewer_path.as_deref() == Some(pdf.as_path()) {
-                    pdf_viewer::invalidate_document(&pdf);
-                } else {
-                    pdf_viewer::reset_for_new_document(&pdf);
-                    app.pdf_viewer_path = Some(pdf.clone());
-                }
-                if should_open_generated_pdf(&app.pdf_viewer, self.external_pdf_opened) {
-                    let viewer = app.pdf_viewer.clone();
-                    let _ = open_pdf(&viewer, &pdf, app, None, None);
-                    self.external_pdf_opened = true;
-                }
-                changed = true;
+                changed |= self.activate_pdf(app);
             }
         }
         changed
+    }
+
+    fn activate_pdf(&mut self, app: &mut App) -> bool {
+        let pdf = self.project.path.join("main.pdf");
+        if !pdf.exists() { return false; }
+        let page = app.pdf_viewer_page;
+        app.pdf_viewer_total_pages = get_pdf_page_count(&pdf);
+        app.pdf_viewer_page = page.min(app.pdf_viewer_total_pages.max(1));
+        if app.pdf_viewer_path.as_deref() == Some(pdf.as_path()) {
+            pdf_viewer::invalidate_document(&pdf);
+        } else {
+            pdf_viewer::reset_for_new_document(&pdf);
+            app.pdf_viewer_path = Some(pdf.clone());
+        }
+        if should_open_generated_pdf(&app.pdf_viewer, self.external_pdf_opened) {
+            let viewer = app.pdf_viewer.clone();
+            let _ = open_pdf(&viewer, &pdf, app, None, None);
+            self.external_pdf_opened = true;
+        }
+        true
+    }
+}
+
+fn run_typst_compiler(
+    mut compiler: TypstCompiler,
+    changes: &std_mpsc::Receiver<()>,
+    events: &std_mpsc::Sender<ProjectBuildEvent>,
+    stopping: &AtomicBool,
+) {
+    loop {
+        if stopping.load(Ordering::Acquire) { return; }
+        let _ = events.send(ProjectBuildEvent::Started);
+        let result = compiler.compile();
+        let _ = events.send(ProjectBuildEvent::TypstFinished(result));
+
+        if changes.recv().is_err() { return; }
+        if stopping.load(Ordering::Acquire) { return; }
+        while changes.recv_timeout(std::time::Duration::from_millis(75)).is_ok() {
+            if stopping.load(Ordering::Acquire) { return; }
+        }
     }
 }
 
@@ -886,7 +971,11 @@ fn open_project_workspace(app: &mut App, project: Project) {
     app.project_editor_scroll = 0;
     app.project_editor_manual_scroll = false;
     app.project_editor_pending_g = false;
-    app.project_build_status = "Starting latexmk…".into();
+    app.project_build_status = if project.path.join("main.typ").exists() {
+        "Starting embedded Typst…".into()
+    } else {
+        "Starting latexmk…".into()
+    };
     app.project_build_diagnostics.clear();
     app.project_build_raw_log.clear();
     app.project_build_show_raw = false;
@@ -4594,9 +4683,8 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         && app.project_pane == ProjectPane::Editor
         && app.project_editor_path.is_some()
     {
-        // Saving is synchronous, so latexmk can observe only a complete file.
-        // The single persistent `-pvc` compiler owns rebuild scheduling; this
-        // avoids spawning overlapping compilation jobs on rapid Ctrl+S input.
+        // Saving is synchronous, so the active compiler observes only a
+        // complete file. Its persistent watcher owns rebuild scheduling.
         let _ = save_project_editor(app);
         return None;
     }
@@ -4874,7 +4962,11 @@ fn save_project_editor(app: &mut App) -> bool {
     match std::fs::write(path, &app.project_editor_text) {
         Ok(()) => {
             app.project_editor_dirty = false;
-            app.project_build_status = "Saved; latexmk watching…".into();
+            app.project_build_status = if path.extension().is_some_and(|ext| ext == "typ") {
+                "Saved; embedded Typst watching…".into()
+            } else {
+                "Saved; latexmk watching…".into()
+            };
             app.toast = Some("Saved".into());
             true
         }
@@ -6973,7 +7065,51 @@ mod tests {
         show_build_for_failed_compilation, show_preview_after_successful_compilation,
         complete_terminal_command, ConfigFilesystemWatcher, pdf_viewer_invocation,
         is_text_paste_shortcut, paste_text_into_active_input, should_open_generated_pdf,
+        run_typst_compiler, ProjectBuildEvent,
     };
+
+    #[test]
+    fn embedded_typst_worker_rebuilds_after_a_change() -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "papr-typst-worker-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+        ));
+        fs::create_dir_all(&root)?;
+        fs::write(root.join("main.typ"), "= First build")?;
+        let compiler = papr_core::TypstCompiler::new(&root)?;
+        let (wake, changes) = std::sync::mpsc::channel();
+        let (events, results) = std::sync::mpsc::channel();
+        let stopping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_stopping = stopping.clone();
+        let worker = thread::spawn(move || {
+            run_typst_compiler(compiler, &changes, &events, &worker_stopping);
+        });
+
+        assert!(next_typst_result(&results)?.success);
+        fs::write(root.join("main.typ"), "= Second build")?;
+        wake.send(())?;
+        assert!(next_typst_result(&results)?.success);
+
+        stopping.store(true, std::sync::atomic::Ordering::Release);
+        wake.send(())?;
+        worker.join().map_err(|_| std::io::Error::other("Typst worker panicked"))?;
+        assert!(fs::read(root.join("main.pdf"))?.starts_with(b"%PDF-"));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    fn next_typst_result(
+        events: &std::sync::mpsc::Receiver<ProjectBuildEvent>,
+    ) -> Result<papr_core::TypstCompileResult, Box<dyn std::error::Error>> {
+        loop {
+            match events.recv_timeout(Duration::from_secs(10))? {
+                ProjectBuildEvent::TypstFinished(result) => return Ok(result),
+                ProjectBuildEvent::Started => {}
+                other => return Err(format!("unexpected Typst build event: {other:?}").into()),
+            }
+        }
+    }
 
     #[test]
     fn config_watcher_observes_direct_and_atomic_saves() -> Result<(), Box<dyn std::error::Error>> {

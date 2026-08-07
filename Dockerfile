@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# The current locked dependency graph is not compatible with Rust 1.85.1.
+# The workspace and embedded Typst dependency require Rust 1.92 or newer.
 # `1-bookworm` tracks the current stable Rust 1.x release on Debian Bookworm.
 FROM rust:1-bookworm AS builder
 

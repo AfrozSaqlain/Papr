@@ -44,11 +44,12 @@ Papr was written in Rust because an academic research workspace needs to be fast
 * **Markdown Annotations:** Write dedicated per-paper notes using a built-in Vim-inspired markdown editor with a live styled preview.
 * **Reading Queue:** Prioritize your reading list with a dedicated, sortable queue.
 
-### LaTeX Integration
-* **Built-in Writing Workspace:** Create, edit, and compile LaTeX manuscripts directly within the TUI.
-* **Real-time Compilation:** Asynchronous background compilation powered by `latexmk`.
+### LaTeX and Typst Integration
+* **Built-in Writing Workspace:** Create, edit, and compile LaTeX or Typst manuscripts directly within the TUI.
+* **Real-time Compilation:** Asynchronous background compilation powered by `latexmk` for LaTeX and an embedded Typst compiler for Typst.
+* **No Typst Installation Required:** Typst compilation, PDF export, system and bundled fonts, and Typst Universe package support are built into Papr.
 * **PDF-First Layout:** Work with the live PDF preview side-by-side with your editor, and also track build logs.
-* **Smart Diagnostics:** LaTeX compilation errors and warnings are cleanly grouped with exact source locations, code snippets, diagnostic hints, and a raw log view.
+* **Smart Diagnostics:** LaTeX and native Typst diagnostics are grouped with exact source locations, code snippets, diagnostic hints, and a raw log view.
 * **Full Project File Management:** Navigate project tree structures, create nested files and directories, rename entries, and edit code with familiar Vim-style keybindings.
 
 ### Extensibility
@@ -77,6 +78,7 @@ Papr was written in Rust because an academic research workspace needs to be fast
 | **Terminal PDF Viewer** | A Kitty- or Sixel-capable terminal, plus `poppler` (specifically `pdftoppm`). Kitty is optional and not installed automatically. |
 | **PDF Metadata & Text** | `poppler` (specifically `pdfinfo` and `pdftotext`). |
 | **LaTeX Workspace** | `latexmk` and a TeX distribution (e.g., TeX Live). |
+| **Typst Workspace** | None. The Typst compiler and baseline fonts are embedded. Internet access is needed only when a project first downloads an uncached Typst Universe package. |
 | **Linux Clipboard** | `wl-clipboard` (Wayland) or `xclip` (X11). Native `arboard` fallback is included if these are unavailable. |
 | **External PDF Viewer** | The configured viewer command and its required desktop environment integration. |
 
@@ -203,7 +205,7 @@ Download the `.deb` or `.rpm` package from the [Latest Release Page](https://git
 <summary>Building from Source</summary>
 
 ### Build Requirements
-* **Rust** (1.85 or newer) and Cargo (install via [rustup](https://rustup.rs/)).
+* **Rust** (1.92 or newer) and Cargo (install via [rustup](https://rustup.rs/)).
 * Standard C compiler and system linker.
 * **Linux Specific:** `pkg-config` and `xdg-utils`.
 
@@ -281,7 +283,7 @@ Here is a complete breakdown of every section in Papr, what it does, and how to 
 | **Authors** | Groups all papers in your local library by author name automatically. | Select an author from the list to view every paper written by them in your library. |
 | **Notes** | Provides a searchable catalog of Markdown notes written for your papers. | Press `n` on any paper to open the Markdown editor. Press `Tab` to switch to live preview, `Esc` to save adn exit. |
 | **Downloads** | Tracks active, completed, and failed background PDF downloads in real time. | See [Papr Actions](#paper-actions) and [Downloads](#downloads) for the working keybindings. |
-| **Projects** | Lets you write LaTeX documents, compile `main.tex`, preview PDFs, and inspect build issues. | See [Project List](#project-list), [Project File Tree](#project-file-tree), [Project Panes](#project-panes), and [Project Editor](#project-editor-(normal-mode)) for the working keybindings. |
+| **Projects** | Lets you write LaTeX or Typst documents, continuously compile `main.tex` or `main.typ`, preview PDFs, and inspect build issues. | See [Project List](#project-list), [Project File Tree](#project-file-tree), [Project Panes](#project-panes), and [Project Editor](#project-editor-(normal-mode)) for the working keybindings. |
 | **History** | Logs a chronological timeline of recent activity, searches, downloads, and project builds. | This workspace is currently read-only and intended for viewing insights. **Any ideas are welcome.** |
 | **Statistics** | Shows reading habits, reading streak, total and average reading time, most readd author, most read journal, and a 12-week activity heatmap. | Track your research productivity and reading habits over time. This workspace is currently read-only and intended for viewing insights. **But ideas are welcome.** |
 | **Settings** | Provides an interactive workspace for preferences, paths, themes, and plugins. | Customize themes (with live preview), dashboard keywords, library/download/project paths, and plugin settings. Follow on-screen instructions. |
@@ -318,7 +320,7 @@ library_folders = [
 # Destination directory for new downloads
 download_path = "/home/user/Documents/papers"
 
-# Default directory used to create and discover LaTeX writing projects
+# Default directory used to create and discover writing projects
 projects_directory = "/home/user/Documents/projects"
 
 # Comma-separated interests to populate the daily Dashboard arXiv feed
@@ -540,7 +542,7 @@ docker run --rm -it \
 ## Architecture & CLI Utilities
 
 Papr is split into two core crates:
-* **`papr-core`:** Handles database migrations, SQLite queries, configuration loading, downloading, indexing local directories, LaTeX project compilation, and plugin execution.
+* **`papr-core`:** Handles database migrations, SQLite queries, configuration loading, downloading, indexing local directories, embedded Typst compilation, and plugin execution.
 * **`papr`:** Handles the terminal UI loop (Ratatui + Crossterm), input handling, async orchestration, PDF viewing, and launching external tools.
 
 **CLI Tools:**

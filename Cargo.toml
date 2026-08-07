@@ -8,7 +8,7 @@ edition = "2024"
 license = "MIT"
 homepage = "https://github.com/AfrozSaqlain/Papr"
 repository = "https://github.com/AfrozSaqlain/Papr"
-rust-version = "1.85"
+rust-version = "1.92"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -23,7 +23,7 @@ iana-time-zone = "0.1"
 notify = "8.0"
 quick-xml = { version = "0.38", features = ["serialize", "overlapped-lists"] }
 ratatui = "0.29"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "stream", "blocking"] }
 rusqlite = { version = "0.32", default-features = false, features = ["chrono"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -36,6 +36,10 @@ syntect = { version = "5.2", features = ["default-fancy"] }
 thiserror = "2.0"
 tokio = { version = "1.0", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.8"
+typst = "0.15.1"
+typst-kit = { version = "0.15.1", features = ["datetime", "embedded-fonts", "scan-fonts", "system-files", "system-packages", "universe-packages"] }
+typst-layout = "0.15.1"
+typst-pdf = "0.15.1"
 url = "2.5"
 walkdir = "2.5"
 
