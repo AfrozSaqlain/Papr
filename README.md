@@ -53,6 +53,9 @@ Papr was written in Rust because an academic research workspace needs to be fast
 * **Smart Diagnostics:** LaTeX and native Typst diagnostics are grouped with exact source locations, code snippets, diagnostic hints, and a raw log view.
 * **Full Project File Management:** Navigate project tree structures, create nested files and directories, rename entries, and edit code with familiar Vim-style keybindings.
 
+> [!NOTE]
+> Downloaded Typst Universe packages are cached by namespace, name, and version. The default cache location is `$XDG_CACHE_HOME/typst/packages` (or `~/.cache/typst/packages`) on Linux, `~/Library/Caches/typst/packages` on macOS, and `%LOCALAPPDATA%/typst/packages` on Windows. Cached packages do not expire automatically; they remain available for offline builds until removed by the user or the operating system's cache-cleanup tooling.
+
 ### Extensibility
 * **Process-Isolated Plugins:** Extend workflows using language-agnostic, versioned JSON plugins running in isolated processes with bounded execution limits. Comes with an opt-in auto-tagging plugin out of the box.
 
