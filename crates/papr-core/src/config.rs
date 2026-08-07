@@ -104,7 +104,7 @@ impl Default for Config {
             download_path: None,
             projects_directory: None,
             dashboard_keywords: String::new(),
-            default_project_compiler: "latex".into(),
+            default_project_compiler: "typst".into(),
             enabled_plugins: Vec::new(),
         }
     }
@@ -198,7 +198,7 @@ projects_directory = {projects_dir_str}
 dashboard_keywords = ""
 
 # Default project compiler (latex or typst).
-default_project_compiler = "latex"
+default_project_compiler = "typst"
 
 # Plugin identifiers explicitly allowed to execute.
 enabled_plugins = []
@@ -329,6 +329,8 @@ mod tests {
         let parsed: Config = toml::from_str(&content)?;
         assert_eq!(parsed.theme, config.theme);
         assert_eq!(parsed.startup_page, config.startup_page);
+        assert_eq!(config.default_project_compiler, "typst");
+        assert_eq!(parsed.default_project_compiler, "typst");
         
         let expected_viewer = if cfg!(target_os = "macos") {
             "open".to_string()
@@ -344,6 +346,33 @@ mod tests {
         assert!(rewritten.find("projects_directory =").unwrap() < rewritten.find("dashboard_keywords =").unwrap());
 
         std::fs::remove_dir_all(&temp_dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn existing_compiler_preference_is_preserved() -> Result<(), Box<dyn std::error::Error>> {
+        let unique_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("papr_test_{unique_id}"));
+        std::fs::create_dir_all(&temp_dir)?;
+        let paths = super::Paths {
+            config_file: temp_dir.join("config.toml"),
+            database_file: temp_dir.join("papr.db"),
+            downloads_dir: temp_dir.join("papers"),
+            plugins_dir: temp_dir.join("plugins"),
+            plugins_config_file: temp_dir.join("plugins.toml"),
+            projects_dir: temp_dir.join("projects"),
+        };
+        std::fs::write(&paths.config_file, "default_project_compiler = \"latex\"\n")?;
+
+        let config = Config::load_or_create(&paths)?;
+
+        assert_eq!(config.default_project_compiler, "latex");
+        assert!(std::fs::read_to_string(&paths.config_file)?
+            .contains("default_project_compiler = \"latex\""));
+
+        std::fs::remove_dir_all(temp_dir)?;
         Ok(())
     }
 
