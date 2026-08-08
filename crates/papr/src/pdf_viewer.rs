@@ -119,6 +119,10 @@ struct EncodedFrame {
     rows: u16,
     /// The id-color used for unicode placeholder rendering.
     id_color: String,
+    /// Image data that can be deleted after this frame's placeholders have
+    /// reached the terminal.  Keeping the old image alive until then avoids
+    /// the blank interval caused by re-transmitting an in-use Kitty image ID.
+    retire_image_id: Option<u32>,
 }
 
 /// Everything that lives inside the global singleton lock.
@@ -142,7 +146,8 @@ struct PageCache {
     last_crop_key: Option<CropKey>,
     /// The encoded frame ready to blit; `None` until first render.
     last_encoded: Option<EncodedFrame>,
-    /// Monotonically-increasing counter used to assign unique Kitty IDs.
+    /// Next Kitty image ID.  A new ID is used for each crop so the old image
+    /// stays visible until the new virtual placement is on screen.
     next_kitty_id: u32,
 }
 
@@ -408,6 +413,13 @@ fn kitty_transmit(img: &DynamicImage, id: u32) -> String {
     data
 }
 
+/// Remove image data only after its replacement has been written.  `q=2`
+/// suppresses the acknowledgement so it cannot enter the application's input
+/// stream.
+fn kitty_delete_image(id: u32) -> String {
+    format!("\x1b_Gq=2,a=d,d=I,i={id}\x1b\\")
+}
+
 /// Minimal base64 encoder (standard alphabet, no padding needed by Kitty).
 fn base64_encode(input: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -497,26 +509,51 @@ fn render_kitty_placeholders(
     let cols = area.width.min(encoded.cols);
 
     let [id_extra, id_r, id_g, id_b] = encoded.image_id.to_be_bytes();
-    let fg_color = Color::Rgb(id_r, id_g, id_b);
-    let mut wrote_payload = false;
-
+    let id_color = format!("\x1b[38;2;{id_r};{id_g};{id_b}m");
     for y in 0..rows {
-        for x in 0..cols {
-            if let Some(cell) = buf.cell_mut((area.left() + x, area.top() + y)) {
-                let mut symbol = String::new();
-                if !wrote_payload {
-                    symbol.push_str(&encoded.transmit_seq);
-                    wrote_payload = true;
-                }
-                
-                symbol.push('\u{10EEEE}');
-                symbol.push(diacritic(y));
-                symbol.push(diacritic(x));
-                symbol.push(diacritic(u16::from(id_extra)));
+        // Kitty's placeholders must be emitted as one terminal row.  Writing
+        // one placeholder per Ratatui cell lets Ratatui's diff writer move the
+        // cursor between combining-character sequences, which detaches some
+        // placeholders from their intended cells and leaves old placements
+        // visible.  This is the protocol layout used by ratatui-image.
+        let mut symbol = if y == 0 {
+            encoded.transmit_seq.clone()
+        } else {
+            String::new()
+        };
+        symbol.reserve(3 + id_color.len() + (cols as usize * 4) + 19);
+        write!(
+            symbol,
+            "\x1b[s{id_color}\u{10EEEE}{}{}{}",
+            diacritic(y),
+            diacritic(0),
+            diacritic(u16::from(id_extra))
+        )
+        .unwrap();
+        symbol.extend(std::iter::repeat_n('\u{10EEEE}', cols.saturating_sub(1) as usize));
 
-                cell.set_symbol(&symbol);
-                cell.set_fg(fg_color);
+        for x in 1..cols {
+            if let Some(cell) = buf.cell_mut((area.left() + x, area.top() + y)) {
+                cell.set_skip(true);
             }
+        }
+
+        // The row is emitted from its first cell, so restore Ratatui's cursor
+        // and advance it to where normal cell rendering expects it to be.
+        let right = area.width.saturating_sub(1);
+        let down = area.height.saturating_sub(1);
+        write!(symbol, "\x1b[u\x1b[{right}C\x1b[{down}B").unwrap();
+
+        // This comes last in the terminal stream: the new row placeholders
+        // are already present before the old virtual image is retired.
+        if y + 1 == rows {
+            if let Some(id) = encoded.retire_image_id {
+                symbol.push_str(&kitty_delete_image(id));
+            }
+        }
+
+        if let Some(cell) = buf.cell_mut((area.left(), area.top() + y)) {
+            cell.set_symbol(&symbol);
         }
     }
 }
@@ -529,6 +566,60 @@ struct KittyBlit<'a> {
 impl Widget for KittyBlit<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         render_kitty_placeholders(area, buf, self.encoded);
+    }
+}
+
+#[cfg(test)]
+mod kitty_placeholder_tests {
+    use super::*;
+
+    #[test]
+    fn emits_each_kitty_placeholder_row_from_one_buffer_cell() {
+        let area = Rect::new(0, 0, 3, 2);
+        let mut buffer = Buffer::empty(area);
+        let encoded = EncodedFrame {
+            transmit_seq: "upload".to_owned(),
+            image_id: 1,
+            cols: 3,
+            rows: 2,
+            id_color: String::new(),
+            retire_image_id: None,
+        };
+
+        render_kitty_placeholders(area, &mut buffer, &encoded);
+
+        for y in 0..2 {
+            let row = buffer[(0, y)].symbol();
+            assert_eq!(row.matches('\u{10EEEE}').count(), 3);
+            assert!(row.contains("\x1b[s"));
+            assert!(row.contains("\x1b[u"));
+            assert_eq!(buffer[(1, y)].symbol(), " ");
+            assert_eq!(buffer[(2, y)].symbol(), " ");
+        }
+        assert!(buffer[(0, 0)].symbol().starts_with("upload"));
+        assert!(!buffer[(0, 1)].symbol().contains("upload"));
+    }
+
+    #[test]
+    fn retires_the_previous_image_after_the_last_new_placeholder_row() {
+        let area = Rect::new(0, 0, 2, 2);
+        let mut buffer = Buffer::empty(area);
+        let encoded = EncodedFrame {
+            transmit_seq: String::new(),
+            image_id: 2,
+            cols: 2,
+            rows: 2,
+            id_color: String::new(),
+            retire_image_id: Some(1),
+        };
+
+        render_kitty_placeholders(area, &mut buffer, &encoded);
+
+        assert!(!buffer[(0, 0)].symbol().contains("a=d,d=I,i=1"));
+        let final_row = buffer[(0, 1)].symbol();
+        let placeholder = final_row.rfind('\u{10EEEE}').unwrap();
+        let delete = final_row.find("a=d,d=I,i=1").unwrap();
+        assert!(delete > placeholder);
     }
 }
 
@@ -763,22 +854,21 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 let id = g.next_kitty_id;
                 g.next_kitty_id = g.next_kitty_id.wrapping_add(1).max(1);
                 let transmit_seq = kitty_transmit(&cropped, id);
-                
-                // Write the APC sequence directly to stdout out-of-band.
-                // This prevents Ratatui from seeing it as a massive string and skipping cells,
-                // which caused the black bar at the top-left corner.
-                use std::io::Write;
-                let _ = std::io::stdout().write_all(transmit_seq.as_bytes());
-                let _ = std::io::stdout().flush();
+                let retire_image_id = g.last_encoded.as_ref().map(|frame| frame.image_id);
 
                 let [_id_extra, id_r, id_g, id_b] = id.to_be_bytes();
                 let id_color = format!("\x1b[38;2;{id_r};{id_g};{id_b}m");
                 g.last_encoded = Some(EncodedFrame {
-                    transmit_seq: String::new(), // Already sent out-of-band
+                    // The image upload and the placeholders must be emitted
+                    // by the same terminal draw transaction.  Writing the
+                    // upload directly to stdout races Ratatui's buffered
+                    // cursor updates and can associate it with an old frame.
+                    transmit_seq,
                     image_id: id,
                     cols: pdf_area.width,
                     rows: pdf_area.height,
                     id_color,
+                    retire_image_id,
                 });
                 g.last_crop_key = Some(crop_key);
             }
@@ -828,6 +918,11 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     cols: encoded.cols,
                     rows: encoded.rows,
                     id_color: encoded.id_color.clone(),
+                    retire_image_id: if need_encode {
+                        encoded.retire_image_id
+                    } else {
+                        None
+                    },
                 };
                 drop(g);
                 frame.render_widget(KittyBlit { encoded: &blit_frame }, pdf_area);
