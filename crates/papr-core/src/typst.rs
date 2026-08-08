@@ -11,6 +11,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use typst::{
     Library, LibraryExt, World, WorldExt,
     diag::{Severity, SourceDiagnostic, Warned},
@@ -31,7 +32,7 @@ use typst_layout::PagedDocument;
 use crate::projects::{ProjectBuildDiagnostic, ProjectDiagnosticSeverity};
 
 /// Result of compiling a Typst project and exporting `main.pdf`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypstCompileResult {
     /// Whether a complete PDF was written.
     pub success: bool,

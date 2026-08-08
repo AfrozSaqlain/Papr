@@ -513,7 +513,7 @@ mod tests {
 }
 
 /// Severity assigned to a parsed LaTeX compiler diagnostic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProjectDiagnosticSeverity {
     /// Compilation cannot complete successfully.
     Error,
@@ -522,7 +522,7 @@ pub enum ProjectDiagnosticSeverity {
 }
 
 /// A compiler diagnostic enriched with source location and context when available.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectBuildDiagnostic {
     /// Error or warning severity.
     pub severity: ProjectDiagnosticSeverity,

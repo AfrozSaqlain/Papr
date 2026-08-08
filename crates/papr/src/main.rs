@@ -13,7 +13,7 @@ mod settings_modal;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, BufWriter, Write},
     path::{Component, Path, PathBuf},
     ffi::OsString,
     process::{Command as ProcessCommand, Stdio},
@@ -39,6 +39,7 @@ use papr_core::{
     CitationSource, CompletionSource, ProjectBuildDiagnostic, ProjectDiagnosticSeverity, ProjectManager,
     TypstCompileResult, TypstCompiler, canonicalize_path,
 };
+use serde::{Deserialize, Serialize};
 
 use tokio::{sync::{mpsc, Semaphore}, task::JoinSet};
 
@@ -79,11 +80,28 @@ enum CliCommand {
         #[arg(long, default_value_t = 10)]
         timeout: u64,
     },
+    /// Internal process used to isolate a Project's Typst compiler state.
+    #[command(hide = true)]
+    TypstWorker {
+        /// Root directory of the Project compiled by this worker.
+        #[arg(long)]
+        project: PathBuf,
+    },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(CliCommand::TypstWorker { project }) = &cli.command {
+        return run_typst_worker_process(project);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to initialize the Papr async runtime")?
+        .block_on(run_app(cli))
+}
+
+async fn run_app(cli: Cli) -> Result<()> {
     if let Some(CliCommand::Completions { shell }) = &cli.command {
         generate(*shell, &mut Cli::command(), "papr", &mut std::io::stdout());
         return Ok(());
@@ -680,9 +698,10 @@ enum ProjectCompilerBackend {
         readers: Vec<std::thread::JoinHandle<()>>,
     },
     Typst {
-        wake: std_mpsc::Sender<()>,
-        stopping: Arc<AtomicBool>,
-        worker: Option<std::thread::JoinHandle<()>>,
+        control: std_mpsc::Sender<TypstWorkerControl>,
+        child: std::process::Child,
+        threads: Vec<std::thread::JoinHandle<()>>,
+        closing: Arc<AtomicBool>,
     },
 }
 
@@ -704,6 +723,99 @@ enum ProjectBuildEvent {
     Succeeded,
     Failed,
     TypstFinished(TypstCompileResult),
+    TypstWorkerFailed(String),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TypstWorkerControl {
+    Compile,
+    Shutdown,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+enum TypstWorkerRequest {
+    Compile,
+    Shutdown,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+enum TypstWorkerResponse {
+    Started,
+    Finished(TypstCompileResult),
+    Fatal(String),
+}
+
+fn write_typst_worker_message<T: Serialize>(writer: &mut impl Write, message: &T) -> Result<()> {
+    serde_json::to_writer(&mut *writer, message)?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    Ok(())
+}
+
+/// Run the hidden, Project-scoped Typst process. All Typst-owned globals are
+/// initialized on this side of the process boundary and reclaimed on exit.
+fn run_typst_worker_process(project: &Path) -> Result<()> {
+    let stdout = std::io::stdout();
+    let mut output = BufWriter::new(stdout.lock());
+    let mut compiler = match TypstCompiler::new(project) {
+        Ok(compiler) => compiler,
+        Err(error) => {
+            write_typst_worker_message(
+                &mut output,
+                &TypstWorkerResponse::Fatal(error.to_string()),
+            )?;
+            return Ok(());
+        }
+    };
+
+    let (requests, input) = std_mpsc::channel();
+    let input_thread = std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            let request = match line {
+                Ok(line) => serde_json::from_str::<TypstWorkerRequest>(&line),
+                Err(_) => break,
+            };
+            match request {
+                Ok(request) => {
+                    let shutdown = matches!(request, TypstWorkerRequest::Shutdown);
+                    if requests.send(request).is_err() || shutdown {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    let _ = requests.send(TypstWorkerRequest::Shutdown);
+                    eprintln!("invalid Typst worker request: {error}");
+                    return;
+                }
+            }
+        }
+        let _ = requests.send(TypstWorkerRequest::Shutdown);
+    });
+
+    'worker: loop {
+        write_typst_worker_message(&mut output, &TypstWorkerResponse::Started)?;
+        let result = compiler.compile();
+        write_typst_worker_message(&mut output, &TypstWorkerResponse::Finished(result))?;
+
+        match input.recv() {
+            Ok(TypstWorkerRequest::Compile) => {}
+            Ok(TypstWorkerRequest::Shutdown) | Err(_) => break,
+        }
+        loop {
+            match input.recv_timeout(std::time::Duration::from_millis(75)) {
+                Ok(TypstWorkerRequest::Compile) => {}
+                Ok(TypstWorkerRequest::Shutdown) => break 'worker,
+                Err(std_mpsc::RecvTimeoutError::Timeout) => break,
+                Err(std_mpsc::RecvTimeoutError::Disconnected) => break 'worker,
+            }
+        }
+    }
+
+    let _ = input_thread.join();
+    Ok(())
 }
 
 impl ProjectCompiler {
@@ -717,8 +829,8 @@ impl ProjectCompiler {
 
     fn start_typst(project: Project) -> Result<Self> {
         let (sender, events) = std_mpsc::channel();
-        let (wake, changes) = std_mpsc::channel();
-        let watch_sender = wake.clone();
+        let (control, commands) = std_mpsc::channel();
+        let watch_sender = control.clone();
         let mut watcher = RecommendedWatcher::new(
             move |event: notify::Result<notify::Event>| {
                 if let Ok(event) = event
@@ -731,26 +843,107 @@ impl ProjectCompiler {
                         })
                     })
                 {
-                    let _ = watch_sender.send(());
+                    let _ = watch_sender.send(TypstWorkerControl::Compile);
                 }
             },
             NotifyConfig::default(),
         )?;
         watcher.watch(&project.path, RecursiveMode::Recursive)?;
 
-        let compiler = TypstCompiler::new(&project.path)?;
-        let stopping = Arc::new(AtomicBool::new(false));
-        let worker_stopping = stopping.clone();
-        let worker = std::thread::spawn(move || {
-            run_typst_compiler(compiler, &changes, &sender, &worker_stopping);
+        let executable = std::env::current_exe().context("could not locate the Papr executable")?;
+        let mut child = ProcessCommand::new(executable)
+            .arg("typst-worker")
+            .arg("--project")
+            .arg(&project.path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("could not start the isolated Typst worker")?;
+        let stdin = child
+            .stdin
+            .take()
+            .context("Typst worker stdin was not available")?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("Typst worker stdout was not available")?;
+        let stderr = child
+            .stderr
+            .take()
+            .context("Typst worker stderr was not available")?;
+
+        let closing = Arc::new(AtomicBool::new(false));
+        let writer_closing = closing.clone();
+        let writer = std::thread::spawn(move || {
+            let mut writer = BufWriter::new(stdin);
+            while let Ok(command) = commands.recv() {
+                let request = match command {
+                    TypstWorkerControl::Compile => TypstWorkerRequest::Compile,
+                    TypstWorkerControl::Shutdown => TypstWorkerRequest::Shutdown,
+                };
+                if write_typst_worker_message(&mut writer, &request).is_err()
+                    || matches!(command, TypstWorkerControl::Shutdown)
+                {
+                    return;
+                }
+            }
+            // Closing the command channel is also a graceful shutdown request.
+            if !writer_closing.load(Ordering::Acquire) {
+                let _ = write_typst_worker_message(&mut writer, &TypstWorkerRequest::Shutdown);
+            }
+        });
+        let reader_closing = closing.clone();
+        let event_sender = sender.clone();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let response = match line {
+                    Ok(line) => serde_json::from_str::<TypstWorkerResponse>(&line),
+                    Err(error) => {
+                        let _ = event_sender.send(ProjectBuildEvent::TypstWorkerFailed(
+                            format!("could not read Typst worker output: {error}"),
+                        ));
+                        return;
+                    }
+                };
+                let event = match response {
+                    Ok(TypstWorkerResponse::Started) => ProjectBuildEvent::Started,
+                    Ok(TypstWorkerResponse::Finished(result)) => {
+                        ProjectBuildEvent::TypstFinished(result)
+                    }
+                    Ok(TypstWorkerResponse::Fatal(error)) => {
+                        ProjectBuildEvent::TypstWorkerFailed(error)
+                    }
+                    Err(error) => ProjectBuildEvent::TypstWorkerFailed(format!(
+                        "invalid Typst worker response: {error}"
+                    )),
+                };
+                if event_sender.send(event).is_err() {
+                    return;
+                }
+            }
+            if !reader_closing.load(Ordering::Acquire) {
+                let _ = event_sender.send(ProjectBuildEvent::TypstWorkerFailed(
+                    "Typst worker stopped unexpectedly".into(),
+                ));
+            }
+        });
+        // Always drain stderr so a verbose dependency cannot block the worker.
+        let stderr_reader = std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                if line.is_err() {
+                    break;
+                }
+            }
         });
         let external_pdf_opened = project.path.join("main.pdf").is_file();
         Ok(Self {
             project,
             backend: ProjectCompilerBackend::Typst {
-                wake,
-                stopping,
-                worker: Some(worker),
+                control,
+                child,
+                threads: vec![writer, reader, stderr_reader],
+                closing,
             },
             events,
             _watcher: watcher,
@@ -826,6 +1019,7 @@ impl ProjectCompiler {
             return;
         }
         self.stopped = true;
+        let typst_temporary_pdf = self.project.path.join(".papr-main.pdf.tmp");
         match &mut self.backend {
             ProjectCompilerBackend::Latex { child, readers } => {
                 #[cfg(unix)]
@@ -844,12 +1038,38 @@ impl ProjectCompiler {
                     let _ = reader.join();
                 }
             }
-            ProjectCompilerBackend::Typst { wake, stopping, worker } => {
-                stopping.store(true, Ordering::Release);
-                let _ = wake.send(());
-                if let Some(worker) = worker.take() {
-                    let _ = worker.join();
+            ProjectCompilerBackend::Typst {
+                control,
+                child,
+                threads,
+                closing,
+            } => {
+                closing.store(true, Ordering::Release);
+                let _ = control.send(TypstWorkerControl::Shutdown);
+
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => break,
+                        Ok(None) if std::time::Instant::now() < deadline => {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        Ok(None) | Err(_) => {
+                            // `Child::kill` maps to the native process termination
+                            // primitive on Unix and Windows. Waiting afterwards
+                            // prevents zombies and completes the memory boundary.
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break;
+                        }
+                    }
                 }
+                for thread in threads.drain(..) {
+                    let _ = thread.join();
+                }
+                // A forced termination can interrupt the write preceding the
+                // atomic main.pdf rename. The completed main.pdf is untouched.
+                let _ = std::fs::remove_file(&typst_temporary_pdf);
             }
         }
     }
@@ -918,6 +1138,25 @@ impl ProjectCompiler {
                         changed = true;
                     }
                 }
+                Ok(ProjectBuildEvent::TypstWorkerFailed(error)) => {
+                    self.pdf_changed = false;
+                    self.build_succeeded = false;
+                    app.project_build_status = "Compiler unavailable".into();
+                    app.project_build_raw_log = vec![error.clone()];
+                    app.project_build_diagnostics = vec![ProjectBuildDiagnostic {
+                        severity: ProjectDiagnosticSeverity::Error,
+                        title: "Typst worker stopped".into(),
+                        description: error,
+                        file: None,
+                        line: None,
+                        col: None,
+                        code: None,
+                        hint: Some("Close and reopen the Project to restart the compiler.".into()),
+                    }];
+                    app.project_build_selected = 0;
+                    show_build_for_failed_compilation(app);
+                    changed = true;
+                }
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
@@ -965,26 +1204,6 @@ impl ProjectCompiler {
             self.external_pdf_opened = true;
         }
         true
-    }
-}
-
-fn run_typst_compiler(
-    mut compiler: TypstCompiler,
-    changes: &std_mpsc::Receiver<()>,
-    events: &std_mpsc::Sender<ProjectBuildEvent>,
-    stopping: &AtomicBool,
-) {
-    loop {
-        if stopping.load(Ordering::Acquire) { return; }
-        let _ = events.send(ProjectBuildEvent::Started);
-        let result = compiler.compile();
-        let _ = events.send(ProjectBuildEvent::TypstFinished(result));
-
-        if changes.recv().is_err() { return; }
-        if stopping.load(Ordering::Acquire) { return; }
-        while changes.recv_timeout(std::time::Duration::from_millis(75)).is_ok() {
-            if stopping.load(Ordering::Acquire) { return; }
-        }
     }
 }
 
@@ -1192,9 +1411,11 @@ fn close_project_workspace(runtime: &mut Runtime, app: &mut App) {
         app.pdf_viewer_scroll_y = 0;
         app.pdf_viewer_page_pixel_h = 0;
         app.pdf_viewer_max_scroll_y = 0;
-        if let Some(pdf) = project_pdf.as_deref() {
-            pdf_viewer::release_document(pdf);
-        }
+    }
+    // Release by Project ownership, even if a filesystem event already
+    // cleared `pdf_viewer_path` after main.pdf was removed or replaced.
+    if let Some(pdf) = project_pdf.as_deref() {
+        pdf_viewer::release_document(pdf);
     }
 }
 
@@ -1243,8 +1464,10 @@ fn refresh_project_filesystem(runtime: &mut Runtime, app: &mut App) {
     }
 
     let pdf = project.path.join("main.pdf");
-    if app.pdf_viewer_path.as_ref().is_some_and(|path| !path.exists()) {
-        app.pdf_viewer_path = None;
+    if app.pdf_viewer_path.as_ref().is_some_and(|path| !path.exists())
+        && let Some(closed) = app.pdf_viewer_path.take()
+    {
+        pdf_viewer::release_document(&closed);
     }
     if pdf.is_file() && app.pdf_viewer_path.as_ref() != Some(&pdf) {
         pdf_viewer::reset_for_new_document(&pdf);
@@ -7354,6 +7577,7 @@ mod tests {
     use std::{ffi::OsString, fs, thread, time::Duration};
 
     use chrono::{TimeZone, Utc};
+    use clap::Parser;
     use crossterm::event::{
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
     };
@@ -7377,51 +7601,49 @@ mod tests {
         show_build_for_failed_compilation, show_preview_after_successful_compilation,
         complete_terminal_command, ConfigFilesystemWatcher, pdf_viewer_invocation,
         expire_project_editor_pending_sequence, is_text_paste_shortcut, paste_text_into_active_input, should_open_generated_pdf,
-        run_typst_compiler, ProjectBuildEvent,
+        Cli, CliCommand, TypstWorkerRequest, TypstWorkerResponse,
         PROJECT_EDITOR_PENDING_SEQUENCE_TIMEOUT,
     };
 
     #[test]
-    fn embedded_typst_worker_rebuilds_after_a_change() -> Result<(), Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!(
-            "papr-typst-worker-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+    fn hidden_typst_worker_cli_accepts_project_paths() {
+        let cli = Cli::try_parse_from(["papr", "typst-worker", "--project", "paper dir"])
+            .expect("hidden worker command should parse");
+        assert!(matches!(
+            cli.command,
+            Some(CliCommand::TypstWorker { project }) if project == std::path::PathBuf::from("paper dir")
         ));
-        fs::create_dir_all(&root)?;
-        fs::write(root.join("main.typ"), "= First build")?;
-        let compiler = papr_core::TypstCompiler::new(&root)?;
-        let (wake, changes) = std::sync::mpsc::channel();
-        let (events, results) = std::sync::mpsc::channel();
-        let stopping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let worker_stopping = stopping.clone();
-        let worker = thread::spawn(move || {
-            run_typst_compiler(compiler, &changes, &events, &worker_stopping);
-        });
-
-        assert!(next_typst_result(&results)?.success);
-        fs::write(root.join("main.typ"), "= Second build")?;
-        wake.send(())?;
-        assert!(next_typst_result(&results)?.success);
-
-        stopping.store(true, std::sync::atomic::Ordering::Release);
-        wake.send(())?;
-        worker.join().map_err(|_| std::io::Error::other("Typst worker panicked"))?;
-        assert!(fs::read(root.join("main.pdf"))?.starts_with(b"%PDF-"));
-        fs::remove_dir_all(root)?;
-        Ok(())
     }
 
-    fn next_typst_result(
-        events: &std::sync::mpsc::Receiver<ProjectBuildEvent>,
-    ) -> Result<papr_core::TypstCompileResult, Box<dyn std::error::Error>> {
-        loop {
-            match events.recv_timeout(Duration::from_secs(10))? {
-                ProjectBuildEvent::TypstFinished(result) => return Ok(result),
-                ProjectBuildEvent::Started => {}
-                other => return Err(format!("unexpected Typst build event: {other:?}").into()),
-            }
-        }
+    #[test]
+    fn typst_worker_protocol_round_trips_structured_diagnostics() {
+        let request = serde_json::to_string(&TypstWorkerRequest::Compile).unwrap();
+        assert!(matches!(
+            serde_json::from_str(&request).unwrap(),
+            TypstWorkerRequest::Compile
+        ));
+
+        let response = TypstWorkerResponse::Finished(papr_core::TypstCompileResult {
+            success: false,
+            diagnostics: vec![papr_core::ProjectBuildDiagnostic {
+                severity: papr_core::ProjectDiagnosticSeverity::Error,
+                title: "error".into(),
+                description: "broken source".into(),
+                file: Some("main.typ".into()),
+                line: Some(2),
+                col: Some(4),
+                code: Some("#broken".into()),
+                hint: Some("fix it".into()),
+            }],
+            raw_log: vec!["compilation failed".into()],
+        });
+        let encoded = serde_json::to_string(&response).unwrap();
+        let TypstWorkerResponse::Finished(decoded) = serde_json::from_str(&encoded).unwrap() else {
+            panic!("wrong worker response variant");
+        };
+        assert!(!decoded.success);
+        assert_eq!(decoded.diagnostics[0].file.as_deref(), Some("main.typ"));
+        assert_eq!(decoded.diagnostics[0].line, Some(2));
     }
 
     #[test]
