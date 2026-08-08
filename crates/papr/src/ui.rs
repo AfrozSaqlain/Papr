@@ -4473,6 +4473,10 @@ fn render_credits(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
             "• Crossref API (DOI resolution and BibTeX citation metadata)",
             Style::default().fg(theme.text),
         ),
+        Line::styled(
+            "• OpenAlex API (Open catalog of scholarly work and journal metadata)",
+            Style::default().fg(theme.text),
+        ),
         Line::raw(""),
         Line::styled(
             "CORE TECHNOLOGIES USED",
@@ -4498,6 +4502,10 @@ fn render_credits(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         ),
         Line::styled(
             "• Reqwest (HTTP client for querying search APIs)",
+            Style::default().fg(theme.text),
+        ),
+        Line::styled(
+            "• Typst (Markup-based document typesetting and embedded PDF compiler)",
             Style::default().fg(theme.text),
         ),
         Line::styled(

@@ -1311,6 +1311,14 @@ impl App {
                 url: "https://www.crossref.org/documentation/retrieve-metadata/rest-api/".to_string(),
             },
             InteractiveCreditItem {
+                label: "OpenAlex API".to_string(),
+                url: "https://openalex.org/".to_string(),
+            },
+            InteractiveCreditItem {
+                label: "Typst Typesetting System".to_string(),
+                url: "https://typst.app/".to_string(),
+            },
+            InteractiveCreditItem {
                 label: "Ratatui TUI Framework".to_string(),
                 url: "https://ratatui.rs/".to_string(),
             },
