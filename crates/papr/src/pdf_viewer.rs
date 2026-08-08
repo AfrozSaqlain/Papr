@@ -36,26 +36,27 @@
 
 use crate::state::*;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{
+    Arc, Mutex, OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 
 use anyhow::{Context, Result};
 use image::{DynamicImage, Rgba, RgbaImage};
 use ratatui::{
+    Frame,
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Clear, Paragraph, Widget},
-    Frame,
 };
 use ratatui_image::picker::Picker;
-
-
 
 // ---------------------------------------------------------------------------
 // Cache key helpers
@@ -125,15 +126,32 @@ struct EncodedFrame {
     retire_image_id: Option<u32>,
 }
 
+#[derive(Clone)]
+struct RenderJob {
+    key: PageKey,
+    pdf_path: PathBuf,
+    generation: u64,
+    page: usize,
+    dpi: u32,
+    pixel_w: u32,
+    cancelled: Arc<AtomicBool>,
+}
+
 /// Everything that lives inside the global singleton lock.
 struct PageCache {
     picker: Option<Picker>,
     pages: HashMap<PageKey, RenderedPage>,
     in_flight: std::collections::HashSet<PageKey>,
     document_generations: HashMap<PathBuf, u64>,
+    document_widths: HashMap<PathBuf, u32>,
     /// Raster files are owned by their source PDF so closing one document can
     /// remove only its files without disturbing another open document.
     temp_files: Vec<(PathBuf, PathBuf)>,
+    /// Pending raster work. Keeping jobs here instead of spawning one thread
+    /// per request bounds both peak memory and the number of Poppler children.
+    render_queue: VecDeque<RenderJob>,
+    active_renders: usize,
+    render_cancellations: HashMap<PageKey, Arc<AtomicBool>>,
 
     // ── Scroll state ─────────────────────────────────────────────────────
     last_viewport_h: u32,
@@ -155,6 +173,10 @@ struct PageCache {
     /// Keeping this in the draw pipeline avoids writing graphics escapes
     /// directly to stdout while Ratatui owns terminal output.
     pending_kitty_deletes: Vec<u32>,
+    /// Image data currently owned by the terminal. This is deliberately
+    /// independent of `last_encoded`: invalidating a PDF must keep the last
+    /// good preview visible until its replacement has been uploaded.
+    resident_kitty_image: Option<(u64, u32)>,
 }
 
 static CACHE: OnceLock<Arc<Mutex<PageCache>>> = OnceLock::new();
@@ -167,7 +189,11 @@ fn get_cache() -> Arc<Mutex<PageCache>> {
                 pages: HashMap::new(),
                 in_flight: std::collections::HashSet::new(),
                 document_generations: HashMap::new(),
+                document_widths: HashMap::new(),
                 temp_files: Vec::new(),
+                render_queue: VecDeque::new(),
+                active_renders: 0,
+                render_cancellations: HashMap::new(),
                 last_viewport_h: 600,
                 target_page: 1,
                 target_scroll_px: 0.0,
@@ -178,9 +204,36 @@ fn get_cache() -> Arc<Mutex<PageCache>> {
                 last_encoded: None,
                 next_kitty_id: 1,
                 pending_kitty_deletes: Vec::new(),
+                resident_kitty_image: None,
             }))
         })
         .clone()
+}
+
+fn cancel_render_jobs(g: &mut PageCache, mut should_cancel: impl FnMut(&PageKey) -> bool) {
+    for job in &g.render_queue {
+        if should_cancel(&job.key) {
+            job.cancelled.store(true, Ordering::Release);
+        }
+    }
+    for (key, cancelled) in &g.render_cancellations {
+        if should_cancel(key) {
+            cancelled.store(true, Ordering::Release);
+        }
+    }
+
+    let mut removed = Vec::new();
+    g.render_queue.retain(|job| {
+        let keep = !job.cancelled.load(Ordering::Acquire);
+        if !keep {
+            removed.push(job.key.clone());
+        }
+        keep
+    });
+    for key in removed {
+        g.in_flight.remove(&key);
+        g.render_cancellations.remove(&key);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -192,8 +245,26 @@ fn get_cache() -> Arc<Mutex<PageCache>> {
 pub fn reset_for_new_document(new_path: &Path) {
     let cache = get_cache();
     if let Ok(mut g) = cache.lock() {
+        cancel_render_jobs(&mut g, |(path, _, _, _, _)| path.as_path() != new_path);
         g.pages.retain(|(p, _, _, _, _), _| p.as_path() == new_path);
-        g.in_flight.retain(|(p, _, _, _, _)| p.as_path() == new_path);
+        g.in_flight
+            .retain(|(p, _, _, _, _)| p.as_path() == new_path);
+        g.render_queue.retain(|job| job.pdf_path == new_path);
+        g.document_widths.retain(|path, _| path == new_path);
+        let active_documents = g
+            .render_cancellations
+            .keys()
+            .map(|(path, _, _, _, _)| path.clone())
+            .collect::<std::collections::HashSet<_>>();
+        g.document_generations
+            .retain(|path, _| path == new_path || active_documents.contains(path));
+        let new_fp = path_fingerprint(new_path);
+        if let Some((resident_fp, image_id)) = g.resident_kitty_image
+            && resident_fp != new_fp
+        {
+            g.pending_kitty_deletes.push(image_id);
+            g.resident_kitty_image = None;
+        }
         g.last_crop_key = None;
         g.last_encoded = None;
 
@@ -210,10 +281,18 @@ pub fn reset_for_new_document(new_path: &Path) {
 pub fn invalidate_document(path: &Path) {
     let cache = get_cache();
     if let Ok(mut g) = cache.lock() {
-        let generation = g.document_generations.entry(path.to_path_buf()).or_default();
+        let generation = g
+            .document_generations
+            .entry(path.to_path_buf())
+            .or_default();
         *generation = generation.wrapping_add(1);
-        g.pages.retain(|(cached, _, _, _, _), _| cached.as_path() != path);
-        g.in_flight.retain(|(cached, _, _, _, _)| cached.as_path() != path);
+        cancel_render_jobs(&mut g, |(cached, _, _, _, _)| cached.as_path() == path);
+        g.pages
+            .retain(|(cached, _, _, _, _), _| cached.as_path() != path);
+        g.in_flight
+            .retain(|(cached, _, _, _, _)| cached.as_path() != path);
+        g.render_queue.retain(|job| job.pdf_path != path);
+        g.document_widths.remove(path);
         g.last_crop_key = None;
         g.last_encoded = None;
     }
@@ -225,10 +304,18 @@ pub fn invalidate_document(path: &Path) {
 pub fn release_document(path: &Path) {
     let cache = get_cache();
     if let Ok(mut g) = cache.lock() {
-        let generation = g.document_generations.entry(path.to_path_buf()).or_default();
+        let generation = g
+            .document_generations
+            .entry(path.to_path_buf())
+            .or_default();
         *generation = generation.wrapping_add(1);
-        g.pages.retain(|(cached, _, _, _, _), _| cached.as_path() != path);
-        g.in_flight.retain(|(cached, _, _, _, _)| cached.as_path() != path);
+        cancel_render_jobs(&mut g, |(cached, _, _, _, _)| cached.as_path() == path);
+        g.pages
+            .retain(|(cached, _, _, _, _), _| cached.as_path() != path);
+        g.in_flight
+            .retain(|(cached, _, _, _, _)| cached.as_path() != path);
+        g.render_queue.retain(|job| job.pdf_path != path);
+        g.document_widths.remove(path);
         let mut retained_temp_files = Vec::with_capacity(g.temp_files.len());
         for (document, file) in g.temp_files.drain(..) {
             if document == path {
@@ -238,16 +325,26 @@ pub fn release_document(path: &Path) {
             }
         }
         g.temp_files = retained_temp_files;
-        if g
-            .last_crop_key
-            .as_ref()
-            .is_some_and(|key| key.path_fp == path_fingerprint(path))
+        let path_fp = path_fingerprint(path);
+        if let Some((resident_fp, image_id)) = g.resident_kitty_image
+            && resident_fp == path_fp
         {
-            if let Some(image_id) = g.last_encoded.as_ref().map(|encoded| encoded.image_id) {
-                g.pending_kitty_deletes.push(image_id);
-            }
+            g.pending_kitty_deletes.push(image_id);
+            g.resident_kitty_image = None;
+        }
+        if g.last_crop_key
+            .as_ref()
+            .is_some_and(|key| key.path_fp == path_fp)
+        {
             g.last_crop_key = None;
             g.last_encoded = None;
+        }
+        if !g
+            .render_cancellations
+            .keys()
+            .any(|(cached, _, _, _, _)| cached.as_path() == path)
+        {
+            g.document_generations.remove(path);
         }
     }
 }
@@ -258,7 +355,9 @@ pub fn release_document(path: &Path) {
 pub fn render_pending_kitty_cleanup(frame: &mut Frame<'_>) {
     let deletes = {
         let cache = get_cache();
-        let Ok(mut g) = cache.lock() else { return; };
+        let Ok(mut g) = cache.lock() else {
+            return;
+        };
         std::mem::take(&mut g.pending_kitty_deletes)
     };
     if deletes.is_empty() {
@@ -268,7 +367,12 @@ pub fn render_pending_kitty_cleanup(frame: &mut Frame<'_>) {
         .into_iter()
         .map(kitty_delete_image)
         .collect::<String>();
-    frame.render_widget(KittyCleanup { sequence: &sequence }, Rect::new(frame.area().x, frame.area().y, 1, 1));
+    frame.render_widget(
+        KittyCleanup {
+            sequence: &sequence,
+        },
+        Rect::new(frame.area().x, frame.area().y, 1, 1),
+    );
 }
 
 /// Delete all temporary PNG files.  Call once at application exit.
@@ -287,10 +391,11 @@ pub fn cleanup_temp_files() {
 // ---------------------------------------------------------------------------
 
 const DPI: u32 = 150;
+const MAX_CONCURRENT_RENDERS: usize = 2;
 
 /// Submit a background render job if the result isn't already cached or
 /// in-flight.  Uses a single lock acquisition to check-and-mark atomically.
-fn request_page(pdf_path: &Path, page: usize, dpi: u32, pixel_w: u32) {
+fn request_page(pdf_path: &Path, page: usize, dpi: u32, pixel_w: u32, priority: bool) {
     let cache = get_cache();
     let generation;
     let key;
@@ -303,67 +408,150 @@ fn request_page(pdf_path: &Path, page: usize, dpi: u32, pixel_w: u32) {
         };
         generation = *g.document_generations.get(pdf_path).unwrap_or(&0);
         key = (pdf_path.to_path_buf(), generation, page, dpi, pixel_w);
-        if g.pages.contains_key(&key) || g.in_flight.contains(&key) {
+        if g.pages.contains_key(&key) {
+            return;
+        }
+        if g.in_flight.contains(&key) {
+            if priority
+                && let Some(index) = g.render_queue.iter().position(|job| job.key == key)
+                && let Some(job) = g.render_queue.remove(index)
+            {
+                g.render_queue.push_front(job);
+            }
             return;
         }
         g.in_flight.insert(key.clone());
-    }
-
-    let pdf_path = pdf_path.to_path_buf();
-    thread::spawn(move || {
-        let fp = path_fingerprint(&pdf_path);
-        let temp_dir = std::env::temp_dir();
-        let prefix = temp_dir.join(format!(
-            "papr_pdf_{}_fp{:x}_g{}_p{}_d{}",
-            std::process::id(),
-            fp,
+        let cancelled = Arc::new(AtomicBool::new(false));
+        g.render_cancellations
+            .insert(key.clone(), cancelled.clone());
+        let job = RenderJob {
+            key,
+            pdf_path: pdf_path.to_path_buf(),
             generation,
             page,
             dpi,
-        ));
-        let png = prefix.with_extension("png");
+            pixel_w,
+            cancelled,
+        };
+        if priority {
+            g.render_queue.push_front(job);
+        } else {
+            g.render_queue.push_back(job);
+        }
+    }
 
-        let result = render_page_blocking(&pdf_path, page, dpi, pixel_w, &prefix, &png);
+    pump_render_queue();
+}
 
-        if let Ok(mut g) = cache.lock() {
-            g.in_flight.remove(&key);
-            let current_generation = *g.document_generations.get(&pdf_path).unwrap_or(&0);
-            match result {
-                _ if current_generation != generation => {
-                    // The document was closed/replaced while Poppler ran.
-                    // Do not let its disk raster outlive the document either.
-                    let _ = std::fs::remove_file(&png);
-                },
-                Ok(page_data) => {
-                    g.pages.insert(key, page_data);
-                    if !g.temp_files.iter().any(|(_, file)| file == &png) {
-                        g.temp_files.push((pdf_path.clone(), png));
+fn pump_render_queue() {
+    loop {
+        let (cache, job) = {
+            let cache = get_cache();
+            let mut g = match cache.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            if g.active_renders >= MAX_CONCURRENT_RENDERS {
+                return;
+            }
+            let Some(job) = g.render_queue.pop_front() else {
+                return;
+            };
+            g.active_renders += 1;
+            (cache.clone(), job)
+        };
+
+        thread::spawn(move || {
+            let RenderJob {
+                key,
+                pdf_path,
+                generation,
+                page,
+                dpi,
+                pixel_w,
+                cancelled,
+            } = job;
+            let fp = path_fingerprint(&pdf_path);
+            let temp_dir = std::env::temp_dir();
+            let prefix = temp_dir.join(format!(
+                "papr_pdf_{}_fp{:x}_g{}_p{}_d{}_w{}",
+                std::process::id(),
+                fp,
+                generation,
+                page,
+                dpi,
+                pixel_w,
+            ));
+            let png = prefix.with_extension("png");
+
+            let result = render_page_blocking(&pdf_path, page, pixel_w, &prefix, &png, &cancelled);
+
+            if let Ok(mut g) = cache.lock() {
+                g.active_renders = g.active_renders.saturating_sub(1);
+                g.in_flight.remove(&key);
+                g.render_cancellations.remove(&key);
+                let current_generation = *g.document_generations.get(&pdf_path).unwrap_or(&0);
+                let current_width = g.document_widths.get(&pdf_path).copied();
+                match result {
+                    _ if current_generation != generation || current_width != Some(pixel_w) => {
+                        // The document was closed/replaced while Poppler ran.
+                        // Do not let its disk raster outlive the document either.
+                        let _ = std::fs::remove_file(&png);
+                    }
+                    Ok(page_data) => {
+                        g.pages.insert(key, page_data);
+                        if !g.temp_files.iter().any(|(_, file)| file == &png) {
+                            g.temp_files.push((pdf_path.clone(), png));
+                        }
+                    }
+                    Err(_) => {
+                        // A failed Poppler/decode attempt may still have created
+                        // a partial PNG. It has no cache owner, so remove it now.
+                        let _ = std::fs::remove_file(&png);
                     }
                 }
-                Err(_) => {
-                    // A failed Poppler/decode attempt may still have created
-                    // a partial PNG. It has no cache owner, so remove it now.
-                    let _ = std::fs::remove_file(&png);
+                if !g.document_widths.contains_key(&pdf_path)
+                    && !g.pages.keys().any(|(path, _, _, _, _)| path == &pdf_path)
+                    && !g
+                        .in_flight
+                        .iter()
+                        .any(|(path, _, _, _, _)| path == &pdf_path)
+                    && !g.render_queue.iter().any(|job| job.pdf_path == pdf_path)
+                    && !g
+                        .render_cancellations
+                        .keys()
+                        .any(|(path, _, _, _, _)| path == &pdf_path)
+                {
+                    g.document_generations.remove(&pdf_path);
                 }
             }
-        }
-    });
+            pump_render_queue();
+        });
+    }
 }
 
 fn render_page_blocking(
     pdf_path: &Path,
     page: usize,
-    dpi: u32,
     pixel_w: u32,
     prefix: &Path,
     png_path: &Path,
+    cancelled: &AtomicBool,
 ) -> Result<RenderedPage> {
+    if cancelled.load(Ordering::Acquire) {
+        anyhow::bail!("PDF render cancelled");
+    }
     if !png_path.exists() {
-        let status = std::process::Command::new("pdftoppm")
+        let mut child = std::process::Command::new("pdftoppm")
             .arg("-png")
             .arg("-singlefile")
-            .arg("-r")
-            .arg(dpi.to_string())
+            // Rasterize at the size Papr will display. Rendering a larger
+            // 150-DPI page and immediately downscaling it needlessly holds
+            // both full-size buffers at once.
+            .arg("-scale-to-x")
+            .arg(pixel_w.to_string())
+            .arg("-scale-to-y")
+            .arg("-1")
             .arg("-f")
             .arg(page.to_string())
             .arg(pdf_path)
@@ -374,11 +562,28 @@ fn render_page_blocking(
             // Rendering success is determined by the exit status and output
             // image below; keep parser warnings out of the user interface.
             .stderr(std::process::Stdio::null())
-            .status()
+            .spawn()
             .context("failed to spawn pdftoppm")?;
+        let status = loop {
+            if cancelled.load(Ordering::Acquire) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(png_path);
+                anyhow::bail!("PDF render cancelled");
+            }
+            if let Some(status) = child.try_wait().context("failed to wait for pdftoppm")? {
+                break status;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        };
         if !status.success() {
             anyhow::bail!("pdftoppm exited with {:?}", status);
         }
+    }
+
+    if cancelled.load(Ordering::Acquire) {
+        let _ = std::fs::remove_file(png_path);
+        anyhow::bail!("PDF render cancelled");
     }
 
     let img = image::open(png_path).context("failed to decode PNG")?;
@@ -424,8 +629,7 @@ fn crop_view(src: &RgbaImage, crop_y: u32, crop_h: u32) -> DynamicImage {
     let copy_len = slice.len().min(expected_len);
     data[..copy_len].copy_from_slice(&slice[..copy_len]);
 
-    let buf = RgbaImage::from_raw(w, crop_h, data)
-        .unwrap_or_else(|| RgbaImage::new(w, crop_h));
+    let buf = RgbaImage::from_raw(w, crop_h, data).unwrap_or_else(|| RgbaImage::new(w, crop_h));
     DynamicImage::ImageRgba8(buf)
 }
 
@@ -442,29 +646,37 @@ fn crop_view(src: &RgbaImage, crop_y: u32, crop_h: u32) -> DynamicImage {
 /// the given `id`.  The data is chunked at 4096 base64 chars per chunk.
 fn kitty_transmit(img: &DynamicImage, id: u32) -> String {
     let (w, h) = (img.width(), img.height());
-    let img_rgba8 = img.to_rgba8();
-    let bytes = img_rgba8.as_raw();
+    // Every Papr crop is already RGBA. Avoid cloning the entire viewport just
+    // to obtain its byte slice; retain the conversion fallback for callers
+    // that provide another DynamicImage variant.
+    let converted;
+    let bytes = if let Some(rgba) = img.as_rgba8() {
+        rgba.as_raw()
+    } else {
+        converted = img.to_rgba8();
+        converted.as_raw()
+    };
 
     const CHARS_PER_CHUNK: usize = 4096;
     const CHUNK_SIZE: usize = (CHARS_PER_CHUNK / 4) * 3;
-    let chunks: Vec<_> = bytes.chunks(CHUNK_SIZE).collect();
-    let chunk_count = chunks.len();
+    let chunk_count = bytes.len().div_ceil(CHUNK_SIZE);
 
     let bytes_per_chunk = 11 + CHARS_PER_CHUNK + 4;
     let mut data = String::with_capacity(chunk_count * bytes_per_chunk + 64);
 
-    for (i, chunk) in chunks.iter().enumerate() {
-        let payload = base64_encode(chunk);
+    for (i, chunk) in bytes.chunks(CHUNK_SIZE).enumerate() {
         let more = u8::from(chunk_count > (i + 1));
         if i == 0 {
             write!(
                 data,
-                "\x1b_Gq=2,i={id},a=T,U=1,f=32,t=d,s={w},v={h},m={more};{payload}\x1b\\"
+                "\x1b_Gq=2,i={id},a=T,U=1,f=32,t=d,s={w},v={h},m={more};"
             )
             .unwrap();
         } else {
-            write!(data, "\x1b_Gq=2,m={more};{payload}\x1b\\").unwrap();
+            write!(data, "\x1b_Gq=2,m={more};").unwrap();
         }
+        base64_encode_into(chunk, &mut data);
+        data.push_str("\x1b\\");
     }
     data
 }
@@ -477,9 +689,9 @@ fn kitty_delete_image(id: u32) -> String {
 }
 
 /// Minimal base64 encoder (standard alphabet, no padding needed by Kitty).
-fn base64_encode(input: &[u8]) -> String {
+fn base64_encode_into(input: &[u8], out: &mut String) {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((input.len() * 4 + 2) / 3);
+    out.reserve((input.len() * 4 + 2) / 3);
     for chunk in input.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
@@ -498,7 +710,6 @@ fn base64_encode(input: &[u8]) -> String {
             out.push('=');
         }
     }
-    out
 }
 
 /// Row/column diacritics for Kitty unicode placeholder rendering.
@@ -521,29 +732,26 @@ static DIACRITICS: [char; 293] = [
     '\u{81B}', '\u{81C}', '\u{81D}', '\u{81E}', '\u{81F}', '\u{820}', '\u{821}', '\u{822}',
     '\u{823}', '\u{825}', '\u{826}', '\u{827}', '\u{829}', '\u{82A}', '\u{82B}', '\u{82C}',
     '\u{82D}', '\u{951}', '\u{953}', '\u{954}', '\u{F82}', '\u{F83}', '\u{F86}', '\u{F87}',
-    '\u{135D}', '\u{135E}', '\u{135F}', '\u{17DD}', '\u{193A}', '\u{1A17}', '\u{1A75}',
-    '\u{1A76}', '\u{1A77}', '\u{1A78}', '\u{1A79}', '\u{1A7A}', '\u{1A7B}', '\u{1A7C}',
-    '\u{1B6B}', '\u{1B6D}', '\u{1B6E}', '\u{1B6F}', '\u{1B70}', '\u{1B71}', '\u{1B72}',
-    '\u{1B73}', '\u{1CD0}', '\u{1CD1}', '\u{1CD2}', '\u{1CDA}', '\u{1CDB}', '\u{1CDC}',
-    '\u{1CDD}', '\u{1CDE}', '\u{1CDF}', '\u{1CE0}', '\u{1CE2}', '\u{1CE3}', '\u{1CE4}',
-    '\u{1CE5}', '\u{1CE6}', '\u{1CE7}', '\u{1CE8}', '\u{1CED}', '\u{1CF4}', '\u{1CF8}',
-    '\u{1CF9}', '\u{1DC0}', '\u{1DC1}', '\u{1DC3}', '\u{1DC4}', '\u{1DC5}', '\u{1DC6}',
-    '\u{1DC7}', '\u{1DC8}', '\u{1DC9}', '\u{1DCB}', '\u{1DCC}', '\u{1DD1}', '\u{1DD2}',
-    '\u{1DD3}', '\u{1DD4}', '\u{1DD5}', '\u{1DD6}', '\u{1DD7}', '\u{1DD8}', '\u{1DD9}',
-    '\u{1DDA}', '\u{1DDB}', '\u{1DDC}', '\u{1DDD}', '\u{1DDE}', '\u{1DDF}', '\u{1DE0}',
-    '\u{1DE1}', '\u{1DE2}', '\u{1DE3}', '\u{1DE4}', '\u{1DE5}', '\u{1DE6}', '\u{1DFE}',
-    '\u{20D0}', '\u{20D1}', '\u{20D4}', '\u{20D5}', '\u{20D6}', '\u{20D7}', '\u{20DB}',
-    '\u{20DC}', '\u{20E1}', '\u{20E7}', '\u{20E9}', '\u{20F0}', '\u{2CEF}', '\u{2CF0}',
-    '\u{2CF1}', '\u{2DE0}', '\u{2DE1}', '\u{2DE2}', '\u{2DE3}', '\u{2DE4}', '\u{2DE5}',
-    '\u{2DE6}', '\u{2DE7}', '\u{2DE8}', '\u{2DE9}', '\u{2DEA}', '\u{2DEB}', '\u{2DEC}',
-    '\u{2DED}', '\u{2DEE}', '\u{2DEF}', '\u{2DF0}', '\u{2DF1}', '\u{2DF2}', '\u{2DF3}',
-    '\u{2DF4}', '\u{2DF5}', '\u{2DF6}', '\u{2DF7}', '\u{2DF8}', '\u{2DF9}', '\u{2DFA}',
-    '\u{2DFB}', '\u{2DFC}', '\u{2DFD}', '\u{2DFE}', '\u{2DFF}', '\u{A66F}', '\u{A674}',
-    '\u{A675}', '\u{A676}', '\u{A677}', '\u{A678}', '\u{A679}', '\u{A67A}', '\u{A67B}',
-    '\u{A67C}', '\u{A67D}', '\u{A69E}', '\u{A69F}', '\u{A6F0}', '\u{A6F1}', '\u{A8E0}',
-    '\u{A8E1}', '\u{A8E2}', '\u{A8E3}', '\u{A8E4}', '\u{A8E5}', '\u{A8E6}', '\u{A8E7}',
-    '\u{A8E8}', '\u{A8E9}', '\u{A8EA}', '\u{A8EB}', '\u{A8EC}', '\u{A8ED}', '\u{A8EE}',
-    '\u{A8EF}', '\u{A8F0}', '\u{A8F1}',
+    '\u{135D}', '\u{135E}', '\u{135F}', '\u{17DD}', '\u{193A}', '\u{1A17}', '\u{1A75}', '\u{1A76}',
+    '\u{1A77}', '\u{1A78}', '\u{1A79}', '\u{1A7A}', '\u{1A7B}', '\u{1A7C}', '\u{1B6B}', '\u{1B6D}',
+    '\u{1B6E}', '\u{1B6F}', '\u{1B70}', '\u{1B71}', '\u{1B72}', '\u{1B73}', '\u{1CD0}', '\u{1CD1}',
+    '\u{1CD2}', '\u{1CDA}', '\u{1CDB}', '\u{1CDC}', '\u{1CDD}', '\u{1CDE}', '\u{1CDF}', '\u{1CE0}',
+    '\u{1CE2}', '\u{1CE3}', '\u{1CE4}', '\u{1CE5}', '\u{1CE6}', '\u{1CE7}', '\u{1CE8}', '\u{1CED}',
+    '\u{1CF4}', '\u{1CF8}', '\u{1CF9}', '\u{1DC0}', '\u{1DC1}', '\u{1DC3}', '\u{1DC4}', '\u{1DC5}',
+    '\u{1DC6}', '\u{1DC7}', '\u{1DC8}', '\u{1DC9}', '\u{1DCB}', '\u{1DCC}', '\u{1DD1}', '\u{1DD2}',
+    '\u{1DD3}', '\u{1DD4}', '\u{1DD5}', '\u{1DD6}', '\u{1DD7}', '\u{1DD8}', '\u{1DD9}', '\u{1DDA}',
+    '\u{1DDB}', '\u{1DDC}', '\u{1DDD}', '\u{1DDE}', '\u{1DDF}', '\u{1DE0}', '\u{1DE1}', '\u{1DE2}',
+    '\u{1DE3}', '\u{1DE4}', '\u{1DE5}', '\u{1DE6}', '\u{1DFE}', '\u{20D0}', '\u{20D1}', '\u{20D4}',
+    '\u{20D5}', '\u{20D6}', '\u{20D7}', '\u{20DB}', '\u{20DC}', '\u{20E1}', '\u{20E7}', '\u{20E9}',
+    '\u{20F0}', '\u{2CEF}', '\u{2CF0}', '\u{2CF1}', '\u{2DE0}', '\u{2DE1}', '\u{2DE2}', '\u{2DE3}',
+    '\u{2DE4}', '\u{2DE5}', '\u{2DE6}', '\u{2DE7}', '\u{2DE8}', '\u{2DE9}', '\u{2DEA}', '\u{2DEB}',
+    '\u{2DEC}', '\u{2DED}', '\u{2DEE}', '\u{2DEF}', '\u{2DF0}', '\u{2DF1}', '\u{2DF2}', '\u{2DF3}',
+    '\u{2DF4}', '\u{2DF5}', '\u{2DF6}', '\u{2DF7}', '\u{2DF8}', '\u{2DF9}', '\u{2DFA}', '\u{2DFB}',
+    '\u{2DFC}', '\u{2DFD}', '\u{2DFE}', '\u{2DFF}', '\u{A66F}', '\u{A674}', '\u{A675}', '\u{A676}',
+    '\u{A677}', '\u{A678}', '\u{A679}', '\u{A67A}', '\u{A67B}', '\u{A67C}', '\u{A67D}', '\u{A69E}',
+    '\u{A69F}', '\u{A6F0}', '\u{A6F1}', '\u{A8E0}', '\u{A8E1}', '\u{A8E2}', '\u{A8E3}', '\u{A8E4}',
+    '\u{A8E5}', '\u{A8E6}', '\u{A8E7}', '\u{A8E8}', '\u{A8E9}', '\u{A8EA}', '\u{A8EB}', '\u{A8EC}',
+    '\u{A8ED}', '\u{A8EE}', '\u{A8EF}', '\u{A8F0}', '\u{A8F1}',
 ];
 
 fn diacritic(idx: u16) -> char {
@@ -556,11 +764,7 @@ fn diacritic(idx: u16) -> char {
 /// Render a cached Kitty image using unicode placeholders into the ratatui
 /// buffer.  `transmit_seq` is placed into the first cell of the first row;
 /// on subsequent frames it will be an empty string (no re-upload).
-fn render_kitty_placeholders(
-    area: Rect,
-    buf: &mut Buffer,
-    encoded: &EncodedFrame,
-) {
+fn render_kitty_placeholders(area: Rect, buf: &mut Buffer, encoded: &EncodedFrame) {
     let rows = area.height.min(encoded.rows);
     let cols = area.width.min(encoded.cols);
 
@@ -586,7 +790,10 @@ fn render_kitty_placeholders(
             diacritic(u16::from(id_extra))
         )
         .unwrap();
-        symbol.extend(std::iter::repeat_n('\u{10EEEE}', cols.saturating_sub(1) as usize));
+        symbol.extend(std::iter::repeat_n(
+            '\u{10EEEE}',
+            cols.saturating_sub(1) as usize,
+        ));
 
         for x in 1..cols {
             if let Some(cell) = buf.cell_mut((area.left() + x, area.top() + y)) {
@@ -693,6 +900,13 @@ mod kitty_placeholder_tests {
     }
 
     #[test]
+    fn base64_encoder_appends_without_an_intermediate_payload() {
+        let mut output = "prefix:".to_owned();
+        base64_encode_into(b"Papr PDF", &mut output);
+        assert_eq!(output, "prefix:UGFwciBQREY=");
+    }
+
+    #[test]
     fn releasing_a_document_removes_only_its_cache_and_invalidates_jobs() {
         let closed = PathBuf::from("/tmp/papr-closed-document.pdf");
         let other = PathBuf::from("/tmp/papr-other-document.pdf");
@@ -712,12 +926,25 @@ mod kitty_placeholder_tests {
             pixel_h: 1,
             image: Arc::new(RgbaImage::new(1, 1)),
         };
+        let active_key = (closed.clone(), 0, 2, DPI, 1);
+        let active_cancelled = Arc::new(AtomicBool::new(false));
         let cache = get_cache();
         {
             let mut g = cache.lock().unwrap();
             g.pages.insert((closed.clone(), 0, 1, DPI, 1), page.clone());
             g.pages.insert((other.clone(), 0, 1, DPI, 1), page);
-            g.in_flight.insert((closed.clone(), 0, 2, DPI, 1));
+            g.in_flight.insert(active_key.clone());
+            g.render_cancellations
+                .insert(active_key.clone(), active_cancelled.clone());
+            g.render_queue.push_back(RenderJob {
+                key: (closed.clone(), 0, 3, DPI, 1),
+                pdf_path: closed.clone(),
+                generation: 0,
+                page: 3,
+                dpi: DPI,
+                pixel_w: 1,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            });
             g.temp_files.push((closed.clone(), closed_temp.clone()));
             g.temp_files.push((other.clone(), other_temp.clone()));
             g.last_crop_key = Some(CropKey {
@@ -737,6 +964,7 @@ mod kitty_placeholder_tests {
                 id_color: String::new(),
                 retire_image_id: None,
             });
+            g.resident_kitty_image = Some((path_fingerprint(&closed), 77));
         }
 
         release_document(&closed);
@@ -744,17 +972,62 @@ mod kitty_placeholder_tests {
         let mut g = cache.lock().unwrap();
         assert!(!g.pages.keys().any(|(path, _, _, _, _)| path == &closed));
         assert!(!g.in_flight.iter().any(|(path, _, _, _, _)| path == &closed));
+        assert!(!g.render_queue.iter().any(|job| job.pdf_path == closed));
+        assert!(active_cancelled.load(Ordering::Acquire));
         assert!(g.pages.keys().any(|(path, _, _, _, _)| path == &other));
         assert_eq!(g.document_generations.get(&closed), Some(&1));
         assert!(g.last_crop_key.is_none());
         assert!(g.last_encoded.is_none());
         assert!(g.pending_kitty_deletes.contains(&77));
+        assert!(g.resident_kitty_image.is_none());
         assert!(!closed_temp.exists());
         assert!(other_temp.exists());
         g.pages.retain(|(path, _, _, _, _), _| path != &other);
         g.pending_kitty_deletes.retain(|id| *id != 77);
+        g.render_cancellations.remove(&active_key);
+        g.document_generations.remove(&closed);
         g.temp_files.retain(|(_, file)| file != &other_temp);
         let _ = std::fs::remove_file(other_temp);
+        drop(g);
+
+        // A live rebuild must not delete the old terminal image before the
+        // replacement is ready; closing it afterwards must still free it.
+        let rebuilt = PathBuf::from("/tmp/papr-rebuilt-document.pdf");
+        {
+            let mut g = cache.lock().unwrap();
+            g.resident_kitty_image = Some((path_fingerprint(&rebuilt), 88));
+            g.last_crop_key = Some(CropKey {
+                path_fp: path_fingerprint(&rebuilt),
+                page: 1,
+                dpi: DPI,
+                pixel_w: 1,
+                crop_y: 0,
+                crop_h: 1,
+                page_fit: true,
+            });
+            g.last_encoded = Some(EncodedFrame {
+                transmit_seq: "old upload".into(),
+                image_id: 88,
+                cols: 1,
+                rows: 1,
+                id_color: String::new(),
+                retire_image_id: None,
+            });
+        }
+        invalidate_document(&rebuilt);
+        {
+            let g = cache.lock().unwrap();
+            assert_eq!(
+                g.resident_kitty_image,
+                Some((path_fingerprint(&rebuilt), 88))
+            );
+            assert!(!g.pending_kitty_deletes.contains(&88));
+            assert!(g.last_encoded.is_none());
+        }
+        release_document(&rebuilt);
+        let mut g = cache.lock().unwrap();
+        assert!(g.pending_kitty_deletes.contains(&88));
+        g.pending_kitty_deletes.retain(|id| *id != 88);
     }
 }
 
@@ -787,9 +1060,8 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             return;
         }
     };
-    let page_fit = app.page == Page::Projects
-        && app.active_project.is_some()
-        && app.pdf_viewer == "internal";
+    let page_fit =
+        app.page == Page::Projects && app.active_project.is_some() && app.pdf_viewer == "internal";
 
     // Layout
     let chunks = Layout::default()
@@ -800,8 +1072,17 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let status_area = chunks[1];
 
     // ── Single lock: read picker + font size, run physics, read page data ──
-    let (font_w, font_h, page_data_opt, next_page_data_opt, current_page, current_scroll_px_val,
-         last_crop_key, last_encoded_is_some, is_kitty) = {
+    let (
+        font_w,
+        font_h,
+        page_data_opt,
+        next_page_data_opt,
+        current_page,
+        current_scroll_px_val,
+        last_crop_key,
+        last_encoded_is_some,
+        is_kitty,
+    ) = {
         let cache_arc = get_cache();
         let mut g = match cache_arc.lock() {
             Ok(g) => g,
@@ -838,10 +1119,22 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             return;
         }
 
-        // Evict distant pages to bound memory
+        let generation = *g.document_generations.get(&pdf_path).unwrap_or(&0);
+        g.document_widths.insert(pdf_path.clone(), pixel_w);
+
+        // Evict distant pages and stale terminal-width variants. The old code
+        // considered only page number, so every resize could retain another
+        // complete set of page rasters.
         let current_page_val = app.pdf_viewer_page;
-        g.pages.retain(|(_, _, page, _, _), _| {
-            (*page as isize - current_page_val as isize).abs() <= 3
+        g.pages
+            .retain(|(path, cached_generation, page, _, cached_width), _| {
+                path != &pdf_path
+                    || (*cached_generation == generation
+                        && *cached_width == pixel_w
+                        && (*page as isize - current_page_val as isize).abs() <= 2)
+            });
+        cancel_render_jobs(&mut g, |(path, _, _, _, cached_width)| {
+            path == &pdf_path && *cached_width != pixel_w
         });
 
         g.last_viewport_h = pixel_h;
@@ -849,7 +1142,10 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         // The embedded Project preview is a discrete page viewer.  Its
         // fullscreen counterpart keeps the existing smooth scrolling model.
         let now = std::time::Instant::now();
-        let dt = g.last_update.map(|t| (now - t).as_secs_f64()).unwrap_or(0.0);
+        let dt = g
+            .last_update
+            .map(|t| (now - t).as_secs_f64())
+            .unwrap_or(0.0);
         g.last_update = Some(now);
 
         let total_pages = app.pdf_viewer_total_pages;
@@ -860,7 +1156,11 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             g.current_scroll_px = 0.0;
         } else if dt > 0.0 {
             let target_rel = to_relative_px(
-                g.target_page, g.target_scroll_px, g.current_page, &g.pages, default_h,
+                g.target_page,
+                g.target_scroll_px,
+                g.current_page,
+                &g.pages,
+                default_h,
             );
             let diff = target_rel - g.current_scroll_px;
             // Tighter spring: snaps within 1 px instead of dragging for several frames
@@ -881,19 +1181,30 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         app.pdf_viewer_scroll_y = (g.current_scroll_px / font_h as f64) as u32;
 
         let dpi = DPI;
-        let generation = *g.document_generations.get(&pdf_path).unwrap_or(&0);
         let key: PageKey = (pdf_path.clone(), generation, g.current_page, dpi, pixel_w);
         let page_data = g.pages.get(&key).cloned();
-        let next_key: PageKey = (pdf_path.clone(), generation, g.current_page + 1, dpi, pixel_w);
+        let next_key: PageKey = (
+            pdf_path.clone(),
+            generation,
+            g.current_page + 1,
+            dpi,
+            pixel_w,
+        );
         let next_page_data = g.pages.get(&next_key).cloned();
 
         let last_crop_key = g.last_crop_key.clone();
         let last_encoded_is_some = g.last_encoded.is_some();
 
         (
-            font_w, font_h, page_data, next_page_data,
-            g.current_page, g.current_scroll_px,
-            last_crop_key, last_encoded_is_some, is_kitty,
+            font_w,
+            font_h,
+            page_data,
+            next_page_data,
+            g.current_page,
+            g.current_scroll_px,
+            last_crop_key,
+            last_encoded_is_some,
+            is_kitty,
         )
     };
     // ── Lock released ────────────────────────────────────────────────────
@@ -906,11 +1217,13 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     let dpi = DPI;
 
-    // Submit pre-render jobs (no lock held here)
-    for delta in [-2i32, -1, 0, 1, 2] {
+    // Submit the visible page first, then favor forward scrolling. The bounded
+    // renderer queue prevents speculative neighbours from delaying the page
+    // the user is actually waiting for.
+    for delta in [0i32, 1, -1, 2, -2] {
         let p = current_page as i32 + delta;
         if p >= 1 && p as usize <= app.pdf_viewer_total_pages {
-            request_page(&pdf_path, p as usize, dpi, pixel_w);
+            request_page(&pdf_path, p as usize, dpi, pixel_w, delta == 0);
         }
     }
 
@@ -934,7 +1247,11 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     "Rendering page {}{}  (press Esc to cancel)",
                     current_page, dots
                 ))
-                .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                .style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .alignment(ratatui::layout::Alignment::Center),
                 pdf_area,
             );
@@ -945,8 +1262,16 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     let page_h = page_data.pixel_h;
     app.pdf_viewer_page_pixel_h = page_h;
-    let max_scroll_px = if page_fit { 0 } else { page_h.saturating_sub(pixel_h) };
-    let scroll_px = if page_fit { 0 } else { (current_scroll_px_val as u32).min(page_h) };
+    let max_scroll_px = if page_fit {
+        0
+    } else {
+        page_h.saturating_sub(pixel_h)
+    };
+    let scroll_px = if page_fit {
+        0
+    } else {
+        (current_scroll_px_val as u32).min(page_h)
+    };
     let max_scroll_cells = max_scroll_px / (font_h as u32);
     app.pdf_viewer_max_scroll_y = max_scroll_cells;
 
@@ -989,7 +1314,11 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 let id = g.next_kitty_id;
                 g.next_kitty_id = g.next_kitty_id.wrapping_add(1).max(1);
                 let transmit_seq = kitty_transmit(&cropped, id);
-                let retire_image_id = g.last_encoded.as_ref().map(|frame| frame.image_id);
+                let path_fp = path_fingerprint(&pdf_path);
+                let retire_image_id = g
+                    .resident_kitty_image
+                    .filter(|(resident_fp, _)| *resident_fp == path_fp)
+                    .map(|(_, resident_id)| resident_id);
 
                 let [_id_extra, id_r, id_g, id_b] = id.to_be_bytes();
                 let id_color = format!("\x1b[38;2;{id_r};{id_g};{id_b}m");
@@ -1005,6 +1334,7 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     id_color,
                     retire_image_id,
                 });
+                g.resident_kitty_image = Some((path_fp, id));
                 g.last_crop_key = Some(crop_key);
             }
         } else {
@@ -1023,9 +1353,13 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     &mut local_proto,
                 );
                 render_status_bar(
-                    frame, status_area, &pdf_path, current_page, app,
-
-                    app.pdf_viewer_scroll_y, max_scroll_cells,
+                    frame,
+                    status_area,
+                    &pdf_path,
+                    current_page,
+                    app,
+                    app.pdf_viewer_scroll_y,
+                    max_scroll_cells,
                 );
                 return;
             }
@@ -1035,8 +1369,8 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     // ── Blit: write unicode placeholders (zero image data re-upload) ─────
     if is_kitty {
         let cache_arc = get_cache();
-        if let Ok(g) = cache_arc.lock() {
-            if let Some(ref encoded) = g.last_encoded {
+        if let Ok(mut g) = cache_arc.lock() {
+            if let Some(ref mut encoded) = g.last_encoded {
                 // Only include transmit_seq on frames where we just encoded;
                 // on static frames the string is empty (we reuse existing ID).
                 // Clone the encoded frame so we can drop the lock before rendering.
@@ -1045,7 +1379,7 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     // full APC upload string.  If not (same crop key), we want
                     // an empty string so we only draw placeholders.
                     transmit_seq: if need_encode {
-                        encoded.transmit_seq.clone()
+                        std::mem::take(&mut encoded.transmit_seq)
                     } else {
                         String::new()
                     },
@@ -1054,13 +1388,18 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     rows: encoded.rows,
                     id_color: encoded.id_color.clone(),
                     retire_image_id: if need_encode {
-                        encoded.retire_image_id
+                        encoded.retire_image_id.take()
                     } else {
                         None
                     },
                 };
                 drop(g);
-                frame.render_widget(KittyBlit { encoded: &blit_frame }, pdf_area);
+                frame.render_widget(
+                    KittyBlit {
+                        encoded: &blit_frame,
+                    },
+                    pdf_area,
+                );
             }
         }
     }
@@ -1081,7 +1420,11 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 /// complete PDF page regardless of the page's aspect ratio.
 fn fit_page_to_viewport(page: &RgbaImage, viewport_w: u32, viewport_h: u32) -> DynamicImage {
     let scaled = DynamicImage::ImageRgba8(page.clone())
-        .resize(viewport_w, viewport_h, image::imageops::FilterType::Triangle)
+        .resize(
+            viewport_w,
+            viewport_h,
+            image::imageops::FilterType::Triangle,
+        )
         .into_rgba8();
     let mut canvas = RgbaImage::from_pixel(viewport_w, viewport_h, Rgba([255, 255, 255, 255]));
     let x = i64::from(viewport_w.saturating_sub(scaled.width()) / 2);
@@ -1111,7 +1454,9 @@ fn render_status_bar(
     let status = Line::from(vec![
         Span::styled(
             format!(" {} ", filename),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(" │ {}/{} ", page, app.pdf_viewer_total_pages),
@@ -1159,7 +1504,11 @@ pub fn is_animating() -> bool {
         if let Ok(g) = arc.lock() {
             let default_h = 1000.0;
             let target_rel = to_relative_px(
-                g.target_page, g.target_scroll_px, g.current_page, &g.pages, default_h,
+                g.target_page,
+                g.target_scroll_px,
+                g.current_page,
+                &g.pages,
+                default_h,
             );
             return (target_rel - g.current_scroll_px).abs() > 1.0;
         }
@@ -1171,7 +1520,11 @@ pub fn is_animating() -> bool {
 // Smooth scroll physics & stitching helpers
 // ---------------------------------------------------------------------------
 
-fn get_page_height_helper(page: usize, pages: &HashMap<PageKey, RenderedPage>, default_h: f64) -> f64 {
+fn get_page_height_helper(
+    page: usize,
+    pages: &HashMap<PageKey, RenderedPage>,
+    default_h: f64,
+) -> f64 {
     for (key, val) in pages {
         if key.2 == page {
             return val.pixel_h as f64;
@@ -1349,16 +1702,12 @@ fn crop_and_stitch(
         }
     }
 
-    let stitched = RgbaImage::from_raw(w, viewport_h, data)
-        .unwrap_or_else(|| RgbaImage::new(w, viewport_h));
+    let stitched =
+        RgbaImage::from_raw(w, viewport_h, data).unwrap_or_else(|| RgbaImage::new(w, viewport_h));
     DynamicImage::ImageRgba8(stitched)
 }
 
-fn crop_single_with_padding(
-    curr_img: &RgbaImage,
-    scroll_y: u32,
-    viewport_h: u32,
-) -> DynamicImage {
+fn crop_single_with_padding(curr_img: &RgbaImage, scroll_y: u32, viewport_h: u32) -> DynamicImage {
     let w = curr_img.width();
     if w == 0 || viewport_h == 0 {
         return DynamicImage::ImageRgba8(RgbaImage::new(w.max(1), viewport_h.max(1)));
@@ -1386,7 +1735,7 @@ fn crop_single_with_padding(
         pixel[3] = 255;
     });
 
-    let stitched = RgbaImage::from_raw(w, viewport_h, data)
-        .unwrap_or_else(|| RgbaImage::new(w, viewport_h));
+    let stitched =
+        RgbaImage::from_raw(w, viewport_h, data).unwrap_or_else(|| RgbaImage::new(w, viewport_h));
     DynamicImage::ImageRgba8(stitched)
 }
