@@ -2666,6 +2666,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "crossterm",
+ "flate2",
  "iana-time-zone",
  "image",
  "notify",

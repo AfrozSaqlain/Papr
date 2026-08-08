@@ -32,7 +32,7 @@ use papr_core::{
      terminal_path_candidates, terminal_home_directory, sort_terminal_candidates, sanitize_terminal_output, parse_command, 
     select_dashboard_papers, shuffle_daily_bucket,
 
-    expand_tabs_for_editor_view, project_editor_line_at, prev_char_boundary, next_char_boundary, cursor_from_visual_position, cursor_visual_position, config_editor_wrap_rows, config_editor_line_start, config_editor_line_end, prev_word_boundary, next_word_boundary, parse_latex_diagnostics, get_pdf_page_count, move_pdf_file, validate_collection_name,
+    expand_tabs_for_editor_view, project_editor_line_at, prev_char_boundary, next_char_boundary, cursor_from_visual_position, cursor_visual_position, config_editor_wrap_rows, config_editor_line_start, config_editor_line_end, prev_word_boundary, next_word_boundary, parse_latex_diagnostics, move_pdf_file, validate_collection_name,
 
     ArxivClient, CollectionDirectory, Config, Database,     DownloadEvent, DownloadManager, DownloadStatus, DownloadTask, ImportedPdf, LibraryIndexer,
     LibraryWatcher, PaperNote, Paths, PluginHost, RemotePaper, Project,
@@ -1190,14 +1190,16 @@ impl ProjectCompiler {
         let pdf = self.project.path.join("main.pdf");
         if !pdf.exists() { return false; }
         let page = app.pdf_viewer_page;
-        app.pdf_viewer_total_pages = get_pdf_page_count(&pdf);
-        app.pdf_viewer_page = page.min(app.pdf_viewer_total_pages.max(1));
         if app.pdf_viewer_path.as_deref() == Some(pdf.as_path()) {
             pdf_viewer::invalidate_document(&pdf);
         } else {
             pdf_viewer::reset_for_new_document(&pdf);
             app.pdf_viewer_path = Some(pdf.clone());
         }
+        if let Some(total_pages) = pdf_viewer::page_count(&pdf) {
+            app.pdf_viewer_total_pages = total_pages;
+        }
+        app.pdf_viewer_page = page.min(app.pdf_viewer_total_pages.max(1));
         if should_open_generated_pdf(&app.pdf_viewer, self.external_pdf_opened) {
             let viewer = app.pdf_viewer.clone();
             let _ = open_pdf(&viewer, &pdf, app, None, None);
@@ -1289,7 +1291,7 @@ fn open_project_workspace(app: &mut App, project: Project) {
         if pdf.exists() {
             pdf_viewer::reset_for_new_document(&pdf);
             app.pdf_viewer_path = Some(pdf.clone());
-            app.pdf_viewer_total_pages = get_pdf_page_count(&pdf);
+            app.pdf_viewer_total_pages = pdf_viewer::page_count(&pdf).unwrap_or(1);
             app.pdf_viewer_page = 1;
             app.pdf_viewer_scroll_y = 0;
             if app.pdf_viewer != "internal" {
@@ -1472,7 +1474,7 @@ fn refresh_project_filesystem(runtime: &mut Runtime, app: &mut App) {
     if pdf.is_file() && app.pdf_viewer_path.as_ref() != Some(&pdf) {
         pdf_viewer::reset_for_new_document(&pdf);
         app.pdf_viewer_path = Some(pdf.clone());
-        app.pdf_viewer_total_pages = get_pdf_page_count(&pdf);
+        app.pdf_viewer_total_pages = pdf_viewer::page_count(&pdf).unwrap_or(1);
         app.pdf_viewer_page = 1;
         app.pdf_viewer_scroll_y = 0;
     }
@@ -3641,7 +3643,7 @@ fn open_pdf(
         app.pdf_viewer_scroll_y = 0;
         app.pdf_viewer_page_pixel_h = 0;
         app.pdf_viewer_max_scroll_y = 0;
-        app.pdf_viewer_total_pages = get_pdf_page_count(path);
+        app.pdf_viewer_total_pages = pdf_viewer::page_count(path).unwrap_or(1);
         app.active_pdf_session_id = session_id;
         app.active_pdf_session_start = Some(std::time::Instant::now());
         app.toast = Some(format!(

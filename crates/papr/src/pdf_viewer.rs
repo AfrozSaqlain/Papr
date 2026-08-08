@@ -32,13 +32,14 @@
 //!
 //! ## Path-scoped cache keys
 //! Every cache entry is keyed by `(path, page, dpi, pixel_w)` so that
-//! different PDFs never share cached images or temp PNG files.
+//! different PDFs never share cached images or temporary raster files.
 
 use crate::state::*;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::hash::{Hash, Hasher};
+use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex, OnceLock,
@@ -47,6 +48,7 @@ use std::sync::{
 use std::thread;
 
 use anyhow::{Context, Result};
+use flate2::{Compression, write::ZlibEncoder};
 use image::{DynamicImage, Rgba, RgbaImage};
 use ratatui::{
     Frame,
@@ -134,6 +136,7 @@ struct RenderJob {
     page: usize,
     dpi: u32,
     pixel_w: u32,
+    priority: bool,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -143,6 +146,8 @@ struct PageCache {
     pages: HashMap<PageKey, RenderedPage>,
     in_flight: std::collections::HashSet<PageKey>,
     document_generations: HashMap<PathBuf, u64>,
+    page_counts: HashMap<(PathBuf, u64), usize>,
+    page_count_in_flight: HashSet<(PathBuf, u64)>,
     document_widths: HashMap<PathBuf, u32>,
     /// Raster files are owned by their source PDF so closing one document can
     /// remove only its files without disturbing another open document.
@@ -189,6 +194,8 @@ fn get_cache() -> Arc<Mutex<PageCache>> {
                 pages: HashMap::new(),
                 in_flight: std::collections::HashSet::new(),
                 document_generations: HashMap::new(),
+                page_counts: HashMap::new(),
+                page_count_in_flight: HashSet::new(),
                 document_widths: HashMap::new(),
                 temp_files: Vec::new(),
                 render_queue: VecDeque::new(),
@@ -258,6 +265,12 @@ pub fn reset_for_new_document(new_path: &Path) {
             .collect::<std::collections::HashSet<_>>();
         g.document_generations
             .retain(|path, _| path == new_path || active_documents.contains(path));
+        g.document_generations
+            .entry(new_path.to_path_buf())
+            .or_default();
+        g.page_counts.retain(|(path, _), _| path == new_path);
+        g.page_count_in_flight
+            .retain(|(path, _)| path == new_path);
         let new_fp = path_fingerprint(new_path);
         if let Some((resident_fp, image_id)) = g.resident_kitty_image
             && resident_fp != new_fp
@@ -293,6 +306,9 @@ pub fn invalidate_document(path: &Path) {
             .retain(|(cached, _, _, _, _)| cached.as_path() != path);
         g.render_queue.retain(|job| job.pdf_path != path);
         g.document_widths.remove(path);
+        g.page_counts.retain(|(cached, _), _| cached != path);
+        g.page_count_in_flight
+            .retain(|(cached, _)| cached != path);
         g.last_crop_key = None;
         g.last_encoded = None;
     }
@@ -316,6 +332,9 @@ pub fn release_document(path: &Path) {
             .retain(|(cached, _, _, _, _)| cached.as_path() != path);
         g.render_queue.retain(|job| job.pdf_path != path);
         g.document_widths.remove(path);
+        g.page_counts.retain(|(cached, _), _| cached != path);
+        g.page_count_in_flight
+            .retain(|(cached, _)| cached != path);
         let mut retained_temp_files = Vec::with_capacity(g.temp_files.len());
         for (document, file) in g.temp_files.drain(..) {
             if document == path {
@@ -349,6 +368,37 @@ pub fn release_document(path: &Path) {
     }
 }
 
+/// Return the known page count, starting a document-generation-scoped
+/// `pdfinfo` query in the background when needed. A result from a closed or
+/// replaced PDF is discarded instead of repopulating the cache.
+pub fn page_count(path: &Path) -> Option<usize> {
+    let cache = get_cache();
+    let path = path.to_path_buf();
+    let key = {
+        let mut g = cache.lock().ok()?;
+        let generation = *g.document_generations.entry(path.clone()).or_default();
+        let key = (path.clone(), generation);
+        if let Some(count) = g.page_counts.get(&key) {
+            return Some(*count);
+        }
+        if !g.page_count_in_flight.insert(key.clone()) {
+            return None;
+        }
+        key
+    };
+
+    thread::spawn(move || {
+        let count = papr_core::get_pdf_page_count(&path).max(1);
+        if let Ok(mut g) = cache.lock() {
+            g.page_count_in_flight.remove(&key);
+            if g.document_generations.get(&path).copied() == Some(key.1) {
+                g.page_counts.insert(key, count);
+            }
+        }
+    });
+    None
+}
+
 /// Emit pending Kitty image deletions as part of Ratatui's next draw.  The
 /// escape sequence is prepended to an existing cell, preserving its visible
 /// text and keeping graphics output synchronized with terminal updates.
@@ -375,7 +425,7 @@ pub fn render_pending_kitty_cleanup(frame: &mut Frame<'_>) {
     );
 }
 
-/// Delete all temporary PNG files.  Call once at application exit.
+/// Delete all temporary raster files. Call once at application exit.
 pub fn cleanup_temp_files() {
     if let Some(arc) = CACHE.get() {
         if let Ok(mut g) = arc.lock() {
@@ -412,11 +462,19 @@ fn request_page(pdf_path: &Path, page: usize, dpi: u32, pixel_w: u32, priority: 
             return;
         }
         if g.in_flight.contains(&key) {
-            if priority
+            let promoted = if priority
                 && let Some(index) = g.render_queue.iter().position(|job| job.key == key)
-                && let Some(job) = g.render_queue.remove(index)
+                && let Some(mut job) = g.render_queue.remove(index)
             {
+                job.priority = true;
                 g.render_queue.push_front(job);
+                true
+            } else {
+                false
+            };
+            drop(g);
+            if promoted {
+                pump_render_queue();
             }
             return;
         }
@@ -431,6 +489,7 @@ fn request_page(pdf_path: &Path, page: usize, dpi: u32, pixel_w: u32, priority: 
             page,
             dpi,
             pixel_w,
+            priority,
             cancelled,
         };
         if priority {
@@ -454,6 +513,15 @@ fn pump_render_queue() {
             if g.active_renders >= MAX_CONCURRENT_RENDERS {
                 return;
             }
+            if g.active_renders > 0
+                && g.render_queue.front().is_some_and(|job| !job.priority)
+            {
+                // Keep one renderer slot free for a newly visible page. This
+                // also lets the first page use Poppler without prefetch CPU
+                // contention, while still allowing a priority render to join
+                // one already-running speculative neighbour.
+                return;
+            }
             let Some(job) = g.render_queue.pop_front() else {
                 return;
             };
@@ -469,6 +537,7 @@ fn pump_render_queue() {
                 page,
                 dpi,
                 pixel_w,
+                priority: _,
                 cancelled,
             } = job;
             let fp = path_fingerprint(&pdf_path);
@@ -482,9 +551,10 @@ fn pump_render_queue() {
                 dpi,
                 pixel_w,
             ));
-            let png = prefix.with_extension("png");
+            let raster = prefix.with_extension("ppm");
 
-            let result = render_page_blocking(&pdf_path, page, pixel_w, &prefix, &png, &cancelled);
+            let result =
+                render_page_blocking(&pdf_path, page, pixel_w, &prefix, &raster, &cancelled);
 
             if let Ok(mut g) = cache.lock() {
                 g.active_renders = g.active_renders.saturating_sub(1);
@@ -496,18 +566,20 @@ fn pump_render_queue() {
                     _ if current_generation != generation || current_width != Some(pixel_w) => {
                         // The document was closed/replaced while Poppler ran.
                         // Do not let its disk raster outlive the document either.
-                        let _ = std::fs::remove_file(&png);
+                        let _ = std::fs::remove_file(&raster);
                     }
                     Ok(page_data) => {
                         g.pages.insert(key, page_data);
-                        if !g.temp_files.iter().any(|(_, file)| file == &png) {
-                            g.temp_files.push((pdf_path.clone(), png));
+                        if raster.exists()
+                            && !g.temp_files.iter().any(|(_, file)| file == &raster)
+                        {
+                            g.temp_files.push((pdf_path.clone(), raster));
                         }
                     }
                     Err(_) => {
                         // A failed Poppler/decode attempt may still have created
-                        // a partial PNG. It has no cache owner, so remove it now.
-                        let _ = std::fs::remove_file(&png);
+                        // a partial raster. It has no cache owner, so remove it.
+                        let _ = std::fs::remove_file(&raster);
                     }
                 }
                 if !g.document_widths.contains_key(&pdf_path)
@@ -535,15 +607,14 @@ fn render_page_blocking(
     page: usize,
     pixel_w: u32,
     prefix: &Path,
-    png_path: &Path,
+    raster_path: &Path,
     cancelled: &AtomicBool,
 ) -> Result<RenderedPage> {
     if cancelled.load(Ordering::Acquire) {
         anyhow::bail!("PDF render cancelled");
     }
-    if !png_path.exists() {
+    if !raster_path.exists() {
         let mut child = std::process::Command::new("pdftoppm")
-            .arg("-png")
             .arg("-singlefile")
             // Rasterize at the size Papr will display. Rendering a larger
             // 150-DPI page and immediately downscaling it needlessly holds
@@ -568,7 +639,7 @@ fn render_page_blocking(
             if cancelled.load(Ordering::Acquire) {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = std::fs::remove_file(png_path);
+                let _ = std::fs::remove_file(raster_path);
                 anyhow::bail!("PDF render cancelled");
             }
             if let Some(status) = child.try_wait().context("failed to wait for pdftoppm")? {
@@ -582,11 +653,14 @@ fn render_page_blocking(
     }
 
     if cancelled.load(Ordering::Acquire) {
-        let _ = std::fs::remove_file(png_path);
+        let _ = std::fs::remove_file(raster_path);
         anyhow::bail!("PDF render cancelled");
     }
 
-    let img = image::open(png_path).context("failed to decode PNG")?;
+    let img = image::open(raster_path).context("failed to decode Poppler raster")?;
+    // The decoded page is the cache owner. Keeping the much larger PPM file
+    // until document close would provide no reuse benefit and wastes disk.
+    let _ = std::fs::remove_file(raster_path);
     let img_w = img.width();
     let img_h = img.height();
     if img_w == 0 || pixel_w == 0 {
@@ -642,10 +716,98 @@ fn crop_view(src: &RgbaImage, crop_y: u32, crop_h: u32) -> DynamicImage {
 // entire image on every frame because the hash comparison fails when we
 // create a new StatefulProtocol from a new DynamicImage each scroll event.
 
+/// Streams compressed bytes into Kitty-sized base64 chunks. Only one encoded
+/// chunk is staged so compression never creates a second full-image buffer.
+struct KittyPayloadWriter {
+    output: String,
+    pending: Vec<u8>,
+    staged: Option<String>,
+    id: u32,
+    width: u32,
+    height: u32,
+    first: bool,
+}
+
+impl KittyPayloadWriter {
+    const BINARY_CHUNK_SIZE: usize = (4096 / 4) * 3;
+
+    fn new(id: u32, width: u32, height: u32) -> Self {
+        Self {
+            output: String::new(),
+            pending: Vec::with_capacity(Self::BINARY_CHUNK_SIZE * 2),
+            staged: None,
+            id,
+            width,
+            height,
+            first: true,
+        }
+    }
+
+    fn stage(&mut self, bytes: &[u8]) {
+        let mut encoded = String::with_capacity(4096);
+        base64_encode_into(bytes, &mut encoded);
+        if let Some(previous) = self.staged.replace(encoded) {
+            self.emit(&previous, true);
+        }
+    }
+
+    fn emit(&mut self, encoded: &str, more: bool) {
+        let more = u8::from(more);
+        if self.first {
+            let (id, width, height) = (self.id, self.width, self.height);
+            write!(
+                self.output,
+                "\x1b_Gq=2,i={id},a=T,U=1,f=32,t=d,s={width},v={height},o=z,m={more};"
+            )
+            .unwrap();
+            self.first = false;
+        } else {
+            write!(self.output, "\x1b_Gq=2,m={more};").unwrap();
+        }
+        self.output.push_str(encoded);
+        self.output.push_str("\x1b\\");
+    }
+
+    fn finish(mut self) -> String {
+        if !self.pending.is_empty() {
+            let final_bytes = std::mem::take(&mut self.pending);
+            self.stage(&final_bytes);
+        }
+        if let Some(last) = self.staged.take() {
+            self.emit(&last, false);
+        }
+        self.output
+    }
+}
+
+impl IoWrite for KittyPayloadWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut remaining = bytes;
+        while !remaining.is_empty() {
+            let available = Self::BINARY_CHUNK_SIZE - self.pending.len();
+            let take = available.min(remaining.len());
+            self.pending.extend_from_slice(&remaining[..take]);
+            remaining = &remaining[take..];
+            if self.pending.len() == Self::BINARY_CHUNK_SIZE {
+                let mut chunk = std::mem::take(&mut self.pending);
+                self.stage(&chunk);
+                chunk.clear();
+                self.pending = chunk;
+            }
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Build a Kitty APC sequence that uploads `img` as a virtual placement with
-/// the given `id`.  The data is chunked at 4096 base64 chars per chunk.
+/// the given `id`. Zlib is lossless and is streamed directly into protocol
+/// chunks, reducing terminal I/O without retaining another image-sized buffer.
 fn kitty_transmit(img: &DynamicImage, id: u32) -> String {
-    let (w, h) = (img.width(), img.height());
+    let (width, height) = (img.width(), img.height());
     // Every Papr crop is already RGBA. Avoid cloning the entire viewport just
     // to obtain its byte slice; retain the conversion fallback for callers
     // that provide another DynamicImage variant.
@@ -657,28 +819,37 @@ fn kitty_transmit(img: &DynamicImage, id: u32) -> String {
         converted.as_raw()
     };
 
-    const CHARS_PER_CHUNK: usize = 4096;
-    const CHUNK_SIZE: usize = (CHARS_PER_CHUNK / 4) * 3;
+    let writer = KittyPayloadWriter::new(id, width, height);
+    let mut encoder = ZlibEncoder::new(writer, Compression::fast());
+    if encoder.write_all(bytes).is_err() {
+        return kitty_transmit_raw(bytes, id, width, height);
+    }
+    encoder.finish().map_or_else(
+        |_| kitty_transmit_raw(bytes, id, width, height),
+        KittyPayloadWriter::finish,
+    )
+}
+
+/// Infallible protocol fallback used only if the zlib encoder fails.
+fn kitty_transmit_raw(bytes: &[u8], id: u32, width: u32, height: u32) -> String {
+    const CHUNK_SIZE: usize = (4096 / 4) * 3;
     let chunk_count = bytes.len().div_ceil(CHUNK_SIZE);
-
-    let bytes_per_chunk = 11 + CHARS_PER_CHUNK + 4;
-    let mut data = String::with_capacity(chunk_count * bytes_per_chunk + 64);
-
-    for (i, chunk) in bytes.chunks(CHUNK_SIZE).enumerate() {
-        let more = u8::from(chunk_count > (i + 1));
-        if i == 0 {
+    let mut output = String::with_capacity(bytes.len() * 4 / 3 + chunk_count * 16 + 64);
+    for (index, chunk) in bytes.chunks(CHUNK_SIZE).enumerate() {
+        let more = u8::from(index + 1 < chunk_count);
+        if index == 0 {
             write!(
-                data,
-                "\x1b_Gq=2,i={id},a=T,U=1,f=32,t=d,s={w},v={h},m={more};"
+                output,
+                "\x1b_Gq=2,i={id},a=T,U=1,f=32,t=d,s={width},v={height},m={more};"
             )
             .unwrap();
         } else {
-            write!(data, "\x1b_Gq=2,m={more};").unwrap();
+            write!(output, "\x1b_Gq=2,m={more};").unwrap();
         }
-        base64_encode_into(chunk, &mut data);
-        data.push_str("\x1b\\");
+        base64_encode_into(chunk, &mut output);
+        output.push_str("\x1b\\");
     }
-    data
+    output
 }
 
 /// Remove image data only after its replacement has been written.  `q=2`
@@ -907,6 +1078,21 @@ mod kitty_placeholder_tests {
     }
 
     #[test]
+    fn kitty_upload_uses_lossless_streaming_compression() {
+        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+            320,
+            200,
+            Rgba([245, 245, 245, 255]),
+        ));
+        let upload = kitty_transmit(&image, 42);
+        let raw = kitty_transmit_raw(image.as_bytes(), 42, 320, 200);
+
+        assert!(upload.contains("f=32,t=d,s=320,v=200,o=z,"));
+        assert!(upload.ends_with("\x1b\\"));
+        assert!(upload.len() < raw.len());
+    }
+
+    #[test]
     fn releasing_a_document_removes_only_its_cache_and_invalidates_jobs() {
         let closed = PathBuf::from("/tmp/papr-closed-document.pdf");
         let other = PathBuf::from("/tmp/papr-other-document.pdf");
@@ -933,6 +1119,10 @@ mod kitty_placeholder_tests {
             let mut g = cache.lock().unwrap();
             g.pages.insert((closed.clone(), 0, 1, DPI, 1), page.clone());
             g.pages.insert((other.clone(), 0, 1, DPI, 1), page);
+            g.page_counts.insert((closed.clone(), 0), 3);
+            g.page_counts.insert((other.clone(), 0), 4);
+            g.page_count_in_flight.insert((closed.clone(), 0));
+            g.page_count_in_flight.insert((other.clone(), 0));
             g.in_flight.insert(active_key.clone());
             g.render_cancellations
                 .insert(active_key.clone(), active_cancelled.clone());
@@ -943,6 +1133,7 @@ mod kitty_placeholder_tests {
                 page: 3,
                 dpi: DPI,
                 pixel_w: 1,
+                priority: false,
                 cancelled: Arc::new(AtomicBool::new(false)),
             });
             g.temp_files.push((closed.clone(), closed_temp.clone()));
@@ -975,6 +1166,16 @@ mod kitty_placeholder_tests {
         assert!(!g.render_queue.iter().any(|job| job.pdf_path == closed));
         assert!(active_cancelled.load(Ordering::Acquire));
         assert!(g.pages.keys().any(|(path, _, _, _, _)| path == &other));
+        assert!(!g.page_counts.keys().any(|(path, _)| path == &closed));
+        assert!(g.page_counts.keys().any(|(path, _)| path == &other));
+        assert!(!g
+            .page_count_in_flight
+            .iter()
+            .any(|(path, _)| path == &closed));
+        assert!(g
+            .page_count_in_flight
+            .iter()
+            .any(|(path, _)| path == &other));
         assert_eq!(g.document_generations.get(&closed), Some(&1));
         assert!(g.last_crop_key.is_none());
         assert!(g.last_encoded.is_none());
@@ -983,6 +1184,9 @@ mod kitty_placeholder_tests {
         assert!(!closed_temp.exists());
         assert!(other_temp.exists());
         g.pages.retain(|(path, _, _, _, _), _| path != &other);
+        g.page_counts.retain(|(path, _), _| path != &other);
+        g.page_count_in_flight
+            .retain(|(path, _)| path != &other);
         g.pending_kitty_deletes.retain(|id| *id != 77);
         g.render_cancellations.remove(&active_key);
         g.document_generations.remove(&closed);
@@ -1060,6 +1264,10 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             return;
         }
     };
+    if let Some(total_pages) = page_count(&pdf_path) {
+        app.pdf_viewer_total_pages = total_pages;
+        app.pdf_viewer_page = app.pdf_viewer_page.min(total_pages.max(1));
+    }
     let page_fit =
         app.page == Page::Projects && app.active_project.is_some() && app.pdf_viewer == "internal";
 
