@@ -12,9 +12,9 @@
   <img src="assets/papr.gif" alt="Demo" width="900">
 </p>
 
-Papr is a fast, terminal-based workspace built for academic research. It brings together a personalized daily papers feed, arXiv search, local PDF library management, reading, Markdown note-taking, automatic author-based paper organization, and LaTeX manuscript editing into a single terminal interface.
+Papr is a fast, terminal-based workspace built for academic research. It brings together a personalized daily papers feed, arXiv search, local PDF library management, reading, Markdown note-taking, automatic author-based paper organization, and manuscript editing with LaTeX and Typst.
 
-Instead of context-switching between web browsers, reference managers, PDF viewers, and text editors, Papr merges online search with local file organization into a distraction-free environment. Under the hood, it's built with Rust using Ratatui, Tokio, Reqwest, and SQLite, giving you a lightweight tool that runs entirely offline and keeps all your data under your control.
+Papr brings these tools together in a single, distraction-free environment, eliminating the need to constantly switch between web browsers, file managers, PDF viewers, and text editors. It seamlessly connects online paper discovery with local file organization, reading, note-taking, and manuscript writing, while keeping your research workflow entirely within the terminal. Under the hood, Papr is built with Rust using Ratatui, Tokio, Reqwest, and SQLite, providing a fast and lightweight experience with offline-first data storage and full control over your research library.
 
 ---
 
@@ -32,29 +32,32 @@ Papr was written in Rust because an academic research workspace needs to be fast
 ## Key Features
 
 ### Dashboard & Discovery
-* **Daily Research Dashboard:** Displays 10 new random papers daily into your feed, from your predefined keywords, which you can customize in the **Settings** workspace to match your field of interest, helping you stay up to date with the latest advancements in your research area. Also lets you track reading time, active streaks, disk usage, and much more.
-* **Integrated arXiv Search:** Search arXiv directly by title, author, category, abstract, or DOI. Search results load incrementally, let you filter on the fly.
+* **Daily Research Dashboard:** Displays 10 new random papers daily into your feed, from your predefined keywords, (which you can customize in the **Settings** workspace to match your field of interest) helping you stay up to date with the latest advancements in your research area. Also lets you track reading time, active streaks, disk usage, and much more.
+* **Integrated arXiv Search:** Search arXiv directly by title, author, category, abstract, or DOI. Search results load incrementally, and lets you filter on the fly.
 * **Clean Filenames:** Downloads run in the background and are automatically saved with sanitized, human-readable titles instead of cryptic arXiv IDs (e.g., `2401.12345.pdf`).
 * **Smart Deduplication:** Resolves database conflicts across your library (matching arXiv ID, file path, or DOI) and merges records during downloads or scans without losing your existing notes, bookmarks, or reading progress.
 * **Workspace & Disk Sync:** Organizing papers into groups inside the TUI automatically mirrors those changes in your local folder structure on disk.
 
 ### Reading & Note-taking
 * **In-Terminal PDF Viewing:** Read papers directly inside the terminal with smooth scrolling using Kitty or Sixel graphics protocols.
-* **External Viewer & Browser Integration:** Open PDFs in external readers like Zathura or Okular (while Papr continues tracking your reading time) or jump straight to the paper in your web browser.
+* **External Viewer & Browser Integration:** Open PDFs in external readers like Zathura or Okular or jump straight to the paper in your web browser.
 * **Markdown Annotations:** Write dedicated per-paper notes using a built-in Vim-inspired markdown editor with a live styled preview.
 * **Reading Queue:** Prioritize your reading list with a dedicated, sortable queue.
+> [!NOTE]
+> Reading time is tracked when papers are opened in Papr's in-terminal PDF viewer or supported external viewers such as Zathura and Okular. Papr can track these reader subprocesses, but reading time is not tracked when a paper is opened directly in a web browser.
+
 
 ### LaTeX and Typst Integration
-* **Built-in Writing Workspace:** Create, edit, and compile LaTeX or Typst manuscripts directly within the TUI.
-* **Real-time Compilation:** Asynchronous background compilation powered by `latexmk` for LaTeX and an embedded Typst compiler for Typst.
-* **No Typst Installation Required:** Typst compilation, PDF export, system and bundled fonts, and Typst Universe package support are built into Papr.
-* **Typst Package Imports:** In a Typst project, import local `.typ` files from the project directory, published Typst Universe packages in the `@preview` namespace, or system-local packages in the `@local` namespace. Papr supports packages compatible with its embedded Typst version. Universe packages are downloaded on first use and cached for subsequent offline builds.
-* **PDF-First Layout:** Work with the live PDF preview side-by-side with your editor, and also track build logs.
-* **Smart Diagnostics:** LaTeX and native Typst diagnostics are grouped with exact source locations, code snippets, diagnostic hints, and a raw log view.
-* **Full Project File Management:** Navigate project tree structures, create nested files and directories, rename entries, and edit code with familiar Vim-style keybindings.
+- **Built-in Writing Workspace:** Create, edit, and compile LaTeX and Typst manuscripts directly within the TUI.
+- **Real-time Compilation:** Compile asynchronously in the background using `latexmk` for LaTeX and Papr's embedded Typst compiler for Typst.
+- **No Typst Installation Required:** Typst compilation, PDF export, system and bundled fonts, and Typst Universe package support are built directly into Papr.
+- **Typst Package Support:** Import local `.typ` files from your project, published Typst Universe packages through the `@preview` namespace, or system-local packages through the `@local` namespace. Universe packages are downloaded automatically on first use and cached for subsequent builds, including offline builds.
+- **PDF-First Workflow:** View the live PDF preview alongside your editor and monitor compilation through integrated build logs.
+- **Smart Diagnostics:** View LaTeX and native Typst diagnostics with exact source locations, code snippets, diagnostic hints, and access to the raw compiler log.
+- **Full Project File Management:** Navigate project trees, create nested files and directories, rename entries, and edit source files using familiar Vim-style keybindings.
 
 > [!NOTE]
-> Downloaded Typst Universe packages are cached by namespace, name, and version. The default cache location is `$XDG_CACHE_HOME/typst/packages` (or `~/.cache/typst/packages`) on Linux, `~/Library/Caches/typst/packages` on macOS, and `%LOCALAPPDATA%/typst/packages` on Windows. Cached packages do not expire automatically; they remain available for offline builds until removed by the user or the operating system's cache-cleanup tooling.
+> Typst Universe packages are cached by namespace, package name, and version. By default, the cache is stored in `$XDG_CACHE_HOME/typst/packages` (or `~/.cache/typst/packages`) on Linux, `~/Library/Caches/typst/packages` on macOS, and `%LOCALAPPDATA%/typst/packages` on Windows. Cached packages do not expire automatically and remain available for offline builds until removed by the user or the operating system's cache-cleanup mechanism.
 
 ### Extensibility
 * **Process-Isolated Plugins:** Extend workflows using language-agnostic, versioned JSON plugins running in isolated processes with bounded execution limits. Comes with an opt-in auto-tagging plugin out of the box.
