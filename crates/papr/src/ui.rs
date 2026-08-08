@@ -256,6 +256,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     );
     if area.width < 58 || area.height < 18 {
         render_too_small(frame, area, theme);
+        crate::pdf_viewer::render_pending_kitty_cleanup(frame);
         return;
     }
 
@@ -330,6 +331,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         } else {
             crossterm::cursor::SetCursorStyle::BlinkingBar
         };
+    crate::pdf_viewer::render_pending_kitty_cleanup(frame);
     let _ = crossterm::execute!(std::io::stdout(), cursor_style);
 }
 

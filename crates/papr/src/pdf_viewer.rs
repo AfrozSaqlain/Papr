@@ -131,7 +131,9 @@ struct PageCache {
     pages: HashMap<PageKey, RenderedPage>,
     in_flight: std::collections::HashSet<PageKey>,
     document_generations: HashMap<PathBuf, u64>,
-    temp_files: Vec<PathBuf>,
+    /// Raster files are owned by their source PDF so closing one document can
+    /// remove only its files without disturbing another open document.
+    temp_files: Vec<(PathBuf, PathBuf)>,
 
     // ── Scroll state ─────────────────────────────────────────────────────
     last_viewport_h: u32,
@@ -149,6 +151,10 @@ struct PageCache {
     /// Next Kitty image ID.  A new ID is used for each crop so the old image
     /// stays visible until the new virtual placement is on screen.
     next_kitty_id: u32,
+    /// Kitty image IDs that must be retired during the next Ratatui draw.
+    /// Keeping this in the draw pipeline avoids writing graphics escapes
+    /// directly to stdout while Ratatui owns terminal output.
+    pending_kitty_deletes: Vec<u32>,
 }
 
 static CACHE: OnceLock<Arc<Mutex<PageCache>>> = OnceLock::new();
@@ -171,6 +177,7 @@ fn get_cache() -> Arc<Mutex<PageCache>> {
                 last_crop_key: None,
                 last_encoded: None,
                 next_kitty_id: 1,
+                pending_kitty_deletes: Vec::new(),
             }))
         })
         .clone()
@@ -212,24 +219,65 @@ pub fn invalidate_document(path: &Path) {
     }
 }
 
-/// Delete all temporary PNG files.  Call once at application exit.
-pub fn cleanup_temp_files() {
-    if let Some(arc) = CACHE.get() {
-        if let Ok(mut g) = arc.lock() {
-            for p in g.temp_files.drain(..) {
-                let _ = std::fs::remove_file(p);
+/// Release raster and encoded state for a document that is no longer open.
+/// Advancing the generation first prevents an already-running raster job from
+/// inserting its result after the cache entries have been removed.
+pub fn release_document(path: &Path) {
+    let cache = get_cache();
+    if let Ok(mut g) = cache.lock() {
+        let generation = g.document_generations.entry(path.to_path_buf()).or_default();
+        *generation = generation.wrapping_add(1);
+        g.pages.retain(|(cached, _, _, _, _), _| cached.as_path() != path);
+        g.in_flight.retain(|(cached, _, _, _, _)| cached.as_path() != path);
+        let mut retained_temp_files = Vec::with_capacity(g.temp_files.len());
+        for (document, file) in g.temp_files.drain(..) {
+            if document == path {
+                let _ = std::fs::remove_file(file);
+            } else {
+                retained_temp_files.push((document, file));
             }
+        }
+        g.temp_files = retained_temp_files;
+        if g
+            .last_crop_key
+            .as_ref()
+            .is_some_and(|key| key.path_fp == path_fingerprint(path))
+        {
+            if let Some(image_id) = g.last_encoded.as_ref().map(|encoded| encoded.image_id) {
+                g.pending_kitty_deletes.push(image_id);
+            }
+            g.last_crop_key = None;
+            g.last_encoded = None;
         }
     }
 }
 
-/// Evict rendered pages far from `current_page` to bound memory use.
-pub fn evict_distant_pages(current_page: usize) {
+/// Emit pending Kitty image deletions as part of Ratatui's next draw.  The
+/// escape sequence is prepended to an existing cell, preserving its visible
+/// text and keeping graphics output synchronized with terminal updates.
+pub fn render_pending_kitty_cleanup(frame: &mut Frame<'_>) {
+    let deletes = {
+        let cache = get_cache();
+        let Ok(mut g) = cache.lock() else { return; };
+        std::mem::take(&mut g.pending_kitty_deletes)
+    };
+    if deletes.is_empty() {
+        return;
+    }
+    let sequence = deletes
+        .into_iter()
+        .map(kitty_delete_image)
+        .collect::<String>();
+    frame.render_widget(KittyCleanup { sequence: &sequence }, Rect::new(frame.area().x, frame.area().y, 1, 1));
+}
+
+/// Delete all temporary PNG files.  Call once at application exit.
+pub fn cleanup_temp_files() {
     if let Some(arc) = CACHE.get() {
         if let Ok(mut g) = arc.lock() {
-            g.pages.retain(|(_, _, page, _, _), _| {
-                (*page as isize - current_page as isize).abs() <= 3
-            });
+            for (_, file) in g.temp_files.drain(..) {
+                let _ = std::fs::remove_file(file);
+            }
         }
     }
 }
@@ -281,14 +329,22 @@ fn request_page(pdf_path: &Path, page: usize, dpi: u32, pixel_w: u32) {
             g.in_flight.remove(&key);
             let current_generation = *g.document_generations.get(&pdf_path).unwrap_or(&0);
             match result {
-                _ if current_generation != generation => {},
+                _ if current_generation != generation => {
+                    // The document was closed/replaced while Poppler ran.
+                    // Do not let its disk raster outlive the document either.
+                    let _ = std::fs::remove_file(&png);
+                },
                 Ok(page_data) => {
                     g.pages.insert(key, page_data);
+                    if !g.temp_files.iter().any(|(_, file)| file == &png) {
+                        g.temp_files.push((pdf_path.clone(), png));
+                    }
                 }
-                Err(_) => {} // draw function will retry next frame
-            }
-            if !g.temp_files.contains(&png) {
-                g.temp_files.push(png);
+                Err(_) => {
+                    // A failed Poppler/decode attempt may still have created
+                    // a partial PNG. It has no cache owner, so remove it now.
+                    let _ = std::fs::remove_file(&png);
+                }
             }
         }
     });
@@ -569,6 +625,20 @@ impl Widget for KittyBlit<'_> {
     }
 }
 
+struct KittyCleanup<'a> {
+    sequence: &'a str,
+}
+
+impl Widget for KittyCleanup<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if let Some(cell) = buf.cell_mut((area.x, area.y)) {
+            let visible_symbol = cell.symbol().to_owned();
+            let symbol = format!("{}{}", self.sequence, visible_symbol);
+            cell.set_symbol(&symbol);
+        }
+    }
+}
+
 #[cfg(test)]
 mod kitty_placeholder_tests {
     use super::*;
@@ -620,6 +690,71 @@ mod kitty_placeholder_tests {
         let placeholder = final_row.rfind('\u{10EEEE}').unwrap();
         let delete = final_row.find("a=d,d=I,i=1").unwrap();
         assert!(delete > placeholder);
+    }
+
+    #[test]
+    fn releasing_a_document_removes_only_its_cache_and_invalidates_jobs() {
+        let closed = PathBuf::from("/tmp/papr-closed-document.pdf");
+        let other = PathBuf::from("/tmp/papr-other-document.pdf");
+        let closed_temp = std::env::temp_dir().join(format!(
+            "papr-closed-raster-{}-{}.png",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let other_temp = std::env::temp_dir().join(format!(
+            "papr-other-raster-{}-{}.png",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::write(&closed_temp, []).unwrap();
+        std::fs::write(&other_temp, []).unwrap();
+        let page = RenderedPage {
+            pixel_h: 1,
+            image: Arc::new(RgbaImage::new(1, 1)),
+        };
+        let cache = get_cache();
+        {
+            let mut g = cache.lock().unwrap();
+            g.pages.insert((closed.clone(), 0, 1, DPI, 1), page.clone());
+            g.pages.insert((other.clone(), 0, 1, DPI, 1), page);
+            g.in_flight.insert((closed.clone(), 0, 2, DPI, 1));
+            g.temp_files.push((closed.clone(), closed_temp.clone()));
+            g.temp_files.push((other.clone(), other_temp.clone()));
+            g.last_crop_key = Some(CropKey {
+                path_fp: path_fingerprint(&closed),
+                page: 1,
+                dpi: DPI,
+                pixel_w: 1,
+                crop_y: 0,
+                crop_h: 1,
+                page_fit: false,
+            });
+            g.last_encoded = Some(EncodedFrame {
+                transmit_seq: String::new(),
+                image_id: 77,
+                cols: 1,
+                rows: 1,
+                id_color: String::new(),
+                retire_image_id: None,
+            });
+        }
+
+        release_document(&closed);
+
+        let mut g = cache.lock().unwrap();
+        assert!(!g.pages.keys().any(|(path, _, _, _, _)| path == &closed));
+        assert!(!g.in_flight.iter().any(|(path, _, _, _, _)| path == &closed));
+        assert!(g.pages.keys().any(|(path, _, _, _, _)| path == &other));
+        assert_eq!(g.document_generations.get(&closed), Some(&1));
+        assert!(g.last_crop_key.is_none());
+        assert!(g.last_encoded.is_none());
+        assert!(g.pending_kitty_deletes.contains(&77));
+        assert!(!closed_temp.exists());
+        assert!(other_temp.exists());
+        g.pages.retain(|(path, _, _, _, _), _| path != &other);
+        g.pending_kitty_deletes.retain(|id| *id != 77);
+        g.temp_files.retain(|(_, file)| file != &other_temp);
+        let _ = std::fs::remove_file(other_temp);
     }
 }
 

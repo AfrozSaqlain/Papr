@@ -343,6 +343,7 @@ enum UiAction {
     MoveQueueItemUp(i64),
     MoveQueueItemDown(i64),
     ClosePdf,
+    CloseProject,
     RetryDownload { id: String, paper: RemotePaper },
     RefreshProjects,
     CreateProject { name: String, compiler: String },
@@ -489,7 +490,9 @@ impl ConfigFilesystemWatcher {
 /// fresh immutable source to the UI thread, keeping typing non-blocking.
 struct CitationIndexer {
     events: std_mpsc::Receiver<CitationSource>,
-    _watcher: RecommendedWatcher,
+    watcher: Option<RecommendedWatcher>,
+    cancelled: Arc<AtomicBool>,
+    workers: Arc<std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>>,
 }
 
 /// Watches the projects root and the currently open project so the UI stays in
@@ -540,34 +543,105 @@ impl ProjectFilesystemWatcher {
 impl CitationIndexer {
     fn start(project: &Project) -> Result<Self> {
         let (sender, events) = std_mpsc::channel();
-        refresh_citation_index(project.path.clone(), sender.clone());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let workers = Arc::new(std::sync::Mutex::new(Vec::new()));
+        refresh_citation_index(project.path.clone(), sender.clone(), cancelled.clone(), workers.clone());
         let root = project.path.clone();
+        let watch_cancelled = cancelled.clone();
+        let watch_workers = workers.clone();
         let mut watcher = RecommendedWatcher::new(move |event: notify::Result<notify::Event>| {
             if let Ok(event) = event
+                && !watch_cancelled.load(Ordering::Acquire)
                 && event.paths.iter().any(|path| path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bib")))
             {
-                refresh_citation_index(root.clone(), sender.clone());
+                refresh_citation_index(root.clone(), sender.clone(), watch_cancelled.clone(), watch_workers.clone());
             }
         }, NotifyConfig::default())?;
         watcher.watch(&project.path, RecursiveMode::Recursive)?;
-        Ok(Self { events, _watcher: watcher })
+        Ok(Self { events, watcher: Some(watcher), cancelled, workers })
     }
 
     fn drain(&self) -> Option<CitationSource> {
+        reap_finished_citation_workers(&self.workers);
         let mut newest = None;
         while let Ok(source) = self.events.try_recv() { newest = Some(source); }
         newest
     }
+
+    /// Stop filesystem callbacks first, then wait for every project scan to
+    /// relinquish its parsed BibTeX and project path before returning.
+    fn stop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.watcher.take();
+        if let Ok(mut workers) = self.workers.lock() {
+            for worker in workers.drain(..) {
+                let _ = worker.join();
+            }
+        }
+    }
 }
 
-fn refresh_citation_index(root: PathBuf, sender: std_mpsc::Sender<CitationSource>) {
-    std::thread::spawn(move || {
-        let entries = walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok)
-            .filter(|entry| entry.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bib")))
-            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
-            .flat_map(|contents| CitationSource::parse_bibtex(&contents)).collect();
-        let _ = sender.send(CitationSource::new(entries));
+impl Drop for CitationIndexer {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn refresh_citation_index(
+    root: PathBuf,
+    sender: std_mpsc::Sender<CitationSource>,
+    cancelled: Arc<AtomicBool>,
+    workers: Arc<std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>>,
+) {
+    if cancelled.load(Ordering::Acquire) {
+        return;
+    }
+    reap_finished_citation_workers(&workers);
+    let worker_cancelled = cancelled.clone();
+    let worker = std::thread::spawn(move || {
+        let mut entries = Vec::new();
+        for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
+            if cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            if !entry.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bib")) {
+                continue;
+            }
+            if let Ok(contents) = std::fs::read_to_string(entry.path()) {
+                entries.extend(CitationSource::parse_bibtex(&contents));
+            }
+        }
+        if !cancelled.load(Ordering::Acquire) {
+            let _ = sender.send(CitationSource::new(entries));
+        }
     });
+    if let Ok(mut workers) = workers.lock() {
+        if worker_cancelled.load(Ordering::Acquire) {
+            let _ = worker.join();
+        } else {
+            workers.push(worker);
+        }
+    }
+}
+
+fn reap_finished_citation_workers(workers: &std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>) {
+    let finished = {
+        let Ok(mut workers) = workers.lock() else { return; };
+        let mut pending = Vec::with_capacity(workers.len());
+        let mut finished = Vec::new();
+        for worker in workers.drain(..) {
+            if worker.is_finished() {
+                finished.push(worker);
+            } else {
+                pending.push(worker);
+            }
+        }
+        *workers = pending;
+        finished
+    };
+    for worker in finished {
+        let _ = worker.join();
+    }
 }
 
 fn update_project_completions(app: &mut App, source: Option<&CitationSource>) {
@@ -601,7 +675,10 @@ struct ProjectCompiler {
 }
 
 enum ProjectCompilerBackend {
-    Latex(std::process::Child),
+    Latex {
+        child: std::process::Child,
+        readers: Vec<std::thread::JoinHandle<()>>,
+    },
     Typst {
         wake: std_mpsc::Sender<()>,
         stopping: Arc<AtomicBool>,
@@ -720,16 +797,17 @@ impl ProjectCompiler {
         let mut child = command
             .spawn()
             .context("latexmk is not available; install a TeX distribution and latexmk")?;
+        let mut readers = Vec::with_capacity(2);
         if let Some(stdout) = child.stdout.take() {
-            spawn_latexmk_reader(stdout, sender.clone());
+            readers.push(spawn_latexmk_reader(stdout, sender.clone()));
         }
         if let Some(stderr) = child.stderr.take() {
-            spawn_latexmk_reader(stderr, sender.clone());
+            readers.push(spawn_latexmk_reader(stderr, sender.clone()));
         }
         let external_pdf_opened = project.path.join("main.pdf").is_file();
         Ok(Self {
             project,
-            backend: ProjectCompilerBackend::Latex(child),
+            backend: ProjectCompilerBackend::Latex { child, readers },
             events,
             _watcher: watcher,
             pdf_changed: false,
@@ -749,7 +827,7 @@ impl ProjectCompiler {
         }
         self.stopped = true;
         match &mut self.backend {
-            ProjectCompilerBackend::Latex(child) => {
+            ProjectCompilerBackend::Latex { child, readers } => {
                 #[cfg(unix)]
                 {
                     let process_group = format!("-{}", child.id());
@@ -762,6 +840,9 @@ impl ProjectCompiler {
                 }
                 let _ = child.kill();
                 let _ = child.wait();
+                for reader in readers.drain(..) {
+                    let _ = reader.join();
+                }
             }
             ProjectCompilerBackend::Typst { wake, stopping, worker } => {
                 stopping.store(true, Ordering::Release);
@@ -917,7 +998,7 @@ impl Drop for ProjectCompiler {
     }
 }
 
-fn spawn_latexmk_reader<R: std::io::Read + Send + 'static>(reader: R, sender: std_mpsc::Sender<ProjectBuildEvent>) {
+fn spawn_latexmk_reader<R: std::io::Read + Send + 'static>(reader: R, sender: std_mpsc::Sender<ProjectBuildEvent>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         for line in BufReader::new(reader).lines().map_while(Result::ok) {
             let normalized = line.to_ascii_lowercase();
@@ -930,7 +1011,7 @@ fn spawn_latexmk_reader<R: std::io::Read + Send + 'static>(reader: R, sender: st
                 let _ = sender.send(ProjectBuildEvent::Failed);
             }
         }
-    });
+    })
 }
 
 /// Turn TeX's line-oriented output into diagnostics that can be displayed and navigated.
@@ -1053,6 +1134,70 @@ fn restart_project_filesystem_watcher(runtime: &mut Runtime, app: &mut App) {
     });
 }
 
+/// Release everything whose lifetime is scoped to an open Project.
+///
+/// This is deliberately runtime-aware: changing the visible pane alone leaves
+/// compiler processes, Typst's worker/cache, and notify watchers alive.
+fn close_project_workspace(runtime: &mut Runtime, app: &mut App) {
+    let project_pdf = app
+        .active_project
+        .as_ref()
+        .map(|project| project.path.join("main.pdf"));
+
+    if let Some(mut compiler) = runtime.project_compiler.take() {
+        compiler.stop();
+    }
+    runtime.citation_index = None;
+    runtime.citation_source = CitationSource::default();
+    runtime.project_filesystem_watcher = None;
+
+    app.active_project = None;
+    app.project_files = Vec::new();
+    app.project_tree_dir = None;
+    app.project_file_selected = 0;
+    app.project_entry_rename_path = None;
+    app.project_editor_text = String::new();
+    app.project_editor_path = None;
+    app.project_editor_dirty = false;
+    app.project_editor_cursor = 0;
+    app.project_editor_insert_mode = false;
+    app.project_editor_visual_line_anchor = None;
+    app.project_editor_undo = Vec::new();
+    app.project_editor_redo = Vec::new();
+    app.project_editor_scroll = 0;
+    app.project_editor_manual_scroll = false;
+    app.project_editor_pending_sequence = None;
+    app.project_completions = Vec::new();
+    app.project_completion_selected = 0;
+    app.project_bib_titles = std::collections::HashSet::new();
+    app.project_citation_query = String::new();
+    app.project_citation_cursor = 0;
+    app.project_citation_results = Vec::new();
+    app.project_citation_selected = 0;
+    app.project_citation_scroll = 0;
+    app.project_build_status = "Idle".into();
+    app.project_build_diagnostics = Vec::new();
+    app.project_build_raw_log = Vec::new();
+    app.project_build_show_raw = false;
+    app.project_build_selected = 0;
+    app.project_build_scroll = 0;
+    app.project_build_viewport_height = 0;
+    app.project_build_visible = false;
+    app.project_pane = ProjectPane::ProjectList;
+
+    if project_pdf.as_ref() == app.pdf_viewer_path.as_ref() {
+        app.pdf_viewer_path = None;
+        app.pdf_viewer_page = 1;
+        app.pdf_viewer_total_pages = 1;
+        app.pdf_viewer_scroll_y = 0;
+        app.pdf_viewer_page_pixel_h = 0;
+        app.pdf_viewer_max_scroll_y = 0;
+        if let Some(pdf) = project_pdf.as_deref() {
+            pdf_viewer::release_document(pdf);
+        }
+    }
+}
+
 fn refresh_project_filesystem(runtime: &mut Runtime, app: &mut App) {
     let selected_project = app.projects.get(app.projects_selected).map(|project| project.path.clone());
     app.projects = runtime.project_manager.list().unwrap_or_default();
@@ -1062,19 +1207,7 @@ fn refresh_project_filesystem(runtime: &mut Runtime, app: &mut App) {
 
     let Some(project) = app.active_project.as_ref().cloned() else { return; };
     if !project.path.is_dir() {
-        if let Some(mut compiler) = runtime.project_compiler.take() {
-            compiler.stop();
-        }
-        runtime.citation_index = None;
-        runtime.citation_source = CitationSource::default();
-        app.active_project = None;
-        app.project_files.clear();
-        app.project_tree_dir = None;
-        app.project_editor_path = None;
-        app.project_editor_text.clear();
-        app.project_editor_dirty = false;
-        app.project_pane = ProjectPane::ProjectList;
-        app.project_bib_titles.clear();
+        close_project_workspace(runtime, app);
         app.toast = Some("The open project was removed from disk.".into());
         return;
     }
@@ -2297,33 +2430,7 @@ async fn apply_ui_action(
             runtime.database.record_project_activity("project_deleted", &project.name)?;
             refresh_dashboard(runtime, app)?;
             if was_active {
-                if let Some(mut compiler) = runtime.project_compiler.take() {
-                    compiler.stop();
-                }
-                app.active_project = None;
-                app.project_files.clear();
-                app.project_tree_dir = None;
-                app.project_file_selected = 0;
-                app.project_editor_path = None;
-                app.project_editor_text.clear();
-                app.project_editor_dirty = false;
-                app.project_editor_cursor = 0;
-                app.project_editor_insert_mode = false;
-                app.project_editor_scroll = 0;
-                app.project_completions.clear();
-                runtime.citation_index = None;
-                runtime.citation_source = CitationSource::default();
-                runtime.project_filesystem_watcher = None;
-                app.project_build_status = "Idle".into();
-                app.project_build_diagnostics.clear();
-                app.project_build_raw_log.clear();
-                app.project_build_show_raw = false;
-                app.project_build_selected = 0;
-                app.project_build_scroll = 0;
-                app.pdf_viewer_path = None;
-                app.pdf_viewer_page = 1;
-                app.pdf_viewer_total_pages = 1;
-                app.pdf_viewer_scroll_y = 0;
+                close_project_workspace(runtime, app);
             }
             app.project_pane = ProjectPane::ProjectList;
             app.projects = runtime.project_manager.list().unwrap_or_default();
@@ -2444,9 +2551,16 @@ async fn apply_ui_action(
             app.active_pdf_session_id = None;
             app.active_pdf_session_start = None;
             app.mode = AppMode::Normal;
-            app.pdf_viewer_path = None;
-            pdf_viewer::evict_distant_pages(0);
+            if let Some(path) = app.pdf_viewer_path.take() {
+                pdf_viewer::release_document(&path);
+            }
+            app.pdf_viewer_page = 1;
+            app.pdf_viewer_total_pages = 1;
+            app.pdf_viewer_scroll_y = 0;
+            app.pdf_viewer_page_pixel_h = 0;
+            app.pdf_viewer_max_scroll_y = 0;
         }
+        UiAction::CloseProject => close_project_workspace(runtime, app),
         UiAction::OpenCollection(collection_id) => {
             open_collection(&runtime.database, app, collection_id)?;
         }
@@ -4668,7 +4782,9 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
     if key.code == KeyCode::Esc {
         if app.project_pane == ProjectPane::FileTree {
-            exit_project_view(app);
+            if prepare_project_close(app) {
+                return Some(UiAction::CloseProject);
+            }
         } else {
             return_to_project_file_tree(app);
         }
@@ -4676,7 +4792,9 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
     if app.project_pane == ProjectPane::FileTree && key.code == KeyCode::Left {
         if !move_project_tree_to_parent(app) {
-            exit_project_view(app);
+            if prepare_project_close(app) {
+                return Some(UiAction::CloseProject);
+            }
         }
         return None;
     }
@@ -4986,9 +5104,11 @@ fn save_project_editor(app: &mut App) -> bool {
     }
 }
 
-fn exit_project_view(app: &mut App) {
+/// Save any pending edit and preserve the list selection before the runtime
+/// resources are released by `close_project_workspace`.
+fn prepare_project_close(app: &mut App) -> bool {
     if app.project_editor_dirty && !save_project_editor(app) {
-        return;
+        return false;
     }
     if let Some(active) = &app.active_project
         && let Some(selected) = app
@@ -5001,7 +5121,7 @@ fn exit_project_view(app: &mut App) {
     app.project_editor_insert_mode = false;
     app.project_completions.clear();
     app.project_editor_pending_sequence = None;
-    app.project_pane = ProjectPane::ProjectList;
+    true
 }
 
 fn return_to_project_file_tree(app: &mut App) {
@@ -8948,20 +9068,11 @@ mod tests {
         app.projects_selected = 0;
         app.project_pane = ProjectPane::FileTree;
 
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         assert!(app.content_focused);
-        assert_eq!(app.project_pane, ProjectPane::ProjectList);
+        assert!(matches!(action, Some(UiAction::CloseProject)));
         assert_eq!(app.projects_selected, 1);
         assert!(app.active_project.is_some());
-
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-        assert!(!app.content_focused);
-        assert_eq!(app.project_pane, ProjectPane::ProjectList);
-        assert_eq!(app.projects_selected, 1);
-
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-        assert!(!app.content_focused);
-        assert_eq!(app.projects_selected, 1);
     }
 
     #[test]
@@ -9000,8 +9111,8 @@ mod tests {
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.project_pane, ProjectPane::FileTree);
 
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(app.project_pane, ProjectPane::ProjectList);
+        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(action, Some(UiAction::CloseProject)));
         assert!(app.content_focused);
         assert_eq!(app.projects_selected, 1);
     }
