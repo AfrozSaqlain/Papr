@@ -209,6 +209,45 @@ pub enum SettingsTab {
     Plugins,
 }
 
+/// Source currently shown by the project citation search popup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProjectCitationSearchMode {
+    /// Search papers already indexed in the local library.
+    #[default]
+    Local,
+    /// Search remote papers through the discovery provider.
+    Online,
+}
+
+/// A citation-search result, preserving whether it came from the library or online search.
+#[derive(Debug, Clone)]
+pub enum ProjectCitationResult {
+    /// A paper already present in the local library.
+    Local(LibraryPaper),
+    /// A paper returned by the online discovery provider.
+    Online(RemotePaper),
+}
+
+impl ProjectCitationResult {
+    /// Bibliographic title for display and duplicate detection.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        match self {
+            Self::Local(paper) => &paper.title,
+            Self::Online(paper) => &paper.title,
+        }
+    }
+
+    /// Compact author line for display.
+    #[must_use]
+    pub fn authors(&self) -> String {
+        match self {
+            Self::Local(paper) => paper.authors.clone(),
+            Self::Online(paper) => paper.author_line(),
+        }
+    }
+}
+
 impl SettingsTab {
     /// All tabs in display order.
     pub const ALL: [Self; 4] = [Self::Theme, Self::General, Self::Paths, Self::Plugins];
@@ -889,8 +928,12 @@ pub struct App {
     pub project_citation_query: String,
     /// Byte cursor in the project citation search input.
     pub project_citation_cursor: usize,
-    /// Matching library papers in the project citation modal.
-    pub project_citation_results: Vec<LibraryPaper>,
+    /// Matching local or online papers in the project citation modal.
+    pub project_citation_results: Vec<ProjectCitationResult>,
+    /// Active source for the project citation modal.
+    pub project_citation_search_mode: ProjectCitationSearchMode,
+    /// Current online-search progress or error, if any.
+    pub project_citation_search_status: Option<String>,
     /// Selected item in the project citation modal.
     pub project_citation_selected: usize,
     /// Vertical scroll offset for the project citation results.
@@ -1106,6 +1149,8 @@ impl Default for App {
             project_citation_query: String::new(),
             project_citation_cursor: 0,
             project_citation_results: Vec::new(),
+            project_citation_search_mode: ProjectCitationSearchMode::default(),
+            project_citation_search_status: None,
             project_citation_selected: 0,
             project_citation_scroll: 0,
             project_bib_titles: std::collections::HashSet::new(),

@@ -352,6 +352,8 @@ enum UiAction {
     MarkUnread(i64),
     CopyCitation(PaperTarget),
     InsertProjectCitation(papr_core::models::LibraryPaper),
+    InsertProjectRemoteCitation(RemotePaper),
+    SearchProjectCitationsOnline(String),
     ConfirmDeletePaper { paper_id: i64, title: String, path: Option<PathBuf> },
     ConfirmDeleteCollection { collection_id: i64, name: String, path: Option<PathBuf> },
     DeletePaper { paper_id: i64, path: Option<PathBuf> },
@@ -1394,6 +1396,8 @@ fn close_project_workspace(runtime: &mut Runtime, app: &mut App) {
     app.project_citation_query = String::new();
     app.project_citation_cursor = 0;
     app.project_citation_results = Vec::new();
+    app.project_citation_search_mode = ProjectCitationSearchMode::Local;
+    app.project_citation_search_status = None;
     app.project_citation_selected = 0;
     app.project_citation_scroll = 0;
     app.project_build_status = "Idle".into();
@@ -1738,6 +1742,10 @@ enum AppEvent {
         title: String,
         bib_path: std::path::PathBuf,
     },
+    ProjectCitationSearchFinished {
+        query: String,
+        result: Result<Vec<RemotePaper>, String>,
+    },
 }
 
 #[derive(Debug)]
@@ -2062,6 +2070,33 @@ async fn run(
                         app.toast = Some(format!("Citation {} already exists in references.bib", key));
                     }
                 }
+                AppEvent::ProjectCitationSearchFinished { query, result } => {
+                    if app.mode != AppMode::ProjectCitationSearch
+                        || app.project_citation_search_mode != ProjectCitationSearchMode::Online
+                        || app.project_citation_query != query
+                    {
+                        continue;
+                    }
+                    match result {
+                        Ok(papers) => {
+                            app.project_citation_results = papers
+                                .into_iter()
+                                .map(ProjectCitationResult::Online)
+                                .collect();
+                            app.project_citation_search_status = Some(if app.project_citation_results.is_empty() {
+                                "No online papers found.".into()
+                            } else {
+                                format!("{} online papers found", app.project_citation_results.len())
+                            });
+                        }
+                        Err(error) => {
+                            app.project_citation_results.clear();
+                            app.project_citation_search_status = Some(format!("Online search failed: {error}"));
+                        }
+                    }
+                    app.project_citation_selected = 0;
+                    app.project_citation_scroll = 0;
+                }
             }
         }
         if Some(app.page) != last_page {
@@ -2383,6 +2418,58 @@ async fn fetch_discovery_pages(
                 });
                 return;
             }
+        }
+    }
+}
+
+/// Fetch ranked discovery results for the citation popup without blocking the UI.
+async fn fetch_project_citation_online(
+    client: ArxivClient,
+    query: String,
+    sender: mpsc::UnboundedSender<AppEvent>,
+) {
+    let mut papers = Vec::new();
+    let mut start = 0;
+    loop {
+        let mut page = None;
+        for retry in 0..=DISCOVERY_PAGE_RETRY_ATTEMPTS {
+            match client
+                .search_ranked_candidate_page(
+                    &query,
+                    &papers,
+                    start,
+                    DISCOVERY_CANDIDATE_LIMIT,
+                    DISCOVERY_FETCH_BATCH_SIZE,
+                )
+                .await
+            {
+                Ok(result) => {
+                    page = Some(result);
+                    break;
+                }
+                Err(error) if retry == DISCOVERY_PAGE_RETRY_ATTEMPTS => {
+                    let _ = sender.send(AppEvent::ProjectCitationSearchFinished {
+                        query,
+                        result: Err(error.to_string()),
+                    });
+                    return;
+                }
+                Err(_) => {
+                    let multiplier = 1_u32 << u32::from(retry);
+                    tokio::time::sleep(DISCOVERY_PAGE_RETRY_BASE_DELAY * multiplier).await;
+                }
+            }
+        }
+        let Some(page) = page else { return; };
+        papers = page.papers;
+        if let Some(next_start) = page.next_start {
+            start = next_start;
+        } else {
+            let _ = sender.send(AppEvent::ProjectCitationSearchFinished {
+                query,
+                result: Ok(papers),
+            });
+            return;
         }
     }
 }
@@ -2865,6 +2952,31 @@ async fn apply_ui_action(
             } else {
                 app.toast = Some("Citation metadata not available".into());
             }
+        }
+        UiAction::InsertProjectRemoteCitation(paper) => {
+            if let Some(project) = &app.active_project {
+                let metadata = papr_core::models::CitationMetadata {
+                    title: paper.title,
+                    authors: paper.authors.join(" and "),
+                    doi: paper.doi,
+                    arxiv_id: Some(paper.id),
+                    year: Some(paper.published.with_timezone(&chrono::Local).format("%Y").to_string()),
+                    journal_ref: paper.journal_ref,
+                };
+                app.toast = Some("Fetching citation...".into());
+                tokio::spawn(citation::fetch_and_insert_project_citation(
+                    metadata,
+                    project.path.join("references.bib"),
+                    senders.app_events.clone(),
+                ));
+            }
+        }
+        UiAction::SearchProjectCitationsOnline(query) => {
+            tokio::spawn(fetch_project_citation_online(
+                runtime.arxiv.clone(),
+                query,
+                senders.app_events.clone(),
+            ));
         }
         UiAction::ConfirmDeletePaper { paper_id, title, path } => {
             app.delete_confirmation = Some(DeletionTarget::Paper {
@@ -5040,7 +5152,9 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if is_control_character_shortcut(key, 'f') && app.active_project.is_some() {
         app.project_citation_query.clear();
         app.project_citation_cursor = 0;
-        update_project_citation_results(app);
+        app.project_citation_search_mode = ProjectCitationSearchMode::Local;
+        app.project_citation_search_status = None;
+        update_project_local_citation_results(app);
         app.mode = AppMode::ProjectCitationSearch;
         return None;
     }
@@ -5987,7 +6101,7 @@ fn handle_discover_filter_key(app: &mut App, key: KeyEvent) -> Option<UiAction> 
     None
 }
 
-fn update_project_citation_results(app: &mut App) {
+fn update_project_local_citation_results(app: &mut App) {
     let query = app.project_citation_query.to_lowercase();
     let mut results = Vec::new();
     for paper in &app.library.papers {
@@ -6019,7 +6133,11 @@ fn update_project_citation_results(app: &mut App) {
         }
     }
     results.sort_by(|a, b| b.0.cmp(&a.0));
-    app.project_citation_results = results.into_iter().map(|(_, p)| p).collect();
+    app.project_citation_results = results
+        .into_iter()
+        .map(|(_, paper)| ProjectCitationResult::Local(paper))
+        .collect();
+    app.project_citation_search_status = None;
     app.project_citation_selected = 0;
     app.project_citation_scroll = 0;
 }
@@ -6030,6 +6148,21 @@ fn handle_project_citation_search_key(app: &mut App, key: KeyEvent) -> Option<Ui
             app.mode = AppMode::Normal;
             app.project_citation_query.clear();
             app.project_citation_results.clear();
+            app.project_citation_search_status = None;
+        }
+        KeyCode::Tab => {
+            app.project_citation_search_mode = match app.project_citation_search_mode {
+                ProjectCitationSearchMode::Local => ProjectCitationSearchMode::Online,
+                ProjectCitationSearchMode::Online => ProjectCitationSearchMode::Local,
+            };
+            app.project_citation_results.clear();
+            app.project_citation_selected = 0;
+            app.project_citation_scroll = 0;
+            if app.project_citation_search_mode == ProjectCitationSearchMode::Local {
+                update_project_local_citation_results(app);
+            } else {
+                app.project_citation_search_status = Some("Press Enter to search online.".into());
+            }
         }
         KeyCode::Up => {
             app.project_citation_selected = app.project_citation_selected.saturating_sub(1);
@@ -6039,8 +6172,20 @@ fn handle_project_citation_search_key(app: &mut App, key: KeyEvent) -> Option<Ui
                 .min(app.project_citation_results.len().saturating_sub(1));
         }
         KeyCode::Enter => {
-            if let Some(paper) = app.project_citation_results.get(app.project_citation_selected).cloned() {
-                return Some(UiAction::InsertProjectCitation(paper));
+            if let Some(result) = app.project_citation_results.get(app.project_citation_selected).cloned() {
+                return Some(match result {
+                    ProjectCitationResult::Local(paper) => UiAction::InsertProjectCitation(paper),
+                    ProjectCitationResult::Online(paper) => UiAction::InsertProjectRemoteCitation(paper),
+                });
+            }
+            if app.project_citation_search_mode == ProjectCitationSearchMode::Online {
+                let query = app.project_citation_query.trim().to_owned();
+                if query.is_empty() {
+                    app.project_citation_search_status = Some("Enter keywords before searching online.".into());
+                } else {
+                    app.project_citation_search_status = Some("Searching online…".into());
+                    return Some(UiAction::SearchProjectCitationsOnline(query));
+                }
             }
         }
         _ => {
@@ -6051,7 +6196,14 @@ fn handle_project_citation_search_key(app: &mut App, key: KeyEvent) -> Option<Ui
                 key,
             ) {
                 if app.project_citation_query != old_query {
-                    update_project_citation_results(app);
+                    app.project_citation_results.clear();
+                    app.project_citation_selected = 0;
+                    app.project_citation_scroll = 0;
+                    if app.project_citation_search_mode == ProjectCitationSearchMode::Local {
+                        update_project_local_citation_results(app);
+                    } else {
+                        app.project_citation_search_status = Some("Press Enter to search online.".into());
+                    }
                 }
             }
         }
@@ -7614,12 +7766,59 @@ mod tests {
         reload_config_editor_buffer, 
         update_project_completions, merge_enriched_remote_paper, run_terminal_command,
          PaperTarget,
+        handle_project_citation_search_key,
         show_build_for_failed_compilation, show_preview_after_successful_compilation,
         complete_terminal_command, ConfigFilesystemWatcher, pdf_viewer_invocation,
         expire_project_editor_pending_sequence, is_text_paste_shortcut, paste_text_into_active_input, should_open_generated_pdf,
         Cli, CliCommand, TypstWorkerRequest, TypstWorkerResponse,
         PROJECT_EDITOR_PENDING_SEQUENCE_TIMEOUT,
     };
+
+    #[test]
+    fn project_citation_search_toggles_online_and_selects_remote_results() {
+        let mut app = App {
+            mode: AppMode::ProjectCitationSearch,
+            project_citation_query: "graph learning".into(),
+            project_citation_cursor: "graph learning".len(),
+            ..App::default()
+        };
+
+        assert!(handle_project_citation_search_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+        )
+        .is_none());
+        assert_eq!(app.project_citation_search_mode, ProjectCitationSearchMode::Online);
+        assert_eq!(app.project_citation_search_status.as_deref(), Some("Press Enter to search online."));
+
+        assert!(matches!(
+            handle_project_citation_search_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            ),
+            Some(UiAction::SearchProjectCitationsOnline(query)) if query == "graph learning"
+        ));
+
+        app.project_citation_results = vec![ProjectCitationResult::Online(RemotePaper {
+            id: "2401.00001".into(),
+            title: "Graph Learning".into(),
+            authors: vec!["Ada Researcher".into()],
+            abstract_text: String::new(),
+            published: Utc::now(),
+            updated: Utc::now(),
+            categories: Vec::new(),
+            pdf_url: None,
+            doi: None,
+            journal_ref: None,
+        })];
+        assert!(matches!(
+            handle_project_citation_search_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            ),
+            Some(UiAction::InsertProjectRemoteCitation(paper)) if paper.id == "2401.00001"
+        ));
+    }
 
     #[test]
     fn hidden_typst_worker_cli_accepts_project_paths() {

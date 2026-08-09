@@ -3729,10 +3729,14 @@ fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &
     let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(4)]).split(area);
 
     // ── Search bar ────────────────────────────────────────────────────────
+    let mode_hint = match app.project_citation_search_mode {
+        ProjectCitationSearchMode::Local => " LOCAL SEARCH  [ Tab: Online Search ]  [ Enter: Add ] ",
+        ProjectCitationSearchMode::Online => " ONLINE SEARCH  [ Tab: Local Search ]  [ Enter: Search / Add ] ",
+    };
     let search_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent))
-        .title(" ADD CITATION [ Press Enter ] ");
+        .title(format!(" ADD CITATION —{mode_hint}"));
 
     let query_text = &app.project_citation_query;
     let search_content = if query_text.is_empty() {
@@ -3778,10 +3782,10 @@ fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &
     let items: Vec<ListItem> = app.project_citation_results.iter().map(|paper| {
         // (Added) detection: compare by lowercased title against the set of
         // BibTeX titles already indexed from the project's .bib files.
-        let is_added = !paper.title.is_empty()
-            && app.project_bib_titles.contains(&paper.title.trim().to_lowercase());
+        let is_added = !paper.title().is_empty()
+            && app.project_bib_titles.contains(&paper.title().trim().to_lowercase());
 
-        let raw_title = if paper.title.is_empty() { "[untitled]" } else { paper.title.as_str() };
+        let raw_title = if paper.title().is_empty() { "[untitled]" } else { paper.title() };
         // Truncate title so badge always fits.
         let title_text = safe_truncate(raw_title, max_title_width);
         // Pad to a fixed width so the badge column is always at the same offset.
@@ -3799,10 +3803,11 @@ fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &
             badge_span,
         ]);
 
-        let raw_authors = if paper.authors.trim().is_empty() {
+        let authors = paper.authors();
+        let raw_authors = if authors.trim().is_empty() {
             "Unknown authors"
         } else {
-            paper.authors.trim()
+            authors.trim()
         };
         let authors_text = safe_truncate(raw_authors, max_authors_width);
         let authors_line = Line::from(vec![
@@ -3812,10 +3817,14 @@ fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &
         workspace_list_item(vec![title_line, authors_line])
     }).collect();
 
+    let results_title = app.project_citation_search_status.as_deref().map_or_else(
+        || " RESULTS  ↑↓ navigate  Enter add  Esc close ".to_owned(),
+        |status| format!(" RESULTS  {status}  ↑↓ navigate  Enter add  Esc close "),
+    );
     let list = List::new(items)
         .block(
             Block::default()
-                .title(" RESULTS  ↑↓ navigate  Enter add  Esc close ")
+                .title(results_title)
                 .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
                 .style(Style::default().bg(theme.surface))
                 .border_style(Style::default().fg(theme.accent)),
@@ -3832,8 +3841,10 @@ fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &
             None
         } else {
             Some(app.project_citation_selected)
-        });
+        })
+        .with_offset(app.project_citation_scroll);
     frame.render_stateful_widget(list, chunks[1], &mut state);
+    app.project_citation_scroll = state.offset();
 }
 
 fn project_citation_search_area(area: Rect) -> Rect {
