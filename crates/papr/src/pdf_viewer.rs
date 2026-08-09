@@ -933,73 +933,116 @@ fn diacritic(idx: u16) -> char {
 }
 
 /// Render a cached Kitty image using unicode placeholders into the ratatui
-/// buffer.  `transmit_seq` is placed into the first cell of the first row;
-/// on subsequent frames it will be an empty string (no re-upload).
-fn render_kitty_placeholders(area: Rect, buf: &mut Buffer, encoded: &EncodedFrame) {
+/// buffer. `transmit_seq` is placed into the first visible segment; on
+/// subsequent frames it will be an empty string (no re-upload).
+fn render_kitty_placeholders(
+    area: Rect,
+    buf: &mut Buffer,
+    encoded: &EncodedFrame,
+    occlusion: Option<Rect>,
+) {
     let rows = area.height.min(encoded.rows);
     let cols = area.width.min(encoded.cols);
 
     let [id_extra, id_r, id_g, id_b] = encoded.image_id.to_be_bytes();
     let id_color = format!("\x1b[38;2;{id_r};{id_g};{id_b}m");
+    let mut upload = Some(encoded.transmit_seq.as_str());
+    let mut last_anchor = None;
     for y in 0..rows {
-        // Kitty's placeholders must be emitted as one terminal row.  Writing
-        // one placeholder per Ratatui cell lets Ratatui's diff writer move the
-        // cursor between combining-character sequences, which detaches some
-        // placeholders from their intended cells and leaves old placements
-        // visible.  This is the protocol layout used by ratatui-image.
-        let mut symbol = if y == 0 {
-            encoded.transmit_seq.clone()
+        let row_y = area.top() + y;
+        let row_left = area.left();
+        let row_right = row_left.saturating_add(cols);
+        let segments = if let Some(covered) = occlusion.filter(|covered| {
+            row_y >= covered.top()
+                && row_y < covered.bottom()
+                && covered.left() < row_right
+                && covered.right() > row_left
+        }) {
+            let covered_left = covered.left().clamp(row_left, row_right);
+            let covered_right = covered.right().clamp(row_left, row_right);
+            [
+                (row_left, covered_left.saturating_sub(row_left)),
+                (covered_right, row_right.saturating_sub(covered_right)),
+            ]
         } else {
-            String::new()
+            [(row_left, cols), (row_right, 0)]
         };
-        symbol.reserve(3 + id_color.len() + (cols as usize * 4) + 19);
-        write!(
-            symbol,
-            "\x1b[s{id_color}\u{10EEEE}{}{}{}",
-            diacritic(y),
-            diacritic(0),
-            diacritic(u16::from(id_extra))
-        )
-        .unwrap();
-        symbol.extend(std::iter::repeat_n(
-            '\u{10EEEE}',
-            cols.saturating_sub(1) as usize,
-        ));
 
-        for x in 1..cols {
-            if let Some(cell) = buf.cell_mut((area.left() + x, area.top() + y)) {
-                cell.set_skip(true);
+        for (segment_left, segment_width) in segments {
+            if segment_width == 0 {
+                continue;
             }
-        }
+            // A packed segment keeps combining diacritics together while
+            // allowing an overlay to occlude the middle of a PDF row. The
+            // first visible cell after the overlay becomes a new emitter,
+            // rather than remaining a skipped continuation of a covered cell.
+            let mut symbol = upload.take().unwrap_or_default().to_owned();
+            symbol.reserve(3 + id_color.len() + (segment_width as usize * 4) + 19);
+            let source_col = segment_left.saturating_sub(area.left());
+            write!(
+                symbol,
+                "\x1b[s{id_color}\u{10EEEE}{}{}{}",
+                diacritic(y),
+                diacritic(source_col),
+                diacritic(u16::from(id_extra))
+            )
+            .unwrap();
+            symbol.extend(std::iter::repeat_n(
+                '\u{10EEEE}',
+                segment_width.saturating_sub(1) as usize,
+            ));
 
-        // The row is emitted from its first cell, so restore Ratatui's cursor
-        // and advance it to where normal cell rendering expects it to be.
-        let right = area.width.saturating_sub(1);
-        let down = area.height.saturating_sub(1);
-        write!(symbol, "\x1b[u\x1b[{right}C\x1b[{down}B").unwrap();
-
-        // This comes last in the terminal stream: the new row placeholders
-        // are already present before the old virtual image is retired.
-        if y + 1 == rows {
-            if let Some(id) = encoded.retire_image_id {
-                symbol.push_str(&kitty_delete_image(id));
+            for x in 1..segment_width {
+                if let Some(cell) = buf.cell_mut((segment_left + x, row_y)) {
+                    cell.set_skip(true);
+                }
             }
-        }
 
-        if let Some(cell) = buf.cell_mut((area.left(), area.top() + y)) {
-            cell.set_symbol(&symbol);
+            // Restore the cursor and finish at the PDF pane's bottom-right,
+            // matching ratatui-image's packed-row cursor contract.
+            let right = area
+                .right()
+                .saturating_sub(segment_left)
+                .saturating_sub(1);
+            let down = area.height.saturating_sub(1);
+            write!(symbol, "\x1b[u\x1b[{right}C\x1b[{down}B").unwrap();
+
+            if let Some(cell) = buf.cell_mut((segment_left, row_y)) {
+                cell.set_symbol(&symbol);
+            }
+            last_anchor = Some((segment_left, row_y));
         }
+    }
+
+    // Retire the old image only after the final visible replacement segment.
+    if let Some(id) = encoded.retire_image_id
+        && let Some(anchor) = last_anchor
+        && let Some(cell) = buf.cell_mut(anchor)
+    {
+        let mut symbol = cell.symbol().to_owned();
+        symbol.push_str(&kitty_delete_image(id));
+        cell.set_symbol(&symbol);
+    }
+}
+
+fn fully_covered(area: Rect, occlusion: Option<Rect>) -> bool {
+    if let Some(covered) = occlusion {
+        let intersection = area.intersection(covered);
+        intersection == area
+    } else {
+        false
     }
 }
 
 /// A ratatui widget that blits the pre-encoded Kitty frame.
 struct KittyBlit<'a> {
     encoded: &'a EncodedFrame,
+    occlusion: Option<Rect>,
 }
 
 impl Widget for KittyBlit<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        render_kitty_placeholders(area, buf, self.encoded);
+        render_kitty_placeholders(area, buf, self.encoded, self.occlusion);
     }
 }
 
@@ -1034,7 +1077,7 @@ mod kitty_placeholder_tests {
             retire_image_id: None,
         };
 
-        render_kitty_placeholders(area, &mut buffer, &encoded);
+        render_kitty_placeholders(area, &mut buffer, &encoded, None);
 
         for y in 0..2 {
             let row = buffer[(0, y)].symbol();
@@ -1061,7 +1104,7 @@ mod kitty_placeholder_tests {
             retire_image_id: Some(1),
         };
 
-        render_kitty_placeholders(area, &mut buffer, &encoded);
+        render_kitty_placeholders(area, &mut buffer, &encoded, None);
 
         assert!(!buffer[(0, 0)].symbol().contains("a=d,d=I,i=1"));
         let final_row = buffer[(0, 1)].symbol();
@@ -1075,6 +1118,52 @@ mod kitty_placeholder_tests {
         let mut output = "prefix:".to_owned();
         base64_encode_into(b"Papr PDF", &mut output);
         assert_eq!(output, "prefix:UGFwciBQREY=");
+    }
+
+    #[test]
+    fn kitty_rows_split_at_an_overlay_and_restore_after_it_closes() {
+        let area = Rect::new(0, 0, 6, 2);
+        let overlay = Rect::new(0, 0, 3, 2);
+        let encoded = EncodedFrame {
+            transmit_seq: "upload".to_owned(),
+            image_id: 7,
+            cols: 6,
+            rows: 2,
+            id_color: String::new(),
+            retire_image_id: None,
+        };
+        let mut covered = Buffer::empty(area);
+
+        render_kitty_placeholders(area, &mut covered, &encoded, Some(overlay));
+
+        for y in 0..2 {
+            for x in 0..3 {
+                assert!(!covered[(x, y)].skip);
+                assert_eq!(covered[(x, y)].symbol(), " ");
+            }
+            assert!(!covered[(3, y)].skip);
+            assert!(covered[(3, y)].symbol().contains('\u{10EEEE}'));
+            assert!(covered[(4, y)].skip);
+            assert!(covered[(5, y)].skip);
+        }
+        assert!(covered[(3, 0)].symbol().starts_with("upload"));
+
+        let right_segment = covered[(3, 0)].symbol().to_owned();
+        Clear.render(overlay, &mut covered);
+        Paragraph::new("popup").render(overlay, &mut covered);
+        assert_eq!(covered[(0, 0)].symbol(), "p");
+        assert_eq!(covered[(3, 0)].symbol(), right_segment);
+
+        Clear.render(overlay, &mut covered);
+        Paragraph::new("update").render(overlay, &mut covered);
+        assert_eq!(covered[(0, 0)].symbol(), "u");
+        assert_eq!(covered[(3, 0)].symbol(), right_segment);
+
+        let mut restored = Buffer::empty(area);
+        render_kitty_placeholders(area, &mut restored, &encoded, None);
+        let updates = covered.diff(&restored);
+        assert!(updates.iter().any(|(x, y, _)| (*x, *y) == (0, 0)));
+        assert!(updates.iter().any(|(x, y, _)| (*x, *y) == (0, 1)));
     }
 
     #[test]
@@ -1245,6 +1334,17 @@ pub fn draw_pdf_viewer(frame: &mut Frame<'_>, app: &mut App) {
 
 /// Draw the cached, asynchronous PDF renderer inside a workspace pane.
 pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    draw_pdf_viewer_in_with_occlusion(frame, app, area, None);
+}
+
+/// Draw the PDF while leaving an overlapping terminal-cell region available
+/// to a later overlay widget. Kitty rows are split around that exact region.
+pub fn draw_pdf_viewer_in_with_occlusion(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    occlusion: Option<Rect>,
+) {
     // Kitty placeholders mark cells as skipped. Clear the entire pane before
     // every blit so an invalidated image cannot leave skipped/stale cells in a
     // neighbouring split-pane region.
@@ -1579,14 +1679,13 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let cache_arc = get_cache();
         if let Ok(mut g) = cache_arc.lock() {
             if let Some(ref mut encoded) = g.last_encoded {
-                // Only include transmit_seq on frames where we just encoded;
-                // on static frames the string is empty (we reuse existing ID).
-                // Clone the encoded frame so we can drop the lock before rendering.
+                let can_emit = !fully_covered(pdf_area, occlusion);
+                let should_transmit = can_emit && !encoded.transmit_seq.is_empty();
+                // Clone the encoded frame so we can drop the lock before
+                // rendering. A fully covered frame keeps a pending upload
+                // until at least one placeholder segment is visible.
                 let blit_frame = EncodedFrame {
-                    // If we just encoded this frame, transmit_seq contains the
-                    // full APC upload string.  If not (same crop key), we want
-                    // an empty string so we only draw placeholders.
-                    transmit_seq: if need_encode {
+                    transmit_seq: if should_transmit {
                         std::mem::take(&mut encoded.transmit_seq)
                     } else {
                         String::new()
@@ -1595,7 +1694,7 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     cols: encoded.cols,
                     rows: encoded.rows,
                     id_color: encoded.id_color.clone(),
-                    retire_image_id: if need_encode {
+                    retire_image_id: if should_transmit {
                         encoded.retire_image_id.take()
                     } else {
                         None
@@ -1605,6 +1704,7 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 frame.render_widget(
                     KittyBlit {
                         encoded: &blit_frame,
+                        occlusion,
                     },
                     pdf_area,
                 );

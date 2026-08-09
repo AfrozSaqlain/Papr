@@ -273,7 +273,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         && app.active_project.is_some()
         && app.project_pane != ProjectPane::ProjectList;
     if project_open {
-        render_projects(frame, rows[1], app, theme);
+        let pdf_occlusion = (app.mode == AppMode::ProjectCitationSearch)
+            .then(|| project_citation_search_area(area));
+        render_projects(frame, rows[1], app, theme, pdf_occlusion);
     } else {
         let columns = Layout::default()
             .direction(Direction::Horizontal)
@@ -478,7 +480,7 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
     if app.page == Page::Dashboard {
         render_dashboard(frame, inset, app, theme);
     } else if app.page == Page::Projects {
-        render_projects(frame, inset, app, theme);
+        render_projects(frame, inset, app, theme, None);
     } else if app.page == Page::Discover {
         render_discover(frame, inset, app, theme);
     } else if app.page == Page::Library {
@@ -517,7 +519,13 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
     }
 }
 
-fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+fn render_projects(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &mut App,
+    theme: &Theme,
+    pdf_occlusion: Option<Rect>,
+) {
     if app.active_project.is_none() || app.project_pane == ProjectPane::ProjectList {
         let items = app.projects.iter().map(|project| {
             workspace_list_item(vec![
@@ -865,7 +873,12 @@ fn render_projects(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
             );
             let p_area = preview_block.inner(preview_area);
             frame.render_widget(preview_block, preview_area);
-            crate::pdf_viewer::draw_pdf_viewer_in(frame, app, p_area);
+            crate::pdf_viewer::draw_pdf_viewer_in_with_occlusion(
+                frame,
+                app,
+                p_area,
+                pdf_occlusion,
+            );
         } else {
             frame.render_widget(
                 Paragraph::new("Live PDF preview\nWaiting for the first successful build…")
@@ -3710,7 +3723,7 @@ fn render_terminal_command(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
 }
 
 fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
-    let area = centered(90, 24, frame.area());
+    let area = project_citation_search_area(frame.area());
     frame.render_widget(Clear, area);
 
     let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(4)]).split(area);
@@ -3821,6 +3834,10 @@ fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &
             Some(app.project_citation_selected)
         });
     frame.render_stateful_widget(list, chunks[1], &mut state);
+}
+
+fn project_citation_search_area(area: Rect) -> Rect {
+    centered(90, 24, area)
 }
 
 fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
