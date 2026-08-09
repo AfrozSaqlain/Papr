@@ -4006,6 +4006,10 @@ fn start_silent_runtime_scan(runtime: &Runtime, senders: &ActionSenders, app: &m
     );
 }
 
+fn library_index_summary(indexed: usize, imported: usize) -> String {
+    format!("Indexed {indexed} PDFs, imported {imported} new")
+}
+
 async fn apply_index_response(
     response: IndexResponse,
     runtime: &mut Runtime,
@@ -4038,7 +4042,7 @@ async fn apply_index_response(
                 .database
                 .reconcile_collections(&runtime.collection_roots, &directories)?;
             app.library.indexing = false;
-            app.library.message = Some(format!("Indexed {found} PDFs, imported {imported} new"));
+            app.library.message = Some(library_index_summary(found, imported));
 
             spawn_enrichment_if_needed(runtime, senders, app)?;
         }
@@ -4259,6 +4263,7 @@ async fn apply_download_event(
         .iter_mut()
         .find(|t| t.id == id)
         .context("received download event for unknown task")?;
+    let mut downloaded_paper_was_already_indexed = false;
     match event {
         DownloadEvent::Started { total, .. } => {
             task.status = DownloadStatus::Running;
@@ -4277,6 +4282,11 @@ async fn apply_download_event(
             let pdf = LibraryIndexer::inspect(&final_path).context("failed to index downloaded PDF")?;
             if let Some(paper) = pending.remove(&id) {
                 let paper_id = runtime.database.attach_download(&paper, &pdf)?;
+                downloaded_paper_was_already_indexed = app
+                    .library
+                    .papers
+                    .iter()
+                    .any(|library_paper| library_paper.id == paper_id);
                 runtime
                     .database
                     .record_activity("downloaded", Some(paper_id), None)?;
@@ -4300,6 +4310,10 @@ async fn apply_download_event(
             // render, so remote views immediately expose their local-PDF actions.
             spawn_enrichment_if_needed(runtime, senders, app)?;
             refresh_paper_views(runtime, app)?;
+            app.library.message = Some(library_index_summary(
+                app.library.papers.len(),
+                usize::from(!downloaded_paper_was_already_indexed),
+            ));
             refresh_dashboard(runtime, app)?;
             if app.toast.is_none() {
                 app.toast = Some("Download complete. Press Enter to open the PDF.".to_owned());

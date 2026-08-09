@@ -3732,7 +3732,7 @@ fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &
     let search_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent))
-        .title(" ADD CITATION  Ctrl+F ");
+        .title(" ADD CITATION [ Press Enter ] ");
 
     let query_text = &app.project_citation_query;
     let search_content = if query_text.is_empty() {
