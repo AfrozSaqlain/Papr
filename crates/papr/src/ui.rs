@@ -4464,7 +4464,7 @@ fn render_credits(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
                 .add_modifier(Modifier::BOLD),
         ),
         Line::styled(
-            "A keyboard-first terminal workspace for academic papers.",
+            "A keyboard-first terminal workspace for researchers.",
             Style::default().fg(theme.text),
         ),
         Line::raw(""),

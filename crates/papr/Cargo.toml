@@ -1,6 +1,6 @@
 [package]
 name = "papr-tui"
-description = "A keyboard-first terminal workspace for academic papers"
+description = "A keyboard-first terminal workspace for researchers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -48,7 +48,7 @@ workspace = true
 [package.metadata.deb]
 maintainer = "Afroz Saqlain <sqn3680@gmail.com>, Tanveer <tanveer642003@gmail.com>"
 copyright = "2026, Afroz Saqlain <sqn3680@gmail.com>"
-extended-description = "A keyboard-first terminal workspace for academic papers."
+extended-description = "A keyboard-first terminal workspace for researchers."
 section = "utility"
 priority = "optional"
 assets = [

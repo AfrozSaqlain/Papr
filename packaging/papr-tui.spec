@@ -1,7 +1,7 @@
 Name:           papr-tui
 Version:        0.1.1
 Release:        1%{?dist}
-Summary:        Keyboard-first terminal workspace for academic papers
+Summary:        Keyboard-first terminal workspace for researchers
 
 License:        MIT
 URL:            https://github.com/AfrozSaqlain/Papr
