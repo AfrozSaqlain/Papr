@@ -2,16 +2,19 @@
 //!
 //! This module owns everything related to the four-tab settings UI:
 //!   • Theme   – live-preview theme selector
-//!   • General – startup_page, pdf_viewer, enabled_plugins
-//!   • Paths   – library_folders (multi-entry), download_path, projects_directory
+//!   • General – `startup_page`, `pdf_viewer`, `enabled_plugins`
+//!   • Paths   – `library_folders` (multi-entry), `download_path`, `projects_directory`
 //!   • Plugins – enable / disable plugins
 //!
 //! All changes are staged in [`SettingsModalState`] and written to disk
 //! when the user explicitly applies them.
 
 use crate::editor::{next_word_boundary, prev_word_boundary};
-use crate::state::*;
-use crate::theme::*;
+use crate::state::{
+    App, AppMode, Command, GeneralTabFocus, Page, PathEntryState, PathsTabFocus,
+    SettingsModalState, SettingsTab,
+};
+use crate::theme::Theme;
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -38,12 +41,16 @@ const STARTUP_PAGE_LABELS: &[&str] = &[
     "Projects",
 ];
 
+fn saturating_u16(value: usize) -> u16 {
+    u16::try_from(value).unwrap_or(u16::MAX)
+}
+
 /// Populate the settings workspace state from the current configuration.
 pub fn open_settings_modal(app: &mut App, config: &Config, current_theme_name: &str) {
     let modal = &mut app.settings_modal;
 
     // Remember the original theme so Esc/revert can handle it.
-    modal.original_theme = current_theme_name.to_owned();
+    current_theme_name.clone_into(&mut modal.original_theme);
 
     // Theme tab
     let theme_lower = current_theme_name.to_lowercase();
@@ -54,7 +61,7 @@ pub fn open_settings_modal(app: &mut App, config: &Config, current_theme_name: &
     modal.theme_scroll = 0;
 
     // General tab
-    modal.startup_page = config.startup_page.clone();
+    modal.startup_page.clone_from(&config.startup_page);
     let sp_lower = config.startup_page.to_lowercase();
     modal.startup_page_selected = app
         .startup_page_options
@@ -71,8 +78,10 @@ pub fn open_settings_modal(app: &mut App, config: &Config, current_theme_name: &
         .collect();
     modal.keyword_selected = 0;
     modal.keyword_editing = false;
-    modal.enabled_plugins = config.enabled_plugins.clone();
-    modal.default_project_compiler = config.default_project_compiler.clone();
+    modal.enabled_plugins.clone_from(&config.enabled_plugins);
+    modal
+        .default_project_compiler
+        .clone_from(&config.default_project_compiler);
     modal.general_focus = GeneralTabFocus::StartupPage;
 
     // Paths tab
@@ -113,7 +122,7 @@ pub fn open_settings_modal(app: &mut App, config: &Config, current_theme_name: &
 }
 
 /// Build a [`Config`] from the current staged values in the settings state.
-pub fn staged_config(modal: &SettingsModalState, options: &[String], base: &Config) -> Config {
+pub fn staged_config(modal: &SettingsModalState, options: &[String], _base: &Config) -> Config {
     let startup_page = options
         .get(modal.startup_page_selected)
         .cloned()
@@ -162,7 +171,6 @@ pub fn staged_config(modal: &SettingsModalState, options: &[String], base: &Conf
         dashboard_keywords,
         default_project_compiler: modal.default_project_compiler.clone(),
         enabled_plugins: modal.enabled_plugins.clone(),
-        ..base.clone()
     }
 }
 
@@ -184,7 +192,7 @@ pub enum SettingsKeyResult {
     PreviewTheme(String),
 }
 
-/// Synchronize theme_selected to the index of the currently applied theme (original_theme).
+/// Synchronize `theme_selected` to the index of the currently applied theme (`original_theme`).
 pub fn sync_theme_selection_to_applied(app: &mut App) {
     let orig = app.settings_modal.original_theme.clone();
     if let Some(pos) = Theme::BUILTIN_THEMES
@@ -247,9 +255,8 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
         if is_editing {
             clear_edit_state(app);
             return SettingsKeyResult::Handled;
-        } else {
-            return SettingsKeyResult::ReturnToSidebar;
         }
+        return SettingsKeyResult::ReturnToSidebar;
     }
 
     // Global q key handling: if not in text editing mode, quit application cleanly.
@@ -590,11 +597,11 @@ fn handle_general_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
             KeyCode::Down | KeyCode::Char('j') => {
                 app.settings_modal.general_focus = GeneralTabFocus::EnabledPlugins;
             }
-            KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') => {
+            KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l') => {
                 if app.settings_modal.default_project_compiler == "typst" {
-                    app.settings_modal.default_project_compiler = "latex".to_owned();
+                    "latex".clone_into(&mut app.settings_modal.default_project_compiler);
                 } else {
-                    app.settings_modal.default_project_compiler = "typst".to_owned();
+                    "typst".clone_into(&mut app.settings_modal.default_project_compiler);
                 }
             }
             KeyCode::Enter => return SettingsKeyResult::Apply,
@@ -605,7 +612,6 @@ fn handle_general_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
             KeyCode::Up | KeyCode::Char('k') => {
                 app.settings_modal.general_focus = GeneralTabFocus::DefaultProjectCompiler;
             }
-            KeyCode::Down | KeyCode::Char('j') => {}
             KeyCode::Char(' ') => {
                 if let Some(plugin) = app.plugins.get(app.settings_modal.plugins_selected) {
                     let id = plugin.id.clone();
@@ -799,7 +805,6 @@ fn handle_paths_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
             KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
                 app.settings_modal.paths_focus = PathsTabFocus::DownloadPath;
             }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {}
             KeyCode::Enter => {
                 app.settings_modal.projects_directory_editing = true;
             }
@@ -815,7 +820,7 @@ fn handle_library_entry_edit(app: &mut App, key: KeyEvent) -> SettingsKeyResult 
         KeyCode::Enter => {
             if let Some(entry) = app.settings_modal.library_entries.get_mut(idx) {
                 let err = validate_path(&entry.text);
-                entry.error = err.clone();
+                entry.error.clone_from(&err);
                 app.settings_modal.library_editing = false;
                 if err.is_none() {
                     return SettingsKeyResult::Apply;
@@ -910,7 +915,7 @@ fn handle_single_path_edit(
         KeyCode::Enter => match focus {
             PathsTabFocus::DownloadPath => {
                 let err = validate_path(&app.settings_modal.download_path);
-                app.settings_modal.download_path_error = err.clone();
+                app.settings_modal.download_path_error.clone_from(&err);
                 app.settings_modal.download_path_editing = false;
                 if err.is_none() {
                     return SettingsKeyResult::Apply;
@@ -918,13 +923,13 @@ fn handle_single_path_edit(
             }
             PathsTabFocus::ProjectsDirectory => {
                 let err = validate_path(&app.settings_modal.projects_directory);
-                app.settings_modal.projects_directory_error = err.clone();
+                app.settings_modal.projects_directory_error.clone_from(&err);
                 app.settings_modal.projects_directory_editing = false;
                 if err.is_none() {
                     return SettingsKeyResult::Apply;
                 }
             }
-            _ => {}
+            PathsTabFocus::LibraryFolders => {}
         },
         KeyCode::Esc => match focus {
             PathsTabFocus::DownloadPath => {
@@ -933,7 +938,7 @@ fn handle_single_path_edit(
             PathsTabFocus::ProjectsDirectory => {
                 app.settings_modal.projects_directory_editing = false;
             }
-            _ => {}
+            PathsTabFocus::LibraryFolders => {}
         },
         KeyCode::Char(c) => {
             let c = text_input_char(c);
@@ -946,7 +951,7 @@ fn handle_single_path_edit(
                     &mut app.settings_modal.projects_directory,
                     &mut app.settings_modal.projects_directory_cursor,
                 ),
-                _ => return SettingsKeyResult::Handled,
+                PathsTabFocus::LibraryFolders => return SettingsKeyResult::Handled,
             };
             let cur = *cursor;
             text.insert(cur, c);
@@ -962,7 +967,7 @@ fn handle_single_path_edit(
                     &mut app.settings_modal.projects_directory,
                     &mut app.settings_modal.projects_directory_cursor,
                 ),
-                _ => return SettingsKeyResult::Handled,
+                PathsTabFocus::LibraryFolders => return SettingsKeyResult::Handled,
             };
             let cur = *cursor;
             if cur > 0 {
@@ -985,7 +990,7 @@ fn handle_single_path_edit(
                     &mut app.settings_modal.projects_directory,
                     &mut app.settings_modal.projects_directory_cursor,
                 ),
-                _ => return SettingsKeyResult::Handled,
+                PathsTabFocus::LibraryFolders => return SettingsKeyResult::Handled,
             };
             let cur = *cursor;
             if cur < text.len() {
@@ -1007,7 +1012,7 @@ fn handle_single_path_edit(
                     &mut app.settings_modal.projects_directory,
                     &mut app.settings_modal.projects_directory_cursor,
                 ),
-                _ => return SettingsKeyResult::Handled,
+                PathsTabFocus::LibraryFolders => return SettingsKeyResult::Handled,
             };
             let cur = *cursor;
             if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1026,7 +1031,7 @@ fn handle_single_path_edit(
                     &mut app.settings_modal.projects_directory,
                     &mut app.settings_modal.projects_directory_cursor,
                 ),
-                _ => return SettingsKeyResult::Handled,
+                PathsTabFocus::LibraryFolders => return SettingsKeyResult::Handled,
             };
             let cur = *cursor;
             let len = text.len();
@@ -1042,7 +1047,7 @@ fn handle_single_path_edit(
                 PathsTabFocus::ProjectsDirectory => {
                     &mut app.settings_modal.projects_directory_cursor
                 }
-                _ => return SettingsKeyResult::Handled,
+                PathsTabFocus::LibraryFolders => return SettingsKeyResult::Handled,
             };
             *cursor = 0;
         }
@@ -1056,7 +1061,7 @@ fn handle_single_path_edit(
                     &mut app.settings_modal.projects_directory,
                     &mut app.settings_modal.projects_directory_cursor,
                 ),
-                _ => return SettingsKeyResult::Handled,
+                PathsTabFocus::LibraryFolders => return SettingsKeyResult::Handled,
             };
             *cursor = text.len();
         }
@@ -1186,7 +1191,7 @@ fn render_tab_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
         } else {
             "◄/► Switch Tab"
         };
-        let hint_len = hint_text.chars().count() as u16;
+        let hint_len = saturating_u16(hint_text.chars().count());
         let hint_area = Rect::new(
             area.x + area.width.saturating_sub(hint_len),
             area.y,
@@ -1375,7 +1380,7 @@ fn render_theme_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
 
             let prefix = if is_cursor { "> " } else { "  " };
             let suffix = if is_applied { " (Active)" } else { "" };
-            let label = format!("{}{}{}", prefix, display, suffix);
+            let label = format!("{prefix}{display}{suffix}");
 
             ListItem::new(Line::styled(label, style))
         })
@@ -1407,9 +1412,8 @@ fn handle_keyword_entry_edit(app: &mut App, key: KeyEvent) -> SettingsKeyResult 
                 entry.error = None;
                 app.settings_modal.keyword_editing = false;
                 return SettingsKeyResult::Apply;
-            } else {
-                app.settings_modal.keyword_editing = false;
             }
+            app.settings_modal.keyword_editing = false;
         }
         KeyCode::Esc => {
             app.settings_modal.keyword_editing = false;
@@ -1492,7 +1496,8 @@ fn handle_keyword_entry_edit(app: &mut App, key: KeyEvent) -> SettingsKeyResult 
 
 fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let kw_count = app.settings_modal.keyword_entries.len();
-    let kw_height = (kw_count as u16 + 2)
+    let kw_height = saturating_u16(kw_count)
+        .saturating_add(2)
         .max(4)
         .min(area.height.saturating_sub(10));
 
@@ -1564,9 +1569,11 @@ fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
     );
 
     if viewer_editing {
-        let visible_cols = app.settings_modal.pdf_viewer[..app.settings_modal.pdf_viewer_cursor]
-            .chars()
-            .count() as u16;
+        let visible_cols = saturating_u16(
+            app.settings_modal.pdf_viewer[..app.settings_modal.pdf_viewer_cursor]
+                .chars()
+                .count(),
+        );
         frame.set_cursor_position((chunks[1].x + 1 + visible_cols, chunks[1].y + 1));
     }
 
@@ -1587,7 +1594,7 @@ fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
         "typst" => "Typst",
         _ => "LaTeX",
     };
-    let compiler_text = format!(" ◄  {}  ► ", compiler_label);
+    let compiler_text = format!(" ◄  {compiler_label}  ► ");
     frame.render_widget(
         Paragraph::new(Line::styled(
             compiler_text,
@@ -1675,8 +1682,8 @@ fn render_dashboard_keywords(
         let is_selected = i == sel && focused;
         let is_editing = editing && is_selected;
 
-        let text_rows = entry.text.len().div_ceil(wrap_width.max(1)).max(1) as u16;
-        let error_rows = if entry.error.is_some() { 1u16 } else { 0 };
+        let text_rows = saturating_u16(entry.text.len().div_ceil(wrap_width.max(1)).max(1));
+        let error_rows = u16::from(entry.error.is_some());
         let total_rows = text_rows + error_rows;
 
         let row_area = Rect::new(
@@ -1713,9 +1720,10 @@ fn render_dashboard_keywords(
         }
 
         if is_editing {
-            let cur = entry.text[..entry.cursor].chars().count() as u16;
-            let cursor_x = row_area.x + 2 + (cur % (wrap_width as u16));
-            let cursor_y = row_area.y + (cur / (wrap_width as u16));
+            let cur = saturating_u16(entry.text[..entry.cursor].chars().count());
+            let wrap_width = saturating_u16(wrap_width);
+            let cursor_x = row_area.x + 2 + (cur % wrap_width);
+            let cursor_y = row_area.y + (cur / wrap_width);
             if cursor_y < inner.y + inner.height {
                 frame.set_cursor_position((cursor_x, cursor_y));
             }
@@ -1773,15 +1781,18 @@ fn render_paths_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
     );
 
     if app.settings_modal.download_path_editing && download_focused {
-        let cur = app.settings_modal.download_path[..app.settings_modal.download_path_cursor]
-            .chars()
-            .count() as u16;
+        let cur = saturating_u16(
+            app.settings_modal.download_path[..app.settings_modal.download_path_cursor]
+                .chars()
+                .count(),
+        );
         frame.set_cursor_position((chunks[1].x + 1 + cur, chunks[1].y + 1));
     } else if app.settings_modal.projects_directory_editing && projects_focused {
-        let cur = app.settings_modal.projects_directory
-            [..app.settings_modal.projects_directory_cursor]
-            .chars()
-            .count() as u16;
+        let cur = saturating_u16(
+            app.settings_modal.projects_directory[..app.settings_modal.projects_directory_cursor]
+                .chars()
+                .count(),
+        );
         frame.set_cursor_position((chunks[2].x + 1 + cur, chunks[2].y + 1));
     }
 }
@@ -1827,8 +1838,8 @@ fn render_library_folders(
         let is_selected = i == sel && focused;
         let is_editing = editing && is_selected;
 
-        let text_rows = entry.text.len().div_ceil(wrap_width.max(1)).max(1) as u16;
-        let error_rows = if entry.error.is_some() { 1u16 } else { 0 };
+        let text_rows = saturating_u16(entry.text.len().div_ceil(wrap_width.max(1)).max(1));
+        let error_rows = u16::from(entry.error.is_some());
         let total_rows = text_rows + error_rows;
 
         let row_area = Rect::new(
@@ -1856,7 +1867,7 @@ fn render_library_folders(
                 row_area,
             );
             let before_cursor = format!("{}{}", prefix, &entry.text[..entry.cursor]);
-            let col = before_cursor.chars().count() as u16;
+            let col = saturating_u16(before_cursor.chars().count());
             let cursor_row = col / inner.width.max(1);
             let cursor_col = col % inner.width.max(1);
             if inner.y + y_offset + cursor_row < inner.y + inner.height {
@@ -1875,7 +1886,7 @@ fn render_library_folders(
                 let err_area = Rect::new(inner.x, inner.y + err_y, inner.width, 1);
                 frame.render_widget(
                     Paragraph::new(Line::styled(
-                        format!("  ⚠ {}", err),
+                        format!("  ⚠ {err}"),
                         Style::default().fg(theme.error),
                     )),
                     err_area,
@@ -1913,7 +1924,7 @@ fn render_single_path_field(
         setting_value_style(focused, theme)
     };
     let content = if let Some(err) = error {
-        format!("{} — {}", text, err)
+        format!("{text} — {err}")
     } else {
         text.to_owned()
     };
@@ -1959,7 +1970,7 @@ fn render_plugins_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
             let detail_style = setting_value_style(selected, theme);
             ListItem::new(Line::from(vec![
                 Span::raw("  "),
-                Span::styled(format!("[{}] ", check), check_style),
+                Span::styled(format!("[{check}] "), check_style),
                 Span::styled(format!("{} ", plugin.name), name_style),
                 Span::styled(format!("v{}", plugin.version), detail_style),
                 Span::raw("  "),
@@ -2081,15 +2092,17 @@ mod tests {
 
     #[test]
     fn test_staged_config_building() {
-        let mut modal = SettingsModalState::default();
-        modal.startup_page_selected = 1;
-        modal.download_path = "/tmp/downloads".into();
-        modal.projects_directory = "/tmp/projects".into();
-        modal.library_entries = vec![
-            PathEntryState::new("/home/user/papers".into()),
-            PathEntryState::new("".into()),
-        ];
-        modal.enabled_plugins = vec!["plugin-a".into()];
+        let modal = SettingsModalState {
+            startup_page_selected: 1,
+            download_path: "/tmp/downloads".into(),
+            projects_directory: "/tmp/projects".into(),
+            library_entries: vec![
+                PathEntryState::new("/home/user/papers".into()),
+                PathEntryState::new(String::new()),
+            ],
+            enabled_plugins: vec!["plugin-a".into()],
+            ..SettingsModalState::default()
+        };
 
         let options = vec!["dashboard".into(), "discover".into(), "library".into()];
         let base = Config::default();
@@ -2148,11 +2161,10 @@ mod tests {
         let res = handle_settings_key(&mut app, key_right);
 
         assert_eq!(app.settings_modal.tab, SettingsTab::General);
-        if let SettingsKeyResult::PreviewTheme(reverted) = res {
-            assert_eq!(reverted, "catppuccin-mocha");
-        } else {
-            panic!("Expected PreviewTheme with original theme on tab switch from Theme");
-        }
+        assert!(matches!(
+            res,
+            SettingsKeyResult::PreviewTheme(reverted) if reverted == "catppuccin-mocha"
+        ));
     }
 
     #[test]
@@ -2195,11 +2207,10 @@ mod tests {
 
         assert_eq!(app.settings_modal.tab, SettingsTab::General);
         assert!(app.settings_modal.tab_bar_focused);
-        if let SettingsKeyResult::PreviewTheme(reverted) = res {
-            assert_eq!(reverted, "catppuccin-mocha");
-        } else {
-            panic!("Expected PreviewTheme with original theme on Right key in Theme list");
-        }
+        assert!(matches!(
+            res,
+            SettingsKeyResult::PreviewTheme(reverted) if reverted == "catppuccin-mocha"
+        ));
     }
 
     #[test]
@@ -2251,9 +2262,11 @@ mod tests {
 
     #[test]
     fn slash_opens_discovery_unless_a_settings_text_field_is_being_edited() {
-        let mut app = App::default();
-        app.page = Page::Settings;
-        app.content_focused = true;
+        let mut app = App {
+            page: Page::Settings,
+            content_focused: true,
+            ..App::default()
+        };
 
         let result = handle_settings_key(
             &mut app,
@@ -2393,11 +2406,14 @@ mod tests {
         let _ = handle_settings_key(&mut app, key_left);
 
         assert_eq!(app.settings_modal.tab, SettingsTab::Theme);
+        assert_eq!(
+            Theme::BUILTIN_THEMES.get(app.settings_modal.theme_selected),
+            Some(&"dracula")
+        );
         let dracula_idx = Theme::BUILTIN_THEMES
             .iter()
-            .position(|&t| t.eq_ignore_ascii_case("dracula"))
-            .unwrap();
-        assert_eq!(app.settings_modal.theme_selected, dracula_idx);
+            .position(|theme| theme.eq_ignore_ascii_case("dracula"))
+            .unwrap_or_default();
 
         // 2. Previewing another theme (moving down 2 items)
         app.settings_modal.tab_bar_focused = false;

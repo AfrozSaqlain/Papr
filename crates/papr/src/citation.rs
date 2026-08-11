@@ -1,5 +1,9 @@
 use papr_core::models::CitationMetadata;
+use std::fmt::Write as _;
 use std::path::PathBuf;
+
+static CLIPBOARD: std::sync::OnceLock<std::sync::Mutex<Option<arboard::Clipboard>>> =
+    std::sync::OnceLock::new();
 
 /// Fetch the canonical BibTeX for `metadata`.
 ///
@@ -11,61 +15,53 @@ use std::path::PathBuf;
 /// Returns `(citation_key, bibtex_string)`.
 pub async fn fetch_bibtex(metadata: &CitationMetadata) -> (String, String) {
     // 1. Try DOI
-    if let Some(doi) = metadata.doi.as_deref().and_then(extract_doi) {
-        if let Ok(response) = reqwest::Client::new()
-            .get(format!("https://doi.org/{}", doi))
+    if let Some(doi) = metadata.doi.as_deref().and_then(extract_doi)
+        && let Ok(response) = reqwest::Client::new()
+            .get(format!("https://doi.org/{doi}"))
             .header("Accept", "application/x-bibtex")
             .send()
             .await
-        {
-            if response.status().is_success() {
-                if let Ok(bibtex) = response.text().await {
-                    if !bibtex.trim().is_empty() {
-                        // Extract key from the BibTeX string (first token after `{`)
-                        let key = bibtex
-                            .trim()
-                            .trim_start_matches('@')
-                            .find('{')
-                            .and_then(|i| {
-                                bibtex.trim().trim_start_matches('@')[i + 1..]
-                                    .split(',')
-                                    .next()
-                                    .map(|k| k.trim().to_string())
-                            })
-                            .unwrap_or_else(|| best_effort_key(metadata));
-                        return (key, bibtex);
-                    }
-                }
-            }
-        }
+        && response.status().is_success()
+        && let Ok(bibtex) = response.text().await
+        && !bibtex.trim().is_empty()
+    {
+        // Extract key from the BibTeX string (first token after `{`)
+        let key = bibtex
+            .trim()
+            .trim_start_matches('@')
+            .find('{')
+            .and_then(|i| {
+                bibtex.trim().trim_start_matches('@')[i + 1..]
+                    .split(',')
+                    .next()
+                    .map(|k| k.trim().to_string())
+            })
+            .unwrap_or_else(|| best_effort_key(metadata));
+        return (key, bibtex);
     }
 
     // 2. Try arXiv
-    if let Some(arxiv_id) = metadata.arxiv_id.as_deref().and_then(extract_arxiv) {
-        if let Ok(response) = reqwest::Client::new()
-            .get(format!("https://arxiv.org/bibtex/{}", arxiv_id))
+    if let Some(arxiv_id) = metadata.arxiv_id.as_deref().and_then(extract_arxiv)
+        && let Ok(response) = reqwest::Client::new()
+            .get(format!("https://arxiv.org/bibtex/{arxiv_id}"))
             .send()
             .await
-        {
-            if response.status().is_success() {
-                if let Ok(bibtex) = response.text().await {
-                    if !bibtex.trim().is_empty() {
-                        let key = bibtex
-                            .trim()
-                            .trim_start_matches('@')
-                            .find('{')
-                            .and_then(|i| {
-                                bibtex.trim().trim_start_matches('@')[i + 1..]
-                                    .split(',')
-                                    .next()
-                                    .map(|k| k.trim().to_string())
-                            })
-                            .unwrap_or_else(|| best_effort_key(metadata));
-                        return (key, bibtex);
-                    }
-                }
-            }
-        }
+        && response.status().is_success()
+        && let Ok(bibtex) = response.text().await
+        && !bibtex.trim().is_empty()
+    {
+        let key = bibtex
+            .trim()
+            .trim_start_matches('@')
+            .find('{')
+            .and_then(|i| {
+                bibtex.trim().trim_start_matches('@')[i + 1..]
+                    .split(',')
+                    .next()
+                    .map(|k| k.trim().to_string())
+            })
+            .unwrap_or_else(|| best_effort_key(metadata));
+        return (key, bibtex);
     }
 
     // 3. Best-effort local generation
@@ -88,8 +84,7 @@ pub async fn fetch_and_copy_citation(
 
     if copy_to_clipboard(&bibtex) {
         let _ = sender.send(crate::AppEvent::Toast(format!(
-            "Citation copied to clipboard {}",
-            source
+            "Citation copied to clipboard {source}"
         )));
     } else {
         let _ = sender.send(crate::AppEvent::Toast(
@@ -116,21 +111,21 @@ pub async fn fetch_and_insert_project_citation(
 pub fn generate_bibtex(metadata: &CitationMetadata) -> (String, String) {
     let mut bibtex = String::new();
     let key = best_effort_key(metadata);
-    bibtex.push_str(&format!("@article{{{key},\n"));
-    bibtex.push_str(&format!("  title={{{}}},\n", metadata.title));
+    let _ = writeln!(bibtex, "@article{{{key},");
+    let _ = writeln!(bibtex, "  title={{{}}},", metadata.title);
     if !metadata.authors.is_empty() {
-        bibtex.push_str(&format!("  author={{{}}},\n", metadata.authors));
+        let _ = writeln!(bibtex, "  author={{{}}},", metadata.authors);
     }
     if let Some(year) = metadata.year.as_deref().filter(|y| !y.is_empty()) {
-        bibtex.push_str(&format!("  year={{{year}}},\n"));
+        let _ = writeln!(bibtex, "  year={{{year}}},");
     }
     if let Some(journal) = metadata.journal_ref.as_deref().filter(|j| !j.is_empty()) {
-        bibtex.push_str(&format!("  journal={{{journal}}},\n"));
+        let _ = writeln!(bibtex, "  journal={{{journal}}},");
     } else if let Some(arxiv_id) = metadata.arxiv_id.as_deref().and_then(extract_arxiv) {
-        bibtex.push_str(&format!("  journal={{arXiv preprint arXiv:{arxiv_id}}},\n"));
+        let _ = writeln!(bibtex, "  journal={{arXiv preprint arXiv:{arxiv_id}}},");
     }
     if let Some(doi) = metadata.doi.as_deref().and_then(extract_doi) {
-        bibtex.push_str(&format!("  doi={{{doi}}},\n"));
+        let _ = writeln!(bibtex, "  doi={{{doi}}},");
     }
     bibtex.push_str("}\n");
     (key, bibtex)
@@ -216,7 +211,7 @@ fn copy_to_clipboard(text: &str) -> bool {
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(text.as_bytes());
         }
-        if child.wait().map(|s| s.success()).unwrap_or(false) {
+        if child.wait().is_ok_and(|s| s.success()) {
             return true;
         }
     }
@@ -232,7 +227,7 @@ fn copy_to_clipboard(text: &str) -> bool {
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(text.as_bytes());
         }
-        if child.wait().map(|s| s.success()).unwrap_or(false) {
+        if child.wait().is_ok_and(|s| s.success()) {
             return true;
         }
     }
@@ -247,22 +242,19 @@ fn copy_to_clipboard(text: &str) -> bool {
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(text.as_bytes());
         }
-        if child.wait().map(|s| s.success()).unwrap_or(false) {
+        if child.wait().is_ok_and(|s| s.success()) {
             return true;
         }
     }
 
     // Fallback to arboard
-    static CLIPBOARD: std::sync::OnceLock<std::sync::Mutex<Option<arboard::Clipboard>>> =
-        std::sync::OnceLock::new();
-
     let clip_mutex =
         CLIPBOARD.get_or_init(|| std::sync::Mutex::new(arboard::Clipboard::new().ok()));
 
-    if let Ok(mut lock) = clip_mutex.lock() {
-        if let Some(clipboard) = lock.as_mut() {
-            return clipboard.set_text(text).is_ok();
-        }
+    if let Ok(mut lock) = clip_mutex.lock()
+        && let Some(clipboard) = lock.as_mut()
+    {
+        return clipboard.set_text(text).is_ok();
     }
     false
 }

@@ -336,10 +336,9 @@ pub fn parse_latex_diagnostics(log: &[String], project_root: &Path) -> Vec<Proje
         let source_file = location
             .as_ref()
             .map_or(source_file, |location| location.file.clone());
-        let (line, compiler_code) = location
-            .as_ref()
-            .map(|location| (Some(location.line), location.code.clone()))
-            .unwrap_or((None, None));
+        let (line, compiler_code) = location.as_ref().map_or((None, None), |location| {
+            (Some(location.line), location.code.clone())
+        });
         if let Some(location) = &location {
             previous_location = Some(location.clone());
         }
@@ -621,10 +620,10 @@ fn compiler_location_in_line(output: &str) -> Option<(usize, Option<String>)> {
         "at lines ",
         "line ",
     ] {
-        if let Some(offset) = lower.find(marker) {
-            if let Some(line) = parse_line_number(&lower[offset + marker.len()..]) {
-                return Some((line, None));
-            }
+        if let Some(offset) = lower.find(marker)
+            && let Some(line) = parse_line_number(&lower[offset + marker.len()..])
+        {
+            return Some((line, None));
         }
     }
 

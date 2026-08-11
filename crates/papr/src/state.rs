@@ -164,7 +164,7 @@ impl Page {
     /// Parse a configuration string into a `Page`.
     #[must_use]
     pub fn from_config_str(s: &str) -> Option<Self> {
-        let normalized = s.trim().to_lowercase().replace('-', "_").replace(' ', "_");
+        let normalized = s.trim().to_lowercase().replace(['-', ' '], "_");
         match normalized.as_str() {
             "dashboard" => Some(Self::Dashboard),
             "discover" => Some(Self::Discover),
@@ -337,7 +337,7 @@ impl SettingsTab {
     }
 }
 
-/// State for a single editable path entry in the library_folders list.
+/// State for a single editable path entry in the `library_folders` list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathEntryState {
     /// Current text content of this entry.
@@ -363,28 +363,28 @@ impl PathEntryState {
 /// Focus target within the Paths tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PathsTabFocus {
-    /// The library_folders multi-entry list.
+    /// The `library_folders` multi-entry list.
     #[default]
     LibraryFolders,
-    /// The download_path single-line field.
+    /// The `download_path` single-line field.
     DownloadPath,
-    /// The projects_directory single-line field.
+    /// The `projects_directory` single-line field.
     ProjectsDirectory,
 }
 
 /// Focus target within the General tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GeneralTabFocus {
-    /// startup_page selection list.
+    /// `startup_page` selection list.
     #[default]
     StartupPage,
-    /// pdf_viewer text field.
+    /// `pdf_viewer` text field.
     PdfViewer,
-    /// dashboard_keywords list.
+    /// `dashboard_keywords` list.
     DashboardKeywords,
-    /// default_project_compiler.
+    /// `default_project_compiler`.
     DefaultProjectCompiler,
-    /// enabled_plugins toggle list.
+    /// `enabled_plugins` toggle list.
     EnabledPlugins,
 }
 
@@ -400,50 +400,50 @@ pub struct SettingsModalState {
     /// Scroll offset for the theme list.
     pub theme_scroll: usize,
     // --- General tab ---
-    /// Staged startup_page value.
+    /// Staged `startup_page` value.
     pub startup_page: String,
-    /// Selected startup_page option index.
+    /// Selected `startup_page` option index.
     pub startup_page_selected: usize,
-    /// Staged pdf_viewer value (raw command string).
+    /// Staged `pdf_viewer` value (raw command string).
     pub pdf_viewer: String,
-    /// Byte cursor in pdf_viewer text field.
+    /// Byte cursor in `pdf_viewer` text field.
     pub pdf_viewer_cursor: usize,
-    /// Whether the pdf_viewer field is being edited.
+    /// Whether the `pdf_viewer` field is being edited.
     pub pdf_viewer_editing: bool,
-    /// Staged dashboard_keywords as editable entries.
+    /// Staged `dashboard_keywords` as editable entries.
     pub keyword_entries: Vec<PathEntryState>,
-    /// Selected entry index in keyword_entries.
+    /// Selected entry index in `keyword_entries`.
     pub keyword_selected: usize,
     /// Whether the selected keyword entry is actively being edited.
     pub keyword_editing: bool,
-    /// Staged enabled_plugins list.
+    /// Staged `enabled_plugins` list.
     pub enabled_plugins: Vec<String>,
-    /// Staged default_project_compiler value.
+    /// Staged `default_project_compiler` value.
     pub default_project_compiler: String,
     /// Focus within the General tab.
     pub general_focus: GeneralTabFocus,
     // --- Paths tab ---
-    /// Staged library_folders as editable entries.
+    /// Staged `library_folders` as editable entries.
     pub library_entries: Vec<PathEntryState>,
-    /// Selected entry index in library_entries.
+    /// Selected entry index in `library_entries`.
     pub library_selected: usize,
     /// Whether the selected library entry is actively being edited.
     pub library_editing: bool,
-    /// Staged download_path value.
+    /// Staged `download_path` value.
     pub download_path: String,
-    /// Byte cursor in download_path text field.
+    /// Byte cursor in `download_path` text field.
     pub download_path_cursor: usize,
-    /// Whether download_path is actively being edited.
+    /// Whether `download_path` is actively being edited.
     pub download_path_editing: bool,
-    /// Validation error for download_path.
+    /// Validation error for `download_path`.
     pub download_path_error: Option<String>,
-    /// Staged projects_directory value.
+    /// Staged `projects_directory` value.
     pub projects_directory: String,
-    /// Byte cursor in projects_directory text field.
+    /// Byte cursor in `projects_directory` text field.
     pub projects_directory_cursor: usize,
-    /// Whether projects_directory is actively being edited.
+    /// Whether `projects_directory` is actively being edited.
     pub projects_directory_editing: bool,
-    /// Validation error for projects_directory.
+    /// Validation error for `projects_directory`.
     pub projects_directory_error: Option<String>,
     /// Focus within the Paths tab.
     pub paths_focus: PathsTabFocus,
@@ -512,7 +512,7 @@ pub enum ProjectPane {
 /// Target to delete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeletionTarget {
-    /// A LaTex project directory.
+    /// A `LaTex` project directory.
     Project {
         /// Project metadata and directory to remove.
         project: Project,
@@ -639,6 +639,7 @@ impl DiscoveryState {
     }
 
     /// Results on the visible page after applying the local filter.
+    #[must_use]
     pub fn visible_page_results(&self) -> Box<dyn Iterator<Item = &RemotePaper> + '_> {
         if self.uses_unfiltered_fallback() {
             Box::new(self.current_page_results().iter())
@@ -1005,7 +1006,7 @@ pub struct App {
     /// Vertical scroll offset for the project citation results.
     pub project_citation_scroll: usize,
     /// Lowercased titles of BibTeX entries already present in the project's .bib file.
-    /// Updated whenever the CitationSource index refreshes or a new citation is inserted.
+    /// Updated whenever the `CitationSource` index refreshes or a new citation is inserted.
     pub project_bib_titles: std::collections::HashSet<String>,
     /// File or folder being renamed from the active project tree.
     pub project_entry_rename_path: Option<std::path::PathBuf>,
@@ -1097,7 +1098,7 @@ pub struct App {
     pub notes_scroll: usize,
     /// Text of the config.toml file.
     pub config_editor_text: String,
-    /// Byte cursor position in config_editor_text.
+    /// Byte cursor position in `config_editor_text`.
     pub config_editor_cursor: usize,
     /// Whether the configuration editor currently has keyboard focus.
     pub config_editor_focused: bool,
@@ -1109,7 +1110,7 @@ pub struct App {
     pub config_editor_scroll: usize,
     /// Undo history log of configuration states.
     pub config_editor_history: Vec<String>,
-    /// Index pointing to active state in config_editor_history.
+    /// Index pointing to active state in `config_editor_history`.
     pub config_editor_history_idx: usize,
     /// Current Vim command string being entered.
     pub config_editor_command: Option<String>,
@@ -1129,8 +1130,8 @@ pub struct App {
     pub pdf_viewer_total_pages: usize,
     /// Full pixel height of the last rendered page (used for upward page transitions).
     pub pdf_viewer_page_pixel_h: u32,
-    /// Maximum scroll_y (in cell rows) for the current page and viewport.
-    /// Written by draw_pdf_viewer every frame; read by pdf_scroll to detect
+    /// Maximum `scroll_y` (in cell rows) for the current page and viewport.
+    /// Written by `draw_pdf_viewer` every frame; read by `pdf_scroll` to detect
     /// when the user has reached the bottom of the page.
     pub pdf_viewer_max_scroll_y: u32,
     /// Active internal reading session ID.
@@ -1333,10 +1334,10 @@ impl App {
             if local.arxiv_id.as_deref() == Some(remote.id.as_str()) {
                 return true;
             }
-            if let (Some(local_doi), Some(remote_doi)) = (&local.doi, &remote.doi) {
-                if local_doi.eq_ignore_ascii_case(remote_doi) {
-                    return true;
-                }
+            if let (Some(local_doi), Some(remote_doi)) = (&local.doi, &remote.doi)
+                && local_doi.eq_ignore_ascii_case(remote_doi)
+            {
+                return true;
             }
             local.title.eq_ignore_ascii_case(&remote.title)
         })
@@ -1344,27 +1345,27 @@ impl App {
 
     /// Get dependencies parsed from Cargo.toml.
     /// Get dependencies parsed from Cargo.toml.
+    #[must_use]
     pub fn get_dependencies(&self) -> Vec<(String, String)> {
         let mut workspace_versions = std::collections::HashMap::new();
-        if let Ok(root_val) = toml::from_str::<toml::Value>(include_str!("../../../Cargo.toml")) {
-            if let Some(ws_deps) = root_val
+        if let Ok(root_val) = toml::from_str::<toml::Value>(include_str!("../../../Cargo.toml"))
+            && let Some(ws_deps) = root_val
                 .get("workspace")
                 .and_then(|w| w.get("dependencies"))
                 .and_then(|d| d.as_table())
-            {
-                for (k, v) in ws_deps {
-                    let version = match v {
-                        toml::Value::String(s) => s.clone(),
-                        toml::Value::Table(t) => t
-                            .get("version")
-                            .and_then(|ver| ver.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        _ => String::new(),
-                    };
-                    if !version.is_empty() {
-                        workspace_versions.insert(k.clone(), version);
-                    }
+        {
+            for (k, v) in ws_deps {
+                let version = match v {
+                    toml::Value::String(s) => s.clone(),
+                    toml::Value::Table(t) => t
+                        .get("version")
+                        .and_then(|ver| ver.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    _ => String::new(),
+                };
+                if !version.is_empty() {
+                    workspace_versions.insert(k.clone(), version);
                 }
             }
         }
@@ -1381,25 +1382,25 @@ impl App {
                 let deps_node = value
                     .get("dependencies")
                     .or_else(|| value.get("workspace").and_then(|w| w.get("dependencies")));
-                if let Some(dependencies) = deps_node {
-                    if let Some(table) = dependencies.as_table() {
-                        for (k, v) in table {
-                            let mut version = match v {
-                                toml::Value::String(s) => s.clone(),
-                                toml::Value::Table(t) => t
-                                    .get("version")
-                                    .and_then(|ver| ver.as_str())
-                                    .unwrap_or("")
-                                    .to_string(),
-                                _ => String::new(),
-                            };
-                            if version.is_empty() {
-                                if let Some(ws_ver) = workspace_versions.get(k) {
-                                    version = ws_ver.clone();
-                                }
-                            }
-                            dep_map.insert(k.clone(), version);
+                if let Some(dependencies) = deps_node
+                    && let Some(table) = dependencies.as_table()
+                {
+                    for (k, v) in table {
+                        let mut version = match v {
+                            toml::Value::String(s) => s.clone(),
+                            toml::Value::Table(t) => t
+                                .get("version")
+                                .and_then(|ver| ver.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            _ => String::new(),
+                        };
+                        if version.is_empty()
+                            && let Some(ws_ver) = workspace_versions.get(k)
+                        {
+                            version.clone_from(ws_ver);
                         }
+                        dep_map.insert(k.clone(), version);
                     }
                 }
             }
@@ -1411,6 +1412,7 @@ impl App {
     }
 
     /// Get list of all interactive credits items (docs, libraries, dependencies).
+    #[must_use]
     pub fn credits_items(&self) -> Vec<InteractiveCreditItem> {
         let mut items = vec![
             InteractiveCreditItem {
@@ -1452,11 +1454,11 @@ impl App {
             let label = if version.is_empty() {
                 name.clone()
             } else {
-                format!("{} ({})", name, version)
+                format!("{name} ({version})")
             };
             items.push(InteractiveCreditItem {
                 label,
-                url: format!("https://crates.io/crates/{}", name),
+                url: format!("https://crates.io/crates/{name}"),
             });
         }
 
@@ -1464,6 +1466,7 @@ impl App {
     }
 
     /// Check if a query matches the title, authors, DOI, or arXiv ID case-insensitively.
+    #[must_use]
     pub fn matches_query(
         query: &str,
         title: &str,
@@ -1477,21 +1480,19 @@ impl App {
         let q = query.trim().to_ascii_lowercase();
 
         // 1. Check if the query matches an arXiv ID
-        if let Some(q_arxiv) = parse_arxiv_id(&q) {
-            if let Some(p_arxiv_raw) = arxiv_id {
-                if let Some(p_arxiv) = parse_arxiv_id(&clean_arxiv_id(p_arxiv_raw)) {
-                    if strip_arxiv_version(&q_arxiv) == strip_arxiv_version(&p_arxiv) {
-                        return true;
-                    }
-                }
-            }
+        if let Some(q_arxiv) = parse_arxiv_id(&q)
+            && let Some(p_arxiv_raw) = arxiv_id
+            && let Some(p_arxiv) = parse_arxiv_id(&clean_arxiv_id(p_arxiv_raw))
+            && strip_arxiv_version(&q_arxiv) == strip_arxiv_version(&p_arxiv)
+        {
+            return true;
         }
 
         // 2. Check if the query matches DOI
-        if let Some(p_doi) = doi {
-            if p_doi.trim().to_ascii_lowercase() == q {
-                return true;
-            }
+        if let Some(p_doi) = doi
+            && p_doi.trim().to_ascii_lowercase() == q
+        {
+            return true;
         }
 
         // 3. Fall back to title and authors matching
@@ -1499,6 +1500,7 @@ impl App {
     }
 
     /// Get the library papers filtered by the workspace search query.
+    #[must_use]
     pub fn filtered_library_papers(&self) -> Vec<&LibraryPaper> {
         self.library
             .papers
@@ -1516,6 +1518,7 @@ impl App {
     }
 
     /// Get the reading queue papers filtered by the workspace search query.
+    #[must_use]
     pub fn filtered_reading_queue_papers(&self) -> Vec<&LibraryPaper> {
         self.reading_queue_papers
             .iter()
@@ -1532,6 +1535,7 @@ impl App {
     }
 
     /// Get the download tasks filtered by the workspace search query.
+    #[must_use]
     pub fn filtered_downloads(&self) -> Vec<&DownloadTask> {
         self.downloads
             .iter()
@@ -1563,6 +1567,7 @@ impl App {
     }
 
     /// Get the collections filtered by the workspace search query.
+    #[must_use]
     pub fn filtered_collections(&self) -> Vec<CollectionSearchItem<'_>> {
         let mut results = Vec::new();
         if self.workspace_query.is_empty() {
@@ -1576,16 +1581,16 @@ impl App {
             if let Some(paper_ids) = self.collection_papers_map.get(&c.id) {
                 let mut matching_papers = Vec::new();
                 for &pid in paper_ids {
-                    if let Some(p) = self.library.papers.iter().find(|p| p.id == pid) {
-                        if Self::matches_query(
+                    if let Some(p) = self.library.papers.iter().find(|p| p.id == pid)
+                        && Self::matches_query(
                             &self.workspace_query,
                             &p.title,
                             &p.authors,
                             p.doi.as_deref(),
                             p.arxiv_id.as_deref(),
-                        ) {
-                            matching_papers.push(p);
-                        }
+                        )
+                    {
+                        matching_papers.push(p);
                     }
                 }
                 if !matching_papers.is_empty() {
@@ -1600,6 +1605,7 @@ impl App {
     }
 
     /// Get the active collection's papers filtered by the workspace search query.
+    #[must_use]
     pub fn filtered_collection_papers(&self) -> Vec<&LibraryPaper> {
         self.collection_papers
             .iter()
@@ -1616,6 +1622,7 @@ impl App {
     }
 
     /// Get the authors filtered by the workspace search query.
+    #[must_use]
     pub fn filtered_authors(&self) -> Vec<&AuthorSummary> {
         self.authors
             .iter()
@@ -1624,6 +1631,7 @@ impl App {
     }
 
     /// Get the active author's papers filtered by the workspace search query.
+    #[must_use]
     pub fn filtered_author_papers(&self) -> Vec<&LibraryPaper> {
         self.author_papers
             .iter()
@@ -1640,6 +1648,7 @@ impl App {
     }
 
     /// Get the bookmarks filtered by the workspace search query.
+    #[must_use]
     pub fn filtered_bookmarks(&self) -> Vec<&BookmarkSummary> {
         self.bookmarks
             .iter()
@@ -1659,6 +1668,7 @@ impl App {
     }
 
     /// Get the notes papers filtered by the workspace search query.
+    #[must_use]
     pub fn filtered_notes_papers(&self) -> Vec<&LibraryPaper> {
         self.notes_papers
             .iter()
@@ -1674,6 +1684,7 @@ impl App {
             .collect()
     }
     /// Get Browse Papr destinations filtered by the query.
+    #[must_use]
     pub fn filtered_palette_items(&self) -> Vec<Page> {
         let q = self.palette_query.to_lowercase();
         Page::ALL
@@ -1817,10 +1828,9 @@ impl App {
                     } else {
                         self.mode = AppMode::Normal;
                     }
-                } else if self.page == Page::Dashboard && !self.today_papers.is_empty() {
-                    self.mode = AppMode::PaperDetail;
-                    self.paper_detail_scroll = 0;
-                } else if self.page == Page::Discover && !self.discovery.results.is_empty() {
+                } else if (self.page == Page::Dashboard && !self.today_papers.is_empty())
+                    || (self.page == Page::Discover && !self.discovery.results.is_empty())
+                {
                     self.mode = AppMode::PaperDetail;
                     self.paper_detail_scroll = 0;
                 }
@@ -1871,10 +1881,11 @@ impl App {
 }
 
 fn strip_arxiv_version(id: &str) -> &str {
-    if let Some(pos) = id.rfind('v') {
-        if id[pos + 1..].chars().all(|c| c.is_ascii_digit()) && pos + 1 < id.len() {
-            return &id[..pos];
-        }
+    if let Some(pos) = id.rfind('v')
+        && id[pos + 1..].chars().all(|c| c.is_ascii_digit())
+        && pos + 1 < id.len()
+    {
+        return &id[..pos];
     }
     id
 }
@@ -1931,18 +1942,18 @@ fn parse_arxiv_id(s: &str) -> Option<String> {
     if let Some(slash_idx) = base.find('/') {
         let (cat, num) = base.split_at(slash_idx);
         let num = &num[1..];
-        if num.len() == 7 && num.chars().all(|c| c.is_ascii_digit()) {
-            if !cat.is_empty()
-                && cat
-                    .chars()
-                    .all(|c| c.is_ascii_alphabetic() || c == '-' || c == '.')
-            {
-                let mut normalized = base.to_string();
-                if let Some(v) = version {
-                    normalized.push_str(&v);
-                }
-                return Some(normalized);
+        if num.len() == 7
+            && num.chars().all(|c| c.is_ascii_digit())
+            && !cat.is_empty()
+            && cat
+                .chars()
+                .all(|c| c.is_ascii_alphabetic() || c == '-' || c == '.')
+        {
+            let mut normalized = base.to_string();
+            if let Some(v) = version {
+                normalized.push_str(&v);
             }
+            return Some(normalized);
         }
     }
 
@@ -2212,16 +2223,10 @@ mod tests {
 
         app.set_page(Page::Projects);
         assert_eq!(app.page, Page::Projects);
-        assert_eq!(
-            app.sidebar_index,
-            Page::ALL.iter().position(|&p| p == Page::Projects).unwrap()
-        );
+        assert_eq!(Page::ALL.get(app.sidebar_index), Some(&Page::Projects));
 
         app.set_page(Page::Discover);
         assert_eq!(app.page, Page::Discover);
-        assert_eq!(
-            app.sidebar_index,
-            Page::ALL.iter().position(|&p| p == Page::Discover).unwrap()
-        );
+        assert_eq!(Page::ALL.get(app.sidebar_index), Some(&Page::Discover));
     }
 }

@@ -5,6 +5,42 @@ use chrono::{NaiveDate, TimeZone, Utc};
 use reqwest::{Client, Url};
 use serde::Deserialize;
 
+const CROSSREF_ENDPOINT: &str = "https://api.crossref.org/works/";
+
+#[derive(Deserialize)]
+struct CrossrefResponse {
+    message: CrossrefWork,
+}
+
+#[derive(Deserialize)]
+struct CrossrefWork {
+    #[serde(rename = "DOI")]
+    doi: Option<String>,
+    title: Option<Vec<String>>,
+    author: Option<Vec<CrossrefAuthor>>,
+    #[serde(rename = "abstract")]
+    abstract_text: Option<String>,
+    #[serde(rename = "container-title")]
+    container_title: Option<Vec<String>>,
+    #[serde(rename = "short-container-title")]
+    short_container_title: Option<Vec<String>>,
+    published: Option<CrossrefDate>,
+    created: Option<CrossrefDate>,
+    deposited: Option<CrossrefDate>,
+}
+
+#[derive(Deserialize)]
+struct CrossrefAuthor {
+    given: Option<String>,
+    family: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CrossrefDate {
+    #[serde(rename = "date-parts")]
+    date_parts: Option<Vec<Vec<u32>>>,
+}
+
 /// Represents an error returned by the Crossref API.
 #[derive(Debug, thiserror::Error)]
 pub enum CrossrefError {
@@ -23,7 +59,6 @@ pub enum CrossrefError {
 #[derive(Clone)]
 pub struct CrossrefClient {
     client: Client,
-    endpoint: Url,
 }
 
 impl CrossrefClient {
@@ -35,7 +70,6 @@ impl CrossrefClient {
                 .user_agent("papr/0.1.0")
                 .build()
                 .unwrap_or_default(),
-            endpoint: Url::parse("https://api.crossref.org/works/").expect("valid url"),
         }
     }
 
@@ -44,8 +78,8 @@ impl CrossrefClient {
     /// # Errors
     /// Returns an error when the request fails or JSON content is malformed.
     pub async fn get_by_doi(&self, doi: &str) -> Result<Option<RemotePaper>, CrossrefError> {
-        let url = self
-            .endpoint
+        let url = Url::parse(CROSSREF_ENDPOINT)
+            .map_err(|_| CrossrefError::NotFound)?
             .join(doi)
             .map_err(|_| CrossrefError::NotFound)?;
         let response = self.client.get(url).send().await?;
@@ -53,40 +87,6 @@ impl CrossrefClient {
             return Ok(None);
         }
         let response = response.error_for_status()?;
-
-        #[derive(Deserialize)]
-        struct CrossrefResponse {
-            message: CrossrefWork,
-        }
-
-        #[derive(Deserialize)]
-        struct CrossrefWork {
-            #[serde(rename = "DOI")]
-            doi: Option<String>,
-            title: Option<Vec<String>>,
-            author: Option<Vec<CrossrefAuthor>>,
-            #[serde(rename = "abstract")]
-            abstract_text: Option<String>,
-            #[serde(rename = "container-title")]
-            container_title: Option<Vec<String>>,
-            #[serde(rename = "short-container-title")]
-            short_container_title: Option<Vec<String>>,
-            published: Option<CrossrefDate>,
-            created: Option<CrossrefDate>,
-            deposited: Option<CrossrefDate>,
-        }
-
-        #[derive(Deserialize)]
-        struct CrossrefAuthor {
-            given: Option<String>,
-            family: Option<String>,
-        }
-
-        #[derive(Deserialize)]
-        struct CrossrefDate {
-            #[serde(rename = "date-parts")]
-            date_parts: Option<Vec<Vec<u32>>>,
-        }
 
         let body = response.bytes().await?;
         let res: CrossrefResponse = serde_json::from_slice(&body)?;
@@ -102,7 +102,7 @@ impl CrossrefClient {
             .unwrap_or_default()
             .into_iter()
             .filter_map(|a| match (a.given, a.family) {
-                (Some(g), Some(f)) => Some(format!("{} {}", g, f)),
+                (Some(g), Some(f)) => Some(format!("{g} {f}")),
                 (None, Some(f)) => Some(f),
                 (Some(g), None) => Some(g),
                 _ => None,
@@ -120,18 +120,18 @@ impl CrossrefClient {
             .to_string();
 
         let mut date = Utc::now();
-        if let Some(cd) = work.published.or(work.created).or(work.deposited) {
-            if let Some(parts) = cd.date_parts {
-                if let Some(p) = parts.first() {
-                    let year = p.first().copied().unwrap_or(0);
-                    let month = p.get(1).copied().unwrap_or(1);
-                    let day = p.get(2).copied().unwrap_or(1);
-                    if let Some(nd) = NaiveDate::from_ymd_opt(year as i32, month, day) {
-                        if let Some(ndt) = nd.and_hms_opt(0, 0, 0) {
-                            date = Utc.from_utc_datetime(&ndt);
-                        }
-                    }
-                }
+        if let Some(cd) = work.published.or(work.created).or(work.deposited)
+            && let Some(parts) = cd.date_parts
+            && let Some(p) = parts.first()
+        {
+            let year = p.first().copied().unwrap_or(0);
+            let month = p.get(1).copied().unwrap_or(1);
+            let day = p.get(2).copied().unwrap_or(1);
+            if let Ok(year) = i32::try_from(year)
+                && let Some(nd) = NaiveDate::from_ymd_opt(year, month, day)
+                && let Some(ndt) = nd.and_hms_opt(0, 0, 0)
+            {
+                date = Utc.from_utc_datetime(&ndt);
             }
         }
 

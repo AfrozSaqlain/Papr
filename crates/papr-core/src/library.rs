@@ -7,6 +7,7 @@ use std::{
 };
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use sha2::{Digest, Sha256};
 
 use thiserror::Error;
 use walkdir::WalkDir;
@@ -219,7 +220,7 @@ impl LibraryIndexer {
                     .unwrap_or_else(|_| entry.path().to_path_buf());
                 seen.insert(p)
             })
-            .map(|entry| entry.metadata().map(|m| m.len()).unwrap_or(0))
+            .map(|entry| entry.metadata().map_or(0, |m| m.len()))
             .sum()
     }
 
@@ -243,7 +244,7 @@ impl LibraryIndexer {
             .fold((0_u64, 0_u64), |(count, bytes), entry| {
                 (
                     count + 1,
-                    bytes + entry.metadata().map(|metadata| metadata.len()).unwrap_or(0),
+                    bytes + entry.metadata().map_or(0, |metadata| metadata.len()),
                 )
             })
     }
@@ -289,7 +290,6 @@ impl LibraryIndexer {
             .and_then(|name| name.to_str())
             .map_or_else(|| "Untitled PDF".to_owned(), humanize_filename);
 
-        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         std::io::copy(&mut file, &mut hasher)?;
         let content_hash = format!("{:x}", hasher.finalize());
@@ -349,10 +349,10 @@ impl LibraryWatcher {
     {
         let mut watcher =
             notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-                if let Ok(event) = result {
-                    if !matches!(event.kind, notify::EventKind::Access(_)) {
-                        on_event();
-                    }
+                if let Ok(event) = result
+                    && !matches!(event.kind, notify::EventKind::Access(_))
+                {
+                    on_event();
                 }
             })?;
         for root in roots.iter().filter(|root| root.exists()) {

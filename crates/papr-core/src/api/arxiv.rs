@@ -17,7 +17,7 @@ const API_URL: &str = "https://export.arxiv.org/api/query";
 /// arXiv asks API clients to pause for three seconds between consecutive calls.
 const REQUEST_INTERVAL: Duration = Duration::from_secs(3);
 /// A rate-limit response without a `Retry-After` header needs a meaningful cooldown.
-const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
+const RATE_LIMIT_COOLDOWN: Duration = Duration::from_mins(1);
 const LATEST_QUERY: &str = "cat:cs.* OR cat:physics.* OR cat:math.* OR cat:stat.* OR \
     cat:q-bio.* OR cat:astro-ph.* OR cat:cond-mat.* OR cat:gr-qc OR cat:quant-ph";
 
@@ -115,10 +115,10 @@ impl ArxivClient {
     ///
     /// Returns an error when the request fails or Atom content is malformed.
     pub async fn search(&self, query: &str, limit: u16) -> Result<Vec<RemotePaper>, ArxivError> {
-        if let Some(arxiv_id) = parse_arxiv_id(query) {
-            if let Some(paper) = self.get_by_id(&arxiv_id).await? {
-                return Ok(vec![paper]);
-            }
+        if let Some(arxiv_id) = parse_arxiv_id(query)
+            && let Some(paper) = self.get_by_id(&arxiv_id).await?
+        {
+            return Ok(vec![paper]);
         }
         let papers = self
             .query(&build_search_query(query), 0, limit, "relevance")
@@ -141,10 +141,10 @@ impl ArxivClient {
         candidate_limit: u16,
         batch_size: u16,
     ) -> Result<Vec<RemotePaper>, ArxivError> {
-        if let Some(arxiv_id) = parse_arxiv_id(query) {
-            if let Some(paper) = self.get_by_id(&arxiv_id).await? {
-                return Ok(vec![paper]);
-            }
+        if let Some(arxiv_id) = parse_arxiv_id(query)
+            && let Some(paper) = self.get_by_id(&arxiv_id).await?
+        {
+            return Ok(vec![paper]);
         }
 
         let search_query = build_search_query(query);
@@ -189,10 +189,10 @@ impl ArxivClient {
     where
         F: FnMut(Vec<RemotePaper>),
     {
-        if let Some(arxiv_id) = parse_arxiv_id(query) {
-            if let Some(paper) = self.get_by_id(&arxiv_id).await? {
-                return Ok(vec![paper]);
-            }
+        if let Some(arxiv_id) = parse_arxiv_id(query)
+            && let Some(paper) = self.get_by_id(&arxiv_id).await?
+        {
+            return Ok(vec![paper]);
         }
 
         let search_query = build_search_query(query);
@@ -238,15 +238,14 @@ impl ArxivClient {
         candidate_limit: u16,
         batch_size: u16,
     ) -> Result<RankedCandidatePage, ArxivError> {
-        if start == 0 {
-            if let Some(arxiv_id) = parse_arxiv_id(query) {
-                if let Some(paper) = self.get_by_id(&arxiv_id).await? {
-                    return Ok(RankedCandidatePage {
-                        papers: vec![paper],
-                        next_start: None,
-                    });
-                }
-            }
+        if start == 0
+            && let Some(arxiv_id) = parse_arxiv_id(query)
+            && let Some(paper) = self.get_by_id(&arxiv_id).await?
+        {
+            return Ok(RankedCandidatePage {
+                papers: vec![paper],
+                next_start: None,
+            });
         }
 
         let total = candidate_limit.clamp(1, 1_000);
@@ -446,8 +445,7 @@ fn retry_after(response: &Response) -> Duration {
         .get(RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(RATE_LIMIT_COOLDOWN)
+        .map_or(RATE_LIMIT_COOLDOWN, Duration::from_secs)
 }
 
 async fn parse_response(response: String) -> Result<Vec<RemotePaper>, ArxivError> {
@@ -807,18 +805,18 @@ fn parse_arxiv_id(s: &str) -> Option<String> {
     if let Some(slash_idx) = base.find('/') {
         let (cat, num) = base.split_at(slash_idx);
         let num = &num[1..];
-        if num.len() == 7 && num.chars().all(|c| c.is_ascii_digit()) {
-            if !cat.is_empty()
-                && cat
-                    .chars()
-                    .all(|c| c.is_ascii_alphabetic() || c == '-' || c == '.')
-            {
-                let mut normalized = base.to_string();
-                if let Some(v) = version {
-                    normalized.push_str(&v);
-                }
-                return Some(normalized);
+        if num.len() == 7
+            && num.chars().all(|c| c.is_ascii_digit())
+            && !cat.is_empty()
+            && cat
+                .chars()
+                .all(|c| c.is_ascii_alphabetic() || c == '-' || c == '.')
+        {
+            let mut normalized = base.to_string();
+            if let Some(v) = version {
+                normalized.push_str(&v);
             }
+            return Some(normalized);
         }
     }
 

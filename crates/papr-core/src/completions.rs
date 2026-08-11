@@ -39,21 +39,24 @@ pub struct CitationSource {
 
 impl CitationSource {
     /// Construct a source from already-indexed bibliography records.
+    #[must_use]
     pub fn new(entries: Vec<CitationEntry>) -> Self {
         Self { entries }
     }
 
     /// Return all indexed bibliography records (e.g. to build an "already added" set).
+    #[must_use]
     pub fn all_entries(&self) -> &[CitationEntry] {
         &self.entries
     }
 
     /// Parse the useful fields from BibTeX. This deliberately accepts common
     /// hand-written BibTeX formatting rather than requiring a strict parser.
+    #[must_use]
     pub fn parse_bibtex(input: &str) -> Vec<CitationEntry> {
         let mut entries = Vec::new();
         for chunk in input.split('@').skip(1) {
-            let Some(open) = chunk.find(|c| c == '{' || c == '(') else {
+            let Some(open) = chunk.find(['{', '(']) else {
                 continue;
             };
             let body = &chunk[open + 1..];
@@ -126,6 +129,7 @@ impl CompletionSource for CitationSource {
 
 /// Return the incomplete citation key immediately before `cursor`. Recognises
 /// all commands whose name contains `cite`, including natbib and biblatex.
+#[must_use]
 pub fn citation_query(text: &str, cursor: usize) -> Option<&str> {
     let cursor = cursor.min(text.len());
     if !text.is_char_boundary(cursor) {
@@ -171,7 +175,7 @@ fn bib_field(fields: &str, name: &str) -> Option<String> {
     let value = fields[start..].trim_start();
     let trimmed_start = value.trim_start_matches(['{', '"']);
     let end = trimmed_start
-        .find(|c| c == '}' || c == '"' || c == ',')
+        .find(['}', '"', ','])
         .unwrap_or(trimmed_start.len());
     Some(
         trimmed_start

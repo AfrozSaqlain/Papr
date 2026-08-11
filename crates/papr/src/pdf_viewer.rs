@@ -10,7 +10,7 @@
 //! entire RGBA pixel buffer (~8 MB) into a Kitty escape string on every frame.
 //!
 //! Fix: we now manage the Kitty protocol ourselves.  We call `transmit_virtual` once per
-//! unique (page, scroll_px, pixel_w, pixel_h) crop, store the resulting escape string,
+//! unique (page, `scroll_px`, `pixel_w`, `pixel_h`) crop, store the resulting escape string,
 //! and write it directly to the ratatui buffer.  Subsequent frames that show the same
 //! crop pay **zero** encode cost – only the unicode-placeholder rows are re-written,
 //! which is negligible.
@@ -21,7 +21,7 @@
 //! We tightened the constant to 18 and added a snap threshold of 1.0 px.
 //!
 //! ## Problem 3 – event loop drew *before* reading events
-//! The old loop: draw → compute timeout → read keys → force_redraw.  A keypress
+//! The old loop: draw → compute timeout → read keys → `force_redraw`.  A keypress
 //! therefore only affected the *next* loop iteration.  The new loop: read keys → draw.
 //! (Handled in main.rs – see comments there.)
 //!
@@ -34,7 +34,7 @@
 //! Every cache entry is keyed by `(path, page, dpi, pixel_w)` so that
 //! different PDFs never share cached images or temporary raster files.
 
-use crate::state::*;
+use crate::state::{App, Page};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as FmtWrite;
@@ -50,6 +50,7 @@ use std::thread;
 use anyhow::{Context, Result};
 use flate2::{Compression, write::ZlibEncoder};
 use image::{DynamicImage, Rgba, RgbaImage};
+use num_traits::ToPrimitive;
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -58,7 +59,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Clear, Paragraph, Widget},
 };
-use ratatui_image::picker::Picker;
+use ratatui_image::picker::{Picker, ProtocolType};
 
 // ---------------------------------------------------------------------------
 // Cache key helpers
@@ -424,11 +425,11 @@ pub fn render_pending_kitty_cleanup(frame: &mut Frame<'_>) {
 
 /// Delete all temporary raster files. Call once at application exit.
 pub fn cleanup_temp_files() {
-    if let Some(arc) = CACHE.get() {
-        if let Ok(mut g) = arc.lock() {
-            for (_, file) in g.temp_files.drain(..) {
-                let _ = std::fs::remove_file(file);
-            }
+    if let Some(arc) = CACHE.get()
+        && let Ok(mut g) = arc.lock()
+    {
+        for (_, file) in g.temp_files.drain(..) {
+            let _ = std::fs::remove_file(file);
         }
     }
 }
@@ -449,10 +450,7 @@ fn request_page(pdf_path: &Path, page: usize, dpi: u32, pixel_w: u32, priority: 
 
     // Single lock: check presence and mark in-flight atomically.
     {
-        let mut g = match cache.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
+        let Ok(mut g) = cache.lock() else { return };
         generation = *g.document_generations.get(pdf_path).unwrap_or(&0);
         key = (pdf_path.to_path_buf(), generation, page, dpi, pixel_w);
         if g.pages.contains_key(&key) {
@@ -503,10 +501,7 @@ fn pump_render_queue() {
     loop {
         let (cache, job) = {
             let cache = get_cache();
-            let mut g = match cache.lock() {
-                Ok(g) => g,
-                Err(_) => return,
-            };
+            let Ok(mut g) = cache.lock() else { return };
             if g.active_renders >= MAX_CONCURRENT_RENDERS {
                 return;
             }
@@ -642,7 +637,7 @@ fn render_page_blocking(
             thread::sleep(std::time::Duration::from_millis(10));
         };
         if !status.success() {
-            anyhow::bail!("pdftoppm exited with {:?}", status);
+            anyhow::bail!("pdftoppm exited with {status:?}");
         }
     }
 
@@ -661,11 +656,17 @@ fn render_page_blocking(
         anyhow::bail!("zero-width image");
     }
 
-    let scaled_h = ((img_h as f64) * (pixel_w as f64 / img_w as f64)) as u32;
-    let scaled = if img_w != pixel_w {
-        img.resize_exact(pixel_w, scaled_h, image::imageops::FilterType::Triangle)
-    } else {
+    let scaled_h = u32::try_from(
+        u64::from(img_h)
+            .saturating_mul(u64::from(pixel_w))
+            .div_ceil(u64::from(img_w)),
+    )
+    .unwrap_or(u32::MAX)
+    .max(1);
+    let scaled = if img_w == pixel_w {
         img
+    } else {
+        img.resize_exact(pixel_w, scaled_h, image::imageops::FilterType::Triangle)
     };
     let rgba = scaled.into_rgba8();
 
@@ -749,14 +750,13 @@ impl KittyPayloadWriter {
         let more = u8::from(more);
         if self.first {
             let (id, width, height) = (self.id, self.width, self.height);
-            write!(
+            let _ = write!(
                 self.output,
                 "\x1b_Gq=2,i={id},a=T,U=1,f=32,t=d,s={width},v={height},o=z,m={more};"
-            )
-            .unwrap();
+            );
             self.first = false;
         } else {
-            write!(self.output, "\x1b_Gq=2,m={more};").unwrap();
+            let _ = write!(self.output, "\x1b_Gq=2,m={more};");
         }
         self.output.push_str(encoded);
         self.output.push_str("\x1b\\");
@@ -832,13 +832,12 @@ fn kitty_transmit_raw(bytes: &[u8], id: u32, width: u32, height: u32) -> String 
     for (index, chunk) in bytes.chunks(CHUNK_SIZE).enumerate() {
         let more = u8::from(index + 1 < chunk_count);
         if index == 0 {
-            write!(
+            let _ = write!(
                 output,
                 "\x1b_Gq=2,i={id},a=T,U=1,f=32,t=d,s={width},v={height},m={more};"
-            )
-            .unwrap();
+            );
         } else {
-            write!(output, "\x1b_Gq=2,m={more};").unwrap();
+            let _ = write!(output, "\x1b_Gq=2,m={more};");
         }
         base64_encode_into(chunk, &mut output);
         output.push_str("\x1b\\");
@@ -856,11 +855,11 @@ fn kitty_delete_image(id: u32) -> String {
 /// Minimal base64 encoder (standard alphabet, no padding needed by Kitty).
 fn base64_encode_into(input: &[u8], out: &mut String) {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    out.reserve((input.len() * 4 + 2) / 3);
+    out.reserve((input.len() * 4).div_ceil(3));
     for chunk in input.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let b0 = u32::from(chunk[0]);
+        let b1 = u32::from(chunk.get(1).copied().unwrap_or(0));
+        let b2 = u32::from(chunk.get(2).copied().unwrap_or(0));
         let n = (b0 << 16) | (b1 << 8) | b2;
         out.push(CHARS[((n >> 18) & 0x3F) as usize] as char);
         out.push(CHARS[((n >> 12) & 0x3F) as usize] as char);
@@ -878,7 +877,7 @@ fn base64_encode_into(input: &[u8], out: &mut String) {
 }
 
 /// Row/column diacritics for Kitty unicode placeholder rendering.
-/// Source: https://sw.kovidgoyal.net/kitty/graphics-protocol/#unicode-placeholders
+/// Source: <https://sw.kovidgoyal.net/kitty/graphics-protocol/#unicode-placeholders>
 static DIACRITICS: [char; 293] = [
     '\u{305}', '\u{30D}', '\u{30E}', '\u{310}', '\u{312}', '\u{33D}', '\u{33E}', '\u{33F}',
     '\u{346}', '\u{34A}', '\u{34B}', '\u{34C}', '\u{350}', '\u{351}', '\u{352}', '\u{357}',
@@ -973,14 +972,13 @@ fn render_kitty_placeholders(
             let mut symbol = upload.take().unwrap_or_default().to_owned();
             symbol.reserve(3 + id_color.len() + (segment_width as usize * 4) + 19);
             let source_col = segment_left.saturating_sub(area.left());
-            write!(
+            let _ = write!(
                 symbol,
                 "\x1b[s{id_color}\u{10EEEE}{}{}{}",
                 diacritic(y),
                 diacritic(source_col),
                 diacritic(u16::from(id_extra))
-            )
-            .unwrap();
+            );
             symbol.extend(std::iter::repeat_n(
                 '\u{10EEEE}',
                 segment_width.saturating_sub(1) as usize,
@@ -996,7 +994,7 @@ fn render_kitty_placeholders(
             // matching ratatui-image's packed-row cursor contract.
             let right = area.right().saturating_sub(segment_left).saturating_sub(1);
             let down = area.height.saturating_sub(1);
-            write!(symbol, "\x1b[u\x1b[{right}C\x1b[{down}B").unwrap();
+            let _ = write!(symbol, "\x1b[u\x1b[{right}C\x1b[{down}B");
 
             if let Some(cell) = buf.cell_mut((segment_left, row_y)) {
                 cell.set_symbol(&symbol);
@@ -1051,268 +1049,6 @@ impl Widget for KittyCleanup<'_> {
     }
 }
 
-#[cfg(test)]
-mod kitty_placeholder_tests {
-    use super::*;
-
-    #[test]
-    fn emits_each_kitty_placeholder_row_from_one_buffer_cell() {
-        let area = Rect::new(0, 0, 3, 2);
-        let mut buffer = Buffer::empty(area);
-        let encoded = EncodedFrame {
-            transmit_seq: "upload".to_owned(),
-            image_id: 1,
-            cols: 3,
-            rows: 2,
-            id_color: String::new(),
-            retire_image_id: None,
-        };
-
-        render_kitty_placeholders(area, &mut buffer, &encoded, None);
-
-        for y in 0..2 {
-            let row = buffer[(0, y)].symbol();
-            assert_eq!(row.matches('\u{10EEEE}').count(), 3);
-            assert!(row.contains("\x1b[s"));
-            assert!(row.contains("\x1b[u"));
-            assert_eq!(buffer[(1, y)].symbol(), " ");
-            assert_eq!(buffer[(2, y)].symbol(), " ");
-        }
-        assert!(buffer[(0, 0)].symbol().starts_with("upload"));
-        assert!(!buffer[(0, 1)].symbol().contains("upload"));
-    }
-
-    #[test]
-    fn retires_the_previous_image_after_the_last_new_placeholder_row() {
-        let area = Rect::new(0, 0, 2, 2);
-        let mut buffer = Buffer::empty(area);
-        let encoded = EncodedFrame {
-            transmit_seq: String::new(),
-            image_id: 2,
-            cols: 2,
-            rows: 2,
-            id_color: String::new(),
-            retire_image_id: Some(1),
-        };
-
-        render_kitty_placeholders(area, &mut buffer, &encoded, None);
-
-        assert!(!buffer[(0, 0)].symbol().contains("a=d,d=I,i=1"));
-        let final_row = buffer[(0, 1)].symbol();
-        let placeholder = final_row.rfind('\u{10EEEE}').unwrap();
-        let delete = final_row.find("a=d,d=I,i=1").unwrap();
-        assert!(delete > placeholder);
-    }
-
-    #[test]
-    fn base64_encoder_appends_without_an_intermediate_payload() {
-        let mut output = "prefix:".to_owned();
-        base64_encode_into(b"Papr PDF", &mut output);
-        assert_eq!(output, "prefix:UGFwciBQREY=");
-    }
-
-    #[test]
-    fn kitty_rows_split_at_an_overlay_and_restore_after_it_closes() {
-        let area = Rect::new(0, 0, 6, 2);
-        let overlay = Rect::new(0, 0, 3, 2);
-        let encoded = EncodedFrame {
-            transmit_seq: "upload".to_owned(),
-            image_id: 7,
-            cols: 6,
-            rows: 2,
-            id_color: String::new(),
-            retire_image_id: None,
-        };
-        let mut covered = Buffer::empty(area);
-
-        render_kitty_placeholders(area, &mut covered, &encoded, Some(overlay));
-
-        for y in 0..2 {
-            for x in 0..3 {
-                assert!(!covered[(x, y)].skip);
-                assert_eq!(covered[(x, y)].symbol(), " ");
-            }
-            assert!(!covered[(3, y)].skip);
-            assert!(covered[(3, y)].symbol().contains('\u{10EEEE}'));
-            assert!(covered[(4, y)].skip);
-            assert!(covered[(5, y)].skip);
-        }
-        assert!(covered[(3, 0)].symbol().starts_with("upload"));
-
-        let right_segment = covered[(3, 0)].symbol().to_owned();
-        Clear.render(overlay, &mut covered);
-        Paragraph::new("popup").render(overlay, &mut covered);
-        assert_eq!(covered[(0, 0)].symbol(), "p");
-        assert_eq!(covered[(3, 0)].symbol(), right_segment);
-
-        Clear.render(overlay, &mut covered);
-        Paragraph::new("update").render(overlay, &mut covered);
-        assert_eq!(covered[(0, 0)].symbol(), "u");
-        assert_eq!(covered[(3, 0)].symbol(), right_segment);
-
-        let mut restored = Buffer::empty(area);
-        render_kitty_placeholders(area, &mut restored, &encoded, None);
-        let updates = covered.diff(&restored);
-        assert!(updates.iter().any(|(x, y, _)| (*x, *y) == (0, 0)));
-        assert!(updates.iter().any(|(x, y, _)| (*x, *y) == (0, 1)));
-    }
-
-    #[test]
-    fn kitty_upload_uses_lossless_streaming_compression() {
-        let image =
-            DynamicImage::ImageRgba8(RgbaImage::from_pixel(320, 200, Rgba([245, 245, 245, 255])));
-        let upload = kitty_transmit(&image, 42);
-        let raw = kitty_transmit_raw(image.as_bytes(), 42, 320, 200);
-
-        assert!(upload.contains("f=32,t=d,s=320,v=200,o=z,"));
-        assert!(upload.ends_with("\x1b\\"));
-        assert!(upload.len() < raw.len());
-    }
-
-    #[test]
-    fn releasing_a_document_removes_only_its_cache_and_invalidates_jobs() {
-        let closed = PathBuf::from("/tmp/papr-closed-document.pdf");
-        let other = PathBuf::from("/tmp/papr-other-document.pdf");
-        let closed_temp = std::env::temp_dir().join(format!(
-            "papr-closed-raster-{}-{}.png",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        let other_temp = std::env::temp_dir().join(format!(
-            "papr-other-raster-{}-{}.png",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        std::fs::write(&closed_temp, []).unwrap();
-        std::fs::write(&other_temp, []).unwrap();
-        let page = RenderedPage {
-            pixel_h: 1,
-            image: Arc::new(RgbaImage::new(1, 1)),
-        };
-        let active_key = (closed.clone(), 0, 2, DPI, 1);
-        let active_cancelled = Arc::new(AtomicBool::new(false));
-        let cache = get_cache();
-        {
-            let mut g = cache.lock().unwrap();
-            g.pages.insert((closed.clone(), 0, 1, DPI, 1), page.clone());
-            g.pages.insert((other.clone(), 0, 1, DPI, 1), page);
-            g.page_counts.insert((closed.clone(), 0), 3);
-            g.page_counts.insert((other.clone(), 0), 4);
-            g.page_count_in_flight.insert((closed.clone(), 0));
-            g.page_count_in_flight.insert((other.clone(), 0));
-            g.in_flight.insert(active_key.clone());
-            g.render_cancellations
-                .insert(active_key.clone(), active_cancelled.clone());
-            g.render_queue.push_back(RenderJob {
-                key: (closed.clone(), 0, 3, DPI, 1),
-                pdf_path: closed.clone(),
-                generation: 0,
-                page: 3,
-                dpi: DPI,
-                pixel_w: 1,
-                priority: false,
-                cancelled: Arc::new(AtomicBool::new(false)),
-            });
-            g.temp_files.push((closed.clone(), closed_temp.clone()));
-            g.temp_files.push((other.clone(), other_temp.clone()));
-            g.last_crop_key = Some(CropKey {
-                path_fp: path_fingerprint(&closed),
-                page: 1,
-                dpi: DPI,
-                pixel_w: 1,
-                crop_y: 0,
-                crop_h: 1,
-                page_fit: false,
-            });
-            g.last_encoded = Some(EncodedFrame {
-                transmit_seq: String::new(),
-                image_id: 77,
-                cols: 1,
-                rows: 1,
-                id_color: String::new(),
-                retire_image_id: None,
-            });
-            g.resident_kitty_image = Some((path_fingerprint(&closed), 77));
-        }
-
-        release_document(&closed);
-
-        let mut g = cache.lock().unwrap();
-        assert!(!g.pages.keys().any(|(path, _, _, _, _)| path == &closed));
-        assert!(!g.in_flight.iter().any(|(path, _, _, _, _)| path == &closed));
-        assert!(!g.render_queue.iter().any(|job| job.pdf_path == closed));
-        assert!(active_cancelled.load(Ordering::Acquire));
-        assert!(g.pages.keys().any(|(path, _, _, _, _)| path == &other));
-        assert!(!g.page_counts.keys().any(|(path, _)| path == &closed));
-        assert!(g.page_counts.keys().any(|(path, _)| path == &other));
-        assert!(
-            !g.page_count_in_flight
-                .iter()
-                .any(|(path, _)| path == &closed)
-        );
-        assert!(
-            g.page_count_in_flight
-                .iter()
-                .any(|(path, _)| path == &other)
-        );
-        assert_eq!(g.document_generations.get(&closed), Some(&1));
-        assert!(g.last_crop_key.is_none());
-        assert!(g.last_encoded.is_none());
-        assert!(g.pending_kitty_deletes.contains(&77));
-        assert!(g.resident_kitty_image.is_none());
-        assert!(!closed_temp.exists());
-        assert!(other_temp.exists());
-        g.pages.retain(|(path, _, _, _, _), _| path != &other);
-        g.page_counts.retain(|(path, _), _| path != &other);
-        g.page_count_in_flight.retain(|(path, _)| path != &other);
-        g.pending_kitty_deletes.retain(|id| *id != 77);
-        g.render_cancellations.remove(&active_key);
-        g.document_generations.remove(&closed);
-        g.temp_files.retain(|(_, file)| file != &other_temp);
-        let _ = std::fs::remove_file(other_temp);
-        drop(g);
-
-        // A live rebuild must not delete the old terminal image before the
-        // replacement is ready; closing it afterwards must still free it.
-        let rebuilt = PathBuf::from("/tmp/papr-rebuilt-document.pdf");
-        {
-            let mut g = cache.lock().unwrap();
-            g.resident_kitty_image = Some((path_fingerprint(&rebuilt), 88));
-            g.last_crop_key = Some(CropKey {
-                path_fp: path_fingerprint(&rebuilt),
-                page: 1,
-                dpi: DPI,
-                pixel_w: 1,
-                crop_y: 0,
-                crop_h: 1,
-                page_fit: true,
-            });
-            g.last_encoded = Some(EncodedFrame {
-                transmit_seq: "old upload".into(),
-                image_id: 88,
-                cols: 1,
-                rows: 1,
-                id_color: String::new(),
-                retire_image_id: None,
-            });
-        }
-        invalidate_document(&rebuilt);
-        {
-            let g = cache.lock().unwrap();
-            assert_eq!(
-                g.resident_kitty_image,
-                Some((path_fingerprint(&rebuilt), 88))
-            );
-            assert!(!g.pending_kitty_deletes.contains(&88));
-            assert!(g.last_encoded.is_none());
-        }
-        release_document(&rebuilt);
-        let mut g = cache.lock().unwrap();
-        assert!(g.pending_kitty_deletes.contains(&88));
-        g.pending_kitty_deletes.retain(|id| *id != 88);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Draw function
 // ---------------------------------------------------------------------------
@@ -1343,15 +1079,14 @@ pub fn draw_pdf_viewer_in_with_occlusion(
         area,
     );
 
-    let pdf_path = match &app.pdf_viewer_path {
-        Some(p) => p.clone(),
-        None => {
-            frame.render_widget(
-                Paragraph::new("No PDF file open").style(Style::default().fg(Color::Red)),
-                area,
-            );
-            return;
-        }
+    let pdf_path = if let Some(p) = &app.pdf_viewer_path {
+        p.clone()
+    } else {
+        frame.render_widget(
+            Paragraph::new("No PDF file open").style(Style::default().fg(Color::Red)),
+            area,
+        );
+        return;
     };
     if let Some(total_pages) = page_count(&pdf_path) {
         app.pdf_viewer_total_pages = total_pages;
@@ -1381,37 +1116,32 @@ pub fn draw_pdf_viewer_in_with_occlusion(
         is_kitty,
     ) = {
         let cache_arc = get_cache();
-        let mut g = match cache_arc.lock() {
-            Ok(g) => g,
-            Err(_) => return,
+        let Ok(mut g) = cache_arc.lock() else {
+            return;
         };
 
-        let (font_w, font_h, is_kitty) = match g.picker.as_ref() {
-            Some(p) => {
-                let (fw, fh) = p.font_size();
-                // Detect Kitty protocol by checking the picker's protocol type
-                use ratatui_image::picker::ProtocolType;
-                let is_kitty = matches!(p.protocol_type(), ProtocolType::Kitty);
-                (fw, fh, is_kitty)
-            }
-            None => {
-                // No graphics protocol detected
-                drop(g);
-                frame.render_widget(
-                    Paragraph::new(
-                        "Terminal graphics not detected (Kitty / Sixel / iTerm2 / halfblocks). \
-                         Press Esc to exit.",
-                    )
-                    .style(Style::default().fg(Color::Yellow))
-                    .alignment(ratatui::layout::Alignment::Center),
-                    area,
-                );
-                return;
-            }
+        let (font_w, font_h, is_kitty) = if let Some(p) = g.picker.as_ref() {
+            let (fw, fh) = p.font_size();
+            // Detect Kitty protocol by checking the picker's protocol type
+            let is_kitty = matches!(p.protocol_type(), ProtocolType::Kitty);
+            (fw, fh, is_kitty)
+        } else {
+            // No graphics protocol detected
+            drop(g);
+            frame.render_widget(
+                Paragraph::new(
+                    "Terminal graphics not detected (Kitty / Sixel / iTerm2 / halfblocks). \
+                     Press Esc to exit.",
+                )
+                .style(Style::default().fg(Color::Yellow))
+                .alignment(ratatui::layout::Alignment::Center),
+                area,
+            );
+            return;
         };
 
-        let pixel_w = (pdf_area.width as u32) * (font_w as u32);
-        let pixel_h = (pdf_area.height as u32) * (font_h as u32);
+        let pixel_w = u32::from(pdf_area.width) * u32::from(font_w);
+        let pixel_h = u32::from(pdf_area.height) * u32::from(font_h);
         if pixel_w == 0 || pixel_h == 0 {
             return;
         }
@@ -1428,7 +1158,7 @@ pub fn draw_pdf_viewer_in_with_occlusion(
                 path != &pdf_path
                     || (*cached_generation == generation
                         && *cached_width == pixel_w
-                        && (*page as isize - current_page_val as isize).abs() <= 2)
+                        && page.abs_diff(current_page_val) <= 2)
             });
         cancel_render_jobs(&mut g, |(path, _, _, _, cached_width)| {
             path == &pdf_path && *cached_width != pixel_w
@@ -1439,14 +1169,11 @@ pub fn draw_pdf_viewer_in_with_occlusion(
         // The embedded Project preview is a discrete page viewer.  Its
         // fullscreen counterpart keeps the existing smooth scrolling model.
         let now = std::time::Instant::now();
-        let dt = g
-            .last_update
-            .map(|t| (now - t).as_secs_f64())
-            .unwrap_or(0.0);
+        let dt = g.last_update.map_or(0.0, |t| (now - t).as_secs_f64());
         g.last_update = Some(now);
 
         let total_pages = app.pdf_viewer_total_pages;
-        let default_h = pixel_h as f64 * 1.5;
+        let default_h = f64::from(pixel_h) * 1.5;
 
         if page_fit {
             g.target_scroll_px = 0.0;
@@ -1475,7 +1202,9 @@ pub fn draw_pdf_viewer_in_with_occlusion(
         }
 
         app.pdf_viewer_page = g.current_page;
-        app.pdf_viewer_scroll_y = (g.current_scroll_px / font_h as f64) as u32;
+        app.pdf_viewer_scroll_y = (g.current_scroll_px / f64::from(font_h))
+            .to_u32()
+            .unwrap_or(u32::MAX);
 
         let dpi = DPI;
         let key: PageKey = (pdf_path.clone(), generation, g.current_page, dpi, pixel_w);
@@ -1506,8 +1235,8 @@ pub fn draw_pdf_viewer_in_with_occlusion(
     };
     // ── Lock released ────────────────────────────────────────────────────
 
-    let pixel_w = (pdf_area.width as u32) * (font_w as u32);
-    let pixel_h = (pdf_area.height as u32) * (font_h as u32);
+    let pixel_w = u32::from(pdf_area.width) * u32::from(font_w);
+    let pixel_h = u32::from(pdf_area.height) * u32::from(font_h);
     if pixel_w == 0 || pixel_h == 0 {
         return;
     }
@@ -1517,44 +1246,45 @@ pub fn draw_pdf_viewer_in_with_occlusion(
     // Submit the visible page first, then favor forward scrolling. The bounded
     // renderer queue prevents speculative neighbours from delaying the page
     // the user is actually waiting for.
-    for delta in [0i32, 1, -1, 2, -2] {
-        let p = current_page as i32 + delta;
-        if p >= 1 && p as usize <= app.pdf_viewer_total_pages {
-            request_page(&pdf_path, p as usize, dpi, pixel_w, delta == 0);
+    for (candidate, priority) in [
+        (Some(current_page), true),
+        (current_page.checked_add(1), false),
+        (current_page.checked_sub(1), false),
+        (current_page.checked_add(2), false),
+        (current_page.checked_sub(2), false),
+    ] {
+        if let Some(page) = candidate.filter(|page| *page <= app.pdf_viewer_total_pages) {
+            request_page(&pdf_path, page, dpi, pixel_w, priority);
         }
     }
 
-    let page_data = match page_data_opt {
-        Some(d) => d,
-        None => {
-            let dots = match (std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .subsec_millis()
-                / 250)
-                % 4
-            {
-                0 => "   ",
-                1 => ".  ",
-                2 => ".. ",
-                _ => "...",
-            };
-            frame.render_widget(
-                Paragraph::new(format!(
-                    "Rendering page {}{}  (press Esc to cancel)",
-                    current_page, dots
-                ))
-                .style(
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .alignment(ratatui::layout::Alignment::Center),
-                pdf_area,
-            );
-            render_status_bar(frame, status_area, &pdf_path, current_page, app, 0, 0);
-            return;
-        }
+    let Some(page_data) = page_data_opt else {
+        let dots = match (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_millis()
+            / 250)
+            % 4
+        {
+            0 => "   ",
+            1 => ".  ",
+            2 => ".. ",
+            _ => "...",
+        };
+        frame.render_widget(
+            Paragraph::new(format!(
+                "Rendering page {current_page}{dots}  (press Esc to cancel)"
+            ))
+            .style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .alignment(ratatui::layout::Alignment::Center),
+            pdf_area,
+        );
+        render_status_bar(frame, status_area, &pdf_path, current_page, app, 0, 0);
+        return;
     };
 
     let page_h = page_data.pixel_h;
@@ -1567,9 +1297,12 @@ pub fn draw_pdf_viewer_in_with_occlusion(
     let scroll_px = if page_fit {
         0
     } else {
-        (current_scroll_px_val as u32).min(page_h)
+        current_scroll_px_val
+            .to_u32()
+            .unwrap_or(u32::MAX)
+            .min(page_h)
     };
-    let max_scroll_cells = max_scroll_px / (font_h as u32);
+    let max_scroll_cells = max_scroll_px / u32::from(font_h);
     app.pdf_viewer_max_scroll_y = max_scroll_cells;
 
     // Build the crop key for this frame
@@ -1641,7 +1374,10 @@ pub fn draw_pdf_viewer_in_with_occlusion(
             let cache_arc = get_cache();
             if let Ok(mut g) = cache_arc.lock() {
                 g.last_crop_key = Some(crop_key);
-                let proto = g.picker.as_ref().unwrap().new_resize_protocol(cropped);
+                let Some(picker) = g.picker.as_ref() else {
+                    return;
+                };
+                let proto = picker.new_resize_protocol(cropped);
                 drop(g);
                 let mut local_proto = proto;
                 frame.render_stateful_widget(
@@ -1666,38 +1402,38 @@ pub fn draw_pdf_viewer_in_with_occlusion(
     // ── Blit: write unicode placeholders (zero image data re-upload) ─────
     if is_kitty {
         let cache_arc = get_cache();
-        if let Ok(mut g) = cache_arc.lock() {
-            if let Some(ref mut encoded) = g.last_encoded {
-                let can_emit = !fully_covered(pdf_area, occlusion);
-                let should_transmit = can_emit && !encoded.transmit_seq.is_empty();
-                // Clone the encoded frame so we can drop the lock before
-                // rendering. A fully covered frame keeps a pending upload
-                // until at least one placeholder segment is visible.
-                let blit_frame = EncodedFrame {
-                    transmit_seq: if should_transmit {
-                        std::mem::take(&mut encoded.transmit_seq)
-                    } else {
-                        String::new()
-                    },
-                    image_id: encoded.image_id,
-                    cols: encoded.cols,
-                    rows: encoded.rows,
-                    id_color: encoded.id_color.clone(),
-                    retire_image_id: if should_transmit {
-                        encoded.retire_image_id.take()
-                    } else {
-                        None
-                    },
-                };
-                drop(g);
-                frame.render_widget(
-                    KittyBlit {
-                        encoded: &blit_frame,
-                        occlusion,
-                    },
-                    pdf_area,
-                );
-            }
+        if let Ok(mut g) = cache_arc.lock()
+            && let Some(ref mut encoded) = g.last_encoded
+        {
+            let can_emit = !fully_covered(pdf_area, occlusion);
+            let should_transmit = can_emit && !encoded.transmit_seq.is_empty();
+            // Clone the encoded frame so we can drop the lock before
+            // rendering. A fully covered frame keeps a pending upload
+            // until at least one placeholder segment is visible.
+            let blit_frame = EncodedFrame {
+                transmit_seq: if should_transmit {
+                    std::mem::take(&mut encoded.transmit_seq)
+                } else {
+                    String::new()
+                },
+                image_id: encoded.image_id,
+                cols: encoded.cols,
+                rows: encoded.rows,
+                id_color: encoded.id_color.clone(),
+                retire_image_id: if should_transmit {
+                    encoded.retire_image_id.take()
+                } else {
+                    None
+                },
+            };
+            drop(g);
+            frame.render_widget(
+                KittyBlit {
+                    encoded: &blit_frame,
+                    occlusion,
+                },
+                pdf_area,
+            );
         }
     }
 
@@ -1750,7 +1486,7 @@ fn render_status_bar(
         .into_owned();
     let status = Line::from(vec![
         Span::styled(
-            format!(" {} ", filename),
+            format!(" {filename} "),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -1760,7 +1496,7 @@ fn render_status_bar(
             Style::default().fg(Color::White),
         ),
         Span::styled(
-            format!(" │ {}/{} rows ", scroll, max_scroll),
+            format!(" │ {scroll}/{max_scroll} rows "),
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(
@@ -1779,36 +1515,35 @@ fn render_status_bar(
 // ---------------------------------------------------------------------------
 
 pub fn is_current_page_cached(app: &App) -> bool {
-    let pdf_path = match &app.pdf_viewer_path {
-        Some(p) => p,
-        None => return true,
+    let Some(pdf_path) = &app.pdf_viewer_path else {
+        return true;
     };
     let page = app.pdf_viewer_page;
     let dpi = DPI;
-    if let Some(arc) = CACHE.get() {
-        if let Ok(g) = arc.lock() {
-            let generation = *g.document_generations.get(pdf_path).unwrap_or(&0);
-            return g.pages.keys().any(|(p, doc_generation, pg, d, _)| {
-                p == pdf_path && *doc_generation == generation && *pg == page && *d == dpi
-            });
-        }
+    if let Some(arc) = CACHE.get()
+        && let Ok(g) = arc.lock()
+    {
+        let generation = *g.document_generations.get(pdf_path).unwrap_or(&0);
+        return g.pages.keys().any(|(p, doc_generation, pg, d, _)| {
+            p == pdf_path && *doc_generation == generation && *pg == page && *d == dpi
+        });
     }
     false
 }
 
 pub fn is_animating() -> bool {
-    if let Some(arc) = CACHE.get() {
-        if let Ok(g) = arc.lock() {
-            let default_h = 1000.0;
-            let target_rel = to_relative_px(
-                g.target_page,
-                g.target_scroll_px,
-                g.current_page,
-                &g.pages,
-                default_h,
-            );
-            return (target_rel - g.current_scroll_px).abs() > 1.0;
-        }
+    if let Some(arc) = CACHE.get()
+        && let Ok(g) = arc.lock()
+    {
+        let default_h = 1000.0;
+        let target_rel = to_relative_px(
+            g.target_page,
+            g.target_scroll_px,
+            g.current_page,
+            &g.pages,
+            default_h,
+        );
+        return (target_rel - g.current_scroll_px).abs() > 1.0;
     }
     false
 }
@@ -1824,7 +1559,7 @@ fn get_page_height_helper(
 ) -> f64 {
     for (key, val) in pages {
         if key.2 == page {
-            return val.pixel_h as f64;
+            return f64::from(val.pixel_h);
         }
     }
     default_h
@@ -1859,31 +1594,35 @@ fn to_relative_px(
     pages: &HashMap<PageKey, RenderedPage>,
     default_h: f64,
 ) -> f64 {
-    if page == current_page {
-        offset
-    } else if page > current_page {
-        let mut sum = 0.0;
-        for p in current_page..page {
-            sum += get_page_height_helper(p, pages, default_h);
+    match page.cmp(&current_page) {
+        std::cmp::Ordering::Equal => offset,
+        std::cmp::Ordering::Greater => {
+            let mut sum = 0.0;
+            for p in current_page..page {
+                sum += get_page_height_helper(p, pages, default_h);
+            }
+            sum + offset
         }
-        sum + offset
-    } else {
-        let mut sum = 0.0;
-        for p in page..current_page {
-            sum += get_page_height_helper(p, pages, default_h);
+        std::cmp::Ordering::Less => {
+            let mut sum = 0.0;
+            for p in page..current_page {
+                sum += get_page_height_helper(p, pages, default_h);
+            }
+            offset - sum
         }
-        offset - sum
     }
 }
 
 pub fn scroll_by_rows(app: &App, delta_rows: i64) {
     let cache_arc = get_cache();
-    let mut g = match cache_arc.lock() {
-        Ok(g) => g,
-        Err(_) => return,
-    };
-    let font_h = g.picker.as_ref().map(|p| p.font_size().1).unwrap_or(16) as f64;
-    let delta_px = delta_rows as f64 * font_h;
+    let Ok(mut g) = cache_arc.lock() else { return };
+    let font_h = f64::from(g.picker.as_ref().map_or(16, |p| p.font_size().1));
+    let bounded_rows = i32::try_from(delta_rows).unwrap_or(if delta_rows.is_negative() {
+        i32::MIN
+    } else {
+        i32::MAX
+    });
+    let delta_px = f64::from(bounded_rows) * font_h;
     let total_pages = app.pdf_viewer_total_pages;
     let default_h = 1000.0;
 
@@ -1899,7 +1638,7 @@ pub fn scroll_by_rows(app: &App, delta_rows: i64) {
     }
     if g.target_page == total_pages {
         let current_h = get_page_height_helper(g.target_page, &g.pages, default_h);
-        let max_scroll = (current_h - g.last_viewport_h as f64).max(0.0);
+        let max_scroll = (current_h - f64::from(g.last_viewport_h)).max(0.0);
         if g.target_scroll_px > max_scroll {
             g.target_scroll_px = max_scroll;
         }
@@ -1926,7 +1665,7 @@ pub fn jump_to_page(app: &mut App, page: usize) {
 pub fn page_up(app: &App) {
     let cache_arc = get_cache();
     if let Ok(mut g) = cache_arc.lock() {
-        let scroll_amt = g.last_viewport_h as f64 * 0.9;
+        let scroll_amt = f64::from(g.last_viewport_h) * 0.9;
         g.target_scroll_px -= scroll_amt;
         let total_pages = app.pdf_viewer_total_pages;
         let default_h = 1000.0;
@@ -1944,7 +1683,7 @@ pub fn page_up(app: &App) {
 pub fn page_down(app: &App) {
     let cache_arc = get_cache();
     if let Ok(mut g) = cache_arc.lock() {
-        let scroll_amt = g.last_viewport_h as f64 * 0.9;
+        let scroll_amt = f64::from(g.last_viewport_h) * 0.9;
         g.target_scroll_px += scroll_amt;
         let total_pages = app.pdf_viewer_total_pages;
         let default_h = 1000.0;
@@ -1955,7 +1694,7 @@ pub fn page_down(app: &App) {
         g.target_scroll_px = ts;
         if g.target_page == total_pages {
             let current_h = get_page_height_helper(g.target_page, &g.pages, default_h);
-            let max_scroll = (current_h - g.last_viewport_h as f64).max(0.0);
+            let max_scroll = (current_h - f64::from(g.last_viewport_h)).max(0.0);
             if g.target_scroll_px > max_scroll {
                 g.target_scroll_px = max_scroll;
             }
@@ -2035,4 +1774,276 @@ fn crop_single_with_padding(curr_img: &RgbaImage, scroll_y: u32, viewport_h: u32
     let stitched =
         RgbaImage::from_raw(w, viewport_h, data).unwrap_or_else(|| RgbaImage::new(w, viewport_h));
     DynamicImage::ImageRgba8(stitched)
+}
+
+#[cfg(test)]
+mod kitty_placeholder_tests {
+    use super::*;
+
+    #[test]
+    fn emits_each_kitty_placeholder_row_from_one_buffer_cell() {
+        let area = Rect::new(0, 0, 3, 2);
+        let mut buffer = Buffer::empty(area);
+        let encoded = EncodedFrame {
+            transmit_seq: "upload".to_owned(),
+            image_id: 1,
+            cols: 3,
+            rows: 2,
+            id_color: String::new(),
+            retire_image_id: None,
+        };
+
+        render_kitty_placeholders(area, &mut buffer, &encoded, None);
+
+        for y in 0..2 {
+            let row = buffer[(0, y)].symbol();
+            assert_eq!(row.matches('\u{10EEEE}').count(), 3);
+            assert!(row.contains("\x1b[s"));
+            assert!(row.contains("\x1b[u"));
+            assert_eq!(buffer[(1, y)].symbol(), " ");
+            assert_eq!(buffer[(2, y)].symbol(), " ");
+        }
+        assert!(buffer[(0, 0)].symbol().starts_with("upload"));
+        assert!(!buffer[(0, 1)].symbol().contains("upload"));
+    }
+
+    #[test]
+    fn retires_the_previous_image_after_the_last_new_placeholder_row() {
+        let area = Rect::new(0, 0, 2, 2);
+        let mut buffer = Buffer::empty(area);
+        let encoded = EncodedFrame {
+            transmit_seq: String::new(),
+            image_id: 2,
+            cols: 2,
+            rows: 2,
+            id_color: String::new(),
+            retire_image_id: Some(1),
+        };
+
+        render_kitty_placeholders(area, &mut buffer, &encoded, None);
+
+        assert!(!buffer[(0, 0)].symbol().contains("a=d,d=I,i=1"));
+        let final_row = buffer[(0, 1)].symbol();
+        let positions = (final_row.rfind('\u{10EEEE}'), final_row.find("a=d,d=I,i=1"));
+        assert!(matches!(positions, (Some(placeholder), Some(delete)) if delete > placeholder));
+    }
+
+    #[test]
+    fn base64_encoder_appends_without_an_intermediate_payload() {
+        let mut output = "prefix:".to_owned();
+        base64_encode_into(b"Papr PDF", &mut output);
+        assert_eq!(output, "prefix:UGFwciBQREY=");
+    }
+
+    #[test]
+    fn kitty_rows_split_at_an_overlay_and_restore_after_it_closes() {
+        let area = Rect::new(0, 0, 6, 2);
+        let overlay = Rect::new(0, 0, 3, 2);
+        let encoded = EncodedFrame {
+            transmit_seq: "upload".to_owned(),
+            image_id: 7,
+            cols: 6,
+            rows: 2,
+            id_color: String::new(),
+            retire_image_id: None,
+        };
+        let mut covered = Buffer::empty(area);
+
+        render_kitty_placeholders(area, &mut covered, &encoded, Some(overlay));
+
+        for y in 0..2 {
+            for x in 0..3 {
+                assert!(!covered[(x, y)].skip);
+                assert_eq!(covered[(x, y)].symbol(), " ");
+            }
+            assert!(!covered[(3, y)].skip);
+            assert!(covered[(3, y)].symbol().contains('\u{10EEEE}'));
+            assert!(covered[(4, y)].skip);
+            assert!(covered[(5, y)].skip);
+        }
+        assert!(covered[(3, 0)].symbol().starts_with("upload"));
+
+        let right_segment = covered[(3, 0)].symbol().to_owned();
+        Clear.render(overlay, &mut covered);
+        Paragraph::new("popup").render(overlay, &mut covered);
+        assert_eq!(covered[(0, 0)].symbol(), "p");
+        assert_eq!(covered[(3, 0)].symbol(), right_segment);
+
+        Clear.render(overlay, &mut covered);
+        Paragraph::new("update").render(overlay, &mut covered);
+        assert_eq!(covered[(0, 0)].symbol(), "u");
+        assert_eq!(covered[(3, 0)].symbol(), right_segment);
+
+        let mut restored = Buffer::empty(area);
+        render_kitty_placeholders(area, &mut restored, &encoded, None);
+        let updates = covered.diff(&restored);
+        assert!(updates.iter().any(|(x, y, _)| (*x, *y) == (0, 0)));
+        assert!(updates.iter().any(|(x, y, _)| (*x, *y) == (0, 1)));
+    }
+
+    #[test]
+    fn kitty_upload_uses_lossless_streaming_compression() {
+        let image =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(320, 200, Rgba([245, 245, 245, 255])));
+        let upload = kitty_transmit(&image, 42);
+        let raw = kitty_transmit_raw(image.as_bytes(), 42, 320, 200);
+
+        assert!(upload.contains("f=32,t=d,s=320,v=200,o=z,"));
+        assert!(upload.ends_with("\x1b\\"));
+        assert!(upload.len() < raw.len());
+    }
+
+    #[test]
+    fn releasing_a_document_removes_only_its_cache_and_invalidates_jobs() -> anyhow::Result<()> {
+        let closed = PathBuf::from("/tmp/papr-closed-document.pdf");
+        let other = PathBuf::from("/tmp/papr-other-document.pdf");
+        let closed_temp = std::env::temp_dir().join(format!(
+            "papr-closed-raster-{}-{}.png",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let other_temp = std::env::temp_dir().join(format!(
+            "papr-other-raster-{}-{}.png",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::write(&closed_temp, [])?;
+        std::fs::write(&other_temp, [])?;
+        let page = RenderedPage {
+            pixel_h: 1,
+            image: Arc::new(RgbaImage::new(1, 1)),
+        };
+        let active_key = (closed.clone(), 0, 2, DPI, 1);
+        let active_cancelled = Arc::new(AtomicBool::new(false));
+        let cache = get_cache();
+        {
+            let mut g = cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("PDF cache lock poisoned"))?;
+            g.pages.insert((closed.clone(), 0, 1, DPI, 1), page.clone());
+            g.pages.insert((other.clone(), 0, 1, DPI, 1), page);
+            g.page_counts.insert((closed.clone(), 0), 3);
+            g.page_counts.insert((other.clone(), 0), 4);
+            g.page_count_in_flight.insert((closed.clone(), 0));
+            g.page_count_in_flight.insert((other.clone(), 0));
+            g.in_flight.insert(active_key.clone());
+            g.render_cancellations
+                .insert(active_key.clone(), active_cancelled.clone());
+            g.render_queue.push_back(RenderJob {
+                key: (closed.clone(), 0, 3, DPI, 1),
+                pdf_path: closed.clone(),
+                generation: 0,
+                page: 3,
+                dpi: DPI,
+                pixel_w: 1,
+                priority: false,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            });
+            g.temp_files.push((closed.clone(), closed_temp.clone()));
+            g.temp_files.push((other.clone(), other_temp.clone()));
+            g.last_crop_key = Some(CropKey {
+                path_fp: path_fingerprint(&closed),
+                page: 1,
+                dpi: DPI,
+                pixel_w: 1,
+                crop_y: 0,
+                crop_h: 1,
+                page_fit: false,
+            });
+            g.last_encoded = Some(EncodedFrame {
+                transmit_seq: String::new(),
+                image_id: 77,
+                cols: 1,
+                rows: 1,
+                id_color: String::new(),
+                retire_image_id: None,
+            });
+            g.resident_kitty_image = Some((path_fingerprint(&closed), 77));
+        }
+
+        release_document(&closed);
+
+        let mut g = cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("PDF cache lock poisoned"))?;
+        assert!(!g.pages.keys().any(|(path, _, _, _, _)| path == &closed));
+        assert!(!g.in_flight.iter().any(|(path, _, _, _, _)| path == &closed));
+        assert!(!g.render_queue.iter().any(|job| job.pdf_path == closed));
+        assert!(active_cancelled.load(Ordering::Acquire));
+        assert!(g.pages.keys().any(|(path, _, _, _, _)| path == &other));
+        assert!(!g.page_counts.keys().any(|(path, _)| path == &closed));
+        assert!(g.page_counts.keys().any(|(path, _)| path == &other));
+        assert!(
+            !g.page_count_in_flight
+                .iter()
+                .any(|(path, _)| path == &closed)
+        );
+        assert!(
+            g.page_count_in_flight
+                .iter()
+                .any(|(path, _)| path == &other)
+        );
+        assert_eq!(g.document_generations.get(&closed), Some(&1));
+        assert!(g.last_crop_key.is_none());
+        assert!(g.last_encoded.is_none());
+        assert!(g.pending_kitty_deletes.contains(&77));
+        assert!(g.resident_kitty_image.is_none());
+        assert!(!closed_temp.exists());
+        assert!(other_temp.exists());
+        g.pages.retain(|(path, _, _, _, _), _| path != &other);
+        g.page_counts.retain(|(path, _), _| path != &other);
+        g.page_count_in_flight.retain(|(path, _)| path != &other);
+        g.pending_kitty_deletes.retain(|id| *id != 77);
+        g.render_cancellations.remove(&active_key);
+        g.document_generations.remove(&closed);
+        g.temp_files.retain(|(_, file)| file != &other_temp);
+        let _ = std::fs::remove_file(other_temp);
+        drop(g);
+
+        // A live rebuild must not delete the old terminal image before the
+        // replacement is ready; closing it afterwards must still free it.
+        let rebuilt = PathBuf::from("/tmp/papr-rebuilt-document.pdf");
+        {
+            let mut g = cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("PDF cache lock poisoned"))?;
+            g.resident_kitty_image = Some((path_fingerprint(&rebuilt), 88));
+            g.last_crop_key = Some(CropKey {
+                path_fp: path_fingerprint(&rebuilt),
+                page: 1,
+                dpi: DPI,
+                pixel_w: 1,
+                crop_y: 0,
+                crop_h: 1,
+                page_fit: true,
+            });
+            g.last_encoded = Some(EncodedFrame {
+                transmit_seq: "old upload".into(),
+                image_id: 88,
+                cols: 1,
+                rows: 1,
+                id_color: String::new(),
+                retire_image_id: None,
+            });
+        }
+        invalidate_document(&rebuilt);
+        {
+            let g = cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("PDF cache lock poisoned"))?;
+            assert_eq!(
+                g.resident_kitty_image,
+                Some((path_fingerprint(&rebuilt), 88))
+            );
+            assert!(!g.pending_kitty_deletes.contains(&88));
+            assert!(g.last_encoded.is_none());
+        }
+        release_document(&rebuilt);
+        let mut g = cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("PDF cache lock poisoned"))?;
+        assert!(g.pending_kitty_deletes.contains(&88));
+        g.pending_kitty_deletes.retain(|id| *id != 88);
+        Ok(())
+    }
 }

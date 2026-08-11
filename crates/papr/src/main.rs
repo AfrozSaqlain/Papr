@@ -65,6 +65,7 @@ use terminal::TerminalSession;
 const DASHBOARD_CANDIDATE_LIMIT: u16 = 30;
 const DASHBOARD_DISPLAY_LIMIT: usize = 10;
 const DASHBOARD_REPEAT_EXCLUSION_DAYS: i64 = 7;
+const MAX_TERMINAL_SCROLLBACK_BYTES: usize = 64 * 1024;
 const DASHBOARD_FEED_ALGORITHM_VERSION: &str = "balanced-v3";
 const METADATA_ENRICHMENT_CONCURRENCY: usize = 1;
 
@@ -212,7 +213,7 @@ async fn run_app(cli: Cli) -> Result<()> {
     let (collection_pdf_count, collection_pdf_size) =
         LibraryIndexer::pdf_storage_stats(&collection_roots);
     let (download_pdf_count, download_pdf_size) =
-        LibraryIndexer::pdf_storage_stats(&[download_dir.clone()]);
+        LibraryIndexer::pdf_storage_stats(std::slice::from_ref(&download_dir));
     let library_papers = database.library_papers_in_roots(&library_roots)?;
     dashboard.counts.papers = collection_pdf_count;
     dashboard.counts.downloaded = download_pdf_count;
@@ -222,9 +223,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         .count() as u64;
     dashboard.disk_usage = collection_pdf_size;
     dashboard.downloads_size = download_pdf_size;
-    dashboard.database_size = std::fs::metadata(&paths.database_file)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    dashboard.database_size = std::fs::metadata(&paths.database_file).map_or(0, |m| m.len());
 
     let initial_page = Page::from_config_str(&config.startup_page).unwrap_or(Page::Dashboard);
     let initial_sidebar_index = Page::ALL
@@ -293,7 +292,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         active_dashboard_fetch: initial_dashboard_fetch,
         watch_sender,
         watch_receiver,
-        _watcher: watcher,
+        watcher,
         project_filesystem_watcher: None,
         active_enrichments: std::collections::HashSet::new(),
         citation_index: None,
@@ -515,7 +514,7 @@ struct Runtime {
     active_dashboard_fetch: Option<DashboardFeedKey>,
     watch_sender: mpsc::UnboundedSender<()>,
     watch_receiver: mpsc::UnboundedReceiver<()>,
-    _watcher: LibraryWatcher,
+    watcher: LibraryWatcher,
     project_filesystem_watcher: Option<ProjectFilesystemWatcher>,
     active_enrichments: std::collections::HashSet<i64>,
     citation_index: Option<CitationIndexer>,
@@ -635,7 +634,7 @@ impl CitationIndexer {
             project.path.clone(),
             sender.clone(),
             cancelled.clone(),
-            workers.clone(),
+            &workers,
         );
         let root = project.path.clone();
         let watch_cancelled = cancelled.clone();
@@ -653,7 +652,7 @@ impl CitationIndexer {
                         root.clone(),
                         sender.clone(),
                         watch_cancelled.clone(),
-                        watch_workers.clone(),
+                        &watch_workers,
                     );
                 }
             },
@@ -700,13 +699,14 @@ fn refresh_citation_index(
     root: PathBuf,
     sender: std_mpsc::Sender<CitationSource>,
     cancelled: Arc<AtomicBool>,
-    workers: Arc<std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>>,
+    workers: &Arc<std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>>,
 ) {
     if cancelled.load(Ordering::Acquire) {
         return;
     }
-    reap_finished_citation_workers(&workers);
+    reap_finished_citation_workers(workers);
     let worker_cancelled = cancelled.clone();
+    let workers = Arc::clone(workers);
     let worker = std::thread::spawn(move || {
         let mut entries = Vec::new();
         for entry in walkdir::WalkDir::new(root)
@@ -921,9 +921,9 @@ fn run_typst_worker_process(project: &Path) -> Result<()> {
         loop {
             match input.recv_timeout(std::time::Duration::from_millis(75)) {
                 Ok(TypstWorkerRequest::Compile) => {}
-                Ok(TypstWorkerRequest::Shutdown) => break 'worker,
+                Ok(TypstWorkerRequest::Shutdown)
+                | Err(std_mpsc::RecvTimeoutError::Disconnected) => break 'worker,
                 Err(std_mpsc::RecvTimeoutError::Timeout) => break,
-                Err(std_mpsc::RecvTimeoutError::Disconnected) => break 'worker,
             }
         }
     }
@@ -1316,8 +1316,7 @@ impl Drop for ProjectCompiler {
     }
 }
 
-/// Turn TeX's line-oriented output into diagnostics that can be displayed and navigated.
-
+// Turn TeX's line-oriented output into diagnostics that can be displayed and navigated.
 fn open_project_workspace(app: &mut App, project: Project) {
     app.project_tree_dir = Some(project.path.clone());
     app.project_files = project_tree_entries(&project.path);
@@ -1421,11 +1420,13 @@ fn restart_project_filesystem_watcher(runtime: &mut Runtime, app: &mut App) {
         runtime.project_manager.root(),
         app.active_project.as_ref(),
     )
-    .map(Some)
-    .unwrap_or_else(|error| {
-        app.toast = Some(format!("Could not watch project files: {error}"));
-        None
-    });
+    .map_or_else(
+        |error| {
+            app.toast = Some(format!("Could not watch project files: {error}"));
+            None
+        },
+        Some,
+    );
 }
 
 /// Release everything whose lifetime is scoped to an open Project.
@@ -1509,7 +1510,7 @@ fn refresh_project_filesystem(runtime: &mut Runtime, app: &mut App) {
                 .min(app.projects.len().saturating_sub(1))
         });
 
-    let Some(project) = app.active_project.as_ref().cloned() else {
+    let Some(project) = app.active_project.clone() else {
         return;
     };
     if !project.path.is_dir() {
@@ -1712,7 +1713,9 @@ fn move_config_editor_vertical(app: &mut App, row_delta: isize) {
 fn move_config_editor_page(app: &mut App, direction: isize) {
     move_config_editor_vertical(
         app,
-        direction * app.config_editor_viewport_height.max(1) as isize,
+        direction.saturating_mul(
+            isize::try_from(app.config_editor_viewport_height.max(1)).unwrap_or(isize::MAX),
+        ),
     );
 }
 
@@ -1806,9 +1809,8 @@ pub(crate) fn build_config_editor_view_with_scroll_mode(
     }
 }
 
-/// Expand stored tab characters only for display. The buffer remains byte-for-
-/// byte unchanged while cursor geometry and wrapping use terminal cell widths.
-
+// Expand stored tab characters only for display. The buffer remains byte-for-
+// byte unchanged while cursor geometry and wrapping use terminal cell widths.
 struct ActionSenders {
     search: mpsc::UnboundedSender<SearchResponse>,
     index: mpsc::UnboundedSender<IndexResponse>,
@@ -2023,7 +2025,7 @@ async fn run(
                 state_changed = true;
             }
         }
-        if last_enrichment_check.elapsed() >= std::time::Duration::from_secs(300) {
+        if last_enrichment_check.elapsed() >= std::time::Duration::from_mins(5) {
             last_enrichment_check = std::time::Instant::now();
             spawn_enrichment_if_needed(&mut runtime, &senders, app)?;
         }
@@ -2136,7 +2138,7 @@ async fn run(
         if any_enrichment_processed {
             refresh_library(&runtime, app)?;
             refresh_organization(&runtime.database, &runtime.library_roots, app)?;
-            refresh_dashboard(&mut runtime, app)?;
+            refresh_dashboard(&runtime, app)?;
             refresh_downloads(&runtime, app);
         }
         if enrichment_receiver.is_empty() && app.enrichment_pending {
@@ -2158,7 +2160,7 @@ async fn run(
                     runtime
                         .database
                         .record_reading_duration(session_id, duration_s)?;
-                    refresh_dashboard(&mut runtime, app)?;
+                    refresh_dashboard(&runtime, app)?;
                 }
                 AppEvent::Toast(message) => {
                     app.toast = Some(message);
@@ -2170,15 +2172,18 @@ async fn run(
                     bib_path,
                 } => {
                     let existing = std::fs::read_to_string(&bib_path).unwrap_or_default();
-                    if !existing.contains(&key) {
+                    if existing.contains(&key) {
+                        app.toast =
+                            Some(format!("Citation {key} already exists in references.bib"));
+                    } else {
                         use std::io::Write;
                         if let Ok(mut f) = std::fs::OpenOptions::new()
                             .create(true)
                             .append(true)
                             .open(&bib_path)
                         {
-                            let _ = writeln!(f, "\n{}", bibtex);
-                            app.toast = Some(format!("Added citation {} to references.bib", key));
+                            let _ = writeln!(f, "\n{bibtex}");
+                            app.toast = Some(format!("Added citation {key} to references.bib"));
                             // Eagerly mark this title as added so the modal badge
                             // updates before the background indexer fires.
                             let title_key = title.trim().to_lowercase();
@@ -2188,9 +2193,6 @@ async fn run(
                         } else {
                             app.toast = Some("Failed to write references.bib".into());
                         }
-                    } else {
-                        app.toast =
-                            Some(format!("Citation {} already exists in references.bib", key));
                     }
                 }
                 AppEvent::ProjectCitationSearchFinished { query, result } => {
@@ -2232,10 +2234,11 @@ async fn run(
             app.workspace_query_cursor = 0;
             if last_page == Some(Page::Settings) {
                 let original = app.settings_modal.original_theme.clone();
-                if !original.is_empty() && theme.name != original {
-                    if let Ok(reverted) = Theme::load(&original) {
-                        theme = reverted;
-                    }
+                if !original.is_empty()
+                    && theme.name != original
+                    && let Ok(reverted) = Theme::load(&original)
+                {
+                    theme = reverted;
                 }
             }
             if matches!(app.page, Page::Dashboard | Page::History | Page::Statistics) {
@@ -2244,10 +2247,10 @@ async fn run(
             // Auto-open the settings workspace whenever the user navigates to the
             // Settings page. Read the config fresh from disk so the workspace
             // always reflects the persisted state.
-            if app.page == Page::Settings {
-                if let Ok(config) = Config::load_or_create(&Paths::discover()?) {
-                    settings_modal::open_settings_modal(app, &config, &theme.name);
-                }
+            if app.page == Page::Settings
+                && let Ok(config) = Config::load_or_create(&Paths::discover()?)
+            {
+                settings_modal::open_settings_modal(app, &config, &theme.name);
             }
             last_page = Some(app.page);
             state_changed = true;
@@ -2258,13 +2261,13 @@ async fn run(
                 last_toast = app.toast.clone();
                 state_changed = true;
             }
-            if let Some(ts) = app.toast_timestamp {
-                if ts.elapsed() >= std::time::Duration::from_secs(7) {
-                    app.toast = None;
-                    app.toast_timestamp = None;
-                    last_toast = None;
-                    state_changed = true;
-                }
+            if let Some(ts) = app.toast_timestamp
+                && ts.elapsed() >= std::time::Duration::from_secs(7)
+            {
+                app.toast = None;
+                app.toast_timestamp = None;
+                last_toast = None;
+                state_changed = true;
             }
         } else {
             if last_toast.is_some() {
@@ -2277,12 +2280,11 @@ async fn run(
         // Auto-cleanup failed downloads after 2 minutes (120 seconds)
         let before_len = app.downloads.len();
         app.downloads.retain(|task| {
-            if let DownloadStatus::Failed(_) = task.status {
-                if let Some(failed_at) = task.failed_at {
-                    if failed_at.elapsed() >= std::time::Duration::from_secs(120) {
-                        return false;
-                    }
-                }
+            if let DownloadStatus::Failed(_) = task.status
+                && let Some(failed_at) = task.failed_at
+                && failed_at.elapsed() >= std::time::Duration::from_mins(2)
+            {
+                return false;
             }
             true
         });
@@ -2685,11 +2687,10 @@ async fn apply_ui_action(
                 task.total = None;
                 task.status = DownloadStatus::Starting;
                 task.failed_at = None;
-                let destination = task
-                    .pdf_path
-                    .as_ref()
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|| runtime.download_dir.join(format!("{}.pdf", id)));
+                let destination = task.pdf_path.as_ref().map_or_else(
+                    || runtime.download_dir.join(format!("{id}.pdf")),
+                    std::path::PathBuf::from,
+                );
                 pending_downloads.insert(id.clone(), paper.clone());
                 app.toast = Some("Retrying download...".to_owned());
                 let manager = runtime.downloads.clone();
@@ -2910,14 +2911,14 @@ async fn apply_ui_action(
                         let old_root = project.path;
                         let old_editor = app.project_editor_path.clone();
                         open_project_workspace(app, renamed.clone());
-                        if let Some(old_editor) = old_editor {
-                            if let Ok(relative) = old_editor.strip_prefix(&old_root) {
-                                let new_editor = renamed.path.join(relative);
-                                if let Ok(text) = std::fs::read_to_string(&new_editor) {
-                                    app.project_editor_path = Some(new_editor);
-                                    app.project_editor_text = text;
-                                    app.project_pane = ProjectPane::Editor;
-                                }
+                        if let Some(old_editor) = old_editor
+                            && let Ok(relative) = old_editor.strip_prefix(&old_root)
+                        {
+                            let new_editor = renamed.path.join(relative);
+                            if let Ok(text) = std::fs::read_to_string(&new_editor) {
+                                app.project_editor_path = Some(new_editor);
+                                app.project_editor_text = text;
+                                app.project_pane = ProjectPane::Editor;
                             }
                         }
                         start_project_compiler(runtime, app);
@@ -3103,16 +3104,16 @@ async fn apply_ui_action(
             if let Some(task) = task {
                 if let Some(task_paper_id) = task.paper_id {
                     paper_id = Some(task_paper_id);
-                    if let Some(paper) = app.library.papers.iter().find(|p| p.id == task_paper_id) {
-                        if let Some(pdf_path) = &paper.pdf_path {
-                            path = Some(PathBuf::from(pdf_path));
-                        }
-                    }
-                }
-                if path.is_none() {
-                    if let Some(pdf_path) = &task.pdf_path {
+                    if let Some(paper) = app.library.papers.iter().find(|p| p.id == task_paper_id)
+                        && let Some(pdf_path) = &paper.pdf_path
+                    {
                         path = Some(PathBuf::from(pdf_path));
                     }
+                }
+                if path.is_none()
+                    && let Some(pdf_path) = &task.pdf_path
+                {
+                    path = Some(PathBuf::from(pdf_path));
                 }
             }
             let path = path.unwrap_or_else(|| runtime.download_dir.join(format!("{id}.pdf")));
@@ -3272,10 +3273,10 @@ async fn apply_ui_action(
                 }
                 runtime.database.delete_paper(paper.id)?;
             }
-            if let Some(p) = &path {
-                if p.exists() {
-                    let _ = std::fs::remove_dir_all(p);
-                }
+            if let Some(p) = &path
+                && p.exists()
+            {
+                let _ = std::fs::remove_dir_all(p);
             }
             runtime.database.delete_collection(collection_id)?;
             if app.active_collection.as_ref().map(|c| c.id) == Some(collection_id) {
@@ -3567,18 +3568,16 @@ fn add_paper_to_collection_with_disk(
     let current_collection_name = runtime.database.paper_collection_name(paper_id)?;
     let already_in_collection = current_collection_name
         .as_deref()
-        .map_or(false, |c| c.eq_ignore_ascii_case(name));
+        .is_some_and(|c| c.eq_ignore_ascii_case(name));
 
     if let Some(pdf_path_str) = &paper.pdf_path {
         let source = PathBuf::from(pdf_path_str);
         if source.exists() {
             let destination = folder.join(source.file_name().context("PDF path has no filename")?);
             let mut moved = false;
-            if source != destination {
-                if !destination.exists() {
-                    move_pdf_file(&source, &destination)?;
-                    moved = true;
-                }
+            if source != destination && !destination.exists() {
+                move_pdf_file(&source, &destination)?;
+                moved = true;
             }
             runtime
                 .database
@@ -3816,8 +3815,7 @@ fn dashboard_recent_paper_ids(database: &Database, feed_date: &str) -> Result<Ha
     Ok(database.dashboard_paper_ids_since(&cutoff.to_string())?)
 }
 
-/// Deterministically order one keyword's eligible papers for a local day.
-///
+// Deterministically order one keyword's eligible papers for a local day.
 
 fn refresh_library(runtime: &Runtime, app: &mut App) -> Result<()> {
     app.library.papers = runtime
@@ -3832,7 +3830,8 @@ fn refresh_library(runtime: &Runtime, app: &mut App) -> Result<()> {
 fn refresh_dashboard(runtime: &Runtime, app: &mut App) -> Result<()> {
     app.dashboard = runtime.database.research_dashboard()?;
     app.dashboard.counts.papers = LibraryIndexer::count_pdfs(&runtime.collection_roots);
-    app.dashboard.counts.downloaded = LibraryIndexer::count_pdfs(&[runtime.download_dir.clone()]);
+    app.dashboard.counts.downloaded =
+        LibraryIndexer::count_pdfs(std::slice::from_ref(&runtime.download_dir));
     app.dashboard.read = runtime
         .database
         .library_papers_in_roots(&runtime.library_roots)?
@@ -3841,10 +3840,8 @@ fn refresh_dashboard(runtime: &Runtime, app: &mut App) -> Result<()> {
         .count() as u64;
     app.dashboard.disk_usage = LibraryIndexer::pdf_storage_size(&runtime.collection_roots);
     app.dashboard.downloads_size =
-        LibraryIndexer::pdf_storage_size(&[runtime.download_dir.clone()]);
-    app.dashboard.database_size = std::fs::metadata(&runtime.database_file)
-        .map(|m| m.len())
-        .unwrap_or(0);
+        LibraryIndexer::pdf_storage_size(std::slice::from_ref(&runtime.download_dir));
+    app.dashboard.database_size = std::fs::metadata(&runtime.database_file).map_or(0, |m| m.len());
     app.stats = app.dashboard.counts;
     Ok(())
 }
@@ -3969,7 +3966,7 @@ fn open_pdf(
         // `app.pdf_viewer_path`.
         pdf_viewer::reset_for_new_document(path);
         app.mode = AppMode::PdfView;
-        app.pdf_viewer_path = Some(path.to_path_buf());
+        app.pdf_viewer_path = Some(path.clone());
         app.pdf_viewer_page = 1;
         app.pdf_viewer_scroll_y = 0;
         app.pdf_viewer_page_pixel_h = 0;
@@ -4014,14 +4011,14 @@ fn open_pdf(
                 let take_len = 100_usize.saturating_sub(ext_len).saturating_sub(1);
                 let truncated_stem: String = stem.chars().take(take_len).collect();
                 if extension.is_empty() {
-                    format!("{}…", truncated_stem)
+                    format!("{truncated_stem}…")
                 } else {
-                    format!("{}….{}", truncated_stem, extension)
+                    format!("{truncated_stem}….{extension}")
                 }
             } else {
                 basename
             };
-            app.toast = Some(format!("Opened PDF: {}", display_name));
+            app.toast = Some(format!("Opened PDF: {display_name}"));
             if let (Some(session_id), Some(sender)) = (session_id, event_sender) {
                 let start = std::time::Instant::now();
                 tokio::spawn(async move {
@@ -4072,11 +4069,11 @@ fn pdf_viewer_invocation(viewer: &str, path: &Path) -> Result<(String, Vec<OsStr
         }
     };
 
-    let mut args = argv.into_iter().map(OsString::from).collect::<Vec<_>>();
+    let mut command_args = argv.into_iter().map(OsString::from).collect::<Vec<_>>();
     if !has_placeholder {
-        args.push(path.as_os_str().to_owned());
+        command_args.push(path.as_os_str().to_owned());
     }
-    Ok((program, args))
+    Ok((program, command_args))
 }
 
 fn open_browser(url: &str, app: &mut App) {
@@ -4135,7 +4132,7 @@ fn log_message(database_file: &Path, message: &str) {
         {
             use std::io::Write;
             let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-            let _ = writeln!(file, "[{}] {}", timestamp, message);
+            let _ = writeln!(file, "[{timestamp}] {message}");
         }
     }
 }
@@ -4165,7 +4162,7 @@ fn start_library_watcher(
 }
 
 fn restart_runtime_watcher(runtime: &mut Runtime) -> Result<()> {
-    runtime._watcher = start_library_watcher(&runtime.library_roots, runtime.watch_sender.clone())?;
+    runtime.watcher = start_library_watcher(&runtime.library_roots, runtime.watch_sender.clone())?;
     Ok(())
 }
 
@@ -4310,10 +4307,10 @@ async fn apply_index_response(
             let ingested =
                 LibraryIngestionService::new(&runtime.database, &runtime.collection_roots)
                     .ingest_pdf(pdf)?;
-            if let Some(paper_id) = ingested.paper_id {
-                if ingested.newly_imported {
-                    dispatch_plugin_events(runtime, app, &["paper_imported"], paper_id).await?;
-                }
+            if let Some(paper_id) = ingested.paper_id
+                && ingested.newly_imported
+            {
+                dispatch_plugin_events(runtime, app, &["paper_imported"], paper_id).await?;
             }
             app.library.message = Some(if ingested.newly_imported {
                 format!("Imported {}", ingested.pdf.title)
@@ -4368,8 +4365,7 @@ fn discover_local_downloads(
             }
 
             let canonical_path = std::fs::canonicalize(&pdf_path)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| pdf_path.clone());
+                .map_or_else(|_| pdf_path.clone(), |p| p.to_string_lossy().into_owned());
 
             let content_hash = {
                 let mut hash_ok = None;
@@ -4389,11 +4385,11 @@ fn discover_local_downloads(
                 .or_else(|| database.paper_id_for_path(&canonical_path).ok().flatten());
 
             let mut db_pdf_path = None;
-            if let Some(ref hash) = content_hash {
-                if let Ok(Some((id, path))) = database.paper_by_hash(hash) {
-                    paper_id = Some(id);
-                    db_pdf_path = Some(path);
-                }
+            if let Some(ref hash) = content_hash
+                && let Ok(Some((id, path))) = database.paper_by_hash(hash)
+            {
+                paper_id = Some(id);
+                db_pdf_path = Some(path);
             }
 
             if let Some(ref path) = db_pdf_path {
@@ -4680,9 +4676,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             }
             KeyCode::Tab | KeyCode::BackTab if app.mode == AppMode::ProjectCreate => {
                 if app.project_create_compiler == "typst" {
-                    app.project_create_compiler = "latex".to_owned();
+                    "latex".clone_into(&mut app.project_create_compiler);
                 } else {
-                    app.project_create_compiler = "typst".to_owned();
+                    "typst".clone_into(&mut app.project_create_compiler);
                 }
             }
             _ => {
@@ -4723,10 +4719,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             }
             _ => {
                 let old_query = app.palette_query.clone();
-                if edit_text(&mut app.palette_query, &mut app.palette_query_cursor, key) {
-                    if app.palette_query != old_query {
-                        app.palette_selected = 0;
-                    }
+                if edit_text(&mut app.palette_query, &mut app.palette_query_cursor, key)
+                    && app.palette_query != old_query
+                {
+                    app.palette_selected = 0;
                 }
             }
         }
@@ -4744,7 +4740,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 }
             }
             KeyCode::Tab => {
-                complete_terminal_command(app, key.modifiers.contains(KeyModifiers::SHIFT))
+                complete_terminal_command(app, key.modifiers.contains(KeyModifiers::SHIFT));
             }
             KeyCode::BackTab => complete_terminal_command(app, true),
             _ => {
@@ -4841,11 +4837,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         return None;
     }
     let key = normalize_panel_navigation(key);
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        if let Some(command) = navigation_command(key) {
-            app.dispatch(command);
-            return None;
-        }
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && let Some(command) = navigation_command(key)
+    {
+        app.dispatch(command);
+        return None;
     }
     if app.mode == AppMode::PaperDetail {
         return handle_paper_detail_key(app, key);
@@ -4889,10 +4885,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if key.code == KeyCode::Char('r') && app.page == Page::Library {
         return Some(UiAction::Reindex);
     }
-    if key.code == KeyCode::Char('o') {
-        if let Some(arxiv_reference) = selected_paper_arxiv_reference(app) {
-            return open_arxiv_page(app, arxiv_reference);
-        }
+    if key.code == KeyCode::Char('o')
+        && let PaperArxivSelection::Selected(arxiv_reference) = selected_paper_arxiv_reference(app)
+    {
+        return open_arxiv_page(app, arxiv_reference.as_deref());
     }
     if matches!(app.page, Page::Dashboard | Page::Discover) {
         match key.code {
@@ -4903,20 +4899,19 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             _ => {}
         }
     }
-    if key.code == KeyCode::Char('u') {
-        if let Some(paper_id) = selected_local_paper_id(app) {
-            return Some(UiAction::MarkUnread(paper_id));
-        }
+    if key.code == KeyCode::Char('u')
+        && let Some(paper_id) = selected_local_paper_id(app)
+    {
+        return Some(UiAction::MarkUnread(paper_id));
     }
-    if key.code == KeyCode::Char('a') {
-        if let Some(paper_id) = selected_local_paper_id(app) {
-            let is_queued = app.reading_queue_papers.iter().any(|p| p.id == paper_id);
-            if is_queued {
-                return Some(UiAction::RemoveFromQueue(paper_id));
-            } else {
-                return Some(UiAction::AddToQueue(paper_id));
-            }
+    if key.code == KeyCode::Char('a')
+        && let Some(paper_id) = selected_local_paper_id(app)
+    {
+        let is_queued = app.reading_queue_papers.iter().any(|p| p.id == paper_id);
+        if is_queued {
+            return Some(UiAction::RemoveFromQueue(paper_id));
         }
+        return Some(UiAction::AddToQueue(paper_id));
     }
     if let KeyHandling::Handled(action) = handle_dashboard_key(app, key) {
         return action.map(|action| *action);
@@ -5204,9 +5199,8 @@ fn append_terminal_output(app: &mut App, command: &str, output: &str) {
     app.terminal_command_output.push('\n');
     app.terminal_command_output
         .push_str(&sanitize_terminal_output(output));
-    const MAX_SCROLLBACK_BYTES: usize = 64 * 1024;
-    if app.terminal_command_output.len() > MAX_SCROLLBACK_BYTES {
-        let start = app.terminal_command_output.len() - MAX_SCROLLBACK_BYTES;
+    if app.terminal_command_output.len() > MAX_TERMINAL_SCROLLBACK_BYTES {
+        let start = app.terminal_command_output.len() - MAX_TERMINAL_SCROLLBACK_BYTES;
         let start = next_char_boundary(&app.terminal_command_output, start);
         app.terminal_command_output.drain(..start);
     }
@@ -5224,10 +5218,10 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 app.project_rename_input.clear();
                 app.project_rename_cursor = 0;
                 app.project_create_compiler =
-                    if !app.settings_modal.default_project_compiler.is_empty() {
-                        app.settings_modal.default_project_compiler.clone()
-                    } else {
+                    if app.settings_modal.default_project_compiler.is_empty() {
                         "latex".to_owned()
+                    } else {
+                        app.settings_modal.default_project_compiler.clone()
                     };
                 app.mode = AppMode::ProjectCreate;
             }
@@ -5247,11 +5241,11 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                     .map(UiAction::ConfirmDeleteProject);
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                app.projects_selected = app.projects_selected.saturating_sub(1)
+                app.projects_selected = app.projects_selected.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 app.projects_selected =
-                    (app.projects_selected + 1).min(app.projects.len().saturating_sub(1))
+                    (app.projects_selected + 1).min(app.projects.len().saturating_sub(1));
             }
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
                 return app
@@ -5296,10 +5290,8 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         return None;
     }
     if app.project_pane == ProjectPane::FileTree && key.code == KeyCode::Left {
-        if !move_project_tree_to_parent(app) {
-            if prepare_project_close(app) {
-                return Some(UiAction::CloseProject);
-            }
+        if !move_project_tree_to_parent(app) && prepare_project_close(app) {
+            return Some(UiAction::CloseProject);
         }
         return None;
     }
@@ -5387,11 +5379,10 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             }
             KeyCode::Char('R') => {
                 if let Some(path) = app.project_files.get(app.project_file_selected).cloned() {
-                    app.project_rename_input = path
-                        .file_name()
+                    path.file_name()
                         .and_then(|name| name.to_str())
                         .unwrap_or_default()
-                        .to_owned();
+                        .clone_into(&mut app.project_rename_input);
                     app.project_rename_cursor = app.project_rename_input.len();
                     app.project_entry_rename_path = Some(path);
                     app.mode = AppMode::ProjectEntryRename;
@@ -5471,10 +5462,10 @@ fn handle_project_pane_shortcut(app: &mut App, key: KeyEvent) -> bool {
             match pane {
                 ProjectPane::Editor => "Open a source file before focusing the editor.",
                 ProjectPane::Preview => {
-                    if app.pdf_viewer != "internal" {
-                        "PDF preview is disabled when using an external viewer."
-                    } else {
+                    if app.pdf_viewer == "internal" {
                         "Open a project before focusing this pane."
+                    } else {
+                        "PDF preview is disabled when using an external viewer."
                     }
                 }
                 _ => "Open a project before focusing this pane.",
@@ -5584,7 +5575,6 @@ fn handle_project_preview_key(app: &mut App, key: KeyEvent) {
         ),
         KeyCode::Home => pdf_viewer::jump_to_page(app, 1),
         KeyCode::End => pdf_viewer::jump_to_page(app, app.pdf_viewer_total_pages.max(1)),
-        KeyCode::Left | KeyCode::Right => {}
         _ => {}
     }
 }
@@ -5603,7 +5593,9 @@ fn move_project_editor_page(app: &mut App, direction: isize) {
         .sum::<usize>()
         .max(1);
     let target = row
-        .saturating_add_signed(direction * app.project_editor_viewport_height.max(1) as isize)
+        .saturating_add_signed(direction.saturating_mul(
+            isize::try_from(app.project_editor_viewport_height.max(1)).unwrap_or(isize::MAX),
+        ))
         .min(total_rows.saturating_sub(1));
     app.project_editor_cursor =
         cursor_from_visual_position(&app.project_editor_text, target, column, wrap_width);
@@ -5737,7 +5729,7 @@ fn paste_text_into_active_input(app: &mut App, text: &str) -> bool {
     }
 
     if is_project_exact_paste_editor(app) {
-        handle_project_exact_paste(app, &text);
+        handle_project_exact_paste(app, text);
         return true;
     }
 
@@ -5763,12 +5755,12 @@ fn paste_text_into_active_input(app: &mut App, text: &str) -> bool {
             None => return false,
         },
         _ if is_project_editor_active(app) && app.project_editor_insert_mode => {
-            insert_project_bibtex_text(app, &text);
+            insert_project_bibtex_text(app, text);
             return true;
         }
         _ => return false,
     };
-    target.insert_str(*cursor, &text);
+    target.insert_str(*cursor, text);
     *cursor += text.len();
 
     if app.mode == AppMode::CommandPalette {
@@ -5955,19 +5947,19 @@ fn handle_project_editor_normal_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('u') => undo_project_editor_change(app),
         KeyCode::Char('w') => {
             app.project_editor_cursor =
-                next_word_boundary(&app.project_editor_text, app.project_editor_cursor)
+                next_word_boundary(&app.project_editor_text, app.project_editor_cursor);
         }
         KeyCode::Char('b') => {
             app.project_editor_cursor =
-                prev_word_boundary(&app.project_editor_text, app.project_editor_cursor)
+                prev_word_boundary(&app.project_editor_text, app.project_editor_cursor);
         }
         KeyCode::Char('0') | KeyCode::Home => {
             app.project_editor_cursor =
-                config_editor_line_start(&app.project_editor_text, app.project_editor_cursor)
+                config_editor_line_start(&app.project_editor_text, app.project_editor_cursor);
         }
         KeyCode::Char('$') | KeyCode::End => {
             app.project_editor_cursor =
-                config_editor_line_end(&app.project_editor_text, app.project_editor_cursor)
+                config_editor_line_end(&app.project_editor_text, app.project_editor_cursor);
         }
         KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) => {
             let previous = prev_word_boundary(&app.project_editor_text, app.project_editor_cursor);
@@ -6072,8 +6064,7 @@ fn delete_project_editor_current_line(app: &mut App) {
     let start = config_editor_line_start(&app.project_editor_text, cursor);
     let end = app.project_editor_text[cursor..]
         .find('\n')
-        .map(|offset| cursor + offset + 1)
-        .unwrap_or(app.project_editor_text.len());
+        .map_or(app.project_editor_text.len(), |offset| cursor + offset + 1);
     // A cursor after a final newline is on the trailing empty line. Deleting
     // it removes that newline, leaving the preceding line as the cursor line.
     let (start, end) = if start == end && start == app.project_editor_text.len() && start > 0 {
@@ -6351,7 +6342,7 @@ fn update_project_local_citation_results(app: &mut App) {
             }
         }
     }
-    results.sort_by(|a, b| b.0.cmp(&a.0));
+    results.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     app.project_citation_results = results
         .into_iter()
         .map(|(_, paper)| ProjectCitationResult::Local(paper))
@@ -6420,17 +6411,16 @@ fn handle_project_citation_search_key(app: &mut App, key: KeyEvent) -> Option<Ui
                 &mut app.project_citation_query,
                 &mut app.project_citation_cursor,
                 key,
-            ) {
-                if app.project_citation_query != old_query {
-                    app.project_citation_results.clear();
-                    app.project_citation_selected = 0;
-                    app.project_citation_scroll = 0;
-                    if app.project_citation_search_mode == ProjectCitationSearchMode::Local {
-                        update_project_local_citation_results(app);
-                    } else {
-                        app.project_citation_search_status =
-                            Some("Press Enter to search online.".into());
-                    }
+            ) && app.project_citation_query != old_query
+            {
+                app.project_citation_results.clear();
+                app.project_citation_selected = 0;
+                app.project_citation_scroll = 0;
+                if app.project_citation_search_mode == ProjectCitationSearchMode::Local {
+                    update_project_local_citation_results(app);
+                } else {
+                    app.project_citation_search_status =
+                        Some("Press Enter to search online.".into());
                 }
             }
         }
@@ -6480,17 +6470,12 @@ fn handle_workspace_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction>
                 }
             }
         }
-        KeyCode::Left if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.workspace_query_cursor == 0 {
-                app.mode = AppMode::Normal;
-                app.content_focused = false;
-            } else {
-                edit_text(
-                    &mut app.workspace_query,
-                    &mut app.workspace_query_cursor,
-                    key,
-                );
-            }
+        KeyCode::Left
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && app.workspace_query_cursor == 0 =>
+        {
+            app.mode = AppMode::Normal;
+            app.content_focused = false;
         }
         _ => {
             edit_text(
@@ -6523,7 +6508,7 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 }
             }
         }
-        KeyCode::Char('n' | 'N') | KeyCode::Esc | KeyCode::Char('q') => {
+        KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc => {
             app.delete_confirmation = None;
             app.mode = AppMode::Normal;
             None
@@ -6653,86 +6638,67 @@ fn handle_downloads_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.page != Page::Downloads {
         return None;
     }
-    if key.code == KeyCode::Char('r') {
-        if let Some(&task) = app.filtered_downloads().get(app.download_selected) {
-            if matches!(task.status, DownloadStatus::Failed(_)) {
-                if let Some(ref remote_paper) = task.remote_paper {
-                    return Some(UiAction::RetryDownload {
-                        id: task.id.clone(),
-                        paper: remote_paper.clone(),
-                    });
-                }
-            }
-        }
+    if key.code == KeyCode::Char('r')
+        && let Some(&task) = app.filtered_downloads().get(app.download_selected)
+        && matches!(task.status, DownloadStatus::Failed(_))
+        && let Some(ref remote_paper) = task.remote_paper
+    {
+        return Some(UiAction::RetryDownload {
+            id: task.id.clone(),
+            paper: remote_paper.clone(),
+        });
     }
     if matches!(
         key.code,
         KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
-    ) {
-        if let Some(&task) = app.filtered_downloads().get(app.download_selected) {
-            if matches!(task.status, DownloadStatus::Completed) {
-                return Some(UiAction::OpenDownload(task.id.clone()));
-            }
-        }
-    }
-    if matches!(
-        key.code,
-        KeyCode::Char('R')
-            | KeyCode::Char('g')
-            | KeyCode::Char('n')
-            | KeyCode::Char('c')
-            | KeyCode::Char('x')
-    ) || key.code == KeyCode::Char('B')
+    ) && let Some(&task) = app.filtered_downloads().get(app.download_selected)
+        && matches!(task.status, DownloadStatus::Completed)
     {
-        if let Some(task) = app
+        return Some(UiAction::OpenDownload(task.id.clone()));
+    }
+    if (matches!(key.code, KeyCode::Char('R' | 'g' | 'n' | 'c' | 'x'))
+        || key.code == KeyCode::Char('B'))
+        && let Some(task) = app
             .filtered_downloads()
             .get(app.download_selected)
+            .copied()
             .cloned()
-            .cloned()
-        {
-            if matches!(task.status, DownloadStatus::Completed) {
-                let paper_id = task.paper_id.or_else(|| {
-                    task.pdf_path.as_ref().and_then(|pdf_path| {
-                        app.library
-                            .papers
-                            .iter()
-                            .find(|paper| {
-                                paper.pdf_path.as_deref() == Some(pdf_path.as_str())
-                                    || (|| {
-                                        let paper_path = PathBuf::from(paper.pdf_path.as_deref()?);
-                                        let task_path = PathBuf::from(pdf_path);
-                                        let c_paper = std::fs::canonicalize(&paper_path).ok()?;
-                                        let c_task = std::fs::canonicalize(&task_path).ok()?;
-                                        Some(c_paper == c_task)
-                                    })()
-                                    .unwrap_or(false)
-                            })
-                            .map(|paper| paper.id)
+        && matches!(task.status, DownloadStatus::Completed)
+    {
+        let paper_id = task.paper_id.or_else(|| {
+            task.pdf_path.as_ref().and_then(|pdf_path| {
+                app.library
+                    .papers
+                    .iter()
+                    .find(|paper| {
+                        paper.pdf_path.as_deref() == Some(pdf_path.as_str())
+                            || (|| {
+                                let paper_path = PathBuf::from(paper.pdf_path.as_deref()?);
+                                let task_path = PathBuf::from(pdf_path);
+                                let c_paper = std::fs::canonicalize(&paper_path).ok()?;
+                                let c_task = std::fs::canonicalize(&task_path).ok()?;
+                                Some(c_paper == c_task)
+                            })()
+                            .unwrap_or(false)
                     })
-                });
-                if let Some(paper_id) = paper_id {
-                    app.modal_return = AppMode::Normal;
-                    return match key.code {
-                        KeyCode::Char('R') => Some(UiAction::RenamePdf(paper_id)),
-                        KeyCode::Char('g') => Some(UiAction::Prompt(PaperTarget::Local(paper_id))),
-                        KeyCode::Char('B') => {
-                            Some(UiAction::Bookmark(PaperTarget::Local(paper_id)))
-                        }
-                        KeyCode::Char('c') => {
-                            Some(UiAction::CopyCitation(PaperTarget::Local(paper_id)))
-                        }
-                        KeyCode::Char('n') => {
-                            Some(UiAction::OpenNote(PaperTarget::Local(paper_id)))
-                        }
-                        KeyCode::Char('x') => Some(UiAction::ConfirmDeletePaper {
-                            paper_id,
-                            title: task.title.clone(),
-                            path: task.pdf_path.as_ref().map(PathBuf::from),
-                        }),
-                        _ => None,
-                    };
-                }
-            }
+                    .map(|paper| paper.id)
+            })
+        });
+        if let Some(paper_id) = paper_id {
+            app.modal_return = AppMode::Normal;
+            return match key.code {
+                KeyCode::Char('R') => Some(UiAction::RenamePdf(paper_id)),
+                KeyCode::Char('g') => Some(UiAction::Prompt(PaperTarget::Local(paper_id))),
+                KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(paper_id))),
+                KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(paper_id))),
+                KeyCode::Char('n') => Some(UiAction::OpenNote(PaperTarget::Local(paper_id))),
+                KeyCode::Char('x') => Some(UiAction::ConfirmDeletePaper {
+                    paper_id,
+                    title: task.title.clone(),
+                    path: task.pdf_path.as_ref().map(PathBuf::from),
+                }),
+                _ => None,
+            };
         }
     }
     None
@@ -6898,10 +6864,9 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
                                 path: PathBuf::from(path),
                             }),
                         );
-                    } else {
-                        app.toast = Some("This paper has no local PDF to open".into());
-                        return (true, None);
                     }
+                    app.toast = Some("This paper has no local PDF to open".into());
+                    return (true, None);
                 }
                 if key.code == KeyCode::Char('B') {
                     return (true, Some(UiAction::Bookmark(PaperTarget::Local(paper.id))));
@@ -7076,14 +7041,13 @@ fn edit_text(text: &mut String, cursor: &mut usize, key: KeyEvent) -> bool {
         }
         KeyCode::Home => {
             let s = &text[..*cursor];
-            let line_start = s.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+            let line_start = s.rfind('\n').map_or(0, |idx| idx + 1);
             *cursor = line_start;
         }
         KeyCode::End => {
             let line_end = text[*cursor..]
                 .find('\n')
-                .map(|idx| *cursor + idx)
-                .unwrap_or(text.len());
+                .map_or(text.len(), |idx| *cursor + idx);
             *cursor = line_end;
         }
         KeyCode::Backspace => {
@@ -7111,13 +7075,11 @@ fn edit_text(text: &mut String, cursor: &mut usize, key: KeyEvent) -> bool {
         }
         KeyCode::Up => {
             if *cursor > 0 {
-                let current_line_start =
-                    text[..*cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                let current_line_start = text[..*cursor].rfind('\n').map_or(0, |idx| idx + 1);
                 let col = *cursor - current_line_start;
                 if current_line_start > 0 {
                     let prev_line_search = &text[..current_line_start - 1];
-                    let prev_line_start =
-                        prev_line_search.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                    let prev_line_start = prev_line_search.rfind('\n').map_or(0, |idx| idx + 1);
                     let prev_line_len = (current_line_start - 1) - prev_line_start;
                     let mut target = prev_line_start + col.min(prev_line_len);
                     while target > prev_line_start && !text.is_char_boundary(target) {
@@ -7129,8 +7091,7 @@ fn edit_text(text: &mut String, cursor: &mut usize, key: KeyEvent) -> bool {
         }
         KeyCode::Down => {
             if *cursor < text.len() {
-                let current_line_start =
-                    text[..*cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                let current_line_start = text[..*cursor].rfind('\n').map_or(0, |idx| idx + 1);
                 let col = *cursor - current_line_start;
                 if let Some(current_line_end) = text[*cursor..].find('\n').map(|idx| *cursor + idx)
                 {
@@ -7138,8 +7099,7 @@ fn edit_text(text: &mut String, cursor: &mut usize, key: KeyEvent) -> bool {
                     if next_line_start <= text.len() {
                         let next_line_end = text[next_line_start..]
                             .find('\n')
-                            .map(|idx| next_line_start + idx)
-                            .unwrap_or(text.len());
+                            .map_or(text.len(), |idx| next_line_start + idx);
                         let next_line_len = next_line_end - next_line_start;
                         let mut target = next_line_start + col.min(next_line_len);
                         while target > next_line_start && !text.is_char_boundary(target) {
@@ -7197,7 +7157,6 @@ fn apply_editor_insert_key(
             *cursor += 1;
             EditorInsertResult::Changed
         }
-        KeyCode::BackTab => EditorInsertResult::Ignored,
         KeyCode::Backspace => {
             if *cursor == 0 {
                 return EditorInsertResult::Ignored;
@@ -7361,10 +7320,8 @@ fn handle_paper_detail_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             return selected_remote_target(app).map(UiAction::CopyCitation);
         }
         KeyCode::Char('o') => {
-            return open_arxiv_page(
-                app,
-                selected_remote_paper(app).map(|paper| paper.id.clone()),
-            );
+            let arxiv_reference = selected_remote_paper(app).map(|paper| paper.id.clone());
+            return open_arxiv_page(app, arxiv_reference.as_deref());
         }
         KeyCode::Enter => {
             let remote = selected_remote_paper(app)?;
@@ -7433,54 +7390,67 @@ fn selected_library_pdf(app: &App) -> Option<(i64, PathBuf)> {
         .map(|path| (paper.id, PathBuf::from(path)))
 }
 
+enum PaperArxivSelection {
+    NoPaper,
+    Selected(Option<String>),
+}
+
 /// Return the online arXiv reference for the currently selected paper row.
-/// The outer option distinguishes a selected paper row from other workspace
-/// rows (for example, a group or author heading).
-fn selected_paper_arxiv_reference(app: &App) -> Option<Option<String>> {
+fn selected_paper_arxiv_reference(app: &App) -> PaperArxivSelection {
     match app.page {
         Page::Dashboard => app
             .today_papers
             .get(app.today_selected)
-            .map(|paper| Some(paper.id.clone())),
+            .map_or(PaperArxivSelection::NoPaper, |paper| {
+                PaperArxivSelection::Selected(Some(paper.id.clone()))
+            }),
         Page::Discover => app
             .discovery
             .selected_paper()
-            .map(|paper| Some(paper.id.clone())),
-        Page::Downloads => app
-            .filtered_downloads()
-            .get(app.download_selected)
-            .map(|task| {
-                task.remote_paper
-                    .as_ref()
-                    .map(|paper| paper.id.clone())
-                    .or_else(|| {
-                        selected_local_paper_id(app).and_then(|id| {
-                            app.library
-                                .papers
-                                .iter()
-                                .find(|paper| paper.id == id)
-                                .and_then(|paper| paper.arxiv_id.clone())
-                        })
-                    })
+            .map_or(PaperArxivSelection::NoPaper, |paper| {
+                PaperArxivSelection::Selected(Some(paper.id.clone()))
             }),
+        Page::Downloads => app.filtered_downloads().get(app.download_selected).map_or(
+            PaperArxivSelection::NoPaper,
+            |task| {
+                PaperArxivSelection::Selected(
+                    task.remote_paper
+                        .as_ref()
+                        .map(|paper| paper.id.clone())
+                        .or_else(|| {
+                            selected_local_paper_id(app).and_then(|id| {
+                                app.library
+                                    .papers
+                                    .iter()
+                                    .find(|paper| paper.id == id)
+                                    .and_then(|paper| paper.arxiv_id.clone())
+                            })
+                        }),
+                )
+            },
+        ),
         Page::Library
         | Page::ReadingQueue
         | Page::Collections
         | Page::Bookmarks
         | Page::Authors
-        | Page::Notes => selected_local_paper_id(app).map(|id| {
-            app.library
-                .papers
-                .iter()
-                .find(|paper| paper.id == id)
-                .and_then(|paper| paper.arxiv_id.clone())
+        | Page::Notes => selected_local_paper_id(app).map_or(PaperArxivSelection::NoPaper, |id| {
+            PaperArxivSelection::Selected(
+                app.library
+                    .papers
+                    .iter()
+                    .find(|paper| paper.id == id)
+                    .and_then(|paper| paper.arxiv_id.clone()),
+            )
         }),
-        Page::Projects | Page::History | Page::Statistics | Page::Settings | Page::Credits => None,
+        Page::Projects | Page::History | Page::Statistics | Page::Settings | Page::Credits => {
+            PaperArxivSelection::NoPaper
+        }
     }
 }
 
-fn open_arxiv_page(app: &mut App, arxiv_reference: Option<String>) -> Option<UiAction> {
-    let Some(url) = arxiv_reference.as_deref().and_then(arxiv_page_url) else {
+fn open_arxiv_page(app: &mut App, arxiv_reference: Option<&str>) -> Option<UiAction> {
+    let Some(url) = arxiv_reference.and_then(arxiv_page_url) else {
         app.toast = Some("No valid arXiv page is available for this paper".into());
         return None;
     };
@@ -7659,7 +7629,9 @@ fn handle_settings_modal_key(
             if let Err(e) = apply_config_update(runtime, app, &new_config, theme, senders) {
                 app.toast = Some(format!("Apply failed: {e}"));
             } else {
-                app.settings_modal.original_theme = new_config.theme.clone();
+                app.settings_modal
+                    .original_theme
+                    .clone_from(&new_config.theme);
                 settings_modal::sync_theme_selection_to_applied(app);
                 app.toast = Some("Settings saved and applied.".to_owned());
                 return Ok(Some(UiAction::Reindex));
@@ -7669,20 +7641,22 @@ fn handle_settings_modal_key(
         SettingsKeyResult::ReturnToSidebar => {
             app.content_focused = false;
             let original = app.settings_modal.original_theme.clone();
-            if !original.is_empty() && theme.name != original {
-                if let Ok(reverted) = Theme::load(&original) {
-                    *theme = reverted;
-                }
+            if !original.is_empty()
+                && theme.name != original
+                && let Ok(reverted) = Theme::load(&original)
+            {
+                *theme = reverted;
             }
             settings_modal::sync_theme_selection_to_applied(app);
         }
 
         SettingsKeyResult::Quit => {
             let original = app.settings_modal.original_theme.clone();
-            if !original.is_empty() && theme.name != original {
-                if let Ok(reverted) = Theme::load(&original) {
-                    *theme = reverted;
-                }
+            if !original.is_empty()
+                && theme.name != original
+                && let Ok(reverted) = Theme::load(&original)
+            {
+                *theme = reverted;
             }
             if let Ok(config) = Config::load_or_create(&Paths::discover()?) {
                 settings_modal::open_settings_modal(app, &config, &original);
@@ -7742,14 +7716,14 @@ fn apply_config_update(
             .unwrap_or_else(|| runtime.default_downloads_dir.clone());
         let _ = std::fs::create_dir_all(&download_dir);
         let download_dir = std::fs::canonicalize(&download_dir).unwrap_or(download_dir);
-        runtime.download_dir = download_dir.clone();
+        runtime.download_dir.clone_from(&download_dir);
 
         let collection_roots: Vec<_> = config
             .library_folders
             .iter()
             .map(|root| std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
             .collect();
-        runtime.collection_roots = collection_roots.clone();
+        runtime.collection_roots.clone_from(&collection_roots);
         let mut library_roots = collection_roots.clone();
         if !collection_roots
             .iter()
@@ -7789,8 +7763,11 @@ fn apply_config_update(
     }
 
     runtime.config = config.clone();
-    app.project_create_compiler = config.default_project_compiler.clone();
-    app.settings_modal.default_project_compiler = config.default_project_compiler.clone();
+    app.project_create_compiler
+        .clone_from(&config.default_project_compiler);
+    app.settings_modal
+        .default_project_compiler
+        .clone_from(&config.default_project_compiler);
 
     Ok(())
 }
@@ -7936,13 +7913,11 @@ fn handle_config_editor_key(
             let text = &app.config_editor_text;
             let cursor = &mut app.config_editor_cursor;
             if *cursor > 0 {
-                let current_line_start =
-                    text[..*cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                let current_line_start = text[..*cursor].rfind('\n').map_or(0, |idx| idx + 1);
                 let col = *cursor - current_line_start;
                 if current_line_start > 0 {
                     let prev_line_search = &text[..current_line_start - 1];
-                    let prev_line_start =
-                        prev_line_search.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                    let prev_line_start = prev_line_search.rfind('\n').map_or(0, |idx| idx + 1);
                     let prev_line_len = (current_line_start - 1) - prev_line_start;
                     let mut target = prev_line_start + col.min(prev_line_len);
                     while target > prev_line_start && !text.is_char_boundary(target) {
@@ -7957,8 +7932,7 @@ fn handle_config_editor_key(
             let text = &app.config_editor_text;
             let cursor = &mut app.config_editor_cursor;
             if *cursor < text.len() {
-                let current_line_start =
-                    text[..*cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                let current_line_start = text[..*cursor].rfind('\n').map_or(0, |idx| idx + 1);
                 let col = *cursor - current_line_start;
                 if let Some(current_line_end) = text[*cursor..].find('\n').map(|idx| *cursor + idx)
                 {
@@ -7966,8 +7940,7 @@ fn handle_config_editor_key(
                     if next_line_start <= text.len() {
                         let next_line_end = text[next_line_start..]
                             .find('\n')
-                            .map(|idx| next_line_start + idx)
-                            .unwrap_or(text.len());
+                            .map_or(text.len(), |idx| next_line_start + idx);
                         let next_line_len = next_line_end - next_line_start;
                         let mut target = next_line_start + col.min(next_line_len);
                         while target > next_line_start && !text.is_char_boundary(target) {
@@ -8164,20 +8137,21 @@ mod tests {
     }
 
     #[test]
-    fn hidden_typst_worker_cli_accepts_project_paths() {
+    fn hidden_typst_worker_cli_accepts_project_paths() -> anyhow::Result<()> {
         let cli = Cli::try_parse_from(["papr", "typst-worker", "--project", "paper dir"])
-            .expect("hidden worker command should parse");
+            .map_err(|error| anyhow::anyhow!(error))?;
         assert!(matches!(
             cli.command,
-            Some(CliCommand::TypstWorker { project }) if project == std::path::PathBuf::from("paper dir")
+            Some(CliCommand::TypstWorker { project }) if project == *"paper dir"
         ));
+        Ok(())
     }
 
     #[test]
-    fn typst_worker_protocol_round_trips_structured_diagnostics() {
-        let request = serde_json::to_string(&TypstWorkerRequest::Compile).unwrap();
+    fn typst_worker_protocol_round_trips_structured_diagnostics() -> anyhow::Result<()> {
+        let request = serde_json::to_string(&TypstWorkerRequest::Compile)?;
         assert!(matches!(
-            serde_json::from_str(&request).unwrap(),
+            serde_json::from_str(&request)?,
             TypstWorkerRequest::Compile
         ));
 
@@ -8195,13 +8169,14 @@ mod tests {
             }],
             raw_log: vec!["compilation failed".into()],
         });
-        let encoded = serde_json::to_string(&response).unwrap();
-        let TypstWorkerResponse::Finished(decoded) = serde_json::from_str(&encoded).unwrap() else {
-            panic!("wrong worker response variant");
+        let encoded = serde_json::to_string(&response)?;
+        let TypstWorkerResponse::Finished(decoded) = serde_json::from_str(&encoded)? else {
+            anyhow::bail!("wrong worker response variant");
         };
         assert!(!decoded.success);
         assert_eq!(decoded.diagnostics[0].file.as_deref(), Some("main.typ"));
         assert_eq!(decoded.diagnostics[0].line, Some(2));
+        Ok(())
     }
 
     #[test]
@@ -8395,8 +8370,10 @@ mod tests {
 
     #[test]
     fn test_startup_page_config_initializes_app_page_and_sidebar_index() {
-        let mut config = papr_core::Config::default();
-        config.startup_page = "reading_queue".into();
+        let config = papr_core::Config {
+            startup_page: "reading_queue".into(),
+            ..papr_core::Config::default()
+        };
 
         let initial_page = Page::from_config_str(&config.startup_page).unwrap_or(Page::Dashboard);
         let initial_sidebar_index = Page::ALL
@@ -8652,7 +8629,7 @@ mod tests {
                 sidebar_index: Page::ALL
                     .iter()
                     .position(|&page| page == Page::Discover)
-                    .unwrap(),
+                    .unwrap_or_default(),
                 content_focused: true,
                 mode: if from_filter {
                     AppMode::DiscoverFilter
@@ -9086,19 +9063,20 @@ mod tests {
     }
 
     #[test]
-    fn project_tex_paste_uses_the_same_exact_text_path() {
+    fn project_tex_paste_uses_the_same_exact_text_path() -> anyhow::Result<()> {
         let pasted = "\\section{Exact}\n  text   stays\n";
         let mut app = project_editor_app("before", 6);
         let path = std::env::temp_dir().join(format!("papr-exact-{}.tex", std::process::id()));
-        std::fs::write(&path, "before").unwrap();
+        std::fs::write(&path, "before")?;
         app.project_editor_path = Some(path.clone());
 
         assert!(handle_project_exact_paste(&mut app, pasted));
 
         assert_eq!(app.project_editor_text, format!("before{pasted}"));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "before");
+        assert_eq!(std::fs::read_to_string(&path)?, "before");
         assert!(app.project_editor_dirty);
         let _ = std::fs::remove_file(path);
+        Ok(())
     }
 
     #[test]
@@ -9144,10 +9122,10 @@ mod tests {
 
     #[cfg(not(target_os = "windows"))]
     #[test]
-    fn terminal_command_uses_the_open_project_directory() {
+    fn terminal_command_uses_the_open_project_directory() -> anyhow::Result<()> {
         let root = std::env::temp_dir().join(format!("papr-terminal-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&root)?;
         let mut app = project_editor_app("", 0);
         app.active_project = Some(Project {
             name: "terminal".into(),
@@ -9164,7 +9142,8 @@ mod tests {
             app.terminal_command_output
                 .contains(root.to_string_lossy().as_ref())
         );
-        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -9182,9 +9161,11 @@ mod tests {
 
     #[test]
     fn terminal_clear_and_control_sequences_stay_inside_the_palette() {
-        let mut app = App::default();
-        app.terminal_command_output = "previous output".into();
-        app.terminal_command = "clear".into();
+        let mut app = App {
+            terminal_command_output: "previous output".into(),
+            terminal_command: "clear".into(),
+            ..App::default()
+        };
 
         run_terminal_command(&mut app);
 
@@ -9194,11 +9175,11 @@ mod tests {
     }
 
     #[test]
-    fn terminal_tab_completes_paths_in_the_session_directory() {
+    fn terminal_tab_completes_paths_in_the_session_directory() -> anyhow::Result<()> {
         let root = std::env::temp_dir().join(format!("papr-complete-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("references.bib"), "").unwrap();
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(root.join("references.bib"), "")?;
         let mut app = App::default();
         app.terminal_command_directory = Some(root.clone());
         app.terminal_command = "cat ref".into();
@@ -9207,16 +9188,17 @@ mod tests {
         complete_terminal_command(&mut app, false);
 
         assert_eq!(app.terminal_command, "cat references.bib");
-        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]
-    fn terminal_tab_lists_then_cycles_completion_candidates() {
+    fn terminal_tab_lists_then_cycles_completion_candidates() -> anyhow::Result<()> {
         let root = std::env::temp_dir().join(format!("papr-cycle-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("alpha.tex"), "").unwrap();
-        std::fs::write(root.join("amber.tex"), "").unwrap();
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(root.join("alpha.tex"), "")?;
+        std::fs::write(root.join("amber.tex"), "")?;
         let mut app = App::default();
         app.terminal_command_directory = Some(root.clone());
         app.terminal_command = "cat a".into();
@@ -9232,17 +9214,19 @@ mod tests {
         complete_terminal_command(&mut app, true);
         assert_eq!(app.terminal_command, "cat alpha.tex");
 
-        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]
-    fn terminal_completion_is_case_insensitive_and_recomputes_after_accepting() {
+    fn terminal_completion_is_case_insensitive_and_recomputes_after_accepting() -> anyhow::Result<()>
+    {
         let root = std::env::temp_dir().join(format!("papr-case-complete-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("Documents")).unwrap();
-        std::fs::create_dir_all(root.join("Downloads")).unwrap();
-        std::fs::write(root.join("Documents").join("Alpha.tex"), "").unwrap();
-        std::fs::write(root.join("Documents").join("Beta.tex"), "").unwrap();
+        std::fs::create_dir_all(root.join("Documents"))?;
+        std::fs::create_dir_all(root.join("Downloads"))?;
+        std::fs::write(root.join("Documents").join("Alpha.tex"), "")?;
+        std::fs::write(root.join("Documents").join("Beta.tex"), "")?;
         let mut app = App::default();
         app.mode = AppMode::TerminalCommand;
         app.terminal_command_directory = Some(root.clone());
@@ -9265,7 +9249,8 @@ mod tests {
         assert_eq!(app.terminal_command, "cp Documents/Alpha.tex");
         assert!(app.terminal_completions.is_empty());
 
-        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]
@@ -9683,7 +9668,9 @@ mod tests {
 
         app.project_editor_pending_sequence = Some(ProjectEditorPendingSequence {
             first_key: 'd',
-            started_at: std::time::Instant::now() - PROJECT_EDITOR_PENDING_SEQUENCE_TIMEOUT,
+            started_at: std::time::Instant::now()
+                .checked_sub(PROJECT_EDITOR_PENDING_SEQUENCE_TIMEOUT)
+                .unwrap_or_else(std::time::Instant::now),
         });
         assert!(expire_project_editor_pending_sequence(&mut app));
         assert!(app.project_editor_pending_sequence.is_none());
@@ -9817,7 +9804,12 @@ mod tests {
     fn project_list_right_opens_and_x_requests_confirmed_deletion() {
         let mut app = project_editor_app("", 0);
         app.project_pane = ProjectPane::ProjectList;
-        let project = app.active_project.clone().unwrap();
+        assert!(app.active_project.is_some());
+        let project = app.active_project.clone().unwrap_or(Project {
+            name: "missing".into(),
+            path: std::path::PathBuf::new(),
+            opened_at: 0,
+        });
         app.projects = vec![project.clone()];
 
         let action = handle_key(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
@@ -9962,37 +9954,38 @@ mod tests {
     }
 
     #[test]
-    fn creates_nested_project_files_without_overwriting() {
+    fn creates_nested_project_files_without_overwriting() -> anyhow::Result<()> {
         let root = std::env::temp_dir().join(format!("papr-file-create-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&root)?;
 
-        let created = create_project_file(&root, "chapters/introduction.tex").unwrap();
+        let created =
+            create_project_file(&root, "chapters/introduction.tex").map_err(anyhow::Error::msg)?;
         assert_eq!(created, root.join("chapters/introduction.tex"));
         assert!(created.exists());
         assert!(is_project_text_file(&created));
         assert!(project_tree_entries(&root).contains(&root.join("chapters")));
-        let folder = create_project_file(&root, "assets/").unwrap();
+        let folder = create_project_file(&root, "assets/").map_err(anyhow::Error::msg)?;
         assert_eq!(folder, root.join("assets"));
         assert!(folder.is_dir());
         assert!(project_tree_entries(&root).contains(&folder));
         let image = root.join("figure.webp");
-        std::fs::write(&image, []).unwrap();
+        std::fs::write(&image, [])?;
         assert!(project_tree_entries(&root).contains(&image));
         assert!(
             create_project_file(&root, "chapters/introduction.tex")
-                .unwrap_err()
-                .contains("already exists")
+                .is_err_and(|error| error.contains("already exists"))
         );
         assert!(create_project_file(&root, "../outside.tex").is_err());
         assert!(create_project_file(&root, "/tmp/outside.tex").is_err());
 
-        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[cfg(unix)]
     #[test]
-    fn project_file_creation_rejects_symlinked_parents_outside_the_project() {
+    fn project_file_creation_rejects_symlinked_parents_outside_the_project() -> anyhow::Result<()> {
         use std::os::unix::fs::symlink;
 
         let root = std::env::temp_dir().join(format!("papr-file-symlink-{}", std::process::id()));
@@ -10000,24 +9993,25 @@ mod tests {
             std::env::temp_dir().join(format!("papr-file-outside-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&outside);
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
-        symlink(&outside, root.join("linked")).unwrap();
+        std::fs::create_dir_all(&root)?;
+        std::fs::create_dir_all(&outside)?;
+        symlink(&outside, root.join("linked"))?;
 
         assert!(create_project_file(&root, "linked/escape.tex").is_err());
         assert!(!outside.join("escape.tex").exists());
 
-        std::fs::remove_dir_all(root).unwrap();
-        std::fs::remove_dir_all(outside).unwrap();
+        std::fs::remove_dir_all(root)?;
+        std::fs::remove_dir_all(outside)?;
+        Ok(())
     }
 
     #[test]
-    fn file_tree_enters_folders_and_left_returns_to_the_parent() {
+    fn file_tree_enters_folders_and_left_returns_to_the_parent() -> anyhow::Result<()> {
         let root = std::env::temp_dir().join(format!("papr-tree-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let folder = root.join("assets");
-        std::fs::create_dir_all(&folder).unwrap();
-        std::fs::write(folder.join("logo.tex"), "logo").unwrap();
+        std::fs::create_dir_all(&folder)?;
+        std::fs::write(folder.join("logo.tex"), "logo")?;
 
         let mut app = project_editor_app("", 0);
         app.active_project = Some(Project {
@@ -10038,7 +10032,8 @@ mod tests {
         assert_eq!(app.project_files, vec![folder.clone()]);
         assert_eq!(app.project_file_selected, 0);
 
-        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]
@@ -10078,7 +10073,12 @@ mod tests {
     #[test]
     fn project_left_navigation_follows_file_tree_then_project_list_hierarchy() {
         let mut app = project_editor_app("", 0);
-        let active = app.active_project.clone().unwrap();
+        assert!(app.active_project.is_some());
+        let active = app.active_project.clone().unwrap_or(Project {
+            name: "missing".into(),
+            path: std::path::PathBuf::new(),
+            opened_at: 0,
+        });
         app.projects = vec![
             Project {
                 name: "other".into(),
@@ -10100,7 +10100,12 @@ mod tests {
     #[test]
     fn escape_returns_to_file_tree_before_exiting_the_project() {
         let mut app = project_editor_app("abc", 1);
-        let active = app.active_project.clone().unwrap();
+        assert!(app.active_project.is_some());
+        let active = app.active_project.clone().unwrap_or(Project {
+            name: "missing".into(),
+            path: std::path::PathBuf::new(),
+            opened_at: 0,
+        });
         app.projects = vec![
             Project {
                 name: "other".into(),
@@ -10305,17 +10310,11 @@ mod tests {
             &mut app,
             KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
         );
-        assert!(action.is_some());
-        if let Some(UiAction::RetryDownload {
-            id,
-            paper: retry_paper,
-        }) = action
-        {
-            assert_eq!(id, "retry_id");
-            assert_eq!(retry_paper.title, "Retry Paper");
-        } else {
-            panic!("Expected UiAction::RetryDownload");
-        }
+        assert!(matches!(
+            action,
+            Some(UiAction::RetryDownload { id, paper })
+                if id == "retry_id" && paper.title == "Retry Paper"
+        ));
     }
 
     #[test]
@@ -10356,14 +10355,14 @@ mod tests {
     }
 
     #[test]
-    fn reloading_config_editor_discards_the_entire_unsaved_buffer_state() {
+    fn reloading_config_editor_discards_the_entire_unsaved_buffer_state() -> anyhow::Result<()> {
         let config_file = std::env::temp_dir().join(format!(
             "papr-config-editor-reload-{}-{}-{}.toml",
             std::process::id(),
             Utc::now().timestamp_micros(),
             std::thread::current().name().unwrap_or("test")
         ));
-        fs::write(&config_file, "theme = \"paper\"\n").unwrap();
+        fs::write(&config_file, "theme = \"paper\"\n")?;
 
         let mut app = App {
             config_editor_text: "unsaved = true".into(),
@@ -10390,7 +10389,8 @@ mod tests {
         assert!(app.config_editor_error.is_none());
         assert!(app.config_editor_goal_column.is_none());
 
-        fs::remove_file(config_file).unwrap();
+        fs::remove_file(config_file)?;
+        Ok(())
     }
 
     #[test]
@@ -10775,17 +10775,17 @@ mod tests {
     }
 
     #[test]
-    fn downloaded_remote_paper_opens_from_metadata_without_changing_browser_shortcut() {
+    fn downloaded_remote_paper_opens_from_metadata_without_changing_browser_shortcut()
+    -> anyhow::Result<()> {
         let pdf_path = std::env::temp_dir().join(format!(
             "papr-downloaded-remote-paper-{}-{}.pdf",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock should be after the Unix epoch")
+                .map_err(|error| anyhow::anyhow!(error))?
                 .as_nanos()
         ));
-        std::fs::write(&pdf_path, b"%PDF-1.4 test")
-            .expect("temporary PDF fixture should be writable");
+        std::fs::write(&pdf_path, b"%PDF-1.4 test")?;
 
         for page in [Page::Dashboard, Page::Discover] {
             let remote = remote_paper("https://arxiv.org/abs/downloaded", "Downloaded paper");
@@ -10837,7 +10837,8 @@ mod tests {
                 Some(UiAction::OpenBrowser(url)) if url.ends_with("/downloaded")
             ));
         }
-        std::fs::remove_file(pdf_path).expect("temporary PDF fixture should be removable");
+        std::fs::remove_file(pdf_path)?;
+        Ok(())
     }
 
     #[test]
@@ -10965,21 +10966,22 @@ mod tests {
     }
 
     #[test]
-    fn control_s_is_consumed_before_editor_text_handling() {
+    fn control_s_is_consumed_before_editor_text_handling() -> anyhow::Result<()> {
         let root = std::env::temp_dir().join(format!("papr-save-shortcut-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&root)?;
         let source = root.join("main.tex");
-        fs::write(&source, "before").unwrap();
+        fs::write(&source, "before")?;
 
         let mut app = project_editor_app("after", 5);
         app.project_editor_path = Some(source.clone());
         for code in [KeyCode::Char('s'), KeyCode::Char('S')] {
             let _ = handle_key(&mut app, KeyEvent::new(code, KeyModifiers::CONTROL));
             assert_eq!(app.project_editor_text, "after");
-            assert_eq!(fs::read_to_string(&source).unwrap(), "after");
+            assert_eq!(fs::read_to_string(&source)?, "after");
         }
-        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]
@@ -11215,14 +11217,14 @@ mod tests {
         let download_dir = temp_dir.clone();
 
         let (watch_sender, watch_receiver) = mpsc::unbounded_channel();
-        let watcher = papr_core::library::LibraryWatcher::start(&[], || {}).unwrap();
+        let watcher = papr_core::library::LibraryWatcher::start(&[], || {})?;
 
         let mut runtime = Runtime {
-            arxiv: papr_core::api::arxiv::ArxivClient::new().unwrap(),
+            arxiv: papr_core::api::arxiv::ArxivClient::new()?,
             metadata_enrichment: MetadataEnrichmentService::new(
-                papr_core::api::arxiv::ArxivClient::new().unwrap(),
+                papr_core::api::arxiv::ArxivClient::new()?,
             ),
-            downloads: papr_core::downloads::DownloadManager::new().unwrap(),
+            downloads: papr_core::downloads::DownloadManager::new()?,
             database,
             database_file,
             config_file: temp_dir.join("papr.toml"),
@@ -11231,7 +11233,7 @@ mod tests {
             config_reload_deadline: None,
             config_reload_attempts: 0,
             plugins_dir: temp_dir.join("plugins"),
-            plugin_host: papr_core::PluginHost::discover(&temp_dir.join("plugins"), &[]).unwrap(),
+            plugin_host: papr_core::PluginHost::discover(&temp_dir.join("plugins"), &[])?,
             project_manager: papr_core::ProjectManager::new(temp_dir.join("projects"))?,
             project_compiler: None,
             default_downloads_dir: temp_dir.clone(),
@@ -11242,12 +11244,12 @@ mod tests {
             library_roots,
             collection_roots,
             dashboard_keywords: vec![],
-            dashboard_keyword_signature: "".into(),
-            dashboard_feed_date: "".into(),
+            dashboard_keyword_signature: String::new(),
+            dashboard_feed_date: String::new(),
             active_dashboard_fetch: None,
             watch_sender,
             watch_receiver,
-            _watcher: watcher,
+            watcher,
             project_filesystem_watcher: None,
             active_enrichments: HashSet::new(),
             citation_index: None,
@@ -11270,7 +11272,7 @@ mod tests {
         app.library.papers = vec![LibraryPaper {
             id: paper_id,
             title: "my_old_paper".into(),
-            authors: "".into(),
+            authors: String::new(),
             doi: None,
             arxiv_id: None,
             pdf_path: Some(old_pdf_path.to_string_lossy().into_owned()),
@@ -11302,7 +11304,7 @@ mod tests {
             )
         );
 
-        let index_res = papr_core::library::LibraryIndexer::scan(&[temp_dir.clone()]);
+        let index_res = papr_core::library::LibraryIndexer::scan(std::slice::from_ref(&temp_dir));
         let response = crate::IndexResponse::Scan {
             pdfs: index_res,
             directories: vec![],
@@ -11387,14 +11389,14 @@ print(json.dumps({"actions": actions}))
         let database = Database::open(&database_file)?;
 
         let (watch_sender, watch_receiver) = mpsc::unbounded_channel();
-        let watcher = papr_core::library::LibraryWatcher::start(&[], || {}).unwrap();
+        let watcher = papr_core::library::LibraryWatcher::start(&[], || {})?;
 
         let runtime = Runtime {
-            arxiv: papr_core::api::arxiv::ArxivClient::new().unwrap(),
+            arxiv: papr_core::api::arxiv::ArxivClient::new()?,
             metadata_enrichment: MetadataEnrichmentService::new(
-                papr_core::api::arxiv::ArxivClient::new().unwrap(),
+                papr_core::api::arxiv::ArxivClient::new()?,
             ),
-            downloads: papr_core::downloads::DownloadManager::new().unwrap(),
+            downloads: papr_core::downloads::DownloadManager::new()?,
             database,
             database_file,
             config_file: temp_dir.join("papr.toml"),
@@ -11414,12 +11416,12 @@ print(json.dumps({"actions": actions}))
             library_roots: vec![temp_dir.clone()],
             collection_roots: vec![temp_dir.clone()],
             dashboard_keywords: vec![],
-            dashboard_keyword_signature: "".into(),
-            dashboard_feed_date: "".into(),
+            dashboard_keyword_signature: String::new(),
+            dashboard_feed_date: String::new(),
             active_dashboard_fetch: None,
             watch_sender,
             watch_receiver,
-            _watcher: watcher,
+            watcher,
             project_filesystem_watcher: None,
             active_enrichments: std::collections::HashSet::new(),
             citation_index: None,
@@ -11428,8 +11430,10 @@ print(json.dumps({"actions": actions}))
 
         let pdf_path = temp_dir.join("neural_networks.pdf");
         std::fs::write(&pdf_path, "%PDF-1.4 test")?;
-        let pdf =
-            papr_core::library::LibraryIndexer::inspect_in_roots(&pdf_path, &[temp_dir.clone()])?;
+        let pdf = papr_core::library::LibraryIndexer::inspect_in_roots(
+            &pdf_path,
+            std::slice::from_ref(&temp_dir),
+        )?;
         runtime.database.import_pdf(&pdf)?;
 
         let papers = runtime.database.library_papers()?;

@@ -94,6 +94,16 @@ pub struct Config {
     pub enabled_plugins: Vec<String>,
 }
 
+#[derive(Serialize)]
+struct PathValue {
+    val: PathBuf,
+}
+
+#[derive(Serialize)]
+struct StringValue {
+    val: String,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -115,6 +125,10 @@ impl Config {
     ///
     /// This is used by the live-reload path: an editor may briefly expose a
     /// partially-written file, so reloading must never "upgrade" it in place.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read or parsed.
     pub fn load(config_file: &std::path::Path) -> Result<Self, ConfigError> {
         Ok(toml::from_str(&fs::read_to_string(config_file)?)?)
     }
@@ -148,10 +162,6 @@ impl Config {
             "xdg-open"
         };
 
-        #[derive(Serialize)]
-        struct PathValue {
-            val: PathBuf,
-        }
         let serialized_path = toml::to_string(&PathValue {
             val: paths.downloads_dir.clone(),
         })?;
@@ -167,10 +177,6 @@ impl Config {
             .unwrap_or(&serialized_projects_path)
             .trim_end();
 
-        #[derive(Serialize)]
-        struct StringValue {
-            val: String,
-        }
         let serialized_viewer = toml::to_string(&StringValue {
             val: default_pdf_viewer.to_string(),
         })?;
@@ -213,12 +219,14 @@ enabled_plugins = []
 
         fs::write(&paths.config_file, toml_content)?;
 
-        let mut config = Self::default();
-        config.library_folders = vec![paths.downloads_dir.clone()];
-        config.download_path = Some(paths.downloads_dir.clone());
-        config.projects_directory = Some(paths.projects_dir.clone());
-        config.pdf_viewer = Some(default_pdf_viewer.to_string());
-        config.enabled_plugins = Vec::new();
+        let config = Self {
+            library_folders: vec![paths.downloads_dir.clone()],
+            download_path: Some(paths.downloads_dir.clone()),
+            projects_directory: Some(paths.projects_dir.clone()),
+            pdf_viewer: Some(default_pdf_viewer.to_string()),
+            enabled_plugins: Vec::new(),
+            ..Self::default()
+        };
         fs::create_dir_all(&paths.projects_dir)?;
         Ok(config)
     }
@@ -249,10 +257,23 @@ enabled_plugins = []
 mod tests {
     use super::{Config, Paths};
     use directories::ProjectDirs;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Deserialize)]
+    struct MockConfig {
+        pdf_viewer: String,
+    }
+
+    fn find_setting(content: &str, setting: &str) -> Result<usize, std::io::Error> {
+        content
+            .find(setting)
+            .ok_or_else(|| std::io::Error::other(format!("missing setting: {setting}")))
+    }
 
     #[test]
-    fn platform_paths_use_the_application_component_once() {
-        let dirs = ProjectDirs::from("org", "", "papr").unwrap();
+    fn platform_paths_use_the_application_component_once() -> Result<(), std::io::Error> {
+        let dirs = ProjectDirs::from("org", "", "papr")
+            .ok_or_else(|| std::io::Error::other("platform directories unavailable"))?;
         #[cfg(target_os = "windows")]
         assert_eq!(dirs.project_path(), std::path::Path::new("papr"));
         #[cfg(target_os = "macos")]
@@ -266,8 +287,8 @@ mod tests {
         assert_eq!(paths.downloads_dir, dirs.data_dir().join("papers"));
         assert_eq!(paths.plugins_dir, dirs.data_dir().join("plugins"));
         assert_eq!(paths.projects_dir, dirs.data_dir().join("projects"));
+        Ok(())
     }
-    use serde::{Deserialize, Serialize};
 
     #[test]
     fn defaults_apply_to_partial_toml() -> Result<(), toml::de::Error> {
@@ -305,7 +326,7 @@ mod tests {
         let unique_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos();
-        let temp_dir = std::env::temp_dir().join(format!("papr_test_{}", unique_id));
+        let temp_dir = std::env::temp_dir().join(format!("papr_test_{unique_id}"));
         std::fs::create_dir_all(&temp_dir)?;
 
         let paths = super::Paths {
@@ -330,12 +351,12 @@ mod tests {
         assert!(content.contains("enabled_plugins ="));
         assert!(content.contains("projects_directory ="));
         assert!(
-            content.find("download_path =").unwrap()
-                < content.find("projects_directory =").unwrap()
+            find_setting(&content, "download_path =")?
+                < find_setting(&content, "projects_directory =")?
         );
         assert!(
-            content.find("projects_directory =").unwrap()
-                < content.find("dashboard_keywords =").unwrap()
+            find_setting(&content, "projects_directory =")?
+                < find_setting(&content, "dashboard_keywords =")?
         );
 
         let parsed: Config = toml::from_str(&content)?;
@@ -355,12 +376,12 @@ mod tests {
 
         let rewritten = toml::to_string_pretty(&parsed)?;
         assert!(
-            rewritten.find("download_path =").unwrap()
-                < rewritten.find("projects_directory =").unwrap()
+            find_setting(&rewritten, "download_path =")?
+                < find_setting(&rewritten, "projects_directory =")?
         );
         assert!(
-            rewritten.find("projects_directory =").unwrap()
-                < rewritten.find("dashboard_keywords =").unwrap()
+            find_setting(&rewritten, "projects_directory =")?
+                < find_setting(&rewritten, "dashboard_keywords =")?
         );
 
         std::fs::remove_dir_all(&temp_dir)?;
@@ -419,12 +440,8 @@ mod tests {
                 .unwrap_or(&serialized)
                 .trim_end();
 
-            let toml_content = format!("pdf_viewer = {}\n", formatted_viewer);
+            let toml_content = format!("pdf_viewer = {formatted_viewer}\n");
 
-            #[derive(Deserialize)]
-            struct MockConfig {
-                pdf_viewer: String,
-            }
             let parsed: MockConfig = toml::from_str(&toml_content)?;
             assert_eq!(parsed.pdf_viewer, viewer);
         }

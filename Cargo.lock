@@ -2670,6 +2670,7 @@ dependencies = [
  "iana-time-zone",
  "image",
  "notify",
+ "num-traits",
  "papr-core",
  "pulldown-cmark",
  "ratatui",

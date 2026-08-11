@@ -1,11 +1,15 @@
 //! Ratatui rendering for the application shell.
 
-use crate::state::*;
-use crate::theme::*;
-use std::sync::OnceLock;
+use crate::state::{
+    App, AppMode, CollectionSearchItem, DeletionTarget, DiscoveryStatus, DownloadStatus, Page,
+    ProjectCitationSearchMode, ProjectPane,
+};
+use crate::theme::Theme;
+use std::{fmt::Write as _, sync::OnceLock};
 
 use crate::build_config_editor_view_with_scroll_mode;
 use crate::settings_modal;
+use num_traits::ToPrimitive;
 use papr_core::{ProjectDiagnosticSeverity, RemotePaper};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::{
@@ -28,11 +32,16 @@ use syntect::{
 
 const LOGO: &str = "[ P A P R ]";
 const WORKSPACE_LIST_ITEM_GAP_ROWS: usize = 1;
+const CITATION_BADGE: &str = " (Added)";
+
+fn saturating_u16(value: usize) -> u16 {
+    u16::try_from(value).unwrap_or(u16::MAX)
+}
 
 /// Build a workspace list item with the standard vertical separation.
 ///
 /// Keeping the gap here means item renderers only describe their content.
-fn workspace_list_item<'a>(mut lines: Vec<Line<'a>>) -> ListItem<'a> {
+fn workspace_list_item(mut lines: Vec<Line<'_>>) -> ListItem<'_> {
     lines.extend(std::iter::repeat_n(
         Line::raw(""),
         WORKSPACE_LIST_ITEM_GAP_ROWS,
@@ -128,10 +137,10 @@ pub fn resolve_timezone_display(local: &chrono::DateTime<chrono::Local>) -> Stri
     }
 
     // Try mapping detected system IANA timezone identifier (e.g. "Asia/Kolkata", "America/New_York") to standard abbreviation.
-    if let Ok(iana_tz) = iana_time_zone::get_timezone() {
-        if let Some(abbr) = iana_to_abbreviation(&iana_tz, local) {
-            return abbr.to_string();
-        }
+    if let Ok(iana_tz) = iana_time_zone::get_timezone()
+        && let Some(abbr) = iana_to_abbreviation(&iana_tz, local)
+    {
+        return abbr.to_string();
     }
 
     // Fallback: UTC offset enclosed in parentheses (e.g., (+05:30) or (-07:00))
@@ -244,7 +253,7 @@ fn iana_to_abbreviation(
 
         // UK & Ireland
         "Europe/London" | "Europe/Belfast" | "Europe/Dublin" => {
-            if offset_secs == 1 * 3600 {
+            if offset_secs == 3600 {
                 Some("BST")
             } else {
                 Some("GMT")
@@ -286,7 +295,7 @@ fn iana_to_abbreviation(
     }
 }
 
-/// Format a UTC DateTime in the system's local timezone with timezone abbreviation or parenthesized offset.
+/// Format a UTC `DateTime` in the system's local timezone with timezone abbreviation or parenthesized offset.
 pub fn format_local_datetime(dt: &chrono::DateTime<chrono::Utc>, fmt: &str) -> String {
     let local = dt.with_timezone(&chrono::Local);
     let tz = resolve_timezone_display(&local);
@@ -423,7 +432,7 @@ fn render_project_name_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
             "typst" => "Typst",
             _ => "LaTeX",
         };
-        let compiler_text = format!(" ◄  {}  ► ", compiler_label);
+        let compiler_text = format!(" ◄  {compiler_label}  ► ");
         frame.render_widget(
             Paragraph::new(Line::styled(compiler_text, Style::default().fg(theme.text)))
                 .block(focus_block(" Compiler (Tab to cycle) ", false, theme)),
@@ -434,7 +443,8 @@ fn render_project_name_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
             .project_rename_cursor
             .min(app.project_rename_input.len())]
             .chars()
-            .count() as u16;
+            .count();
+        let cursor_columns = saturating_u16(cursor_columns);
         frame.set_cursor_position((
             chunks[0].x.saturating_add(1 + cursor_columns),
             chunks[0].y + 1,
@@ -450,7 +460,8 @@ fn render_project_name_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
             .project_rename_cursor
             .min(app.project_rename_input.len())]
             .chars()
-            .count() as u16;
+            .count();
+        let cursor_columns = saturating_u16(cursor_columns);
         frame.set_cursor_position((popup.x.saturating_add(1 + cursor_columns), popup.y + 1));
     }
 }
@@ -610,10 +621,9 @@ fn render_projects(
         }
         return;
     }
-    let project = app
-        .active_project
-        .as_ref()
-        .expect("active project checked above");
+    let Some(project) = app.active_project.as_ref() else {
+        return;
+    };
     let (file_tree_area, editor_area, right_area) = if app.pdf_viewer == "internal"
         || app.project_build_visible
     {
@@ -759,8 +769,10 @@ fn render_projects(
             ),
         ));
         if !app.project_completions.is_empty() {
-            let width = editor_area.width.saturating_sub(8).min(68).max(24);
-            let height = (app.project_completions.len() as u16 + 2).min(10);
+            let width = editor_area.width.saturating_sub(8).clamp(24, 68);
+            let height = saturating_u16(app.project_completions.len())
+                .saturating_add(2)
+                .min(10);
             let popup = Rect::new(
                 editor_area.x.saturating_add(4),
                 editor_area
@@ -799,7 +811,9 @@ fn render_projects(
         }
     }
     if app.project_build_visible {
-        let build_area = right_area.expect("Build view reserves the right-hand panel");
+        let Some(build_area) = right_area else {
+            return;
+        };
         app.project_build_viewport_height = build_area.height.saturating_sub(2) as usize;
         let build_right_title = " Alt+3 PDF PREVIEW ";
         if app.project_build_show_raw {
@@ -976,7 +990,7 @@ fn render_workspace_search_bar(frame: &mut Frame<'_>, area: Rect, app: &App, the
 
     let mut text = app.workspace_query.clone();
     if text.is_empty() && app.mode != AppMode::WorkspaceSearch {
-        text = "Type to filter...".to_owned();
+        "Type to filter...".clone_into(&mut text);
     }
     frame.render_widget(Paragraph::new(text).style(style).block(block), area);
 
@@ -1281,7 +1295,7 @@ fn render_history(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
 }
 
 fn format_duration(seconds: u64) -> String {
-    let minutes = (seconds as f64) / 60.0;
+    let minutes = seconds.to_f64().unwrap_or(f64::MAX) / 60.0;
     if minutes < 60.0 {
         format_decimal(minutes, "min")
     } else {
@@ -1309,7 +1323,7 @@ fn format_decimal(value: f64, unit: &str) -> String {
     if (value - value.round()).abs() < 0.05 {
         format!("{:.0} {}", value.round(), unit)
     } else {
-        format!("{:.1} {}", value, unit)
+        format!("{value:.1} {unit}")
     }
 }
 
@@ -1442,8 +1456,7 @@ fn render_metric(
 fn activity_kind(kind: &str) -> &str {
     match kind {
         "paper_browsed" => "Paper browsed",
-        "paper_opened" => "Paper opened",
-        "pdf_opened" => "Paper opened",
+        "paper_opened" | "pdf_opened" => "Paper opened",
         "note_opened" => "Note opened",
         "search" => "Search",
         "downloaded" => "Downloaded",
@@ -1469,7 +1482,7 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
             .iter()
             .map(|item| {
                 let lib_paper = app.library.papers.iter().find(|p| p.id == item.paper_id);
-                let reading_status = lib_paper.map(|p| p.reading_status.as_str()).unwrap_or("");
+                let reading_status = lib_paper.map_or("", |p| p.reading_status.as_str());
                 let file_size = lib_paper.and_then(|p| p.file_size);
                 let lines = build_paper_lines(
                     app,
@@ -1483,7 +1496,7 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
                     item.year.as_deref(),
                     item.journal.as_deref(),
                     item.doi.as_deref(),
-                    item.page.map(|p| p as u64),
+                    item.page.map(u64::from),
                     None,
                     available_width,
                 );
@@ -1620,12 +1633,13 @@ fn render_note_editor(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     if app.note_preview {
         return;
     }
-    let text_before_cursor = &body[..app.note_editor.as_ref().unwrap().cursor];
+    let cursor = app.note_editor.as_ref().map_or(0, |note| note.cursor);
+    let text_before_cursor = &body[..cursor];
     let row = u16::try_from(text_before_cursor.split('\n').count().saturating_sub(1)).unwrap_or(0);
     let column = u16::try_from(
         text_before_cursor
             .split('\n')
-            .last()
+            .next_back()
             .unwrap_or("")
             .chars()
             .count(),
@@ -1698,11 +1712,11 @@ impl Widget for MarkdownHyperlinks {
                     continue;
                 }
                 let second_x = x.saturating_add(1);
-                let second = (second_x < end)
-                    .then(|| {
-                        buffer[(area.x.saturating_add(second_x), area.y.saturating_add(y))].symbol()
-                    })
-                    .unwrap_or("");
+                let second = if second_x < end {
+                    buffer[(area.x.saturating_add(second_x), area.y.saturating_add(y))].symbol()
+                } else {
+                    ""
+                };
                 let hyperlink = format!("\x1b]8;;{safe_url}\x07{first}{second}\x1b]8;;\x07");
                 buffer[(area.x.saturating_add(x), area.y.saturating_add(y))].set_symbol(&hyperlink);
                 x = x.saturating_add(2);
@@ -1748,11 +1762,11 @@ impl<'a> MarkdownRenderer<'a> {
 
     fn push(&mut self, text: impl Into<String>, style: Style) {
         let text = text.into();
-        if let Some(table) = &mut self.table {
-            if table.in_cell {
-                table.cell.push_str(&text);
-                return;
-            }
+        if let Some(table) = &mut self.table
+            && table.in_cell
+        {
+            table.cell.push_str(&text);
+            return;
         }
         self.current.push(Span::styled(text, style));
     }
@@ -1826,7 +1840,7 @@ impl<'a> MarkdownRenderer<'a> {
             let mut highlighter = HighlightLines::new(syntax, syntax_theme);
             for line in LinesWithEndings::from(&source) {
                 let spans: Vec<Span<'static>> = highlighter
-                    .highlight_line(line.trim_end_matches(['\r', '\n']), &syntax_set)
+                    .highlight_line(line.trim_end_matches(['\r', '\n']), syntax_set)
                     .unwrap_or_default()
                     .into_iter()
                     .map(|(style, text)| {
@@ -1866,7 +1880,7 @@ impl<'a> MarkdownRenderer<'a> {
             let mut rendered = String::from("│");
             for (index, width) in widths.iter().enumerate() {
                 let cell = row.get(index).map_or("", String::as_str);
-                rendered.push_str(&format!(" {cell:width$} │", width = *width));
+                let _ = write!(rendered, " {cell:width$} │", width = *width);
             }
             self.lines.push(Line::styled(
                 rendered,
@@ -1938,7 +1952,6 @@ fn markdown_preview(body: &str, theme: &Theme) -> MarkdownPreview {
                 preserve_source_spacing(&mut renderer, body, range.start);
                 renderer.block_prefix();
             }
-            Event::End(TagEnd::Paragraph) => renderer.finish_line(),
             Event::Start(Tag::Heading { level, .. }) => {
                 renderer.finish_line();
                 preserve_source_spacing(&mut renderer, body, range.start);
@@ -1961,19 +1974,13 @@ fn markdown_preview(body: &str, theme: &Theme) -> MarkdownPreview {
             Event::Start(Tag::Emphasis) => renderer
                 .styles
                 .push(renderer.style().add_modifier(Modifier::ITALIC)),
-            Event::End(TagEnd::Emphasis) => {
-                renderer.styles.pop();
-            }
             Event::Start(Tag::Strong) => renderer
                 .styles
                 .push(renderer.style().add_modifier(Modifier::BOLD)),
-            Event::End(TagEnd::Strong) => {
-                renderer.styles.pop();
-            }
             Event::Start(Tag::Strikethrough) => renderer
                 .styles
                 .push(renderer.style().add_modifier(Modifier::CROSSED_OUT)),
-            Event::End(TagEnd::Strikethrough) => {
+            Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough) => {
                 renderer.styles.pop();
             }
             Event::Start(Tag::Link { dest_url, .. }) => {
@@ -2041,7 +2048,6 @@ fn markdown_preview(body: &str, theme: &Theme) -> MarkdownPreview {
                 renderer.lists.pop();
             }
             Event::Start(Tag::Item) => renderer.start_item(),
-            Event::End(TagEnd::Item) => renderer.finish_line(),
             Event::TaskListMarker(done) => renderer.push(
                 if done { "[x] " } else { "[ ] " },
                 Style::default().fg(if done { theme.success } else { theme.warning }),
@@ -2077,13 +2083,12 @@ fn markdown_preview(body: &str, theme: &Theme) -> MarkdownPreview {
                 ));
             }
             Event::FootnoteReference(label) => {
-                renderer.push(format!("[^{label}]"), Style::default().fg(theme.accent))
+                renderer.push(format!("[^{label}]"), Style::default().fg(theme.accent));
             }
             Event::Start(Tag::FootnoteDefinition(label)) => {
                 renderer.finish_line();
                 renderer.push(format!("[^{label}]: "), Style::default().fg(theme.accent));
             }
-            Event::End(TagEnd::FootnoteDefinition) => renderer.finish_line(),
             Event::Start(Tag::Table(_)) => {
                 renderer.finish_line();
                 preserve_source_spacing(&mut renderer, body, range.start);
@@ -2091,10 +2096,10 @@ fn markdown_preview(body: &str, theme: &Theme) -> MarkdownPreview {
             }
             Event::End(TagEnd::Table) => renderer.finish_table(),
             Event::Start(Tag::TableRow) => {
-                if let Some(table) = &mut renderer.table {
-                    if !table.row.is_empty() {
-                        table.rows.push(std::mem::take(&mut table.row));
-                    }
+                if let Some(table) = &mut renderer.table
+                    && !table.row.is_empty()
+                {
+                    table.rows.push(std::mem::take(&mut table.row));
                 }
             }
             Event::Start(Tag::TableCell) => {
@@ -2113,7 +2118,9 @@ fn markdown_preview(body: &str, theme: &Theme) -> MarkdownPreview {
                     table.rows.push(std::mem::take(&mut table.row));
                 }
             }
-            Event::SoftBreak | Event::HardBreak => renderer.finish_line(),
+            Event::End(TagEnd::Paragraph | TagEnd::FootnoteDefinition | TagEnd::Item)
+            | Event::SoftBreak
+            | Event::HardBreak => renderer.finish_line(),
             Event::Rule => {
                 renderer.finish_line();
                 renderer.lines.push(Line::styled(
@@ -2695,7 +2702,7 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         Line::styled(message, Style::default().fg(theme.text)),
         Line::raw(""),
         Line::styled(
-            format!("  \"{}\"", item_name),
+            format!("  \"{item_name}\""),
             Style::default()
                 .fg(theme.warning)
                 .add_modifier(Modifier::BOLD),
@@ -2753,7 +2760,7 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let text_lines = if chunks.is_empty() {
         1
     } else {
-        chunks.len() as u16
+        saturating_u16(chunks.len())
     };
 
     let has_current =
@@ -2770,12 +2777,9 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     frame.render_widget(Clear, area);
 
     let mut lines = Vec::new();
-    if has_current {
+    if let Some(current_collection) = prompt.current_collection.as_ref().filter(|_| has_current) {
         lines.push(Line::styled(
-            format!(
-                "Current group: {}",
-                prompt.current_collection.as_ref().unwrap()
-            ),
+            format!("Current group: {current_collection}"),
             Style::default().fg(theme.muted),
         ));
         lines.push(Line::raw(""));
@@ -3180,7 +3184,6 @@ fn render_discover(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
                 rows[1],
             );
         }
-        DiscoveryStatus::Loading => render_search_results(frame, rows[1], app, theme),
         DiscoveryStatus::Error(_) if app.discovery.results.is_empty() => {
             frame.render_widget(
                 Paragraph::new(vec![
@@ -3201,8 +3204,9 @@ fn render_discover(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
                 rows[1],
             );
         }
-        DiscoveryStatus::Error(_) => render_search_results(frame, rows[1], app, theme),
-        DiscoveryStatus::Ready => render_search_results(frame, rows[1], app, theme),
+        DiscoveryStatus::Loading | DiscoveryStatus::Error(_) | DiscoveryStatus::Ready => {
+            render_search_results(frame, rows[1], app, theme);
+        }
     }
 }
 
@@ -3722,11 +3726,10 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme
 fn render_terminal_command(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let area = centered(76, 20, frame.area());
     frame.render_widget(Clear, area);
-    let working_directory = app
-        .terminal_command_directory
-        .as_ref()
-        .map(|directory| directory.display().to_string())
-        .unwrap_or_else(|| "current application directory".to_owned());
+    let working_directory = app.terminal_command_directory.as_ref().map_or_else(
+        || "current application directory".to_owned(),
+        |directory| directory.display().to_string(),
+    );
     let output = if app.terminal_command_output.is_empty() {
         "Command output will appear here.".to_owned()
     } else {
@@ -3792,9 +3795,11 @@ fn render_terminal_command(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
             )),
         sections[2],
     );
-    let cursor = app.terminal_command[..app.terminal_command_cursor.min(app.terminal_command.len())]
+    let cursor = app.terminal_command
+        [..app.terminal_command_cursor.min(app.terminal_command.len())]
         .chars()
-        .count() as u16;
+        .count();
+    let cursor = saturating_u16(cursor);
     frame.set_cursor_position((sections[2].x.saturating_add(1 + cursor), sections[2].y + 1));
 }
 
@@ -3853,11 +3858,10 @@ fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &
     // ── Results list ─────────────────────────────────────────────────────
     // Layout: each row has a fixed right slot for the "(Added)" badge.
     // Borders (2) + highlight symbol "> " (2) + right border (1) = 5 overhead.
-    const BADGE: &str = " (Added)";
-    const BADGE_WIDTH: usize = BADGE.len(); // 8 chars
+    let badge_width = CITATION_BADGE.len();
     let list_inner_width = (chunks[1].width as usize).saturating_sub(5);
-    let max_title_width = list_inner_width.saturating_sub(BADGE_WIDTH + 1).max(4);
-    let max_authors_width = max_title_width + BADGE_WIDTH + 1;
+    let max_title_width = list_inner_width.saturating_sub(badge_width + 1).max(4);
+    let max_authors_width = max_title_width + badge_width + 1;
 
     let items: Vec<ListItem> = app
         .project_citation_results
@@ -3878,18 +3882,18 @@ fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &
             // Truncate title so badge always fits.
             let title_text = safe_truncate(raw_title, max_title_width);
             // Pad to a fixed width so the badge column is always at the same offset.
-            let padded_title = format!("{:<width$}", title_text, width = max_title_width);
+            let padded_title = format!("{title_text:<max_title_width$}");
 
             let badge_span = if is_added {
                 Span::styled(
-                    BADGE,
+                    CITATION_BADGE,
                     Style::default()
                         .fg(theme.success)
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
                 // Reserve the column with blank space so unselected rows don't shift.
-                Span::styled(" ".repeat(BADGE_WIDTH), Style::default())
+                Span::styled(" ".repeat(badge_width), Style::default())
             };
 
             let title_line = Line::from(vec![
@@ -4122,9 +4126,10 @@ fn help_column_groups(
         return vec![sections];
     }
     let columns = columns.min(sections.len());
+    let column_count = saturating_u16(columns).max(1);
     let column_width =
-        width.saturating_sub((columns.saturating_sub(1) as u16) * 2) / columns as u16;
-    let mut units = help_section_units(sections);
+        width.saturating_sub(column_count.saturating_sub(1).saturating_mul(2)) / column_count;
+    let mut units = help_section_units(&sections);
     let global_unit = units
         .iter()
         .position(|unit| {
@@ -4155,22 +4160,17 @@ fn help_column_groups(
     groups
 }
 
-fn help_section_units(sections: Vec<HelpSection>) -> Vec<Vec<HelpSection>> {
+fn help_section_units(sections: &[HelpSection]) -> Vec<Vec<HelpSection>> {
     let mut units = Vec::new();
     let mut index = 0;
     while index < sections.len() {
-        if sections[index].title == "NOTES & PDF VIEWER"
-            && sections
-                .get(index + 1)
-                .is_some_and(|section| section.title == "INTERNAL PDF VIEWER")
-        {
-            units.push(vec![sections[index].clone(), sections[index + 1].clone()]);
-            index += 2;
-        } else if sections[index].title == "DOWNLOADS"
-            && sections
-                .get(index + 1)
-                .is_some_and(|section| section.title == "PROJECT LIST")
-        {
+        let next_title = sections.get(index + 1).map(|section| section.title);
+        let keep_together = matches!(
+            (sections[index].title, next_title),
+            ("NOTES & PDF VIEWER", Some("INTERNAL PDF VIEWER"))
+                | ("DOWNLOADS", Some("PROJECT LIST"))
+        );
+        if keep_together {
             units.push(vec![sections[index].clone(), sections[index + 1].clone()]);
             index += 2;
         } else {
@@ -4191,7 +4191,8 @@ fn help_columns_widths(area_width: u16, groups: &[Vec<HelpSection>]) -> Vec<u16>
     }
 
     let gap = 2u16;
-    let total_gaps = (count as u16 - 1) * gap;
+    let count_u16 = saturating_u16(count).max(1);
+    let total_gaps = count_u16.saturating_sub(1).saturating_mul(gap);
     let avail_width = area_width.saturating_sub(total_gaps);
 
     let mut prefix_widths = Vec::with_capacity(count);
@@ -4206,13 +4207,13 @@ fn help_columns_widths(area_width: u16, groups: &[Vec<HelpSection>]) -> Vec<u16>
             .map(|(key, _)| key.len())
             .max()
             .unwrap_or(0);
-        let prefix = (key_width + 4) as u16;
+        let prefix = saturating_u16(key_width.saturating_add(4));
         let max_desc = g
             .iter()
             .flat_map(|section| section.entries)
             .map(|(_, desc)| desc.len())
             .max()
-            .unwrap_or(16) as u16;
+            .map_or(16, saturating_u16);
 
         let ideal_desc = max_desc;
         let min_w = prefix + 10;
@@ -4230,10 +4231,11 @@ fn help_columns_widths(area_width: u16, groups: &[Vec<HelpSection>]) -> Vec<u16>
     let mut widths = vec![0u16; count];
 
     if avail_width <= min_sum {
-        let total_min = min_sum.max(1) as u32;
+        let total_min = u32::from(min_sum.max(1));
         let mut allocated = 0u16;
         for i in 0..count {
-            let w = ((u32::from(min_widths[i]) * u32::from(avail_width)) / total_min) as u16;
+            let w = u16::try_from((u32::from(min_widths[i]) * u32::from(avail_width)) / total_min)
+                .unwrap_or(u16::MAX);
             widths[i] = w;
             allocated += w;
         }
@@ -4259,7 +4261,9 @@ fn help_columns_widths(area_width: u16, groups: &[Vec<HelpSection>]) -> Vec<u16>
 
         let mut allocated = 0u16;
         for i in 0..count {
-            let add = ((u32::from(extra) * u32::from(needed_extra[i])) / total_needed_extra) as u16;
+            let add =
+                u16::try_from((u32::from(extra) * u32::from(needed_extra[i])) / total_needed_extra)
+                    .unwrap_or(u16::MAX);
             widths[i] = min_widths[i] + add;
             allocated += widths[i];
         }
@@ -4272,8 +4276,8 @@ fn help_columns_widths(area_width: u16, groups: &[Vec<HelpSection>]) -> Vec<u16>
         }
     } else {
         let extra = avail_width - ideal_sum;
-        let base_add = extra / (count as u16);
-        let mut rem = extra % (count as u16);
+        let base_add = extra / count_u16;
+        let mut rem = extra % count_u16;
 
         for i in 0..count {
             widths[i] = ideal_widths[i]
@@ -4744,10 +4748,10 @@ fn render_credits(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
 
 fn get_paper_collection_name(app: &App, paper_id: i64) -> Option<String> {
     for (collection_id, paper_ids) in &app.collection_papers_map {
-        if paper_ids.contains(&paper_id) {
-            if let Some(collection) = app.collections.iter().find(|c| c.id == *collection_id) {
-                return Some(collection.name.clone());
-            }
+        if paper_ids.contains(&paper_id)
+            && let Some(collection) = app.collections.iter().find(|c| c.id == *collection_id)
+        {
+            return Some(collection.name.clone());
         }
     }
     None
@@ -4819,7 +4823,7 @@ fn wrap_text_to_spans(
                             Span::styled(chunk, text_style),
                         ]));
                         start = end;
-                        current_prefix = indent.clone();
+                        current_prefix.clone_from(&indent);
                         current_max = cont_max;
                         is_first_line_of_section = false;
                     }
@@ -4836,7 +4840,7 @@ fn wrap_text_to_spans(
                     Span::styled(current_prefix.clone(), label_style),
                     Span::styled(line_str, text_style),
                 ]));
-                current_prefix = indent.clone();
+                current_prefix.clone_from(&indent);
                 current_max = cont_max;
                 is_first_line_of_section = false;
                 current_words.clear();
@@ -4970,16 +4974,18 @@ fn build_paper_lines<'a>(
             format_bytes(size),
             Style::default().fg(theme.muted),
         ));
-    } else if file_size.is_none() && bookmark_year.is_none() && download_label.is_none() {
-        if paper_id.is_some() {
-            if !stats_spans.is_empty() {
-                stats_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
-            }
-            stats_spans.push(Span::styled(
-                "metadata only",
-                Style::default().fg(theme.muted),
-            ));
+    } else if file_size.is_none()
+        && bookmark_year.is_none()
+        && download_label.is_none()
+        && paper_id.is_some()
+    {
+        if !stats_spans.is_empty() {
+            stats_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
         }
+        stats_spans.push(Span::styled(
+            "metadata only",
+            Style::default().fg(theme.muted),
+        ));
     }
 
     // 5. Availability (Local PDF / Remote metadata)
@@ -5004,7 +5010,7 @@ fn build_paper_lines<'a>(
         ));
     }
 
-    let stats_len: usize = stats_spans.iter().map(|s| s.width()).sum();
+    let stats_len: usize = stats_spans.iter().map(ratatui::prelude::Span::width).sum();
     let authors_str = if authors.is_empty() {
         "Unknown authors"
     } else {
@@ -5093,8 +5099,9 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_reference_balances_column_heights_and_widths() {
-        let theme = Theme::load("nord").unwrap();
+    fn keyboard_reference_balances_column_heights_and_widths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let theme = Theme::load("nord")?;
 
         // Check 3-column layout on wide screen
         let groups_3col = help_column_groups(keyboard_reference(), 3, 130);
@@ -5105,13 +5112,12 @@ mod tests {
             .zip(&cols_3col)
             .map(|(g, col)| format_help_column(g, col.width, &theme).len())
             .collect();
-        let max_h3 = *heights_3col.iter().max().unwrap();
-        let min_h3 = *heights_3col.iter().min().unwrap();
+        let max_h3 = heights_3col.iter().max().copied().ok_or("missing column")?;
+        let min_h3 = heights_3col.iter().min().copied().ok_or("missing column")?;
         // Heights should be well balanced: max height should be <= 42 lines and diff <= 10 lines
         assert!(
             max_h3 <= 42,
-            "Max height in 3-col layout should be <= 42, got {}",
-            max_h3
+            "Max height in 3-col layout should be <= 42, got {max_h3}"
         );
         assert!(
             max_h3 - min_h3 <= 10,
@@ -5128,13 +5134,14 @@ mod tests {
             .zip(&cols_2col)
             .map(|(g, col)| format_help_column(g, col.width, &theme).len())
             .collect();
-        let max_h2 = *heights_2col.iter().max().unwrap();
-        let min_h2 = *heights_2col.iter().min().unwrap();
+        let max_h2 = heights_2col.iter().max().copied().ok_or("missing column")?;
+        let min_h2 = heights_2col.iter().min().copied().ok_or("missing column")?;
         assert!(
             max_h2 - min_h2 <= 10,
             "Height diff in 2-col layout should be <= 10, got {}",
             max_h2 - min_h2
         );
+        Ok(())
     }
 
     #[test]
@@ -5184,7 +5191,7 @@ mod tests {
             .content
             .iter()
             .position(|cell| cell.symbol() == "F")
-            .expect("paper title should be rendered");
+            .ok_or("paper title should be rendered")?;
         let x = u16::try_from(index % usize::from(buffer.area.width)).unwrap_or(0);
         let y = u16::try_from(index / usize::from(buffer.area.width)).unwrap_or(0);
         assert_ne!(buffer[(x - 2, y)].symbol(), ">");
@@ -5199,7 +5206,7 @@ mod tests {
             .content
             .iter()
             .position(|cell| cell.symbol() == "F")
-            .expect("paper title should be rendered");
+            .ok_or("paper title should be rendered")?;
         let x = u16::try_from(index % usize::from(buffer.area.width)).unwrap_or(0);
         let y = u16::try_from(index / usize::from(buffer.area.width)).unwrap_or(0);
         assert_eq!(buffer[(x - 2, y)].symbol(), ">");
@@ -5231,7 +5238,7 @@ mod tests {
     #[test]
     fn markdown_preview_supports_gfm_extensions() -> Result<(), Box<dyn std::error::Error>> {
         let theme = Theme::load("nord")?;
-        let markdown = r#"# Research
+        let markdown = r"# Research
 
 | Method | Score |
 | --- | ---: |
@@ -5255,7 +5262,7 @@ let answer = 42;
 Image: ![plot](plot.png)[^1]
 
 [^1]: A figure.
-"#;
+";
         let preview = markdown_preview(markdown, &theme);
         assert!(preview.lines.iter().any(|line| line.spans.is_empty()));
         assert!(
@@ -5788,14 +5795,14 @@ Image: ![plot](plot.png)[^1]
         let now = chrono::Local::now();
         let tz = super::resolve_timezone_display(&now);
         // Ensure no bare numeric offset is displayed without parentheses
-        if tz.starts_with('+') || tz.starts_with('-') {
-            panic!("Bare numeric offset found without parentheses: {}", tz);
-        }
+        assert!(
+            !(tz.starts_with('+') || tz.starts_with('-')),
+            "Bare numeric offset found without parentheses: {tz}"
+        );
         if tz.contains(':') {
             assert!(
                 tz.starts_with('(') && tz.ends_with(')'),
-                "Offset must be enclosed in parentheses: {}",
-                tz
+                "Offset must be enclosed in parentheses: {tz}"
             );
         }
 

@@ -62,6 +62,12 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
 ];
 
+/// Paper identifier, optional arXiv identifier, and optional local PDF path.
+pub type EnrichmentCandidate = (i64, Option<String>, Option<String>);
+
+/// Paper identifier, optional arXiv identifier, DOI, and local PDF path.
+pub type EnrichmentCandidateWithDoi = (i64, Option<String>, Option<String>, Option<String>);
+
 /// Write a source-provided author sequence only when the paper has no canonical
 /// author metadata yet. Existing rows and their `position` values are authoritative.
 fn persist_authors_if_missing(
@@ -278,9 +284,8 @@ impl Database {
                     return Ok(true);
                 }
                 return Ok(false);
-            } else {
-                return Ok(false);
             }
+            return Ok(false);
         }
 
         let changed = self.connection.execute(
@@ -929,6 +934,10 @@ impl Database {
     }
 
     /// List all local papers that have associated notes (and are valid in the library roots).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the note or paper query fails.
     pub fn papers_with_notes(&self, roots: &[PathBuf]) -> Result<Vec<LibraryPaper>, DatabaseError> {
         let mut statement = self.connection.prepare(
             "SELECT p.id, p.title,
@@ -1039,7 +1048,11 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    /// Load the collection papers mapping (collection_id -> vec of paper_id)
+    /// Load the collection papers mapping (`collection_id` -> vec of `paper_id`)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the collection membership query fails.
     pub fn collection_papers_map(
         &self,
     ) -> Result<std::collections::HashMap<i64, Vec<i64>>, DatabaseError> {
@@ -1431,7 +1444,7 @@ impl Database {
                 self.record_paper_activity(
                     "paper_renamed",
                     Some(paper_id),
-                    Some(&format!("{} -> {}", old_name, new_name)),
+                    Some(&format!("{old_name} -> {new_name}")),
                 )?;
             }
         }
@@ -1645,7 +1658,7 @@ impl Database {
         Ok(())
     }
 
-    /// Record a project-specific activity, avoiding consecutive duplicates for 'project_opened' within 5 minutes.
+    /// Record a project-specific activity, avoiding consecutive duplicates for '`project_opened`' within 5 minutes.
     ///
     /// # Errors
     ///
@@ -1663,17 +1676,18 @@ impl Database {
                 )
                 .optional()?;
 
-            if let Some((id, last_kind, last_detail, occurred_at)) = recent {
-                if last_kind == "project_opened" && last_detail == name {
-                    let now = chrono::Utc::now().naive_utc();
-                    let diff = now.signed_duration_since(occurred_at);
-                    if diff.num_seconds() >= 0 && diff.num_seconds() < 300 {
-                        self.connection.execute(
-                            "UPDATE activity_log SET occurred_at = CURRENT_TIMESTAMP WHERE id = ?1",
-                            [id],
-                        )?;
-                        return Ok(());
-                    }
+            if let Some((id, last_kind, last_detail, occurred_at)) = recent
+                && last_kind == "project_opened"
+                && last_detail == name
+            {
+                let now = chrono::Utc::now().naive_utc();
+                let diff = now.signed_duration_since(occurred_at);
+                if diff.num_seconds() >= 0 && diff.num_seconds() < 300 {
+                    self.connection.execute(
+                        "UPDATE activity_log SET occurred_at = CURRENT_TIMESTAMP WHERE id = ?1",
+                        [id],
+                    )?;
+                    return Ok(());
                 }
             }
         }
@@ -2023,9 +2037,7 @@ impl Database {
     ///
     /// # Errors
     /// Returns an error when the query fails.
-    pub fn papers_needing_enrichment(
-        &self,
-    ) -> Result<Vec<(i64, Option<String>, Option<String>)>, DatabaseError> {
+    pub fn papers_needing_enrichment(&self) -> Result<Vec<EnrichmentCandidate>, DatabaseError> {
         Ok(self
             .papers_needing_enrichment_with_doi()?
             .into_iter()
@@ -2035,9 +2047,13 @@ impl Database {
 
     /// Return enrichable papers including their stored DOI for provider selection.
     /// Each entry is `(paper_id, candidate_arxiv_id, doi, pdf_path)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the enrichment candidate query fails.
     pub fn papers_needing_enrichment_with_doi(
         &self,
-    ) -> Result<Vec<(i64, Option<String>, Option<String>, Option<String>)>, DatabaseError> {
+    ) -> Result<Vec<EnrichmentCandidateWithDoi>, DatabaseError> {
         let mut statement = self.connection.prepare(
             "SELECT p.id, p.arxiv_id, p.doi, p.pdf_path
              FROM papers p
@@ -2106,7 +2122,20 @@ impl Database {
             .optional()?;
 
         let target_id = if let Some(existing) = existing_id {
-            if existing != paper_id {
+            if existing == paper_id {
+                transaction.execute(
+                    "UPDATE papers SET title = ?1,
+                     abstract = CASE WHEN ?2 IS NULL OR trim(?2) = '' THEN abstract ELSE ?2 END,
+                     arxiv_id = ?3,
+                     doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6, journal = COALESCE(?7, journal)
+                     WHERE id = ?8",
+                    params![
+                        paper.title, paper.abstract_text, paper.id, paper.doi,
+                        paper.published.to_rfc3339(), paper.updated.to_rfc3339(), paper.journal_ref, paper_id
+                    ],
+                )?;
+                paper_id
+            } else {
                 let (pdf_path, file_size): (Option<String>, Option<i64>) = transaction
                     .query_row(
                         "SELECT pdf_path, file_size FROM papers WHERE id = ?1",
@@ -2163,19 +2192,6 @@ impl Database {
                     )?;
                 }
                 existing
-            } else {
-                transaction.execute(
-                    "UPDATE papers SET title = ?1,
-                     abstract = CASE WHEN ?2 IS NULL OR trim(?2) = '' THEN abstract ELSE ?2 END,
-                     arxiv_id = ?3,
-                     doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6, journal = COALESCE(?7, journal)
-                     WHERE id = ?8",
-                    params![
-                        paper.title, paper.abstract_text, paper.id, paper.doi,
-                        paper.published.to_rfc3339(), paper.updated.to_rfc3339(), paper.journal_ref, paper_id
-                    ],
-                )?;
-                paper_id
             }
         } else {
             transaction.execute(
@@ -2202,6 +2218,10 @@ impl Database {
     }
 
     /// Store a journal discovered by a fallback provider without replacing a valid value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the journal metadata cannot be persisted.
     pub fn apply_journal_metadata(
         &self,
         paper_id: i64,
@@ -2248,10 +2268,11 @@ impl Database {
 
 /// Strip a trailing version suffix like `v1`, `v2`, etc. from an arXiv ID.
 fn strip_arxiv_version(id: &str) -> &str {
-    if let Some(pos) = id.rfind('v') {
-        if id[pos + 1..].chars().all(|c| c.is_ascii_digit()) && pos + 1 < id.len() {
-            return &id[..pos];
-        }
+    if let Some(pos) = id.rfind('v')
+        && id[pos + 1..].chars().all(|c| c.is_ascii_digit())
+        && pos + 1 < id.len()
+    {
+        return &id[..pos];
     }
     id
 }
@@ -2275,7 +2296,7 @@ fn extract_arxiv_id(path: &str) -> Option<String> {
                 j += 1;
             }
             let digit_count = j - (i + 5);
-            if digit_count >= 4 && digit_count <= 5 {
+            if (4..=5).contains(&digit_count) {
                 let candidate = &stem[i..j];
                 return Some(candidate.to_owned());
             }
@@ -2808,22 +2829,22 @@ mod tests {
         };
         let paper_id = database.attach_download(&paper, &imported_pdf("author-order.pdf"))?;
 
-        assert_eq!(
-            database.library_paper_by_id(paper_id)?.unwrap().authors,
-            "Zulu Author, Alpha Author"
-        );
-        assert_eq!(
-            database.paper_citation_metadata(paper_id)?.unwrap().authors,
-            "Zulu Author and Alpha Author"
-        );
+        let library_paper = database
+            .library_paper_by_id(paper_id)?
+            .ok_or("missing library paper")?;
+        assert_eq!(library_paper.authors, "Zulu Author, Alpha Author");
+        let citation = database
+            .paper_citation_metadata(paper_id)?
+            .ok_or("missing citation metadata")?;
+        assert_eq!(citation.authors, "Zulu Author and Alpha Author");
 
         // Once persisted, metadata refreshes must retain the stored sequence.
         paper.authors.reverse();
         database.apply_arxiv_metadata(paper_id, &paper)?;
-        assert_eq!(
-            database.library_paper_by_id(paper_id)?.unwrap().authors,
-            "Zulu Author, Alpha Author"
-        );
+        let library_paper = database
+            .library_paper_by_id(paper_id)?
+            .ok_or("missing refreshed library paper")?;
+        assert_eq!(library_paper.authors, "Zulu Author, Alpha Author");
         Ok(())
     }
 
@@ -3040,28 +3061,28 @@ mod tests {
         let paper_id = database.attach_download(&paper, &pdf)?;
 
         // Case 1: Valid roots, file exists -> Alice should be returned with count 1
-        let authors = database.authors(&[root.clone()])?;
+        let authors = database.authors(std::slice::from_ref(&root))?;
         assert_eq!(authors.len(), 1);
         assert_eq!(authors[0].name, "Alice Specialist");
         assert_eq!(authors[0].paper_count, 1);
 
-        let papers = database.author_papers(authors[0].id, &[root.clone()])?;
+        let papers = database.author_papers(authors[0].id, std::slice::from_ref(&root))?;
         assert_eq!(papers.len(), 1);
         assert_eq!(papers[0].id, paper_id);
 
         // Case 2: File is missing -> Alice should NOT be returned
         fs::remove_file(&pdf_path)?;
-        let authors = database.authors(&[root.clone()])?;
+        let authors = database.authors(std::slice::from_ref(&root))?;
         assert!(authors.is_empty());
-        let papers = database.author_papers(1, &[root.clone()])?;
+        let papers = database.author_papers(1, std::slice::from_ref(&root))?;
         assert!(papers.is_empty());
 
         // Case 3: Re-create file but query with wrong/different roots -> Alice should NOT be returned
         fs::write(&pdf_path, "%PDF-1.4 test")?;
         let different_root = root.join("other_dir");
-        let authors = database.authors(&[different_root.clone()])?;
+        let authors = database.authors(std::slice::from_ref(&different_root))?;
         assert!(authors.is_empty());
-        let papers = database.author_papers(1, &[different_root.clone()])?;
+        let papers = database.author_papers(1, std::slice::from_ref(&different_root))?;
         assert!(papers.is_empty());
 
         // Clean up
@@ -3110,19 +3131,19 @@ mod tests {
         assert!(database.toggle_bookmark(paper_id)?);
 
         // Case 1: Valid roots, file exists -> Bookmark should be returned
-        let bookmarks = database.bookmarks(&[root.clone()])?;
+        let bookmarks = database.bookmarks(std::slice::from_ref(&root))?;
         assert_eq!(bookmarks.len(), 1);
         assert_eq!(bookmarks[0].paper_title, "Test Bookmarked Paper");
 
         // Case 2: File is missing -> Bookmark should NOT be returned
         fs::remove_file(&pdf_path)?;
-        let bookmarks = database.bookmarks(&[root.clone()])?;
+        let bookmarks = database.bookmarks(std::slice::from_ref(&root))?;
         assert!(bookmarks.is_empty());
 
         // Case 3: Re-create file but query with wrong/different roots -> Bookmark should NOT be returned
         fs::write(&pdf_path, "%PDF-1.4 test")?;
         let different_root = root.join("other_dir");
-        let bookmarks = database.bookmarks(&[different_root.clone()])?;
+        let bookmarks = database.bookmarks(std::slice::from_ref(&different_root))?;
         assert!(bookmarks.is_empty());
 
         // Clean up
@@ -3180,34 +3201,39 @@ mod tests {
         database.save_note(&note)?;
 
         // Case 1: Valid roots, file exists -> Paper should be returned in papers_with_notes
-        let papers = database.papers_with_notes(&[root.clone()])?;
+        let papers = database.papers_with_notes(std::slice::from_ref(&root))?;
         assert_eq!(papers.len(), 1);
         assert_eq!(papers[0].title, "Test Noted Paper");
 
         // Case 2: Save empty/whitespace note -> Note should be deleted and paper removed from list
         let empty_note = PaperNote {
             paper_id,
-            title: "".into(),
+            title: String::new(),
             body: "   \n  ".into(),
             cursor: 0,
         };
         database.save_note(&empty_note)?;
-        let papers = database.papers_with_notes(&[root.clone()])?;
+        let papers = database.papers_with_notes(std::slice::from_ref(&root))?;
         assert!(papers.is_empty());
 
         // Re-save non-empty note to test filesystem validation
         database.save_note(&note)?;
-        assert_eq!(database.papers_with_notes(&[root.clone()])?.len(), 1);
+        assert_eq!(
+            database
+                .papers_with_notes(std::slice::from_ref(&root))?
+                .len(),
+            1
+        );
 
         // Case 3: File is missing -> Paper should NOT be returned
         fs::remove_file(&pdf_path)?;
-        let papers = database.papers_with_notes(&[root.clone()])?;
+        let papers = database.papers_with_notes(std::slice::from_ref(&root))?;
         assert!(papers.is_empty());
 
         // Case 4: File re-created but wrong/different roots -> Paper should NOT be returned
         fs::write(&pdf_path, "%PDF-1.4 test")?;
         let different_root = root.join("other_dir");
-        let papers = database.papers_with_notes(&[different_root.clone()])?;
+        let papers = database.papers_with_notes(std::slice::from_ref(&different_root))?;
         assert!(papers.is_empty());
 
         // Clean up
@@ -3261,9 +3287,21 @@ mod tests {
         database.import_pdf(&pdf3)?;
 
         let papers = database.library_papers()?;
-        let id1 = papers.iter().find(|p| p.title == "Paper 1").unwrap().id;
-        let id2 = papers.iter().find(|p| p.title == "Paper 2").unwrap().id;
-        let id3 = papers.iter().find(|p| p.title == "Paper 3").unwrap().id;
+        let id1 = papers
+            .iter()
+            .find(|paper| paper.title == "Paper 1")
+            .ok_or("missing Paper 1")?
+            .id;
+        let id2 = papers
+            .iter()
+            .find(|paper| paper.title == "Paper 2")
+            .ok_or("missing Paper 2")?
+            .id;
+        let id3 = papers
+            .iter()
+            .find(|paper| paper.title == "Paper 3")
+            .ok_or("missing Paper 3")?
+            .id;
 
         // Add to queue
         database.add_to_queue(id1)?;
@@ -3271,7 +3309,7 @@ mod tests {
         database.add_to_queue(id3)?;
 
         // Check order
-        let queue = database.reading_queue_papers_in_roots(&[root.clone()])?;
+        let queue = database.reading_queue_papers_in_roots(std::slice::from_ref(&root))?;
         assert_eq!(queue.len(), 3);
         assert_eq!(queue[0].id, id1);
         assert_eq!(queue[1].id, id2);
@@ -3280,34 +3318,34 @@ mod tests {
 
         // Move down P1 (index 0 -> index 1)
         database.move_queue_item(id1, false)?;
-        let queue = database.reading_queue_papers_in_roots(&[root.clone()])?;
+        let queue = database.reading_queue_papers_in_roots(std::slice::from_ref(&root))?;
         assert_eq!(queue[0].id, id2);
         assert_eq!(queue[1].id, id1);
         assert_eq!(queue[2].id, id3);
 
         // Move up P3 (index 2 -> index 1)
         database.move_queue_item(id3, true)?;
-        let queue = database.reading_queue_papers_in_roots(&[root.clone()])?;
+        let queue = database.reading_queue_papers_in_roots(std::slice::from_ref(&root))?;
         assert_eq!(queue[0].id, id2);
         assert_eq!(queue[1].id, id3);
         assert_eq!(queue[2].id, id1);
 
         // Mark unread P3 (index 1) -> should remove P3 from queue
         database.mark_unread(id3)?;
-        let queue = database.reading_queue_papers_in_roots(&[root.clone()])?;
+        let queue = database.reading_queue_papers_in_roots(std::slice::from_ref(&root))?;
         assert_eq!(queue.len(), 2);
         assert_eq!(queue[0].id, id2);
         assert_eq!(queue[1].id, id1);
 
         // Record open for P1 (index 1) -> should mark read and remove P1 from queue
         database.record_open(id1, true)?;
-        let queue = database.reading_queue_papers_in_roots(&[root.clone()])?;
+        let queue = database.reading_queue_papers_in_roots(std::slice::from_ref(&root))?;
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].id, id2);
 
         // Delete P2 -> should remove P2 from queue
         database.delete_paper(id2)?;
-        let queue = database.reading_queue_papers_in_roots(&[root.clone()])?;
+        let queue = database.reading_queue_papers_in_roots(std::slice::from_ref(&root))?;
         assert_eq!(queue.len(), 0);
 
         // Clean up files
@@ -3516,10 +3554,10 @@ mod tests {
         let papers = database.library_papers()?;
         assert_eq!(papers.len(), 1);
         assert_eq!(papers[0].title, "Old Paper Name");
-        assert_eq!(
-            papers[0].pdf_path.as_deref(),
-            Some(new_path.to_str().unwrap())
-        );
+        let new_path = new_path
+            .to_str()
+            .ok_or("temporary path is not valid UTF-8")?;
+        assert_eq!(papers[0].pdf_path.as_deref(), Some(new_path));
 
         let queue = database.reading_queue_papers()?;
         assert_eq!(queue.len(), 1);
@@ -3542,7 +3580,7 @@ mod tests {
         assert_eq!(notes[0].id, paper_id);
         assert_eq!(notes[0].title, "Old Paper Name");
 
-        fs::remove_file(&new_path)?;
+        fs::remove_file(new_path)?;
         fs::remove_dir(&root)?;
         Ok(())
     }

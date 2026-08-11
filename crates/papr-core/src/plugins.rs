@@ -180,27 +180,13 @@ pub struct PluginHost {
 }
 
 fn ensure_builtin_plugins(root: &Path) -> Result<(), std::io::Error> {
-    let has_dirs = if let Ok(entries) = std::fs::read_dir(root) {
-        entries
-            .filter_map(Result::ok)
-            .any(|entry| entry.path().is_dir())
-    } else {
-        false
-    };
+    let has_dirs = contains_plugin_directory(root);
 
     if !has_dirs {
         let auto_tagger_dir = root.join("auto-tagger");
         std::fs::create_dir_all(&auto_tagger_dir)?;
 
-        let manifest = r#"id = "auto-tagger"
-name = "Auto Tagger"
-version = "1.0.0"
-api_version = 1
-description = "Automatically categorizes papers based on keyword rules"
-executable = "tagger.py"
-capabilities = ["activity-events", "read-paper-metadata"]
-"#;
-        std::fs::write(auto_tagger_dir.join("plugin.toml"), manifest)?;
+        write_auto_tagger_manifest(&auto_tagger_dir)?;
 
         let script = r#"#!/usr/bin/env python3
 """
@@ -290,18 +276,44 @@ if __name__ == "__main__":
 "#;
         let script_path = auto_tagger_dir.join("tagger.py");
         std::fs::write(&script_path, script)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(metadata) = std::fs::metadata(&script_path) {
-                let mut perms = metadata.permissions();
-                perms.set_mode(0o755);
-                let _ = std::fs::set_permissions(&script_path, perms);
-            }
-        }
+        make_executable(&script_path);
     }
     Ok(())
 }
+
+fn contains_plugin_directory(root: &Path) -> bool {
+    std::fs::read_dir(root).is_ok_and(|entries| {
+        entries
+            .filter_map(Result::ok)
+            .any(|entry| entry.path().is_dir())
+    })
+}
+
+fn write_auto_tagger_manifest(directory: &Path) -> Result<(), std::io::Error> {
+    let manifest = r#"id = "auto-tagger"
+name = "Auto Tagger"
+version = "1.0.0"
+api_version = 1
+description = "Automatically categorizes papers based on keyword rules"
+executable = "tagger.py"
+capabilities = ["activity-events", "read-paper-metadata"]
+"#;
+    std::fs::write(directory.join("plugin.toml"), manifest)
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Ok(metadata) = std::fs::metadata(path) {
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o755);
+        let _ = std::fs::set_permissions(path, permissions);
+    }
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) {}
 
 impl PluginHost {
     /// Discover plugin bundles beneath a platform data directory.

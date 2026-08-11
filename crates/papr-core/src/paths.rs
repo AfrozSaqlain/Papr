@@ -13,11 +13,16 @@ use std::{
 /// application-wide representation because they leak into persisted metadata
 /// and normal UI rendering. `dunce` removes that transport prefix whenever a
 /// regular Windows path can represent the same location.
+///
+/// # Errors
+///
+/// Returns an error when the filesystem cannot resolve the supplied path.
 pub fn canonicalize_path(path: impl AsRef<Path>) -> io::Result<PathBuf> {
     dunce::canonicalize(path)
 }
 
 /// Sanitizes a string for use as a download filename component.
+#[must_use]
 pub fn sanitize_download_filename_component(title: &str) -> String {
     let sanitized: String = title
         .chars()
@@ -45,6 +50,11 @@ pub fn sanitize_download_filename_component(title: &str) -> String {
 }
 
 /// Move a PDF file from source to destination.
+///
+/// # Errors
+///
+/// Returns an error when neither an atomic rename nor the copy-and-remove
+/// fallback can complete safely.
 pub fn move_pdf_file(source: &Path, destination: &Path) -> io::Result<()> {
     if let Err(_rename_error) = std::fs::rename(source, destination) {
         std::fs::copy(source, destination)?;
@@ -62,12 +72,37 @@ pub fn move_pdf_file(source: &Path, destination: &Path) -> io::Result<()> {
 pub struct InvalidCollectionName;
 
 /// Validates that a collection name is a safe directory name.
+///
+/// # Errors
+///
+/// Returns [`InvalidCollectionName`] when the name is empty, reserved, or
+/// contains a path separator.
 pub fn validate_collection_name(name: &str) -> Result<(), InvalidCollectionName> {
     if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
         Err(InvalidCollectionName)
     } else {
         Ok(())
     }
+}
+
+/// Gets the page count of a PDF using `pdfinfo`.
+/// Falls back to returning 1 if it fails.
+#[must_use]
+pub fn get_pdf_page_count(path: &Path) -> usize {
+    if let Ok(output) = std::process::Command::new("pdfinfo").arg(path).output()
+        && output.status.success()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            if line.starts_with("Pages:")
+                && let Some(pages_str) = line.split_whitespace().nth(1)
+                && let Ok(pages) = pages_str.parse::<usize>()
+            {
+                return pages;
+            }
+        }
+    }
+    1
 }
 
 #[cfg(test)]
@@ -87,24 +122,4 @@ mod tests {
         let sanitized = sanitize_download_filename_component("AntiGlitch: Better / Faster");
         assert_eq!(sanitized, "AntiGlitch_ Better _ Faster");
     }
-}
-
-/// Gets the page count of a PDF using `pdfinfo`.
-/// Falls back to returning 1 if it fails.
-pub fn get_pdf_page_count(path: &Path) -> usize {
-    if let Ok(output) = std::process::Command::new("pdfinfo").arg(path).output() {
-        if output.status.success() {
-            let text = String::from_utf8_lossy(&output.stdout);
-            for line in text.lines() {
-                if line.starts_with("Pages:") {
-                    if let Some(pages_str) = line.split_whitespace().nth(1) {
-                        if let Ok(pages) = pages_str.parse::<usize>() {
-                            return pages;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    1
 }
