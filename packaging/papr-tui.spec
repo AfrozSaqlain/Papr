@@ -34,10 +34,10 @@ metadata enrichment, and LaTeX and embedded Typst project support in a terminal 
 %cargo_prep
 
 %generate_buildrequires
-%cargo_generate_buildrequires --no-default-features -p papr-tui
+%cargo_generate_buildrequires -n
 
 %build
-%cargo_build --no-default-features -p papr-tui
+%cargo_build -n -- -p papr-tui
 
 %install
 install -Dpm0755 target/release/papr %{buildroot}%{_bindir}/papr
