@@ -1350,11 +1350,15 @@ impl App {
     }
 
     /// Get dependencies parsed from Cargo.toml.
-    /// Get dependencies parsed from Cargo.toml.
     #[must_use]
     pub fn get_dependencies(&self) -> Vec<(String, String)> {
         let mut workspace_versions = std::collections::HashMap::new();
-        if let Ok(root_val) = toml::from_str::<toml::Value>(include_str!("../../../Cargo.toml"))
+        // These manifest snapshots live inside this crate so they are present in
+        // the tarball that `cargo publish` verifies.  Referencing the workspace
+        // root or sibling `papr-core` crate directly works in a checkout, but
+        // those paths do not exist after Cargo extracts the published package.
+        if let Ok(root_val) =
+            toml::from_str::<toml::Value>(include_str!("../package-metadata/workspace-Cargo.toml"))
             && let Some(ws_deps) = root_val
                 .get("workspace")
                 .and_then(|w| w.get("dependencies"))
@@ -1380,7 +1384,7 @@ impl App {
 
         let manifests = [
             include_str!("../Cargo.toml"),
-            include_str!("../../papr-core/Cargo.toml"),
+            include_str!("../package-metadata/papr-core-Cargo.toml"),
         ];
 
         for manifest in manifests {
