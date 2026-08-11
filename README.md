@@ -153,6 +153,19 @@ or
 paru -S papr-bin
 ```
 
+## Fedora (COPR)
+Use COPR Repository to install Papr:
+```
+sudo dnf copr enable afrozsaqlain/Papr
+sudo dnf install papr-tui
+```
+
+and if already installed and you want to upgrade, then simply run:
+
+```
+sudo dnf upgrade papr-tui
+```
+
 ## macOS Homebrew Tap
 Install Papr on macOS using Homebrew:
 
@@ -186,16 +199,14 @@ This installs `papr.exe` to:
 
 If `papr` is not recognized after installation, restart your PowerShell window so the updated `PATH` is loaded.
 
-
-
-## Debian / Ubuntu (.deb) & Fedora (.rpm) Packages
+## Debian / Ubuntu (.deb) & RHEL / CentOS (.rpm) / openSUSE (.rpm) Packages
 Download the `.deb` or `.rpm` package from the [Latest Release Page](https://github.com/AfrozSaqlain/Papr/releases/latest) and install:
 
 * **Debian / Ubuntu / Mint:**
   ```sh
   sudo apt install ./papr_*.deb
   ```
-* **Fedora / RHEL / CentOS:**
+* **RHEL / CentOS:**
   ```sh
   sudo dnf install ./papr-*.rpm
   ```
