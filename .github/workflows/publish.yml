@@ -194,7 +194,7 @@ jobs:
           chmod 600 "$HOME/.config/copr"
 
           echo "Submitting ${RELEASE_TAG} to COPR project ${COPR_PROJECT}"
-          copr build-package "$COPR_PROJECT" --name papr-tui --nowait
+          copr build-package "$COPR_PROJECT" --name papr-tui --enable-net on --nowait
 
   publish-aur:
     name: Publish to Arch Linux AUR

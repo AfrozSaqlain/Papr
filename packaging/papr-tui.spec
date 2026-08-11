@@ -10,7 +10,6 @@ Source0:        %{url}/archive/refs/tags/v%{version}/Papr-%{version}.tar.gz
 BuildRequires:  cargo
 BuildRequires:  gcc
 BuildRequires:  pkgconf-pkg-config
-BuildRequires:  rust-packaging
 BuildRequires:  sqlite-devel
 
 # The application invokes these tools for optional PDF, LaTeX, clipboard, and
@@ -30,14 +29,8 @@ metadata enrichment, and LaTeX and embedded Typst project support in a terminal 
 %prep
 %autosetup -n Papr-%{version}
 
-# Fedora builds use the system SQLite rather than rusqlite's bundled copy.
-%cargo_prep
-
-%generate_buildrequires
-%cargo_generate_buildrequires -n
-
 %build
-%cargo_build -n -- -p papr-tui
+cargo build --release --no-default-features -p papr-tui
 
 %install
 install -Dpm0755 target/release/papr %{buildroot}%{_bindir}/papr
