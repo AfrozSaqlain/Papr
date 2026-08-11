@@ -239,7 +239,20 @@ impl ArxivClient {
     ///
     /// Returns an error when the request fails or Atom content is malformed.
     pub async fn latest(&self, limit: u16) -> Result<Vec<RemotePaper>, ArxivError> {
-        self.query(LATEST_QUERY, 0, limit, "submittedDate").await
+        self.latest_page(0, limit).await
+    }
+
+    /// Load one page of newest submissions across arXiv for the dashboard.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails or Atom content is malformed.
+    pub async fn latest_page(
+        &self,
+        start: u16,
+        limit: u16,
+    ) -> Result<Vec<RemotePaper>, ArxivError> {
+        self.query(LATEST_QUERY, start, limit, "submittedDate").await
     }
 
     /// Search arXiv and return the newest matching submissions first.
@@ -252,12 +265,27 @@ impl ArxivClient {
         query: &str,
         limit: u16,
     ) -> Result<Vec<RemotePaper>, ArxivError> {
+        self.search_latest_page(query, 0, limit).await
+    }
+
+    /// Search one page of the newest matching arXiv submissions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails or Atom content is malformed.
+    pub async fn search_latest_page(
+        &self,
+        query: &str,
+        start: u16,
+        limit: u16,
+    ) -> Result<Vec<RemotePaper>, ArxivError> {
         if let Some(arxiv_id) = parse_arxiv_id(query) {
-            if let Some(paper) = self.get_by_id(&arxiv_id).await? {
+            if start == 0 && let Some(paper) = self.get_by_id(&arxiv_id).await? {
                 return Ok(vec![paper]);
             }
+            return Ok(Vec::new());
         }
-        self.query(&build_search_query(query), 0, limit, "submittedDate")
+        self.query(&build_search_query(query), start, limit, "submittedDate")
             .await
     }
 

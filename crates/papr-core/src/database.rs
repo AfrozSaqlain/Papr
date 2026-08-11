@@ -56,6 +56,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         13,
         include_str!("../migrations/0013_activity_kind_paper_creation_modification.sql"),
     ),
+    (
+        14,
+        include_str!("../migrations/0014_dashboard_feed_history.sql"),
+    ),
 ];
 
 /// Write a source-provided author sequence only when the paper has no canonical
@@ -658,6 +662,10 @@ impl Database {
             return Ok(None);
         }
 
+        if let Some(papers) = &papers {
+            self.record_dashboard_feed_history(feed_date, keyword_signature, papers)?;
+        }
+
         Ok(papers)
     }
 
@@ -685,6 +693,43 @@ impl Database {
                 refreshed_at = CURRENT_TIMESTAMP",
             params![feed_date, keyword_signature, payload],
         )?;
+        self.record_dashboard_feed_history(feed_date, keyword_signature, papers)?;
+        Ok(())
+    }
+
+    /// Return remote paper IDs displayed on the dashboard on or after `feed_date`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the query fails.
+    pub fn dashboard_paper_ids_since(
+        &self,
+        feed_date: &str,
+    ) -> Result<HashSet<String>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT paper_id FROM dashboard_feed_history
+             WHERE feed_date >= ?1",
+        )?;
+        let ids = statement
+            .query_map([feed_date], |row| row.get::<_, String>(0))?
+            .collect::<Result<HashSet<_>, _>>()?;
+        Ok(ids)
+    }
+
+    fn record_dashboard_feed_history(
+        &self,
+        feed_date: &str,
+        keyword_signature: &str,
+        papers: &[RemotePaper],
+    ) -> Result<(), DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "INSERT OR IGNORE INTO dashboard_feed_history
+                (feed_date, keyword_signature, paper_id)
+             VALUES (?1, ?2, ?3)",
+        )?;
+        for paper in papers {
+            statement.execute(params![feed_date, keyword_signature, paper.id])?;
+        }
         Ok(())
     }
 
@@ -2923,6 +2968,31 @@ mod tests {
         )?;
         assert_eq!(retained, 0);
 
+        Ok(())
+    }
+
+    #[test]
+    fn dashboard_history_tracks_cached_feed_papers_by_date()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        let paper = RemotePaper {
+            id: "https://arxiv.org/abs/2607.00001".into(),
+            title: "Dashboard history paper".into(),
+            authors: vec!["Researcher".into()],
+            abstract_text: String::new(),
+            published: Utc::now(),
+            updated: Utc::now(),
+            categories: vec![],
+            pdf_url: None,
+            doi: None,
+            journal_ref: None,
+        };
+        database.save_dashboard_feed_cache("2026-07-13", "gravity", &[paper])?;
+
+        assert!(database
+            .dashboard_paper_ids_since("2026-07-13")?
+            .contains("https://arxiv.org/abs/2607.00001"));
+        assert!(database.dashboard_paper_ids_since("2026-07-14")?.is_empty());
         Ok(())
     }
 

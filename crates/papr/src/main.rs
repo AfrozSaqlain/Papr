@@ -12,7 +12,7 @@ mod settings_modal;
 
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{BufRead, BufReader, BufWriter, Write},
     path::{Component, Path, PathBuf},
     ffi::OsString,
@@ -24,7 +24,7 @@ use std::{
 use anyhow::{Context, Result};
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use toml;
-use chrono::Local;
+use chrono::{Duration, Local, NaiveDate};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
@@ -47,6 +47,7 @@ use terminal::TerminalSession;
 
 const DASHBOARD_CANDIDATE_LIMIT: u16 = 30;
 const DASHBOARD_DISPLAY_LIMIT: usize = 10;
+const DASHBOARD_REPEAT_EXCLUSION_DAYS: i64 = 7;
 const DASHBOARD_FEED_ALGORITHM_VERSION: &str = "balanced-v3";
 const METADATA_ENRICHMENT_CONCURRENCY: usize = 1;
 
@@ -162,6 +163,7 @@ async fn run_app(cli: Cli) -> Result<()> {
         start_dashboard_fetch(
             arxiv.clone(),
             dashboard_keywords.clone(),
+            dashboard_recent_paper_ids(&database, &dashboard_feed_date)?,
             key.clone(),
             today_sender.clone(),
         );
@@ -3513,6 +3515,7 @@ fn refresh_dashboard_papers(
     start_dashboard_fetch(
         runtime.arxiv.clone(),
         runtime.dashboard_keywords.clone(),
+        dashboard_recent_paper_ids(&runtime.database, &runtime.dashboard_feed_date)?,
         key.clone(),
         senders.today.clone(),
     );
@@ -3523,11 +3526,12 @@ fn refresh_dashboard_papers(
 fn start_dashboard_fetch(
     client: ArxivClient,
     keywords: Vec<String>,
+    excluded_paper_ids: HashSet<String>,
     key: DashboardFeedKey,
     sender: mpsc::UnboundedSender<TodayResponse>,
 ) {
     tokio::spawn(async move {
-        let result = dashboard_papers(client, keywords, &key.feed_date)
+        let result = dashboard_papers(client, keywords, excluded_paper_ids, &key.feed_date)
             .await
             .map_err(|error| error.to_string());
         let _ = sender.send(TodayResponse { key, result });
@@ -3545,10 +3549,11 @@ fn dashboard_keyword_signature(keywords: &[String]) -> String {
 async fn dashboard_papers(
     client: ArxivClient,
     keywords: Vec<String>,
+    excluded_paper_ids: HashSet<String>,
     feed_date: &str,
 ) -> Result<Vec<RemotePaper>> {
     if keywords.is_empty() {
-        let mut papers = client.latest(DASHBOARD_CANDIDATE_LIMIT).await?;
+        let mut papers = dashboard_candidate_page(&client, None, &excluded_paper_ids).await?;
         shuffle_daily_bucket(&mut papers, feed_date, "");
         papers.truncate(DASHBOARD_DISPLAY_LIMIT);
         return Ok(papers);
@@ -3561,10 +3566,14 @@ async fn dashboard_papers(
     let mut requests = JoinSet::new();
     for (index, keyword) in keywords.into_iter().enumerate() {
         let client = client.clone();
+        let excluded_paper_ids = excluded_paper_ids.clone();
         requests.spawn(async move {
-            let result = client
-                .search_latest(&keyword, DASHBOARD_CANDIDATE_LIMIT)
-                .await;
+            let result = dashboard_candidate_page(
+                &client,
+                Some(&keyword),
+                &excluded_paper_ids,
+            )
+            .await;
             (index, keyword, result)
         });
     }
@@ -3592,6 +3601,54 @@ async fn dashboard_papers(
         DASHBOARD_DISPLAY_LIMIT,
         feed_date,
     ))
+}
+
+/// Load up to 30 unseen candidates, requesting more arXiv pages when recently
+/// displayed papers fill the newest result page.
+async fn dashboard_candidate_page(
+    client: &ArxivClient,
+    keyword: Option<&str>,
+    excluded_paper_ids: &HashSet<String>,
+) -> Result<Vec<RemotePaper>> {
+    let mut candidates = Vec::with_capacity(usize::from(DASHBOARD_CANDIDATE_LIMIT));
+    let mut start = 0_u16;
+
+    loop {
+        let papers = match keyword {
+            Some(keyword) => client
+                .search_latest_page(keyword, start, DASHBOARD_CANDIDATE_LIMIT)
+                .await?,
+            None => client
+                .latest_page(start, DASHBOARD_CANDIDATE_LIMIT)
+                .await?,
+        };
+        let received = u16::try_from(papers.len()).unwrap_or(u16::MAX);
+        candidates.extend(
+            papers
+                .into_iter()
+                .filter(|paper| !excluded_paper_ids.contains(&paper.id)),
+        );
+
+        if candidates.len() >= usize::from(DASHBOARD_CANDIDATE_LIMIT)
+            || received < DASHBOARD_CANDIDATE_LIMIT
+        {
+            break;
+        }
+        start = start.saturating_add(received);
+    }
+
+    candidates.truncate(usize::from(DASHBOARD_CANDIDATE_LIMIT));
+    Ok(candidates)
+}
+
+fn dashboard_recent_paper_ids(
+    database: &Database,
+    feed_date: &str,
+) -> Result<HashSet<String>> {
+    let feed_date = NaiveDate::parse_from_str(feed_date, "%Y-%m-%d")
+        .unwrap_or_else(|_| Local::now().date_naive());
+    let cutoff = feed_date - Duration::days(DASHBOARD_REPEAT_EXCLUSION_DAYS);
+    Ok(database.dashboard_paper_ids_since(&cutoff.to_string())?)
 }
 
 /// Deterministically order one keyword's eligible papers for a local day.
