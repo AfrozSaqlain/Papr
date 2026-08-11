@@ -127,11 +127,7 @@ async fn run_app(cli: Cli) -> Result<()> {
     }
     let paths = Paths::discover().context("failed to resolve papr directories")?;
     if matches!(&cli.command, Some(CliCommand::Paths)) {
-        println!("config: {}", paths.config_file.display());
-        println!("database: {}", paths.database_file.display());
-        println!("downloads: {}", paths.downloads_dir.display());
-        println!("plugins: {}", paths.plugins_dir.display());
-        println!("projects: {}", paths.projects_dir.display());
+        print_application_paths(&paths);
         return Ok(());
     }
 
@@ -146,124 +142,39 @@ async fn run_app(cli: Cli) -> Result<()> {
     let theme = Theme::load(&config.theme).context("failed to load theme")?;
     let database = Database::open(&paths.database_file).context("failed to open database")?;
     if matches!(&cli.command, Some(CliCommand::Index)) {
-        let download_dir = config.download_path.clone().unwrap_or(paths.downloads_dir);
-        let mut roots = config.library_folders.clone();
-        let download_inside = roots.iter().any(|root| {
-            let root_canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-            let dl_canon =
-                std::fs::canonicalize(&download_dir).unwrap_or_else(|_| download_dir.clone());
-            dl_canon.starts_with(&root_canon)
-        });
-        if !download_inside {
-            roots.push(download_dir);
-        }
-        let pdfs = LibraryIndexer::scan(&roots);
-        let mut imported = 0_usize;
-        for pdf in &pdfs {
-            imported += usize::from(database.import_pdf(pdf)?);
-        }
-        println!("indexed: {}, imported: {}", pdfs.len(), imported);
+        index_library(&config, &paths, &database)?;
         return Ok(());
     }
-    let dashboard_keywords = config.dashboard_keyword_list();
-    let dashboard_keyword_signature = dashboard_keyword_signature(&dashboard_keywords);
-    let dashboard_feed_date = local_feed_date();
     let arxiv = ArxivClient::new().context("failed to initialize arXiv client")?;
     let (today_sender, today_receiver) = mpsc::unbounded_channel();
-    let initial_cached_papers =
-        database.dashboard_feed_cache(&dashboard_feed_date, &dashboard_keyword_signature)?;
-    let initial_dashboard_fetch = if initial_cached_papers.is_none() {
-        let key = DashboardFeedKey {
-            feed_date: dashboard_feed_date.clone(),
-            keyword_signature: dashboard_keyword_signature.clone(),
-        };
-        start_dashboard_fetch(
-            arxiv.clone(),
-            dashboard_keywords.clone(),
-            dashboard_recent_paper_ids(&database, &dashboard_feed_date)?,
-            key.clone(),
-            today_sender.clone(),
-        );
-        Some(key)
-    } else {
-        None
-    };
-    let download_dir = config
-        .download_path
-        .clone()
-        .unwrap_or_else(|| paths.downloads_dir.clone());
-    std::fs::create_dir_all(&download_dir).context("failed to create download directory")?;
-    let download_dir = std::fs::canonicalize(&download_dir).unwrap_or(download_dir);
+    let dashboard_startup = prepare_dashboard_feed(&config, &database, &arxiv, &today_sender)?;
+    let locations = LibraryLocations::resolve(&config, &paths)?;
+    let (dashboard, library_papers) = load_initial_dashboard(&database, &paths, &locations)?;
 
-    let mut collection_roots = Vec::new();
-    for root in &config.library_folders {
-        collection_roots.push(std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()));
-    }
-    let mut library_roots = collection_roots.clone();
-    let download_inside = collection_roots
-        .iter()
-        .any(|root| download_dir.starts_with(root));
-    if !download_inside {
-        library_roots.push(download_dir.clone());
-    }
-
-    let mut dashboard = database
-        .research_dashboard()
-        .context("failed to load research dashboard")?;
-    let (collection_pdf_count, collection_pdf_size) =
-        LibraryIndexer::pdf_storage_stats(&collection_roots);
-    let (download_pdf_count, download_pdf_size) =
-        LibraryIndexer::pdf_storage_stats(std::slice::from_ref(&download_dir));
-    let library_papers = database.library_papers_in_roots(&library_roots)?;
-    dashboard.counts.papers = collection_pdf_count;
-    dashboard.counts.downloaded = download_pdf_count;
-    dashboard.read = library_papers
-        .iter()
-        .filter(|p| p.reading_status == "read")
-        .count() as u64;
-    dashboard.disk_usage = collection_pdf_size;
-    dashboard.downloads_size = download_pdf_size;
-    dashboard.database_size = std::fs::metadata(&paths.database_file).map_or(0, |m| m.len());
-
-    let initial_page = Page::from_config_str(&config.startup_page).unwrap_or(Page::Dashboard);
-    let initial_sidebar_index = Page::ALL
-        .iter()
-        .position(|&p| p == initial_page)
-        .unwrap_or(0);
-
-    let mut app = App {
-        page: initial_page,
-        sidebar_index: initial_sidebar_index,
-        stats: dashboard.counts,
-        dashboard,
-        pdf_viewer: config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer),
-        project_create_compiler: config.default_project_compiler.clone(),
-        ..App::default()
-    };
-    settings_modal::open_settings_modal(&mut app, &config, &theme.name);
+    let mut app = initial_app(&config, &theme, dashboard);
     app.plugins = plugin_host.plugins();
     app.plugin_diagnostics = plugin_host.diagnostics().len();
     app.config_editor_text = std::fs::read_to_string(&paths.config_file).unwrap_or_default();
     app.projects = project_manager.list().unwrap_or_default();
-    if let Some(papers) = initial_cached_papers {
+    if let Some(papers) = dashboard_startup.cached_papers {
         app.today_papers = papers;
         app.today_status = DiscoveryStatus::Ready;
     } else {
         app.today_status = DiscoveryStatus::Loading;
     }
 
-    discover_local_downloads(&mut app, &download_dir, &database);
+    discover_local_downloads(&mut app, &locations.download_dir, &database);
 
     app.library.papers = library_papers;
-    refresh_organization(&database, &library_roots, &mut app)?;
+    refresh_organization(&database, &locations.library_roots, &mut app)?;
     let (watch_sender, watch_receiver) = mpsc::unbounded_channel();
-    let watcher = start_library_watcher(&library_roots, watch_sender.clone())?;
+    let watcher = start_library_watcher(&locations.library_roots, watch_sender.clone())?;
     let config_filesystem_watcher = ConfigFilesystemWatcher::start(&paths.config_file)
         .context("failed to watch configuration file")?;
 
     let downloads = DownloadManager::new().context("failed to initialize download manager")?;
     let mut session = TerminalSession::start()?;
-    let primary_library_root = library_roots[0].clone();
+    let primary_library_root = locations.library_roots[0].clone();
     let runtime = Runtime {
         metadata_enrichment: MetadataEnrichmentService::new(arxiv.clone()),
         arxiv,
@@ -281,15 +192,15 @@ async fn run_app(cli: Cli) -> Result<()> {
         project_compiler: None,
         default_downloads_dir: paths.downloads_dir.clone(),
         default_projects_dir: paths.projects_dir.clone(),
-        download_dir,
+        download_dir: locations.download_dir,
         pdf_viewer: config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer),
         primary_library_root,
-        library_roots,
-        collection_roots,
-        dashboard_keywords,
-        dashboard_keyword_signature,
-        dashboard_feed_date,
-        active_dashboard_fetch: initial_dashboard_fetch,
+        library_roots: locations.library_roots,
+        collection_roots: locations.collection_roots,
+        dashboard_keywords: dashboard_startup.keywords,
+        dashboard_keyword_signature: dashboard_startup.keyword_signature,
+        dashboard_feed_date: dashboard_startup.feed_date,
+        active_dashboard_fetch: dashboard_startup.active_fetch,
         watch_sender,
         watch_receiver,
         watcher,
@@ -307,6 +218,155 @@ async fn run_app(cli: Cli) -> Result<()> {
         today_receiver,
     )
     .await
+}
+
+fn initial_app(config: &Config, theme: &Theme, dashboard: papr_core::ResearchDashboard) -> App {
+    let page = Page::from_config_str(&config.startup_page).unwrap_or(Page::Dashboard);
+    let mut app = App {
+        page,
+        sidebar_index: Page::ALL
+            .iter()
+            .position(|&candidate| candidate == page)
+            .unwrap_or(0),
+        stats: dashboard.counts,
+        dashboard,
+        project_create_compiler: config.default_project_compiler.clone(),
+        ..App::default()
+    };
+    app.pdf_viewer = config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer);
+    settings_modal::open_settings_modal(&mut app, config, &theme.name);
+    app
+}
+
+struct DashboardStartup {
+    keywords: Vec<String>,
+    keyword_signature: String,
+    feed_date: String,
+    cached_papers: Option<Vec<RemotePaper>>,
+    active_fetch: Option<DashboardFeedKey>,
+}
+
+fn prepare_dashboard_feed(
+    config: &Config,
+    database: &Database,
+    arxiv: &ArxivClient,
+    sender: &mpsc::UnboundedSender<TodayResponse>,
+) -> Result<DashboardStartup> {
+    let keywords = config.dashboard_keyword_list();
+    let keyword_signature = dashboard_keyword_signature(&keywords);
+    let feed_date = local_feed_date();
+    let cached_papers = database.dashboard_feed_cache(&feed_date, &keyword_signature)?;
+    let active_fetch = if cached_papers.is_none() {
+        let key = DashboardFeedKey {
+            feed_date: feed_date.clone(),
+            keyword_signature: keyword_signature.clone(),
+        };
+        start_dashboard_fetch(
+            arxiv.clone(),
+            keywords.clone(),
+            dashboard_recent_paper_ids(database, &feed_date)?,
+            key.clone(),
+            sender.clone(),
+        );
+        Some(key)
+    } else {
+        None
+    };
+    Ok(DashboardStartup {
+        keywords,
+        keyword_signature,
+        feed_date,
+        cached_papers,
+        active_fetch,
+    })
+}
+
+fn print_application_paths(paths: &Paths) {
+    println!("config: {}", paths.config_file.display());
+    println!("database: {}", paths.database_file.display());
+    println!("downloads: {}", paths.downloads_dir.display());
+    println!("plugins: {}", paths.plugins_dir.display());
+    println!("projects: {}", paths.projects_dir.display());
+}
+
+fn index_library(config: &Config, paths: &Paths, database: &Database) -> Result<()> {
+    let download_dir = config
+        .download_path
+        .clone()
+        .unwrap_or_else(|| paths.downloads_dir.clone());
+    let mut roots = config.library_folders.clone();
+    let download_dir = std::fs::canonicalize(&download_dir).unwrap_or(download_dir);
+    if !roots.iter().any(|root| {
+        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+        download_dir.starts_with(root)
+    }) {
+        roots.push(download_dir);
+    }
+    let pdfs = LibraryIndexer::scan(&roots);
+    let mut imported = 0_usize;
+    for pdf in &pdfs {
+        imported += usize::from(database.import_pdf(pdf)?);
+    }
+    println!("indexed: {}, imported: {}", pdfs.len(), imported);
+    Ok(())
+}
+
+struct LibraryLocations {
+    download_dir: PathBuf,
+    collection_roots: Vec<PathBuf>,
+    library_roots: Vec<PathBuf>,
+}
+
+impl LibraryLocations {
+    fn resolve(config: &Config, paths: &Paths) -> Result<Self> {
+        let download_dir = config
+            .download_path
+            .clone()
+            .unwrap_or_else(|| paths.downloads_dir.clone());
+        std::fs::create_dir_all(&download_dir).context("failed to create download directory")?;
+        let download_dir = std::fs::canonicalize(&download_dir).unwrap_or(download_dir);
+        let collection_roots = config
+            .library_folders
+            .iter()
+            .map(|root| std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
+            .collect::<Vec<_>>();
+        let mut library_roots = collection_roots.clone();
+        if !collection_roots
+            .iter()
+            .any(|root| download_dir.starts_with(root))
+        {
+            library_roots.push(download_dir.clone());
+        }
+        Ok(Self {
+            download_dir,
+            collection_roots,
+            library_roots,
+        })
+    }
+}
+
+fn load_initial_dashboard(
+    database: &Database,
+    paths: &Paths,
+    locations: &LibraryLocations,
+) -> Result<(papr_core::ResearchDashboard, Vec<papr_core::LibraryPaper>)> {
+    let mut dashboard = database
+        .research_dashboard()
+        .context("failed to load research dashboard")?;
+    let (paper_count, disk_usage) = LibraryIndexer::pdf_storage_stats(&locations.collection_roots);
+    let (downloaded, downloads_size) =
+        LibraryIndexer::pdf_storage_stats(std::slice::from_ref(&locations.download_dir));
+    let papers = database.library_papers_in_roots(&locations.library_roots)?;
+    dashboard.counts.papers = paper_count;
+    dashboard.counts.downloaded = downloaded;
+    dashboard.read = papers
+        .iter()
+        .filter(|paper| paper.reading_status == "read")
+        .count() as u64;
+    dashboard.disk_usage = disk_usage;
+    dashboard.downloads_size = downloads_size;
+    dashboard.database_size = std::fs::metadata(&paths.database_file).map_or(0, |m| m.len());
+    Ok((dashboard, papers))
 }
 
 async fn handle_plugin_cli(command: Option<&CliCommand>, plugin_host: &PluginHost) -> Result<bool> {
@@ -824,6 +884,76 @@ enum ProjectCompilerBackend {
     },
 }
 
+fn start_typst_worker_threads(
+    commands: std_mpsc::Receiver<TypstWorkerControl>,
+    event_sender: std_mpsc::Sender<ProjectBuildEvent>,
+    stdin: std::process::ChildStdin,
+    stdout: std::process::ChildStdout,
+    stderr: std::process::ChildStderr,
+) -> (Arc<AtomicBool>, Vec<std::thread::JoinHandle<()>>) {
+    let closing = Arc::new(AtomicBool::new(false));
+    let writer_closing = closing.clone();
+    let writer = std::thread::spawn(move || {
+        let mut writer = BufWriter::new(stdin);
+        while let Ok(command) = commands.recv() {
+            let request = match command {
+                TypstWorkerControl::Compile => TypstWorkerRequest::Compile,
+                TypstWorkerControl::Shutdown => TypstWorkerRequest::Shutdown,
+            };
+            if write_typst_worker_message(&mut writer, &request).is_err()
+                || matches!(command, TypstWorkerControl::Shutdown)
+            {
+                return;
+            }
+        }
+        if !writer_closing.load(Ordering::Acquire) {
+            let _ = write_typst_worker_message(&mut writer, &TypstWorkerRequest::Shutdown);
+        }
+    });
+    let reader_closing = closing.clone();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let response = match line {
+                Ok(line) => serde_json::from_str::<TypstWorkerResponse>(&line),
+                Err(error) => {
+                    let _ = event_sender.send(ProjectBuildEvent::TypstWorkerFailed(format!(
+                        "could not read Typst worker output: {error}"
+                    )));
+                    return;
+                }
+            };
+            let event = match response {
+                Ok(TypstWorkerResponse::Started) => ProjectBuildEvent::Started,
+                Ok(TypstWorkerResponse::Finished(result)) => {
+                    ProjectBuildEvent::TypstFinished(result)
+                }
+                Ok(TypstWorkerResponse::Fatal(error)) => {
+                    ProjectBuildEvent::TypstWorkerFailed(error)
+                }
+                Err(error) => ProjectBuildEvent::TypstWorkerFailed(format!(
+                    "invalid Typst worker response: {error}"
+                )),
+            };
+            if event_sender.send(event).is_err() {
+                return;
+            }
+        }
+        if !reader_closing.load(Ordering::Acquire) {
+            let _ = event_sender.send(ProjectBuildEvent::TypstWorkerFailed(
+                "Typst worker stopped unexpectedly".into(),
+            ));
+        }
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            if line.is_err() {
+                break;
+            }
+        }
+    });
+    (closing, vec![writer, reader, stderr_reader])
+}
+
 /// Compilation results control only the right-hand view, never keyboard focus.
 fn show_build_for_failed_compilation(app: &mut App) {
     app.project_view_flags.build_visible = true;
@@ -992,76 +1122,15 @@ impl ProjectCompiler {
             .take()
             .context("Typst worker stderr was not available")?;
 
-        let closing = Arc::new(AtomicBool::new(false));
-        let writer_closing = closing.clone();
-        let writer = std::thread::spawn(move || {
-            let mut writer = BufWriter::new(stdin);
-            while let Ok(command) = commands.recv() {
-                let request = match command {
-                    TypstWorkerControl::Compile => TypstWorkerRequest::Compile,
-                    TypstWorkerControl::Shutdown => TypstWorkerRequest::Shutdown,
-                };
-                if write_typst_worker_message(&mut writer, &request).is_err()
-                    || matches!(command, TypstWorkerControl::Shutdown)
-                {
-                    return;
-                }
-            }
-            // Closing the command channel is also a graceful shutdown request.
-            if !writer_closing.load(Ordering::Acquire) {
-                let _ = write_typst_worker_message(&mut writer, &TypstWorkerRequest::Shutdown);
-            }
-        });
-        let reader_closing = closing.clone();
-        let event_sender = sender.clone();
-        let reader = std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let response = match line {
-                    Ok(line) => serde_json::from_str::<TypstWorkerResponse>(&line),
-                    Err(error) => {
-                        let _ = event_sender.send(ProjectBuildEvent::TypstWorkerFailed(format!(
-                            "could not read Typst worker output: {error}"
-                        )));
-                        return;
-                    }
-                };
-                let event = match response {
-                    Ok(TypstWorkerResponse::Started) => ProjectBuildEvent::Started,
-                    Ok(TypstWorkerResponse::Finished(result)) => {
-                        ProjectBuildEvent::TypstFinished(result)
-                    }
-                    Ok(TypstWorkerResponse::Fatal(error)) => {
-                        ProjectBuildEvent::TypstWorkerFailed(error)
-                    }
-                    Err(error) => ProjectBuildEvent::TypstWorkerFailed(format!(
-                        "invalid Typst worker response: {error}"
-                    )),
-                };
-                if event_sender.send(event).is_err() {
-                    return;
-                }
-            }
-            if !reader_closing.load(Ordering::Acquire) {
-                let _ = event_sender.send(ProjectBuildEvent::TypstWorkerFailed(
-                    "Typst worker stopped unexpectedly".into(),
-                ));
-            }
-        });
-        // Always drain stderr so a verbose dependency cannot block the worker.
-        let stderr_reader = std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines() {
-                if line.is_err() {
-                    break;
-                }
-            }
-        });
+        let (closing, threads) =
+            start_typst_worker_threads(commands, sender.clone(), stdin, stdout, stderr);
         let external_pdf_opened = project.path.join("main.pdf").is_file();
         Ok(Self {
             project,
             backend: ProjectCompilerBackend::Typst {
                 control,
                 child,
-                threads: vec![writer, reader, stderr_reader],
+                threads,
                 closing,
             },
             events,
@@ -1901,546 +1970,68 @@ async fn run(
             state_changed = true;
         }
 
-        let project_files_changed = runtime
-            .project_filesystem_watcher
-            .as_ref()
-            .is_some_and(ProjectFilesystemWatcher::has_changes);
-        if project_files_changed {
-            refresh_project_filesystem(&mut runtime, app);
-            state_changed = true;
+        match process_config_reload(
+            session,
+            &mut runtime,
+            app,
+            &mut theme,
+            &senders,
+            &mut force_redraw,
+        )? {
+            ConfigReloadOutcome::Unchanged => {}
+            ConfigReloadOutcome::Changed => state_changed = true,
+            ConfigReloadOutcome::SkipIteration => continue,
         }
+        state_changed |=
+            process_project_runtime_updates(&mut runtime, app, &mut last_pdf_page_cached);
 
-        if runtime.config_filesystem_watcher.has_changes() {
-            runtime.config_reload_deadline =
-                Some(std::time::Instant::now() + std::time::Duration::from_millis(150));
-            runtime.config_reload_attempts = 0;
-        }
-        if let Some(deadline) = runtime.config_reload_deadline
-            && std::time::Instant::now() >= deadline
-        {
-            match Config::load(&runtime.config_file) {
-                Ok(config) => {
-                    runtime.config_reload_deadline = None;
-                    runtime.config_reload_attempts = 0;
-                    // Settings writes are applied synchronously before the
-                    // filesystem notification arrives. Do not repaint the
-                    // whole terminal for that identical follow-up event.
-                    if config == runtime.config {
-                        continue;
-                    }
-                    apply_config_update(&mut runtime, app, &config, &mut theme, &senders)?;
-                    // Do not overwrite an in-progress edit in Papr's own
-                    // editor. It will pick up the saved file when closed.
-                    if !app.overlay_flags.config_editor_focused {
-                        reload_config_editor_buffer(app, &runtime.config_file);
-                    }
-                    sync_settings_workspace_from_config(app, &config, &theme);
-                    app.toast = Some("Configuration reloaded.".to_owned());
-                    // A theme-only update can leave the layout and cell text
-                    // unchanged. Invalidate Ratatui's previous-frame buffer
-                    // so it repaints styles immediately instead of waiting
-                    // for a navigation-driven layout change.
-                    session.terminal_mut().clear()?;
-                    force_redraw = true;
-                    state_changed = true;
-                }
-                Err(_) if runtime.config_reload_attempts < 10 => {
-                    // Editors may notify after truncating the file but before
-                    // the replacement or final write is visible. Retry for a
-                    // bounded period without ever applying invalid TOML.
-                    runtime.config_reload_attempts += 1;
-                    runtime.config_reload_deadline =
-                        Some(std::time::Instant::now() + std::time::Duration::from_millis(100));
-                }
-                Err(error) => {
-                    runtime.config_reload_deadline = None;
-                    app.toast = Some(format!("Configuration reload failed: {error}"));
-                    state_changed = true;
-                }
-            }
-        }
-
-        if let Some(compiler) = runtime.project_compiler.as_mut() {
-            let previous = (
-                app.project_build_status.clone(),
-                app.project_build_diagnostics.clone(),
-            );
-            let preview_changed = compiler.drain_events(app);
-            if preview_changed
-                || previous.0 != app.project_build_status
-                || previous.1 != app.project_build_diagnostics
-            {
-                state_changed = true;
-            }
-        }
-        if let Some(indexer) = runtime.citation_index.as_ref()
-            && let Some(source) = indexer.drain()
-        {
-            runtime.citation_source = source;
-            update_project_completions(app, Some(&runtime.citation_source));
-            app.project_bib_titles = runtime
-                .citation_source
-                .all_entries()
-                .iter()
-                .map(|e| e.title.trim().to_lowercase())
-                .filter(|t| !t.is_empty())
-                .collect();
-            state_changed = true;
-        }
-
-        let project_preview_active = app.page == Page::Projects
-            && app.active_project.is_some()
-            && app.pdf_viewer_path.is_some();
-        if app.mode == AppMode::PdfView || project_preview_active {
-            let pdf_page_cached = pdf_viewer::is_current_page_cached(app);
-            if pdf_page_cached != last_pdf_page_cached {
-                state_changed = true;
-                last_pdf_page_cached = pdf_page_cached;
-            }
-        }
-
-        while let Ok(TodayResponse { key, result }) = today_receiver.try_recv() {
-            state_changed = true;
-            if key.feed_date != runtime.dashboard_feed_date
-                || key.keyword_signature != runtime.dashboard_keyword_signature
-            {
-                continue;
-            }
-            runtime.active_dashboard_fetch = None;
-            match result {
-                Ok(papers) => {
-                    runtime.database.save_dashboard_feed_cache(
-                        &key.feed_date,
-                        &runtime.dashboard_keyword_signature,
-                        &papers,
-                    )?;
-                    app.today_papers = papers;
-                    app.today_selected = app
-                        .today_selected
-                        .min(app.today_papers.len().saturating_sub(1));
-                    app.today_status = DiscoveryStatus::Ready;
-                }
-                Err(error) => app.today_status = DiscoveryStatus::Error(error),
-            }
-        }
-        if last_date_check.elapsed() >= std::time::Duration::from_secs(1) {
-            last_date_check = std::time::Instant::now();
-            let current_date = local_feed_date();
-            if current_date != runtime.dashboard_feed_date {
-                runtime.dashboard_feed_date = current_date;
-                refresh_dashboard_papers(&mut runtime, &senders, app)?;
-                state_changed = true;
-            }
-        }
+        state_changed |= process_dashboard_feed_updates(
+            &mut today_receiver,
+            &mut runtime,
+            &senders,
+            app,
+            &mut last_date_check,
+        )?;
         if last_enrichment_check.elapsed() >= std::time::Duration::from_mins(5) {
             last_enrichment_check = std::time::Instant::now();
             spawn_enrichment_if_needed(&mut runtime, &senders, app)?;
         }
-        while let Ok(response) = receiver.try_recv() {
-            state_changed = true;
-            if response.query == app.discovery.query
-                && response.request_id == app.discovery.request_id
-            {
-                match response.update {
-                    SearchUpdate::Partial { papers, next_start } => {
-                        app.discovery.update_results(papers);
-                        app.discovery.next_batch_start = next_start;
-                        app.discovery.progress_message =
-                            next_start.map(|_| "Loading more results...".to_owned());
-                        app.discovery.status = DiscoveryStatus::Loading;
-                    }
-                    SearchUpdate::Retrying {
-                        attempt,
-                        max_attempts,
-                    } => {
-                        app.discovery.progress_message = Some(format!(
-                            "Retrying more results ({attempt}/{max_attempts})..."
-                        ));
-                        app.discovery.status = DiscoveryStatus::Loading;
-                    }
-                    SearchUpdate::Complete(papers) => {
-                        app.discovery.update_results(papers);
-                        app.discovery.next_batch_start = None;
-                        app.discovery.progress_message = None;
-                        app.discovery.status = DiscoveryStatus::Ready;
-                    }
-                    SearchUpdate::InitialFailure(error) => {
-                        app.discovery.status = DiscoveryStatus::Error(error);
-                    }
-                    SearchUpdate::PartialFailure { next_start } => {
-                        app.discovery.next_batch_start = Some(next_start);
-                        app.discovery.progress_message =
-                            Some("More results could not be loaded. Press r to retry.".to_owned());
-                        app.discovery.status = DiscoveryStatus::Ready;
-                    }
-                }
-            }
-        }
-        let has_active_downloads = app.downloads.iter().any(|task| {
-            !matches!(
-                task.status,
-                DownloadStatus::Completed | DownloadStatus::Failed(_)
-            )
-        });
-        while runtime.watch_receiver.try_recv().is_ok() {
-            state_changed = true;
-            if !has_active_downloads {
-                start_silent_runtime_scan(&runtime, &senders, app);
-            }
-        }
-        while let Ok(response) = index_receiver.try_recv() {
-            state_changed = true;
-            apply_index_response(response, &mut runtime, &senders, app).await?;
-        }
-        let mut any_enrichment_processed = false;
-        while let Ok(MetadataEnrichment { paper_id, outcome }) = enrichment_receiver.try_recv() {
-            match outcome {
-                MetadataEnrichmentOutcome::Paper(ref p) => {
-                    runtime.database.apply_arxiv_metadata(paper_id, p)?;
-                    // Update in-memory today_papers
-                    for paper in &mut app.today_papers {
-                        if paper.id == p.id || (p.doi.is_some() && paper.doi == p.doi) {
-                            *paper = merge_enriched_remote_paper(paper, p);
-                        }
-                    }
-                    // Update in-memory discovery results
-                    for paper in &mut app.discovery.results {
-                        if paper.id == p.id || (p.doi.is_some() && paper.doi == p.doi) {
-                            *paper = merge_enriched_remote_paper(paper, p);
-                        }
-                    }
-                    // Save updated today_papers to SQLite dashboard feed cache
-                    let _ = runtime.database.save_dashboard_feed_cache(
-                        &runtime.dashboard_feed_date,
-                        &runtime.dashboard_keyword_signature,
-                        &app.today_papers,
-                    );
-                }
-                MetadataEnrichmentOutcome::Journal(ref journal) => {
-                    runtime.database.apply_journal_metadata(paper_id, journal)?;
-                }
-                MetadataEnrichmentOutcome::Failed(_) => {
-                    runtime
-                        .database
-                        .update_enrichment_status(paper_id, "failed")?;
-                }
-                MetadataEnrichmentOutcome::Unavailable => {
-                    runtime
-                        .database
-                        .update_enrichment_status(paper_id, "unavailable")?;
-                }
-            }
-            runtime.active_enrichments.remove(&paper_id);
-            if let Some(task) = app
-                .downloads
-                .iter_mut()
-                .find(|t| t.paper_id == Some(paper_id))
-            {
-                task.status = DownloadStatus::Completed;
-                finalize_download_task(task);
-            }
-            any_enrichment_processed = true;
-            state_changed = true;
-        }
-        if any_enrichment_processed {
-            refresh_library(&runtime, app)?;
-            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
-            refresh_dashboard(&runtime, app)?;
-            refresh_downloads(&runtime, app);
-        }
-        if enrichment_receiver.is_empty() && app.session_flags.enrichment_pending {
-            app.session_flags.enrichment_pending = false;
-            state_changed = true;
-        }
-        while let Ok(event) = download_receiver.try_recv() {
-            state_changed = true;
-            apply_download_event(event, &mut pending_downloads, &mut runtime, app, &senders)
-                .await?;
-        }
-        while let Ok(event) = app_events_receiver.try_recv() {
-            state_changed = true;
-            match event {
-                AppEvent::ReadingSessionCompleted {
-                    session_id,
-                    duration_s,
-                } => {
-                    runtime
-                        .database
-                        .record_reading_duration(session_id, duration_s)?;
-                    refresh_dashboard(&runtime, app)?;
-                }
-                AppEvent::Toast(message) => {
-                    app.toast = Some(message);
-                }
-                AppEvent::ProjectCitationReady {
-                    key,
-                    bibtex,
-                    title,
-                    bib_path,
-                } => {
-                    let existing = std::fs::read_to_string(&bib_path).unwrap_or_default();
-                    if existing.contains(&key) {
-                        app.toast =
-                            Some(format!("Citation {key} already exists in references.bib"));
-                    } else {
-                        use std::io::Write;
-                        if let Ok(mut f) = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&bib_path)
-                        {
-                            let _ = writeln!(f, "\n{bibtex}");
-                            app.toast = Some(format!("Added citation {key} to references.bib"));
-                            // Eagerly mark this title as added so the modal badge
-                            // updates before the background indexer fires.
-                            let title_key = title.trim().to_lowercase();
-                            if !title_key.is_empty() {
-                                app.project_bib_titles.insert(title_key);
-                            }
-                        } else {
-                            app.toast = Some("Failed to write references.bib".into());
-                        }
-                    }
-                }
-                AppEvent::ProjectCitationSearchFinished { query, result } => {
-                    if app.mode != AppMode::ProjectCitationSearch
-                        || app.project_citation_search_mode != ProjectCitationSearchMode::Online
-                        || app.project_citation_query != query
-                    {
-                        continue;
-                    }
-                    match result {
-                        Ok(papers) => {
-                            app.project_citation_results = papers
-                                .into_iter()
-                                .map(ProjectCitationResult::Online)
-                                .collect();
-                            app.project_citation_search_status =
-                                Some(if app.project_citation_results.is_empty() {
-                                    "No online papers found.".into()
-                                } else {
-                                    format!(
-                                        "{} online papers found",
-                                        app.project_citation_results.len()
-                                    )
-                                });
-                        }
-                        Err(error) => {
-                            app.project_citation_results.clear();
-                            app.project_citation_search_status =
-                                Some(format!("Online search failed: {error}"));
-                        }
-                    }
-                    app.project_citation_selected = 0;
-                    app.project_citation_scroll = 0;
-                }
-            }
-        }
-        if Some(app.page) != last_page {
-            app.workspace_query.clear();
-            app.workspace_query_cursor = 0;
-            if last_page == Some(Page::Settings) {
-                let original = app.settings_modal.original_theme.clone();
-                if !original.is_empty()
-                    && theme.name != original
-                    && let Ok(reverted) = Theme::load(&original)
-                {
-                    theme = reverted;
-                }
-            }
-            if matches!(app.page, Page::Dashboard | Page::History | Page::Statistics) {
-                refresh_dashboard(&runtime, app)?;
-            }
-            // Auto-open the settings workspace whenever the user navigates to the
-            // Settings page. Read the config fresh from disk so the workspace
-            // always reflects the persisted state.
-            if app.page == Page::Settings
-                && let Ok(config) = Config::load_or_create(&Paths::discover()?)
-            {
-                settings_modal::open_settings_modal(app, &config, &theme.name);
-            }
-            last_page = Some(app.page);
-            state_changed = true;
-        }
-        if app.toast.is_some() {
-            if app.toast != last_toast {
-                app.toast_timestamp = Some(std::time::Instant::now());
-                last_toast = app.toast.clone();
-                state_changed = true;
-            }
-            if let Some(ts) = app.toast_timestamp
-                && ts.elapsed() >= std::time::Duration::from_secs(7)
-            {
-                app.toast = None;
-                app.toast_timestamp = None;
-                last_toast = None;
-                state_changed = true;
-            }
-        } else {
-            if last_toast.is_some() {
-                state_changed = true;
-            }
-            app.toast_timestamp = None;
-            last_toast = None;
-        }
-
-        // Auto-cleanup failed downloads after 2 minutes (120 seconds)
-        let before_len = app.downloads.len();
-        app.downloads.retain(|task| {
-            if let DownloadStatus::Failed(_) = task.status
-                && let Some(failed_at) = task.failed_at
-                && failed_at.elapsed() >= std::time::Duration::from_mins(2)
-            {
-                return false;
-            }
-            true
-        });
-        if app.downloads.len() != before_len {
-            state_changed = true;
-            app.download_selected = app
-                .download_selected
-                .min(app.downloads.len().saturating_sub(1));
-        }
+        state_changed |= process_search_updates(&mut receiver, app);
+        state_changed |=
+            process_index_updates(&mut index_receiver, &mut runtime, &senders, app).await?;
+        state_changed |= process_enrichment_updates(&mut enrichment_receiver, &mut runtime, app)?;
+        state_changed |= process_download_updates(
+            &mut download_receiver,
+            &mut pending_downloads,
+            &mut runtime,
+            &senders,
+            app,
+        )
+        .await?;
+        state_changed |= process_app_events(&mut app_events_receiver, &runtime, app)?;
+        state_changed |= process_page_change(&runtime, app, &mut theme, &mut last_page)?;
+        state_changed |= update_toast_and_download_cleanup(app, &mut last_toast);
 
         // ── FIXED EVENT ORDERING ─────────────────────────────────────────────
         // Read all pending events FIRST, THEN draw.  Previously the loop drew
         // state before reading keys, adding one full iteration of input latency.
         // Now: drain pending events → block-wait → draw updated state.
 
-        // Use a dynamic timeout based on cache and animation status.
-        // Only call is_animating() once per iteration (it acquires a mutex).
         let preview_active = app.mode == AppMode::PdfView
             || (app.page == Page::Projects
                 && app.active_project.is_some()
                 && app.pdf_viewer_path.is_some());
         let animating = preview_active && pdf_viewer::is_animating();
-        let poll_timeout = if preview_active {
-            if animating {
-                std::time::Duration::from_millis(8) // ~120fps cap while animating
-            } else if pdf_viewer::is_current_page_cached(app) {
-                std::time::Duration::from_millis(250)
-            } else {
-                std::time::Duration::from_millis(50)
-            }
-        } else {
-            std::time::Duration::from_millis(100)
-        };
-
-        // Step 1: drain all immediately-available events so we fold multiple
-        // key-repeat events into a single physics update before drawing.
-        let mut got_event = false;
-        while event::poll(std::time::Duration::ZERO)? {
-            got_event = true;
-            match event::read()? {
-                Event::Key(key)
-                    if key.kind == KeyEventKind::Press
-                        || (app.mode == AppMode::PdfView && key.kind == KeyEventKind::Repeat) =>
-                {
-                    if app.page == Page::Settings
-                        && app.content_focused
-                        && app.mode == AppMode::Normal
-                    {
-                        if let Some(action) =
-                            handle_settings_modal_key(app, key, &mut runtime, &mut theme, &senders)?
-                        {
-                            apply_ui_action(
-                                action,
-                                &mut runtime,
-                                &senders,
-                                &mut pending_downloads,
-                                app,
-                                &mut theme,
-                            )
-                            .await?;
-                        }
-                    } else if let Some(action) = handle_key(app, key) {
-                        apply_ui_action(
-                            action,
-                            &mut runtime,
-                            &senders,
-                            &mut pending_downloads,
-                            app,
-                            &mut theme,
-                        )
-                        .await?;
-                    }
-                }
-                Event::Mouse(mouse) => {
-                    if let Some(action) = handle_mouse(app, mouse) {
-                        apply_ui_action(
-                            action,
-                            &mut runtime,
-                            &senders,
-                            &mut pending_downloads,
-                            app,
-                            &mut theme,
-                        )
-                        .await?;
-                    }
-                }
-                Event::Paste(text) => {
-                    paste_text_into_active_input(app, &text);
-                }
-                _ => {}
-            }
-        }
-
-        // Step 2: block-wait for the next event (up to poll_timeout).
-        if event::poll(poll_timeout)? {
-            got_event = true;
-            match event::read()? {
-                Event::Key(key)
-                    if key.kind == KeyEventKind::Press
-                        || (app.mode == AppMode::PdfView && key.kind == KeyEventKind::Repeat) =>
-                {
-                    if app.page == Page::Settings
-                        && app.content_focused
-                        && app.mode == AppMode::Normal
-                    {
-                        if let Some(action) =
-                            handle_settings_modal_key(app, key, &mut runtime, &mut theme, &senders)?
-                        {
-                            apply_ui_action(
-                                action,
-                                &mut runtime,
-                                &senders,
-                                &mut pending_downloads,
-                                app,
-                                &mut theme,
-                            )
-                            .await?;
-                        }
-                    } else if let Some(action) = handle_key(app, key) {
-                        apply_ui_action(
-                            action,
-                            &mut runtime,
-                            &senders,
-                            &mut pending_downloads,
-                            app,
-                            &mut theme,
-                        )
-                        .await?;
-                    }
-                }
-                Event::Mouse(mouse) => {
-                    if let Some(action) = handle_mouse(app, mouse) {
-                        apply_ui_action(
-                            action,
-                            &mut runtime,
-                            &senders,
-                            &mut pending_downloads,
-                            app,
-                            &mut theme,
-                        )
-                        .await?;
-                    }
-                }
-                Event::Paste(text) => {
-                    paste_text_into_active_input(app, &text);
-                }
-                _ => {}
-            }
-        }
+        let poll_timeout = terminal_poll_timeout(app, preview_active, animating);
+        let got_event = poll_terminal_events(
+            app,
+            &mut runtime,
+            &senders,
+            &mut pending_downloads,
+            &mut theme,
+            poll_timeout,
+        )
+        .await?;
 
         if got_event || animating {
             force_redraw = true;
@@ -2455,25 +2046,596 @@ async fn run(
         // in THIS iteration, not the next one).
         if state_changed || force_redraw {
             force_redraw = false; // consumed here
-            session.set_command_cursor_active(app.mode == AppMode::TerminalCommand)?;
-            let draw_start = std::time::Instant::now();
-            session
-                .terminal_mut()
-                .draw(|frame| ui::render(frame, app, &theme))?;
-            if draw_start.elapsed() > std::time::Duration::from_millis(16) {
-                log_message(
-                    &runtime.database_file,
-                    &format!("Slow draw: {:?}", draw_start.elapsed()),
-                );
-            }
+            draw_application(session, app, &theme, &runtime.database_file)?;
         }
 
         tokio::task::yield_now().await;
     }
+    shutdown_runtime(&mut runtime);
+    Ok(())
+}
+
+fn shutdown_runtime(runtime: &mut Runtime) {
     if let Some(mut compiler) = runtime.project_compiler.take() {
         compiler.stop();
     }
     pdf_viewer::cleanup_temp_files();
+}
+
+fn draw_application(
+    session: &mut TerminalSession,
+    app: &mut App,
+    theme: &Theme,
+    database_file: &Path,
+) -> Result<()> {
+    session.set_command_cursor_active(app.mode == AppMode::TerminalCommand)?;
+    let draw_start = std::time::Instant::now();
+    session
+        .terminal_mut()
+        .draw(|frame| ui::render(frame, app, theme))?;
+    if draw_start.elapsed() > std::time::Duration::from_millis(16) {
+        log_message(
+            database_file,
+            &format!("Slow draw: {:?}", draw_start.elapsed()),
+        );
+    }
+    Ok(())
+}
+
+enum ConfigReloadOutcome {
+    Unchanged,
+    Changed,
+    SkipIteration,
+}
+
+fn process_config_reload(
+    session: &mut TerminalSession,
+    runtime: &mut Runtime,
+    app: &mut App,
+    theme: &mut Theme,
+    senders: &ActionSenders,
+    force_redraw: &mut bool,
+) -> Result<ConfigReloadOutcome> {
+    if runtime.config_filesystem_watcher.has_changes() {
+        runtime.config_reload_deadline =
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(150));
+        runtime.config_reload_attempts = 0;
+    }
+    let Some(deadline) = runtime.config_reload_deadline else {
+        return Ok(ConfigReloadOutcome::Unchanged);
+    };
+    if std::time::Instant::now() < deadline {
+        return Ok(ConfigReloadOutcome::Unchanged);
+    }
+    match Config::load(&runtime.config_file) {
+        Ok(config) => {
+            runtime.config_reload_deadline = None;
+            runtime.config_reload_attempts = 0;
+            if config == runtime.config {
+                return Ok(ConfigReloadOutcome::SkipIteration);
+            }
+            apply_config_update(runtime, app, &config, theme, senders)?;
+            if !app.overlay_flags.config_editor_focused {
+                reload_config_editor_buffer(app, &runtime.config_file);
+            }
+            sync_settings_workspace_from_config(app, &config, theme);
+            app.toast = Some("Configuration reloaded.".to_owned());
+            session.terminal_mut().clear()?;
+            *force_redraw = true;
+            Ok(ConfigReloadOutcome::Changed)
+        }
+        Err(_) if runtime.config_reload_attempts < 10 => {
+            runtime.config_reload_attempts += 1;
+            runtime.config_reload_deadline =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(100));
+            Ok(ConfigReloadOutcome::Unchanged)
+        }
+        Err(error) => {
+            runtime.config_reload_deadline = None;
+            app.toast = Some(format!("Configuration reload failed: {error}"));
+            Ok(ConfigReloadOutcome::Changed)
+        }
+    }
+}
+
+fn process_project_runtime_updates(
+    runtime: &mut Runtime,
+    app: &mut App,
+    last_pdf_page_cached: &mut bool,
+) -> bool {
+    let mut changed = false;
+    if runtime
+        .project_filesystem_watcher
+        .as_ref()
+        .is_some_and(ProjectFilesystemWatcher::has_changes)
+    {
+        refresh_project_filesystem(runtime, app);
+        changed = true;
+    }
+    if let Some(compiler) = runtime.project_compiler.as_mut() {
+        let previous = (
+            app.project_build_status.clone(),
+            app.project_build_diagnostics.clone(),
+        );
+        changed |= compiler.drain_events(app)
+            || previous.0 != app.project_build_status
+            || previous.1 != app.project_build_diagnostics;
+    }
+    if let Some(indexer) = runtime.citation_index.as_ref()
+        && let Some(source) = indexer.drain()
+    {
+        runtime.citation_source = source;
+        update_project_completions(app, Some(&runtime.citation_source));
+        app.project_bib_titles = runtime
+            .citation_source
+            .all_entries()
+            .iter()
+            .map(|entry| entry.title.trim().to_lowercase())
+            .filter(|title| !title.is_empty())
+            .collect();
+        changed = true;
+    }
+    let preview_active = app.mode == AppMode::PdfView
+        || (app.page == Page::Projects
+            && app.active_project.is_some()
+            && app.pdf_viewer_path.is_some());
+    if preview_active {
+        let cached = pdf_viewer::is_current_page_cached(app);
+        changed |= cached != *last_pdf_page_cached;
+        *last_pdf_page_cached = cached;
+    }
+    changed
+}
+
+fn process_dashboard_feed_updates(
+    receiver: &mut mpsc::UnboundedReceiver<TodayResponse>,
+    runtime: &mut Runtime,
+    senders: &ActionSenders,
+    app: &mut App,
+    last_date_check: &mut std::time::Instant,
+) -> Result<bool> {
+    let mut changed = false;
+    while let Ok(TodayResponse { key, result }) = receiver.try_recv() {
+        changed = true;
+        if key.feed_date != runtime.dashboard_feed_date
+            || key.keyword_signature != runtime.dashboard_keyword_signature
+        {
+            continue;
+        }
+        runtime.active_dashboard_fetch = None;
+        match result {
+            Ok(papers) => {
+                runtime.database.save_dashboard_feed_cache(
+                    &key.feed_date,
+                    &runtime.dashboard_keyword_signature,
+                    &papers,
+                )?;
+                app.today_papers = papers;
+                app.today_selected = app
+                    .today_selected
+                    .min(app.today_papers.len().saturating_sub(1));
+                app.today_status = DiscoveryStatus::Ready;
+            }
+            Err(error) => app.today_status = DiscoveryStatus::Error(error),
+        }
+    }
+    if last_date_check.elapsed() >= std::time::Duration::from_secs(1) {
+        *last_date_check = std::time::Instant::now();
+        let current_date = local_feed_date();
+        if current_date != runtime.dashboard_feed_date {
+            runtime.dashboard_feed_date = current_date;
+            refresh_dashboard_papers(runtime, senders, app)?;
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+fn process_search_updates(
+    receiver: &mut mpsc::UnboundedReceiver<SearchResponse>,
+    app: &mut App,
+) -> bool {
+    let mut changed = false;
+    while let Ok(response) = receiver.try_recv() {
+        changed = true;
+        if response.query != app.discovery.query || response.request_id != app.discovery.request_id
+        {
+            continue;
+        }
+        match response.update {
+            SearchUpdate::Partial { papers, next_start } => {
+                app.discovery.update_results(papers);
+                app.discovery.next_batch_start = next_start;
+                app.discovery.progress_message =
+                    next_start.map(|_| "Loading more results...".to_owned());
+                app.discovery.status = DiscoveryStatus::Loading;
+            }
+            SearchUpdate::Retrying {
+                attempt,
+                max_attempts,
+            } => {
+                app.discovery.progress_message = Some(format!(
+                    "Retrying more results ({attempt}/{max_attempts})..."
+                ));
+                app.discovery.status = DiscoveryStatus::Loading;
+            }
+            SearchUpdate::Complete(papers) => {
+                app.discovery.update_results(papers);
+                app.discovery.next_batch_start = None;
+                app.discovery.progress_message = None;
+                app.discovery.status = DiscoveryStatus::Ready;
+            }
+            SearchUpdate::InitialFailure(error) => {
+                app.discovery.status = DiscoveryStatus::Error(error);
+            }
+            SearchUpdate::PartialFailure { next_start } => {
+                app.discovery.next_batch_start = Some(next_start);
+                app.discovery.progress_message =
+                    Some("More results could not be loaded. Press r to retry.".to_owned());
+                app.discovery.status = DiscoveryStatus::Ready;
+            }
+        }
+    }
+    changed
+}
+
+async fn process_index_updates(
+    receiver: &mut mpsc::UnboundedReceiver<IndexResponse>,
+    runtime: &mut Runtime,
+    senders: &ActionSenders,
+    app: &mut App,
+) -> Result<bool> {
+    let mut changed = false;
+    let has_active_downloads = app.downloads.iter().any(|task| {
+        !matches!(
+            task.status,
+            DownloadStatus::Completed | DownloadStatus::Failed(_)
+        )
+    });
+    while runtime.watch_receiver.try_recv().is_ok() {
+        changed = true;
+        if !has_active_downloads {
+            start_silent_runtime_scan(runtime, senders, app);
+        }
+    }
+    while let Ok(response) = receiver.try_recv() {
+        changed = true;
+        apply_index_response(response, runtime, senders, app).await?;
+    }
+    Ok(changed)
+}
+
+fn process_enrichment_updates(
+    receiver: &mut mpsc::UnboundedReceiver<MetadataEnrichment>,
+    runtime: &mut Runtime,
+    app: &mut App,
+) -> Result<bool> {
+    let mut changed = false;
+    while let Ok(MetadataEnrichment { paper_id, outcome }) = receiver.try_recv() {
+        apply_enrichment_outcome(runtime, app, paper_id, outcome)?;
+        runtime.active_enrichments.remove(&paper_id);
+        if let Some(task) = app
+            .downloads
+            .iter_mut()
+            .find(|task| task.paper_id == Some(paper_id))
+        {
+            task.status = DownloadStatus::Completed;
+            finalize_download_task(task);
+        }
+        changed = true;
+    }
+    if changed {
+        refresh_library(runtime, app)?;
+        refresh_organization(&runtime.database, &runtime.library_roots, app)?;
+        refresh_dashboard(runtime, app)?;
+        refresh_downloads(runtime, app);
+    }
+    if receiver.is_empty() && app.session_flags.enrichment_pending {
+        app.session_flags.enrichment_pending = false;
+        changed = true;
+    }
+    Ok(changed)
+}
+
+fn apply_enrichment_outcome(
+    runtime: &mut Runtime,
+    app: &mut App,
+    paper_id: i64,
+    outcome: MetadataEnrichmentOutcome,
+) -> Result<()> {
+    match outcome {
+        MetadataEnrichmentOutcome::Paper(paper) => {
+            runtime.database.apply_arxiv_metadata(paper_id, &paper)?;
+            for candidate in app
+                .today_papers
+                .iter_mut()
+                .chain(app.discovery.results.iter_mut())
+            {
+                if candidate.id == paper.id || (paper.doi.is_some() && candidate.doi == paper.doi) {
+                    *candidate = merge_enriched_remote_paper(candidate, &paper);
+                }
+            }
+            let _ = runtime.database.save_dashboard_feed_cache(
+                &runtime.dashboard_feed_date,
+                &runtime.dashboard_keyword_signature,
+                &app.today_papers,
+            );
+        }
+        MetadataEnrichmentOutcome::Journal(journal) => {
+            runtime
+                .database
+                .apply_journal_metadata(paper_id, &journal)?;
+        }
+        MetadataEnrichmentOutcome::Failed(_) => {
+            runtime
+                .database
+                .update_enrichment_status(paper_id, "failed")?;
+        }
+        MetadataEnrichmentOutcome::Unavailable => {
+            runtime
+                .database
+                .update_enrichment_status(paper_id, "unavailable")?;
+        }
+    }
+    Ok(())
+}
+
+async fn process_download_updates(
+    receiver: &mut mpsc::UnboundedReceiver<DownloadEvent>,
+    pending: &mut HashMap<String, RemotePaper>,
+    runtime: &mut Runtime,
+    senders: &ActionSenders,
+    app: &mut App,
+) -> Result<bool> {
+    let mut changed = false;
+    while let Ok(event) = receiver.try_recv() {
+        changed = true;
+        apply_download_event(event, pending, runtime, app, senders).await?;
+    }
+    Ok(changed)
+}
+
+fn process_app_events(
+    receiver: &mut mpsc::UnboundedReceiver<AppEvent>,
+    runtime: &Runtime,
+    app: &mut App,
+) -> Result<bool> {
+    let mut changed = false;
+    while let Ok(event) = receiver.try_recv() {
+        changed = true;
+        match event {
+            AppEvent::ReadingSessionCompleted {
+                session_id,
+                duration_s,
+            } => {
+                runtime
+                    .database
+                    .record_reading_duration(session_id, duration_s)?;
+                refresh_dashboard(runtime, app)?;
+            }
+            AppEvent::Toast(message) => app.toast = Some(message),
+            AppEvent::ProjectCitationReady {
+                key,
+                bibtex,
+                title,
+                bib_path,
+            } => apply_project_citation_ready(app, &key, &bibtex, &title, &bib_path),
+            AppEvent::ProjectCitationSearchFinished { query, result } => {
+                apply_project_citation_search_result(app, &query, result);
+            }
+        }
+    }
+    Ok(changed)
+}
+
+fn apply_project_citation_ready(
+    app: &mut App,
+    key: &str,
+    bibtex: &str,
+    title: &str,
+    bib_path: &Path,
+) {
+    let existing = std::fs::read_to_string(bib_path).unwrap_or_default();
+    if existing.contains(key) {
+        app.toast = Some(format!("Citation {key} already exists in references.bib"));
+        return;
+    }
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(bib_path)
+    else {
+        app.toast = Some("Failed to write references.bib".into());
+        return;
+    };
+    let _ = writeln!(file, "\n{bibtex}");
+    app.toast = Some(format!("Added citation {key} to references.bib"));
+    let title = title.trim().to_lowercase();
+    if !title.is_empty() {
+        app.project_bib_titles.insert(title);
+    }
+}
+
+fn apply_project_citation_search_result(
+    app: &mut App,
+    query: &str,
+    result: Result<Vec<RemotePaper>, String>,
+) {
+    if app.mode != AppMode::ProjectCitationSearch
+        || app.project_citation_search_mode != ProjectCitationSearchMode::Online
+        || app.project_citation_query != query
+    {
+        return;
+    }
+    match result {
+        Ok(papers) => {
+            app.project_citation_results = papers
+                .into_iter()
+                .map(ProjectCitationResult::Online)
+                .collect();
+            app.project_citation_search_status = Some(if app.project_citation_results.is_empty() {
+                "No online papers found.".into()
+            } else {
+                format!("{} online papers found", app.project_citation_results.len())
+            });
+        }
+        Err(error) => {
+            app.project_citation_results.clear();
+            app.project_citation_search_status = Some(format!("Online search failed: {error}"));
+        }
+    }
+    app.project_citation_selected = 0;
+    app.project_citation_scroll = 0;
+}
+
+fn process_page_change(
+    runtime: &Runtime,
+    app: &mut App,
+    theme: &mut Theme,
+    last_page: &mut Option<Page>,
+) -> Result<bool> {
+    if Some(app.page) == *last_page {
+        return Ok(false);
+    }
+    app.workspace_query.clear();
+    app.workspace_query_cursor = 0;
+    if *last_page == Some(Page::Settings) {
+        let original = app.settings_modal.original_theme.clone();
+        if !original.is_empty()
+            && theme.name != original
+            && let Ok(reverted) = Theme::load(&original)
+        {
+            *theme = reverted;
+        }
+    }
+    if matches!(app.page, Page::Dashboard | Page::History | Page::Statistics) {
+        refresh_dashboard(runtime, app)?;
+    }
+    if app.page == Page::Settings
+        && let Ok(config) = Config::load_or_create(&Paths::discover()?)
+    {
+        settings_modal::open_settings_modal(app, &config, &theme.name);
+    }
+    *last_page = Some(app.page);
+    Ok(true)
+}
+
+fn update_toast_and_download_cleanup(app: &mut App, last_toast: &mut Option<String>) -> bool {
+    let mut changed = false;
+    if app.toast.is_some() {
+        if app.toast != *last_toast {
+            app.toast_timestamp = Some(std::time::Instant::now());
+            last_toast.clone_from(&app.toast);
+            changed = true;
+        }
+        if app
+            .toast_timestamp
+            .is_some_and(|timestamp| timestamp.elapsed() >= std::time::Duration::from_secs(7))
+        {
+            app.toast = None;
+            app.toast_timestamp = None;
+            *last_toast = None;
+            changed = true;
+        }
+    } else {
+        changed |= last_toast.is_some();
+        app.toast_timestamp = None;
+        *last_toast = None;
+    }
+    let before = app.downloads.len();
+    app.downloads.retain(|task| {
+        !matches!(task.status, DownloadStatus::Failed(_))
+            || task
+                .failed_at
+                .is_none_or(|failed_at| failed_at.elapsed() < std::time::Duration::from_mins(2))
+    });
+    if app.downloads.len() != before {
+        changed = true;
+        app.download_selected = app
+            .download_selected
+            .min(app.downloads.len().saturating_sub(1));
+    }
+    changed
+}
+
+fn terminal_poll_timeout(app: &App, preview_active: bool, animating: bool) -> std::time::Duration {
+    if !preview_active {
+        return std::time::Duration::from_millis(100);
+    }
+    if animating {
+        std::time::Duration::from_millis(8)
+    } else if pdf_viewer::is_current_page_cached(app) {
+        std::time::Duration::from_millis(250)
+    } else {
+        std::time::Duration::from_millis(50)
+    }
+}
+
+async fn poll_terminal_events(
+    app: &mut App,
+    runtime: &mut Runtime,
+    senders: &ActionSenders,
+    pending_downloads: &mut HashMap<String, RemotePaper>,
+    theme: &mut Theme,
+    timeout: std::time::Duration,
+) -> Result<bool> {
+    let mut received = false;
+    while event::poll(std::time::Duration::ZERO)? {
+        received = true;
+        process_terminal_event(
+            event::read()?,
+            app,
+            runtime,
+            senders,
+            pending_downloads,
+            theme,
+        )
+        .await?;
+    }
+    if event::poll(timeout)? {
+        received = true;
+        process_terminal_event(
+            event::read()?,
+            app,
+            runtime,
+            senders,
+            pending_downloads,
+            theme,
+        )
+        .await?;
+    }
+    Ok(received)
+}
+
+async fn process_terminal_event(
+    event: Event,
+    app: &mut App,
+    runtime: &mut Runtime,
+    senders: &ActionSenders,
+    pending_downloads: &mut HashMap<String, RemotePaper>,
+    theme: &mut Theme,
+) -> Result<()> {
+    let action = match event {
+        Event::Key(key)
+            if key.kind == KeyEventKind::Press
+                || (app.mode == AppMode::PdfView && key.kind == KeyEventKind::Repeat) =>
+        {
+            if app.page == Page::Settings && app.content_focused && app.mode == AppMode::Normal {
+                handle_settings_modal_key(app, key, runtime, theme, senders)?
+            } else {
+                handle_key(app, key)
+            }
+        }
+        Event::Mouse(mouse) => handle_mouse(app, mouse),
+        Event::Paste(text) => {
+            paste_text_into_active_input(app, &text);
+            None
+        }
+        _ => None,
+    };
+    if let Some(action) = action {
+        apply_ui_action(action, runtime, senders, pending_downloads, app).await?;
+    }
     Ok(())
 }
 
@@ -2627,7 +2789,76 @@ async fn apply_ui_action(
     senders: &ActionSenders,
     pending_downloads: &mut HashMap<String, RemotePaper>,
     app: &mut App,
-    _theme: &mut Theme,
+) -> Result<()> {
+    match action {
+        action @ (UiAction::Search(_)
+        | UiAction::RetryDiscoverMore
+        | UiAction::OpenPaper(_)
+        | UiAction::OpenBrowser(_)
+        | UiAction::Download(_)
+        | UiAction::Reindex) => {
+            apply_discovery_action(action, runtime, senders, pending_downloads, app).await
+        }
+        UiAction::RetryDownload { id, paper } => {
+            apply_retry_download(id, paper, runtime, senders, pending_downloads, app);
+            Ok(())
+        }
+        action @ (UiAction::RefreshProjects
+        | UiAction::CreateProject { .. }
+        | UiAction::OpenProject(_)
+        | UiAction::CloseProject) => apply_project_lifecycle_action(action, runtime, app),
+        action @ (UiAction::CreateProjectFile(_)
+        | UiAction::OpenProjectFile(_)
+        | UiAction::RenameProjectEntry { .. }
+        | UiAction::ConfirmDeleteProjectEntry(_)
+        | UiAction::DeleteProjectEntry(_)) => {
+            apply_project_entry_action(action, app);
+            Ok(())
+        }
+        action @ (UiAction::RenameProject { .. }
+        | UiAction::ConfirmDeleteProject(_)
+        | UiAction::DeleteProject(_)) => apply_project_management_action(action, runtime, app),
+        action @ (UiAction::OpenPdf { .. }
+        | UiAction::OpenNote(_)
+        | UiAction::SaveNote(_)
+        | UiAction::Prompt(_)
+        | UiAction::RenameCollection(_)
+        | UiAction::RenamePdf(_)
+        | UiAction::CreateCollection
+        | UiAction::SubmitPrompt(_)
+        | UiAction::Bookmark(_)) => {
+            apply_paper_metadata_action(action, runtime, senders, app).await
+        }
+        action @ (UiAction::AddToQueue(_)
+        | UiAction::RemoveFromQueue(_)
+        | UiAction::MoveQueueItemUp(_)
+        | UiAction::MoveQueueItemDown(_)
+        | UiAction::ClosePdf
+        | UiAction::OpenCollection(_)
+        | UiAction::OpenAuthor(_)
+        | UiAction::OpenDownload(_)
+        | UiAction::MarkUnread(_)) => {
+            apply_library_navigation_action(action, runtime, senders, app)
+        }
+        action @ (UiAction::CopyCitation(_)
+        | UiAction::InsertProjectCitation(_)
+        | UiAction::InsertProjectRemoteCitation(_)
+        | UiAction::SearchProjectCitationsOnline(_)) => {
+            apply_citation_action(action, runtime, senders, app)
+        }
+        action @ (UiAction::ConfirmDeletePaper { .. }
+        | UiAction::ConfirmDeleteCollection { .. }
+        | UiAction::DeletePaper { .. }
+        | UiAction::DeleteCollection { .. }) => apply_deletion_action(action, runtime, app),
+    }
+}
+
+async fn apply_discovery_action(
+    action: UiAction,
+    runtime: &mut Runtime,
+    senders: &ActionSenders,
+    pending_downloads: &mut HashMap<String, RemotePaper>,
+    app: &mut App,
 ) -> Result<()> {
     match action {
         UiAction::Search(query) => {
@@ -2637,10 +2868,9 @@ async fn apply_ui_action(
             refresh_dashboard(runtime, app)?;
             let request_id = app.discovery.begin_search();
             let client = runtime.arxiv.clone();
-            let response_sender = senders.search.clone();
+            let sender = senders.search.clone();
             tokio::spawn(async move {
-                fetch_discovery_pages(client, query, request_id, Vec::new(), 0, response_sender)
-                    .await;
+                fetch_discovery_pages(client, query, request_id, Vec::new(), 0, sender).await;
             });
         }
         UiAction::RetryDiscoverMore => {
@@ -2650,13 +2880,12 @@ async fn apply_ui_action(
             app.discovery.status = DiscoveryStatus::Loading;
             app.discovery.progress_message = Some("Loading more results...".to_owned());
             let client = runtime.arxiv.clone();
-            let response_sender = senders.search.clone();
+            let sender = senders.search.clone();
             let query = app.discovery.query.clone();
             let request_id = app.discovery.request_id;
             let papers = app.discovery.results.clone();
             tokio::spawn(async move {
-                fetch_discovery_pages(client, query, request_id, papers, start, response_sender)
-                    .await;
+                fetch_discovery_pages(client, query, request_id, papers, start, sender).await;
             });
         }
         UiAction::OpenPaper(paper) => {
@@ -2679,60 +2908,74 @@ async fn apply_ui_action(
             pending_downloads,
             app,
         ),
-        UiAction::RetryDownload { id, paper } => {
-            if pending_downloads.contains_key(&id) {
-                return Ok(());
-            }
-            if let Some(task) = app.downloads.iter_mut().find(|t| t.id == id) {
-                if let Some(ref path_str) = task.pdf_path {
-                    let path = std::path::PathBuf::from(path_str);
-                    let part_path = path.with_extension("pdf.part");
-                    let _ = std::fs::remove_file(&path);
-                    let _ = std::fs::remove_file(&part_path);
-                }
-                task.downloaded = 0;
-                task.total = None;
-                task.status = DownloadStatus::Starting;
-                task.failed_at = None;
-                let destination = task.pdf_path.as_ref().map_or_else(
-                    || runtime.download_dir.join(format!("{id}.pdf")),
-                    std::path::PathBuf::from,
-                );
-                pending_downloads.insert(id.clone(), paper.clone());
-                app.toast = Some("Retrying download...".to_owned());
-                let manager = runtime.downloads.clone();
-                let events = senders.download.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = manager
-                        .download(
-                            &id,
-                            &paper.pdf_url.clone().unwrap_or_default(),
-                            &destination,
-                            &events,
-                        )
-                        .await
-                    {
-                        let _ = events.send(DownloadEvent::Failed {
-                            id,
-                            error: error.to_string(),
-                        });
-                    }
-                });
-            }
-        }
         UiAction::Reindex => start_runtime_scan(runtime, senders, app),
+        _ => unreachable!("discovery action routed to the wrong handler"),
+    }
+    Ok(())
+}
+
+fn apply_retry_download(
+    id: String,
+    paper: RemotePaper,
+    runtime: &Runtime,
+    senders: &ActionSenders,
+    pending_downloads: &mut HashMap<String, RemotePaper>,
+    app: &mut App,
+) {
+    if pending_downloads.contains_key(&id) {
+        return;
+    }
+    let Some(task) = app.downloads.iter_mut().find(|task| task.id == id) else {
+        return;
+    };
+    if let Some(path) = task.pdf_path.as_deref().map(PathBuf::from) {
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("pdf.part"));
+    }
+    task.downloaded = 0;
+    task.total = None;
+    task.status = DownloadStatus::Starting;
+    task.failed_at = None;
+    let destination = task.pdf_path.as_ref().map_or_else(
+        || runtime.download_dir.join(format!("{id}.pdf")),
+        PathBuf::from,
+    );
+    pending_downloads.insert(id.clone(), paper.clone());
+    app.toast = Some("Retrying download...".to_owned());
+    let manager = runtime.downloads.clone();
+    let events = senders.download.clone();
+    tokio::spawn(async move {
+        if let Err(error) = manager
+            .download(
+                &id,
+                &paper.pdf_url.clone().unwrap_or_default(),
+                &destination,
+                &events,
+            )
+            .await
+        {
+            let _ = events.send(DownloadEvent::Failed {
+                id,
+                error: error.to_string(),
+            });
+        }
+    });
+}
+
+fn apply_project_lifecycle_action(
+    action: UiAction,
+    runtime: &mut Runtime,
+    app: &mut App,
+) -> Result<()> {
+    match action {
         UiAction::RefreshProjects => {
-            app.projects = runtime
-                .project_manager
-                .list()
-                .map_err(|e| anyhow::anyhow!(e))?;
+            app.projects = runtime.project_manager.list().map_err(anyhow::Error::msg)?;
             app.projects_selected = app
                 .projects_selected
                 .min(app.projects.len().saturating_sub(1));
         }
         UiAction::CreateProject { name, compiler } => {
-            let name = name.trim();
-            let project = match runtime.project_manager.create(name, &compiler) {
+            let project = match runtime.project_manager.create(name.trim(), &compiler) {
                 Ok(project) => project,
                 Err(error) => {
                     app.toast = Some(format!("Could not create project: {error}"));
@@ -2747,9 +2990,7 @@ async fn apply_ui_action(
                 .record_project_activity("project_opened", &project.name)?;
             refresh_dashboard(runtime, app)?;
             open_project_workspace(app, project.clone());
-            start_project_compiler(runtime, app);
-            start_citation_indexer(runtime, app);
-            restart_project_filesystem_watcher(runtime, app);
+            start_project_services(runtime, app);
             app.projects = runtime.project_manager.list().unwrap_or_default();
             app.projects_selected = app
                 .projects
@@ -2758,102 +2999,39 @@ async fn apply_ui_action(
                 .unwrap_or(0);
             app.toast = Some(format!("Created project {}", project.name));
         }
-        UiAction::CreateProjectFile(name) => {
-            let Some(project) = app.active_project.as_ref() else {
-                app.toast = Some("Could not create file: no project is open.".into());
-                return Ok(());
-            };
-            let tree_dir = app
-                .project_tree_dir
-                .clone()
-                .unwrap_or_else(|| project.path.clone());
-            let path = match create_project_file(&tree_dir, &name) {
-                Ok(path) => path,
-                Err(error) => {
-                    app.toast = Some(format!("Could not create file: {error}"));
-                    return Ok(());
-                }
-            };
-            app.project_files = project_tree_entries(&tree_dir);
-            app.project_file_selected = app
-                .project_files
-                .iter()
-                .position(|candidate| candidate == &path)
-                .unwrap_or(0);
-            app.project_pane = ProjectPane::FileTree;
-            if path.is_file() && is_project_text_file(&path) {
-                open_project_file(app, path);
-            }
-            app.toast = Some(
-                if name.trim().ends_with('/') {
-                    "Created folder"
-                } else {
-                    "Created file"
-                }
-                .into(),
-            );
-        }
         UiAction::OpenProject(project) => {
             let project = runtime
                 .project_manager
                 .open(project.path)
-                .map_err(|e| anyhow::anyhow!(e))?;
+                .map_err(anyhow::Error::msg)?;
             runtime
                 .database
                 .record_project_activity("project_opened", &project.name)?;
             refresh_dashboard(runtime, app)?;
             open_project_workspace(app, project);
-            start_project_compiler(runtime, app);
-            start_citation_indexer(runtime, app);
-            restart_project_filesystem_watcher(runtime, app);
+            start_project_services(runtime, app);
         }
+        UiAction::CloseProject => close_project_workspace(runtime, app),
+        _ => unreachable!("project lifecycle action routed to the wrong handler"),
+    }
+    Ok(())
+}
+
+fn start_project_services(runtime: &mut Runtime, app: &mut App) {
+    start_project_compiler(runtime, app);
+    start_citation_indexer(runtime, app);
+    restart_project_filesystem_watcher(runtime, app);
+}
+
+fn apply_project_entry_action(action: UiAction, app: &mut App) {
+    match action {
+        UiAction::CreateProjectFile(name) => create_project_entry(app, &name),
         UiAction::OpenProjectFile(path) => {
-            if app.project_editor_dirty && !save_project_editor(app) {
-                return Ok(());
+            if !app.project_editor_dirty || save_project_editor(app) {
+                open_project_file(app, path);
             }
-            open_project_file(app, path);
         }
-        UiAction::RenameProjectEntry { path, name } => {
-            let Some(project) = app.active_project.as_ref() else {
-                app.toast = Some("Could not rename entry: no project is open.".into());
-                return Ok(());
-            };
-            let project_root = project.path.clone();
-            let name = name.trim();
-            if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
-                app.toast =
-                    Some("Could not rename entry: enter a single file or folder name.".into());
-                return Ok(());
-            }
-            let Some(parent) = path.parent() else {
-                app.toast = Some("Could not rename entry: invalid path.".into());
-                return Ok(());
-            };
-            if !path.starts_with(&project_root) {
-                app.toast = Some("Could not rename entry outside the project.".into());
-                return Ok(());
-            }
-            let renamed = parent.join(name);
-            if let Err(error) = std::fs::rename(&path, &renamed) {
-                app.toast = Some(format!("Could not rename entry: {error}"));
-                return Ok(());
-            }
-            if let Some(editor_path) = &app.project_editor_path
-                && let Ok(relative) = editor_path.strip_prefix(&path)
-            {
-                app.project_editor_path = Some(renamed.join(relative));
-            } else if app.project_editor_path.as_ref() == Some(&path) {
-                app.project_editor_path = Some(renamed.clone());
-            }
-            let tree_dir = app.project_tree_dir.clone().unwrap_or(project_root);
-            app.project_files = project_tree_entries(&tree_dir);
-            app.project_file_selected = app
-                .project_files
-                .iter()
-                .position(|entry| entry == &renamed)
-                .unwrap_or(0);
-            app.toast = Some("Renamed".into());
-        }
+        UiAction::RenameProjectEntry { path, name } => rename_project_entry(app, &path, &name),
         UiAction::ConfirmDeleteProjectEntry(path) => {
             let name = path
                 .file_name()
@@ -2867,109 +3045,221 @@ async fn apply_ui_action(
             });
             app.mode = AppMode::ConfirmDelete;
         }
-        UiAction::DeleteProjectEntry(path) => {
-            let Some(project) = app.active_project.as_ref() else {
-                app.toast = Some("Could not delete entry: no project is open.".into());
-                return Ok(());
-            };
-            if path == project.path || !path.starts_with(&project.path) {
-                app.toast = Some("Could not delete entry outside the project.".into());
-                return Ok(());
-            }
-            let result = if path.is_dir() {
-                std::fs::remove_dir_all(&path)
-            } else {
-                std::fs::remove_file(&path)
-            };
-            if let Err(error) = result {
-                app.toast = Some(format!("Could not delete entry: {error}"));
-                return Ok(());
-            }
-            let tree_dir = app
-                .project_tree_dir
-                .clone()
-                .unwrap_or_else(|| project.path.clone());
-            app.project_files = project_tree_entries(&tree_dir);
-            app.project_file_selected = app
-                .project_file_selected
-                .min(app.project_files.len().saturating_sub(1));
-            if app.project_editor_path.as_ref() == Some(&path) {
-                app.project_editor_path = None;
-                app.project_editor_text.clear();
-                app.project_editor_dirty = false;
-                app.project_editor_cursor = 0;
-                app.project_pane = ProjectPane::FileTree;
-            }
-            app.toast = Some("Deleted".into());
+        UiAction::DeleteProjectEntry(path) => delete_project_entry(app, &path),
+        _ => unreachable!("project entry action routed to the wrong handler"),
+    }
+}
+
+fn create_project_entry(app: &mut App, name: &str) {
+    let Some(project) = app.active_project.as_ref() else {
+        app.toast = Some("Could not create file: no project is open.".into());
+        return;
+    };
+    let tree_dir = app
+        .project_tree_dir
+        .clone()
+        .unwrap_or_else(|| project.path.clone());
+    let path = match create_project_file(&tree_dir, name) {
+        Ok(path) => path,
+        Err(error) => {
+            app.toast = Some(format!("Could not create file: {error}"));
+            return;
         }
-        UiAction::RenameProject { project, name } => {
-            match runtime.project_manager.rename(&project, &name) {
-                Ok(renamed) => {
-                    runtime.database.record_project_activity(
-                        "project_renamed",
-                        &format!("{} -> {}", project.name, renamed.name),
-                    )?;
-                    refresh_dashboard(runtime, app)?;
-                    if app
-                        .active_project
-                        .as_ref()
-                        .is_some_and(|active| active.path == project.path)
-                    {
-                        let old_root = project.path;
-                        let old_editor = app.project_editor_path.clone();
-                        open_project_workspace(app, renamed.clone());
-                        if let Some(old_editor) = old_editor
-                            && let Ok(relative) = old_editor.strip_prefix(&old_root)
-                        {
-                            let new_editor = renamed.path.join(relative);
-                            if let Ok(text) = std::fs::read_to_string(&new_editor) {
-                                app.project_editor_path = Some(new_editor);
-                                app.project_editor_text = text;
-                                app.project_pane = ProjectPane::Editor;
-                            }
-                        }
-                        start_project_compiler(runtime, app);
-                        start_citation_indexer(runtime, app);
-                        restart_project_filesystem_watcher(runtime, app);
-                    }
-                    app.projects = runtime.project_manager.list().unwrap_or_default();
-                    app.projects_selected = app
-                        .projects
-                        .iter()
-                        .position(|p| p.path == renamed.path)
-                        .unwrap_or(0);
-                    app.toast = Some(format!("Renamed project to {}", renamed.name));
-                }
-                Err(error) => app.toast = Some(format!("Could not rename project: {error}")),
-            }
+    };
+    app.project_files = project_tree_entries(&tree_dir);
+    app.project_file_selected = app
+        .project_files
+        .iter()
+        .position(|candidate| candidate == &path)
+        .unwrap_or(0);
+    app.project_pane = ProjectPane::FileTree;
+    if path.is_file() && is_project_text_file(&path) {
+        open_project_file(app, path);
+    }
+    app.toast = Some(
+        if name.trim().ends_with('/') {
+            "Created folder"
+        } else {
+            "Created file"
         }
+        .into(),
+    );
+}
+
+fn rename_project_entry(app: &mut App, path: &Path, name: &str) {
+    let Some(project) = app.active_project.as_ref() else {
+        app.toast = Some("Could not rename entry: no project is open.".into());
+        return;
+    };
+    let project_root = project.path.clone();
+    let name = name.trim();
+    if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
+        app.toast = Some("Could not rename entry: enter a single file or folder name.".into());
+        return;
+    }
+    let Some(parent) = path.parent() else {
+        app.toast = Some("Could not rename entry: invalid path.".into());
+        return;
+    };
+    if !path.starts_with(&project_root) {
+        app.toast = Some("Could not rename entry outside the project.".into());
+        return;
+    }
+    let renamed = parent.join(name);
+    if let Err(error) = std::fs::rename(path, &renamed) {
+        app.toast = Some(format!("Could not rename entry: {error}"));
+        return;
+    }
+    if let Some(editor_path) = &app.project_editor_path
+        && let Ok(relative) = editor_path.strip_prefix(path)
+    {
+        app.project_editor_path = Some(renamed.join(relative));
+    } else if app.project_editor_path.as_deref() == Some(path) {
+        app.project_editor_path = Some(renamed.clone());
+    }
+    let tree_dir = app.project_tree_dir.clone().unwrap_or(project_root);
+    app.project_files = project_tree_entries(&tree_dir);
+    app.project_file_selected = app
+        .project_files
+        .iter()
+        .position(|entry| entry == &renamed)
+        .unwrap_or(0);
+    app.toast = Some("Renamed".into());
+}
+
+fn delete_project_entry(app: &mut App, path: &Path) {
+    let Some(project) = app.active_project.as_ref() else {
+        app.toast = Some("Could not delete entry: no project is open.".into());
+        return;
+    };
+    if path == project.path || !path.starts_with(&project.path) {
+        app.toast = Some("Could not delete entry outside the project.".into());
+        return;
+    }
+    let result = if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    if let Err(error) = result {
+        app.toast = Some(format!("Could not delete entry: {error}"));
+        return;
+    }
+    let tree_dir = app
+        .project_tree_dir
+        .clone()
+        .unwrap_or_else(|| project.path.clone());
+    app.project_files = project_tree_entries(&tree_dir);
+    app.project_file_selected = app
+        .project_file_selected
+        .min(app.project_files.len().saturating_sub(1));
+    if app.project_editor_path.as_deref() == Some(path) {
+        app.project_editor_path = None;
+        app.project_editor_text.clear();
+        app.project_editor_dirty = false;
+        app.project_editor_cursor = 0;
+        app.project_pane = ProjectPane::FileTree;
+    }
+    app.toast = Some("Deleted".into());
+}
+
+fn apply_project_management_action(
+    action: UiAction,
+    runtime: &mut Runtime,
+    app: &mut App,
+) -> Result<()> {
+    match action {
+        UiAction::RenameProject { project, name } => rename_project(runtime, app, project, &name)?,
         UiAction::ConfirmDeleteProject(project) => {
             app.delete_confirmation = Some(DeletionTarget::Project { project });
             app.mode = AppMode::ConfirmDelete;
         }
-        UiAction::DeleteProject(project) => {
-            let was_active = app
-                .active_project
-                .as_ref()
-                .is_some_and(|active| active.path == project.path);
-            if let Err(error) = runtime.project_manager.delete(&project) {
-                app.toast = Some(format!("Could not delete project: {error}"));
-                return Ok(());
-            }
-            runtime
-                .database
-                .record_project_activity("project_deleted", &project.name)?;
-            refresh_dashboard(runtime, app)?;
-            if was_active {
-                close_project_workspace(runtime, app);
-            }
-            app.project_pane = ProjectPane::ProjectList;
-            app.projects = runtime.project_manager.list().unwrap_or_default();
-            app.projects_selected = app
-                .projects_selected
-                .min(app.projects.len().saturating_sub(1));
-            app.toast = Some(format!("Deleted project {}", project.name));
+        UiAction::DeleteProject(project) => delete_project(runtime, app, &project)?,
+        _ => unreachable!("project management action routed to the wrong handler"),
+    }
+    Ok(())
+}
+
+fn rename_project(
+    runtime: &mut Runtime,
+    app: &mut App,
+    project: Project,
+    name: &str,
+) -> Result<()> {
+    let renamed = match runtime.project_manager.rename(&project, name) {
+        Ok(renamed) => renamed,
+        Err(error) => {
+            app.toast = Some(format!("Could not rename project: {error}"));
+            return Ok(());
         }
+    };
+    runtime.database.record_project_activity(
+        "project_renamed",
+        &format!("{} -> {}", project.name, renamed.name),
+    )?;
+    refresh_dashboard(runtime, app)?;
+    if app
+        .active_project
+        .as_ref()
+        .is_some_and(|active| active.path == project.path)
+    {
+        let old_root = project.path;
+        let old_editor = app.project_editor_path.clone();
+        open_project_workspace(app, renamed.clone());
+        if let Some(old_editor) = old_editor
+            && let Ok(relative) = old_editor.strip_prefix(&old_root)
+        {
+            let new_editor = renamed.path.join(relative);
+            if let Ok(text) = std::fs::read_to_string(&new_editor) {
+                app.project_editor_path = Some(new_editor);
+                app.project_editor_text = text;
+                app.project_pane = ProjectPane::Editor;
+            }
+        }
+        start_project_services(runtime, app);
+    }
+    app.projects = runtime.project_manager.list().unwrap_or_default();
+    app.projects_selected = app
+        .projects
+        .iter()
+        .position(|candidate| candidate.path == renamed.path)
+        .unwrap_or(0);
+    app.toast = Some(format!("Renamed project to {}", renamed.name));
+    Ok(())
+}
+
+fn delete_project(runtime: &mut Runtime, app: &mut App, project: &Project) -> Result<()> {
+    let was_active = app
+        .active_project
+        .as_ref()
+        .is_some_and(|active| active.path == project.path);
+    if let Err(error) = runtime.project_manager.delete(project) {
+        app.toast = Some(format!("Could not delete project: {error}"));
+        return Ok(());
+    }
+    runtime
+        .database
+        .record_project_activity("project_deleted", &project.name)?;
+    refresh_dashboard(runtime, app)?;
+    if was_active {
+        close_project_workspace(runtime, app);
+    }
+    app.project_pane = ProjectPane::ProjectList;
+    app.projects = runtime.project_manager.list().unwrap_or_default();
+    app.projects_selected = app
+        .projects_selected
+        .min(app.projects.len().saturating_sub(1));
+    app.toast = Some(format!("Deleted project {}", project.name));
+    Ok(())
+}
+
+async fn apply_paper_metadata_action(
+    action: UiAction,
+    runtime: &mut Runtime,
+    senders: &ActionSenders,
+    app: &mut App,
+) -> Result<()> {
+    match action {
         UiAction::OpenPdf { paper_id, path } => {
             let session_id = runtime.database.record_open(paper_id, true)?;
             open_pdf(
@@ -3003,33 +3293,9 @@ async fn apply_ui_action(
             let current = runtime.database.paper_collection_name(paper_id)?;
             show_collection_prompt(app, Some(paper_id), None, current);
         }
-        UiAction::RenameCollection(id) => {
-            app.metadata_prompt = Some(MetadataPrompt {
-                paper_id: None,
-                rename_collection_id: Some(id),
-                rename_paper_id: None,
-                value: String::new(),
-                cursor: 0,
-                selected: 0,
-                current_collection: None,
-            });
-            app.mode = AppMode::Prompt;
-        }
-        UiAction::RenamePdf(id) => {
-            app.metadata_prompt = Some(MetadataPrompt {
-                paper_id: None,
-                rename_collection_id: None,
-                rename_paper_id: Some(id),
-                value: String::new(),
-                cursor: 0,
-                selected: 0,
-                current_collection: None,
-            });
-            app.mode = AppMode::Prompt;
-        }
-        UiAction::CreateCollection => {
-            show_collection_prompt(app, None, None, None);
-        }
+        UiAction::RenameCollection(id) => open_rename_prompt(app, Some(id), None),
+        UiAction::RenamePdf(id) => open_rename_prompt(app, None, Some(id)),
+        UiAction::CreateCollection => show_collection_prompt(app, None, None, None),
         UiAction::SubmitPrompt(prompt) => {
             apply_collection_prompt(runtime, app, &prompt)?;
             refresh_organization(&runtime.database, &runtime.library_roots, app)?;
@@ -3044,9 +3310,6 @@ async fn apply_ui_action(
                 Some(paper_id),
                 Some(if active { "added" } else { "removed" }),
             )?;
-            // Refresh all workspace projections before the next draw. This
-            // removes a just-unbookmarked row from Bookmarks immediately and
-            // keeps collection, author, and library views consistent.
             refresh_paper_views(runtime, app)?;
             app.toast = Some(if active {
                 "Paper bookmarked".into()
@@ -3054,6 +3317,31 @@ async fn apply_ui_action(
                 "Bookmark removed".into()
             });
         }
+        _ => unreachable!("paper metadata action routed to the wrong handler"),
+    }
+    Ok(())
+}
+
+fn open_rename_prompt(app: &mut App, collection_id: Option<i64>, paper_id: Option<i64>) {
+    app.metadata_prompt = Some(MetadataPrompt {
+        paper_id: None,
+        rename_collection_id: collection_id,
+        rename_paper_id: paper_id,
+        value: String::new(),
+        cursor: 0,
+        selected: 0,
+        current_collection: None,
+    });
+    app.mode = AppMode::Prompt;
+}
+
+fn apply_library_navigation_action(
+    action: UiAction,
+    runtime: &mut Runtime,
+    senders: &ActionSenders,
+    app: &mut App,
+) -> Result<()> {
+    match action {
         UiAction::AddToQueue(paper_id) => {
             runtime.database.add_to_queue(paper_id)?;
             refresh_paper_views(runtime, app)?;
@@ -3075,92 +3363,95 @@ async fn apply_ui_action(
             app.reading_queue_selected = (app.reading_queue_selected + 1)
                 .min(app.reading_queue_papers.len().saturating_sub(1));
         }
-        UiAction::ClosePdf => {
-            if let (Some(session_id), Some(start)) =
-                (app.active_pdf_session_id, app.active_pdf_session_start)
-            {
-                let duration_s = start.elapsed().as_secs();
-                runtime
-                    .database
-                    .record_reading_duration(session_id, duration_s)?;
-                refresh_dashboard(runtime, app)?;
-            }
-            app.active_pdf_session_id = None;
-            app.active_pdf_session_start = None;
-            app.mode = AppMode::Normal;
-            if let Some(path) = app.pdf_viewer_path.take() {
-                pdf_viewer::release_document(&path);
-            }
-            app.pdf_viewer_page = 1;
-            app.pdf_viewer_total_pages = 1;
-            app.pdf_viewer_scroll_y = 0;
-            app.pdf_viewer_page_pixel_h = 0;
-            app.pdf_viewer_max_scroll_y = 0;
+        UiAction::ClosePdf => close_pdf_viewer(runtime, app)?,
+        UiAction::OpenCollection(id) => open_collection(&runtime.database, app, id)?,
+        UiAction::OpenAuthor(id) => {
+            open_author(&runtime.database, &runtime.library_roots, app, id)?;
         }
-        UiAction::CloseProject => close_project_workspace(runtime, app),
-        UiAction::OpenCollection(collection_id) => {
-            open_collection(&runtime.database, app, collection_id)?;
-        }
-        UiAction::OpenAuthor(author_id) => {
-            open_author(&runtime.database, &runtime.library_roots, app, author_id)?;
-        }
-        UiAction::OpenDownload(id) => {
-            let task = app.downloads.iter().find(|t| t.id == id);
-            let mut paper_id = None;
-            let mut path = None;
-            if let Some(task) = task {
-                if let Some(task_paper_id) = task.paper_id {
-                    paper_id = Some(task_paper_id);
-                    if let Some(paper) = app.library.papers.iter().find(|p| p.id == task_paper_id)
-                        && let Some(pdf_path) = &paper.pdf_path
-                    {
-                        path = Some(PathBuf::from(pdf_path));
-                    }
-                }
-                if path.is_none()
-                    && let Some(pdf_path) = &task.pdf_path
-                {
-                    path = Some(PathBuf::from(pdf_path));
-                }
-            }
-            let path = path.unwrap_or_else(|| runtime.download_dir.join(format!("{id}.pdf")));
-            let session_id = paper_id
-                .map(|paper_id| runtime.database.record_open(paper_id, true))
-                .transpose()?;
-            open_pdf(
-                &runtime.pdf_viewer,
-                &path,
-                app,
-                session_id,
-                Some(senders.app_events.clone()),
-            )?;
-            if paper_id.is_some() {
-                refresh_paper_views(runtime, app)?;
-            }
-        }
+        UiAction::OpenDownload(id) => open_download(runtime, senders, app, &id)?,
         UiAction::MarkUnread(paper_id) => {
             runtime.database.mark_unread(paper_id)?;
             refresh_paper_views(runtime, app)?;
             app.toast = Some("Marked unread".into());
         }
+        _ => unreachable!("library navigation action routed to the wrong handler"),
+    }
+    Ok(())
+}
+
+fn close_pdf_viewer(runtime: &Runtime, app: &mut App) -> Result<()> {
+    if let (Some(session_id), Some(start)) =
+        (app.active_pdf_session_id, app.active_pdf_session_start)
+    {
+        runtime
+            .database
+            .record_reading_duration(session_id, start.elapsed().as_secs())?;
+        refresh_dashboard(runtime, app)?;
+    }
+    app.active_pdf_session_id = None;
+    app.active_pdf_session_start = None;
+    app.mode = AppMode::Normal;
+    if let Some(path) = app.pdf_viewer_path.take() {
+        pdf_viewer::release_document(&path);
+    }
+    app.pdf_viewer_page = 1;
+    app.pdf_viewer_total_pages = 1;
+    app.pdf_viewer_scroll_y = 0;
+    app.pdf_viewer_page_pixel_h = 0;
+    app.pdf_viewer_max_scroll_y = 0;
+    Ok(())
+}
+
+fn open_download(
+    runtime: &mut Runtime,
+    senders: &ActionSenders,
+    app: &mut App,
+    id: &str,
+) -> Result<()> {
+    let task = app.downloads.iter().find(|task| task.id == id);
+    let mut paper_id = None;
+    let mut path = None;
+    if let Some(task) = task {
+        if let Some(task_paper_id) = task.paper_id {
+            paper_id = Some(task_paper_id);
+            path = app
+                .library
+                .papers
+                .iter()
+                .find(|paper| paper.id == task_paper_id)
+                .and_then(|paper| paper.pdf_path.as_deref())
+                .map(PathBuf::from);
+        }
+        if path.is_none() {
+            path = task.pdf_path.as_deref().map(PathBuf::from);
+        }
+    }
+    let path = path.unwrap_or_else(|| runtime.download_dir.join(format!("{id}.pdf")));
+    let session_id = paper_id
+        .map(|paper_id| runtime.database.record_open(paper_id, true))
+        .transpose()?;
+    open_pdf(
+        &runtime.pdf_viewer,
+        &path,
+        app,
+        session_id,
+        Some(senders.app_events.clone()),
+    )?;
+    if paper_id.is_some() {
+        refresh_paper_views(runtime, app)?;
+    }
+    Ok(())
+}
+
+fn apply_citation_action(
+    action: UiAction,
+    runtime: &mut Runtime,
+    senders: &ActionSenders,
+    app: &mut App,
+) -> Result<()> {
+    match action {
         UiAction::CopyCitation(target) => {
-            let metadata = match target {
-                PaperTarget::Local(id) => runtime.database.paper_citation_metadata(id)?,
-                PaperTarget::Remote(paper) => Some(papr_core::models::CitationMetadata {
-                    title: paper.title.clone(),
-                    authors: paper.authors.join(" and "),
-                    doi: paper.doi.clone(),
-                    arxiv_id: Some(paper.id.clone()),
-                    year: Some(
-                        paper
-                            .published
-                            .with_timezone(&chrono::Local)
-                            .format("%Y")
-                            .to_string(),
-                    ),
-                    journal_ref: paper.journal_ref.clone(),
-                }),
-            };
+            let metadata = citation_metadata(runtime, target)?;
             if let Some(metadata) = metadata {
                 app.toast = Some("Fetching citation...".into());
                 tokio::spawn(citation::fetch_and_copy_citation(
@@ -3174,11 +3465,10 @@ async fn apply_ui_action(
         UiAction::InsertProjectCitation(paper) => {
             if let Ok(Some(metadata)) = runtime.database.paper_citation_metadata(paper.id) {
                 if let Some(project) = &app.active_project {
-                    let bib_path = project.path.join("references.bib");
                     app.toast = Some("Fetching citation...".into());
                     tokio::spawn(citation::fetch_and_insert_project_citation(
                         metadata,
-                        bib_path,
+                        project.path.join("references.bib"),
                         senders.app_events.clone(),
                     ));
                 }
@@ -3188,20 +3478,7 @@ async fn apply_ui_action(
         }
         UiAction::InsertProjectRemoteCitation(paper) => {
             if let Some(project) = &app.active_project {
-                let metadata = papr_core::models::CitationMetadata {
-                    title: paper.title,
-                    authors: paper.authors.join(" and "),
-                    doi: paper.doi,
-                    arxiv_id: Some(paper.id),
-                    year: Some(
-                        paper
-                            .published
-                            .with_timezone(&chrono::Local)
-                            .format("%Y")
-                            .to_string(),
-                    ),
-                    journal_ref: paper.journal_ref,
-                };
+                let metadata = remote_citation_metadata(paper);
                 app.toast = Some("Fetching citation...".into());
                 tokio::spawn(citation::fetch_and_insert_project_citation(
                     metadata,
@@ -3217,6 +3494,43 @@ async fn apply_ui_action(
                 senders.app_events.clone(),
             ));
         }
+        _ => unreachable!("citation action routed to the wrong handler"),
+    }
+    Ok(())
+}
+
+fn citation_metadata(
+    runtime: &mut Runtime,
+    target: PaperTarget,
+) -> Result<Option<papr_core::models::CitationMetadata>> {
+    match target {
+        PaperTarget::Local(id) => runtime
+            .database
+            .paper_citation_metadata(id)
+            .map_err(Into::into),
+        PaperTarget::Remote(paper) => Ok(Some(remote_citation_metadata(*paper))),
+    }
+}
+
+fn remote_citation_metadata(paper: RemotePaper) -> papr_core::models::CitationMetadata {
+    papr_core::models::CitationMetadata {
+        title: paper.title,
+        authors: paper.authors.join(" and "),
+        doi: paper.doi,
+        arxiv_id: Some(paper.id),
+        year: Some(
+            paper
+                .published
+                .with_timezone(&chrono::Local)
+                .format("%Y")
+                .to_string(),
+        ),
+        journal_ref: paper.journal_ref,
+    }
+}
+
+fn apply_deletion_action(action: UiAction, runtime: &mut Runtime, app: &mut App) -> Result<()> {
+    match action {
         UiAction::ConfirmDeletePaper {
             paper_id,
             title,
@@ -3241,65 +3555,69 @@ async fn apply_ui_action(
             });
             app.mode = AppMode::ConfirmDelete;
         }
-        UiAction::DeletePaper { paper_id, path } => {
-            // Resolve the path at deletion time.  The path captured by the UI
-            // can predate a rename, while the database is updated by the
-            // rename flow and therefore names the file that must be removed.
-            let database_path = runtime
-                .database
-                .library_paper_by_id(paper_id)?
-                .and_then(|paper| paper.pdf_path)
-                .map(PathBuf::from);
-            let file_path = database_path.or(path);
-            if let Some(p) = file_path.as_ref().filter(|path| path.exists()) {
-                std::fs::remove_file(p)
-                    .with_context(|| format!("failed to delete PDF at {}", p.display()))?;
-            }
-            runtime.database.delete_paper(paper_id)?;
-            // Remove the in-memory task immediately as well.  Completed tasks
-            // are normally rebuilt from disk, but retaining one until the next
-            // refresh can make a just-deleted paper look downloaded.
-            app.downloads.retain(|task| task.paper_id != Some(paper_id));
-            refresh_library(runtime, app)?;
-            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
-            refresh_dashboard(runtime, app)?;
-            refresh_downloads(runtime, app);
-            app.toast = Some("PDF permanently deleted".into());
-        }
+        UiAction::DeletePaper { paper_id, path } => delete_paper(runtime, app, paper_id, path)?,
         UiAction::DeleteCollection {
             collection_id,
             path,
-        } => {
-            let papers = runtime.database.papers_for_collection(collection_id)?;
-            for paper in papers {
-                if let Some(ref path_str) = paper.pdf_path {
-                    let p = PathBuf::from(path_str);
-                    if p.exists() {
-                        let _ = std::fs::remove_file(p);
-                    }
-                }
-                runtime.database.delete_paper(paper.id)?;
-            }
-            if let Some(p) = &path
-                && p.exists()
-            {
-                let _ = std::fs::remove_dir_all(p);
-            }
-            runtime.database.delete_collection(collection_id)?;
-            if app.active_collection.as_ref().map(|c| c.id) == Some(collection_id) {
-                app.active_collection = None;
-                app.collection_papers.clear();
-            }
-            refresh_library(runtime, app)?;
-            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
-            refresh_dashboard(runtime, app)?;
-            refresh_downloads(runtime, app);
-            app.toast = Some("Group permanently deleted".into());
-        }
+        } => delete_collection(runtime, app, collection_id, path.as_deref())?,
+        _ => unreachable!("deletion action routed to the wrong handler"),
     }
     Ok(())
 }
 
+fn delete_paper(
+    runtime: &mut Runtime,
+    app: &mut App,
+    paper_id: i64,
+    fallback_path: Option<PathBuf>,
+) -> Result<()> {
+    let database_path = runtime
+        .database
+        .library_paper_by_id(paper_id)?
+        .and_then(|paper| paper.pdf_path)
+        .map(PathBuf::from);
+    if let Some(path) = database_path.or(fallback_path).filter(|path| path.exists()) {
+        std::fs::remove_file(&path)
+            .with_context(|| format!("failed to delete PDF at {}", path.display()))?;
+    }
+    runtime.database.delete_paper(paper_id)?;
+    app.downloads.retain(|task| task.paper_id != Some(paper_id));
+    refresh_after_library_change(runtime, app)?;
+    app.toast = Some("PDF permanently deleted".into());
+    Ok(())
+}
+
+fn delete_collection(
+    runtime: &mut Runtime,
+    app: &mut App,
+    collection_id: i64,
+    path: Option<&Path>,
+) -> Result<()> {
+    for paper in runtime.database.papers_for_collection(collection_id)? {
+        if let Some(path) = paper.pdf_path.as_deref().map(Path::new)
+            && path.exists()
+        {
+            let _ = std::fs::remove_file(path);
+        }
+        runtime.database.delete_paper(paper.id)?;
+    }
+    if let Some(path) = path.filter(|path| path.exists()) {
+        let _ = std::fs::remove_dir_all(path);
+    }
+    runtime.database.delete_collection(collection_id)?;
+    if app
+        .active_collection
+        .as_ref()
+        .map(|collection| collection.id)
+        == Some(collection_id)
+    {
+        app.active_collection = None;
+        app.collection_papers.clear();
+    }
+    refresh_after_library_change(runtime, app)?;
+    app.toast = Some("Group permanently deleted".into());
+    Ok(())
+}
 fn show_collection_prompt(
     app: &mut App,
     paper_id: Option<i64>,
@@ -3329,107 +3647,128 @@ fn apply_collection_prompt(
     }
 
     if let Some(paper_id) = prompt.rename_paper_id {
-        if name.contains(['/', '\\']) {
-            anyhow::bail!("filename must not contain path separators");
-        }
-        let mut new_name = name.to_string();
-        if !new_name.to_lowercase().ends_with(".pdf") {
-            new_name.push_str(".pdf");
-        }
-
-        let paper = app
-            .library
-            .papers
-            .iter()
-            .find(|p| p.id == paper_id)
-            .context("paper not found")?;
-        let source = PathBuf::from(paper.pdf_path.as_ref().context("paper has no local PDF")?);
-        let destination = source.with_file_name(&new_name);
-
-        if source != destination {
-            if destination.exists() {
-                anyhow::bail!("a file with this name already exists");
-            }
-            if let Some(task) = app
-                .downloads
-                .iter_mut()
-                .find(|t| t.paper_id == Some(paper_id))
-            {
-                task.status = DownloadStatus::Renaming;
-            }
-            move_pdf_file(&source, &destination)?;
-            runtime.database.rename_pdf(paper_id, &destination)?;
-            if let Some(task) = app
-                .downloads
-                .iter_mut()
-                .find(|t| t.paper_id == Some(paper_id))
-            {
-                task.pdf_path = Some(destination.to_string_lossy().into_owned());
-                task.status = DownloadStatus::Completed;
-            }
-            refresh_library(runtime, app)?;
-            refresh_organization(&runtime.database, &runtime.library_roots, app)?;
-            refresh_dashboard(runtime, app)?;
-            refresh_downloads(runtime, app);
-        }
-        return Ok(());
+        return rename_paper_pdf(runtime, app, paper_id, name);
     }
 
     validate_collection_name(name)?;
     if let Some(collection_id) = prompt.rename_collection_id {
-        let collection = app
-            .collections
-            .iter()
-            .find(|item| item.id == collection_id)
-            .context("group no longer exists")?;
-        let old = collection.folder_path.as_ref().map_or_else(
-            || runtime.primary_library_root.join(&collection.name),
-            PathBuf::from,
-        );
-        let new = old
-            .parent()
-            .unwrap_or(&runtime.primary_library_root)
-            .join(name);
-        std::fs::rename(&old, &new).context("failed to rename group directory")?;
-        if let Err(error) = runtime
-            .database
-            .rename_collection(collection_id, name, &old, &new)
-        {
-            let _ = std::fs::rename(&new, &old);
-            return Err(error.into());
-        }
-        let directories = LibraryIndexer::collection_directories(&runtime.collection_roots);
-        for directory in &directories {
-            runtime.database.sync_collection_directory(directory)?;
-        }
-        runtime
-            .database
-            .reconcile_collections(&runtime.collection_roots, &directories)?;
-        refresh_renamed_collection(
-            &runtime.database,
-            &runtime.library_roots,
-            app,
-            collection_id,
-        )?;
-        return Ok(());
+        return rename_collection(runtime, app, collection_id, name);
     }
     if prompt.paper_id.is_none() {
-        if app
-            .collections
-            .iter()
-            .any(|collection| collection.name.eq_ignore_ascii_case(name))
-        {
-            anyhow::bail!("a group with this name already exists");
-        }
-        let folder = runtime.primary_library_root.join(name);
-        std::fs::create_dir(&folder).context("failed to create group directory")?;
-        if let Err(error) = runtime.database.create_collection(name, &folder) {
-            let _ = std::fs::remove_dir(&folder);
-            return Err(error.into());
-        }
-        return Ok(());
+        return create_collection(runtime, app, name);
     }
     let paper_id = prompt.paper_id.context("group assignment has no paper")?;
+    assign_paper_to_collection(runtime, app, paper_id, name)
+}
+
+fn rename_paper_pdf(runtime: &mut Runtime, app: &mut App, paper_id: i64, name: &str) -> Result<()> {
+    if name.contains(['/', '\\']) {
+        anyhow::bail!("filename must not contain path separators");
+    }
+    let new_name = if name.to_lowercase().ends_with(".pdf") {
+        name.to_owned()
+    } else {
+        format!("{name}.pdf")
+    };
+    let paper = app
+        .library
+        .papers
+        .iter()
+        .find(|paper| paper.id == paper_id)
+        .context("paper not found")?;
+    let source = PathBuf::from(paper.pdf_path.as_ref().context("paper has no local PDF")?);
+    let destination = source.with_file_name(new_name);
+    if source == destination {
+        return Ok(());
+    }
+    if destination.exists() {
+        anyhow::bail!("a file with this name already exists");
+    }
+    if let Some(task) = app
+        .downloads
+        .iter_mut()
+        .find(|task| task.paper_id == Some(paper_id))
+    {
+        task.status = DownloadStatus::Renaming;
+    }
+    move_pdf_file(&source, &destination)?;
+    runtime.database.rename_pdf(paper_id, &destination)?;
+    if let Some(task) = app
+        .downloads
+        .iter_mut()
+        .find(|task| task.paper_id == Some(paper_id))
+    {
+        task.pdf_path = Some(destination.to_string_lossy().into_owned());
+        task.status = DownloadStatus::Completed;
+    }
+    refresh_after_library_change(runtime, app)
+}
+
+fn rename_collection(
+    runtime: &mut Runtime,
+    app: &mut App,
+    collection_id: i64,
+    name: &str,
+) -> Result<()> {
+    let collection = app
+        .collections
+        .iter()
+        .find(|item| item.id == collection_id)
+        .context("group no longer exists")?;
+    let old = collection.folder_path.as_ref().map_or_else(
+        || runtime.primary_library_root.join(&collection.name),
+        PathBuf::from,
+    );
+    let new = old
+        .parent()
+        .unwrap_or(&runtime.primary_library_root)
+        .join(name);
+    std::fs::rename(&old, &new).context("failed to rename group directory")?;
+    if let Err(error) = runtime
+        .database
+        .rename_collection(collection_id, name, &old, &new)
+    {
+        let _ = std::fs::rename(&new, &old);
+        return Err(error.into());
+    }
+    let directories = LibraryIndexer::collection_directories(&runtime.collection_roots);
+    for directory in &directories {
+        runtime.database.sync_collection_directory(directory)?;
+    }
+    runtime
+        .database
+        .reconcile_collections(&runtime.collection_roots, &directories)?;
+    refresh_renamed_collection(
+        &runtime.database,
+        &runtime.library_roots,
+        app,
+        collection_id,
+    )
+}
+
+fn create_collection(runtime: &Runtime, app: &App, name: &str) -> Result<()> {
+    if app
+        .collections
+        .iter()
+        .any(|collection| collection.name.eq_ignore_ascii_case(name))
+    {
+        anyhow::bail!("a group with this name already exists");
+    }
+    let folder = runtime.primary_library_root.join(name);
+    std::fs::create_dir(&folder).context("failed to create group directory")?;
+    if let Err(error) = runtime.database.create_collection(name, &folder) {
+        let _ = std::fs::remove_dir(&folder);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+fn assign_paper_to_collection(
+    runtime: &mut Runtime,
+    app: &mut App,
+    paper_id: i64,
+    name: &str,
+) -> Result<()> {
     let paper = app
         .library
         .papers
@@ -3472,6 +3811,10 @@ fn apply_collection_prompt(
         }
         return Err(error.into());
     }
+    refresh_after_library_change(runtime, app)
+}
+
+fn refresh_after_library_change(runtime: &mut Runtime, app: &mut App) -> Result<()> {
     refresh_library(runtime, app)?;
     refresh_organization(&runtime.database, &runtime.library_roots, app)?;
     refresh_dashboard(runtime, app)?;
@@ -4585,32 +4928,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         return None;
     }
     if app.mode == AppMode::PdfView {
-        if key.code == KeyCode::Char('?') {
-            app.dispatch(Command::ToggleHelp);
-            return None;
-        }
-        // Accept both Press and Repeat so held-key scrolling is driven by
-        // the OS key-repeat rate rather than by the 16 ms poll timeout.
-        let is_scroll_event = matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat);
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') if key.kind == KeyEventKind::Press => {
-                return Some(UiAction::ClosePdf);
-            }
-            KeyCode::Up | KeyCode::Char('k') if is_scroll_event => {
-                pdf_scroll(app, -1);
-            }
-            KeyCode::Down | KeyCode::Char('j') if is_scroll_event => {
-                pdf_scroll(app, 1);
-            }
-            KeyCode::PageUp if key.kind == KeyEventKind::Press => {
-                pdf_viewer::page_up(app);
-            }
-            KeyCode::PageDown if key.kind == KeyEventKind::Press => {
-                pdf_viewer::page_down(app);
-            }
-            _ => {}
-        }
-        return None;
+        return handle_pdf_viewer_key(app, key);
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t') {
         app.mode = AppMode::TerminalCommand;
@@ -4638,181 +4956,66 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if is_text_paste_shortcut(key) && paste_clipboard_into_active_input(app) {
         return None;
     }
-    if matches!(
-        app.mode,
+    if let KeyHandling::Handled(action) = handle_active_mode_key(app, key) {
+        return action.map(|action| *action);
+    }
+    if let KeyHandling::Handled(action) = handle_raw_workspace_key(app, key) {
+        return action.map(|action| *action);
+    }
+    let key = normalize_panel_navigation(key);
+    if let KeyHandling::Handled(action) = handle_navigation_key(app, key) {
+        return action.map(|action| *action);
+    }
+    handle_focused_workspace_key(app, key)
+}
+
+fn handle_active_mode_key(app: &mut App, key: KeyEvent) -> KeyHandling {
+    let action = match app.mode {
         AppMode::ProjectRename
-            | AppMode::ProjectCreate
-            | AppMode::ProjectFileCreate
-            | AppMode::ProjectEntryRename
-    ) {
-        match key.code {
-            KeyCode::Esc => {
-                app.project_rename_input.clear();
-                app.project_rename_cursor = 0;
-                app.project_entry_rename_path = None;
-                app.mode = AppMode::Normal;
-            }
-            KeyCode::Enter => {
-                let creating_project = app.mode == AppMode::ProjectCreate;
-                let creating_file = app.mode == AppMode::ProjectFileCreate;
-                let renaming_entry = app.mode == AppMode::ProjectEntryRename;
-                app.mode = AppMode::Normal;
-                let name = app.project_rename_input.trim().to_owned();
-                app.project_rename_input.clear();
-                app.project_rename_cursor = 0;
-                if creating_project {
-                    return Some(UiAction::CreateProject {
-                        name,
-                        compiler: app.project_create_compiler.clone(),
-                    });
-                }
-                if creating_file {
-                    return Some(UiAction::CreateProjectFile(name));
-                }
-                if renaming_entry {
-                    return app
-                        .project_entry_rename_path
-                        .take()
-                        .map(|path| UiAction::RenameProjectEntry { path, name });
-                }
-                let project = app
-                    .active_project
-                    .clone()
-                    .or_else(|| app.projects.get(app.projects_selected).cloned());
-                return project.map(|project| UiAction::RenameProject { project, name });
-            }
-            KeyCode::Tab | KeyCode::BackTab if app.mode == AppMode::ProjectCreate => {
-                if app.project_create_compiler == "typst" {
-                    "latex".clone_into(&mut app.project_create_compiler);
-                } else {
-                    "typst".clone_into(&mut app.project_create_compiler);
-                }
-            }
-            _ => {
-                let _ = edit_text(
-                    &mut app.project_rename_input,
-                    &mut app.project_rename_cursor,
-                    key,
-                );
-            }
+        | AppMode::ProjectCreate
+        | AppMode::ProjectFileCreate
+        | AppMode::ProjectEntryRename => handle_project_name_modal_key(app, key),
+        AppMode::CommandPalette => {
+            handle_command_palette_key(app, key);
+            None
         }
-        return None;
-    }
-    if app.mode == AppMode::CommandPalette {
-        match key.code {
-            KeyCode::Esc => app.dispatch(Command::TogglePalette),
-            KeyCode::Up => {
-                app.palette_selected = app.palette_selected.saturating_sub(1);
-            }
-            KeyCode::Down => {
-                app.palette_selected = (app.palette_selected + 1)
-                    .min(app.filtered_palette_items().len().saturating_sub(1));
-            }
-            KeyCode::Enter => {
-                let items = app.filtered_palette_items();
-                if let Some(&page) = items.get(app.palette_selected) {
-                    app.dispatch(Command::TogglePalette);
-                    if let Some(index) = Page::ALL.iter().position(|&p| p == page) {
-                        app.sidebar_index = index;
-                    }
-                    app.page = page;
-                    app.content_focused = true;
-                    if app.active_search_workspaces.contains(&app.page) {
-                        app.mode = AppMode::WorkspaceSearch;
-                    } else {
-                        app.mode = AppMode::Normal;
-                    }
-                }
-            }
-            _ => {
-                let old_query = app.palette_query.clone();
-                if edit_text(&mut app.palette_query, &mut app.palette_query_cursor, key)
-                    && app.palette_query != old_query
-                {
-                    app.palette_selected = 0;
-                }
-            }
+        AppMode::TerminalCommand => {
+            handle_terminal_palette_key(app, key);
+            None
         }
-        return None;
-    }
-    if app.mode == AppMode::TerminalCommand {
-        match key.code {
-            KeyCode::Esc => app.mode = AppMode::Normal,
-            KeyCode::Enter => {
-                if app.terminal_completion_selected.is_some() {
-                    apply_selected_terminal_completion(app);
-                    reset_terminal_completion(app);
-                } else {
-                    run_terminal_command(app);
-                }
-            }
-            KeyCode::Tab => {
-                complete_terminal_command(app, key.modifiers.contains(KeyModifiers::SHIFT));
-            }
-            KeyCode::BackTab => complete_terminal_command(app, true),
-            _ => {
-                reset_terminal_completion(app);
-                let _ = edit_text(
-                    &mut app.terminal_command,
-                    &mut app.terminal_command_cursor,
-                    key,
-                );
-            }
+        AppMode::Help => {
+            handle_help_key(app, key);
+            None
         }
-        return None;
-    }
-    if app.mode == AppMode::Help {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('?' | 'q') => app.dispatch(Command::ToggleHelp),
-            KeyCode::Up | KeyCode::Char('k') => {
-                app.help_scroll = app.help_scroll.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                app.help_scroll = app.help_scroll.saturating_add(1);
-            }
-            KeyCode::PageUp => app.help_scroll = app.help_scroll.saturating_sub(10),
-            KeyCode::PageDown => app.help_scroll = app.help_scroll.saturating_add(10),
-            KeyCode::Home => app.help_scroll = 0,
-            KeyCode::End => app.help_scroll = usize::MAX,
-            _ => {}
-        }
-        return None;
-    }
-    if matches!(app.mode, AppMode::NoteEdit | AppMode::Prompt) {
-        return handle_modal_key(app, key);
-    }
-    if app.mode == AppMode::ConfirmDelete {
-        return handle_confirm_delete_key(app, key);
-    }
-    if app.mode == AppMode::Search {
-        return handle_search_key(app, key);
-    }
-    if app.mode == AppMode::DiscoverFilter {
-        return handle_discover_filter_key(app, key);
-    }
-    if app.mode == AppMode::WorkspaceSearch {
-        return handle_workspace_search_key(app, key);
-    }
-    if app.mode == AppMode::ProjectCitationSearch {
-        return handle_project_citation_search_key(app, key);
-    }
+        AppMode::NoteEdit | AppMode::Prompt => handle_modal_key(app, key),
+        AppMode::ConfirmDelete => handle_confirm_delete_key(app, key),
+        AppMode::Search => handle_search_key(app, key),
+        AppMode::DiscoverFilter => handle_discover_filter_key(app, key),
+        AppMode::WorkspaceSearch => handle_workspace_search_key(app, key),
+        AppMode::ProjectCitationSearch => handle_project_citation_search_key(app, key),
+        _ => return KeyHandling::Ignored,
+    };
+    KeyHandling::Handled(action.map(Box::new))
+}
+
+fn handle_raw_workspace_key(app: &mut App, key: KeyEvent) -> KeyHandling {
     if app.page == Page::Discover
         && key.modifiers.contains(KeyModifiers::CONTROL)
         && key.code == KeyCode::Right
     {
         app.discovery.next_page();
-        return None;
+        return KeyHandling::Handled(None);
     }
     if app.page == Page::Discover
         && key.modifiers.contains(KeyModifiers::CONTROL)
         && key.code == KeyCode::Left
     {
         app.discovery.previous_page();
-        return None;
+        return KeyHandling::Handled(None);
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('b') {
         app.dispatch(Command::TogglePalette);
-        return None;
+        return KeyHandling::Handled(None);
     }
     // Project panes normally own their input, so route search before handing
     // them the key. Insert mode remains the sole editor exception above.
@@ -4827,12 +5030,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         app.content_focused = true;
         app.mode = AppMode::Search;
         app.discovery.query_cursor = app.discovery.query.len();
-        return None;
+        return KeyHandling::Handled(None);
     }
     // Projects owns its raw key events. In particular, do not normalize arrow
     // keys into h/j/k/l before the currently focused pane sees them.
     if app.page == Page::Projects && app.content_focused {
-        return handle_projects_key(app, key);
+        return KeyHandling::Handled(handle_projects_key(app, key).map(Box::new));
     }
     if app.page == Page::Discover
         && app.content_focused
@@ -4841,17 +5044,20 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         && key.code == KeyCode::Left
     {
         app.content_focused = false;
-        return None;
+        return KeyHandling::Handled(None);
     }
-    let key = normalize_panel_navigation(key);
+    KeyHandling::Ignored
+}
+
+fn handle_navigation_key(app: &mut App, key: KeyEvent) -> KeyHandling {
     if key.modifiers.contains(KeyModifiers::CONTROL)
         && let Some(command) = navigation_command(key)
     {
         app.dispatch(command);
-        return None;
+        return KeyHandling::Handled(None);
     }
     if app.mode == AppMode::PaperDetail {
-        return handle_paper_detail_key(app, key);
+        return KeyHandling::Handled(handle_paper_detail_key(app, key).map(Box::new));
     }
 
     if !app.content_focused {
@@ -4864,17 +5070,17 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             // Opening the settings modal is handled by the sidebar navigation
             // path; just focus content so UI is consistent.
             app.content_focused = true;
-            return None;
+            return KeyHandling::Handled(None);
         }
         if let Some(command) = navigation_command(key) {
             app.dispatch(command);
         }
-        return None;
+        return KeyHandling::Handled(None);
     }
-    // When Settings page gains content_focused, immediately open the modal.
-    if app.content_focused && app.page == Page::Settings && app.mode == AppMode::Normal {
-        // The modal will be opened by the page-change handler; just return.
-    }
+    KeyHandling::Ignored
+}
+
+fn handle_focused_workspace_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if key.code == KeyCode::Char('r')
         && app.page == Page::Discover
         && !app.discovery.query.trim().is_empty()
@@ -4892,33 +5098,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if key.code == KeyCode::Char('r') && app.page == Page::Library {
         return Some(UiAction::Reindex);
     }
-    if key.code == KeyCode::Char('o')
-        && let PaperArxivSelection::Selected(arxiv_reference) = selected_paper_arxiv_reference(app)
-    {
-        return open_arxiv_page(app, arxiv_reference.as_deref());
-    }
-    if matches!(app.page, Page::Dashboard | Page::Discover) {
-        match key.code {
-            KeyCode::Char('c') => return selected_remote_target(app).map(UiAction::CopyCitation),
-            KeyCode::Char('d') => {
-                return selected_remote_paper(app).cloned().map(UiAction::Download);
-            }
-            _ => {}
-        }
-    }
-    if key.code == KeyCode::Char('u')
-        && let Some(paper_id) = selected_local_paper_id(app)
-    {
-        return Some(UiAction::MarkUnread(paper_id));
-    }
-    if key.code == KeyCode::Char('a')
-        && let Some(paper_id) = selected_local_paper_id(app)
-    {
-        let is_queued = app.reading_queue_papers.iter().any(|p| p.id == paper_id);
-        if is_queued {
-            return Some(UiAction::RemoveFromQueue(paper_id));
-        }
-        return Some(UiAction::AddToQueue(paper_id));
+    if let KeyHandling::Handled(action) = handle_selected_paper_shortcut(app, key) {
+        return action.map(|action| *action);
     }
     if let KeyHandling::Handled(action) = handle_dashboard_key(app, key) {
         return action.map(|action| *action);
@@ -4990,6 +5171,197 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         app.dispatch(command);
     }
     None
+}
+
+fn handle_selected_paper_shortcut(app: &mut App, key: KeyEvent) -> KeyHandling {
+    if key.code == KeyCode::Char('o')
+        && let PaperArxivSelection::Selected(arxiv_reference) = selected_paper_arxiv_reference(app)
+    {
+        return KeyHandling::Handled(
+            open_arxiv_page(app, arxiv_reference.as_deref()).map(Box::new),
+        );
+    }
+    if matches!(app.page, Page::Dashboard | Page::Discover) {
+        let action = match key.code {
+            KeyCode::Char('c') => selected_remote_target(app).map(UiAction::CopyCitation),
+            KeyCode::Char('d') => selected_remote_paper(app).cloned().map(UiAction::Download),
+            _ => return KeyHandling::Ignored,
+        };
+        return KeyHandling::Handled(action.map(Box::new));
+    }
+    let Some(paper_id) = selected_local_paper_id(app) else {
+        return KeyHandling::Ignored;
+    };
+    let action = match key.code {
+        KeyCode::Char('u') => UiAction::MarkUnread(paper_id),
+        KeyCode::Char('a')
+            if app
+                .reading_queue_papers
+                .iter()
+                .any(|paper| paper.id == paper_id) =>
+        {
+            UiAction::RemoveFromQueue(paper_id)
+        }
+        KeyCode::Char('a') => UiAction::AddToQueue(paper_id),
+        _ => return KeyHandling::Ignored,
+    };
+    KeyHandling::Handled(Some(Box::new(action)))
+}
+
+fn handle_pdf_viewer_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    if key.code == KeyCode::Char('?') {
+        app.dispatch(Command::ToggleHelp);
+        return None;
+    }
+    let is_scroll_event = matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat);
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') if key.kind == KeyEventKind::Press => {
+            Some(UiAction::ClosePdf)
+        }
+        KeyCode::Up | KeyCode::Char('k') if is_scroll_event => {
+            pdf_scroll(app, -1);
+            None
+        }
+        KeyCode::Down | KeyCode::Char('j') if is_scroll_event => {
+            pdf_scroll(app, 1);
+            None
+        }
+        KeyCode::PageUp if key.kind == KeyEventKind::Press => {
+            pdf_viewer::page_up(app);
+            None
+        }
+        KeyCode::PageDown if key.kind == KeyEventKind::Press => {
+            pdf_viewer::page_down(app);
+            None
+        }
+        _ => None,
+    }
+}
+
+fn handle_project_name_modal_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    match key.code {
+        KeyCode::Esc => {
+            app.project_rename_input.clear();
+            app.project_rename_cursor = 0;
+            app.project_entry_rename_path = None;
+            app.mode = AppMode::Normal;
+        }
+        KeyCode::Enter => {
+            let mode = app.mode;
+            app.mode = AppMode::Normal;
+            let name = app.project_rename_input.trim().to_owned();
+            app.project_rename_input.clear();
+            app.project_rename_cursor = 0;
+            return match mode {
+                AppMode::ProjectCreate => Some(UiAction::CreateProject {
+                    name,
+                    compiler: app.project_create_compiler.clone(),
+                }),
+                AppMode::ProjectFileCreate => Some(UiAction::CreateProjectFile(name)),
+                AppMode::ProjectEntryRename => app
+                    .project_entry_rename_path
+                    .take()
+                    .map(|path| UiAction::RenameProjectEntry { path, name }),
+                _ => app
+                    .active_project
+                    .clone()
+                    .or_else(|| app.projects.get(app.projects_selected).cloned())
+                    .map(|project| UiAction::RenameProject { project, name }),
+            };
+        }
+        KeyCode::Tab | KeyCode::BackTab if app.mode == AppMode::ProjectCreate => {
+            app.project_create_compiler = if app.project_create_compiler == "typst" {
+                "latex".to_owned()
+            } else {
+                "typst".to_owned()
+            };
+        }
+        _ => {
+            let _ = edit_text(
+                &mut app.project_rename_input,
+                &mut app.project_rename_cursor,
+                key,
+            );
+        }
+    }
+    None
+}
+
+fn handle_command_palette_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => app.dispatch(Command::TogglePalette),
+        KeyCode::Up => app.palette_selected = app.palette_selected.saturating_sub(1),
+        KeyCode::Down => {
+            app.palette_selected = (app.palette_selected + 1)
+                .min(app.filtered_palette_items().len().saturating_sub(1));
+        }
+        KeyCode::Enter => {
+            let items = app.filtered_palette_items();
+            if let Some(&page) = items.get(app.palette_selected) {
+                app.dispatch(Command::TogglePalette);
+                app.sidebar_index = Page::ALL
+                    .iter()
+                    .position(|&candidate| candidate == page)
+                    .unwrap_or(0);
+                app.page = page;
+                app.content_focused = true;
+                app.mode = if app.active_search_workspaces.contains(&page) {
+                    AppMode::WorkspaceSearch
+                } else {
+                    AppMode::Normal
+                };
+            }
+        }
+        _ => {
+            let workspace = &mut app.workspace;
+            let old_query = workspace.palette_query.clone();
+            if edit_text(
+                &mut workspace.palette_query,
+                &mut workspace.palette_query_cursor,
+                key,
+            ) && workspace.palette_query != old_query
+            {
+                workspace.palette_selected = 0;
+            }
+        }
+    }
+}
+
+fn handle_terminal_palette_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => app.mode = AppMode::Normal,
+        KeyCode::Enter if app.terminal_completion_selected.is_some() => {
+            apply_selected_terminal_completion(app);
+            reset_terminal_completion(app);
+        }
+        KeyCode::Enter => run_terminal_command(app),
+        KeyCode::Tab => {
+            complete_terminal_command(app, key.modifiers.contains(KeyModifiers::SHIFT));
+        }
+        KeyCode::BackTab => complete_terminal_command(app, true),
+        _ => {
+            reset_terminal_completion(app);
+            let workspace = &mut app.workspace;
+            let _ = edit_text(
+                &mut workspace.terminal_command,
+                &mut workspace.terminal_command_cursor,
+                key,
+            );
+        }
+    }
+}
+
+fn handle_help_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('?' | 'q') => app.dispatch(Command::ToggleHelp),
+        KeyCode::Up | KeyCode::Char('k') => app.help_scroll = app.help_scroll.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => app.help_scroll = app.help_scroll.saturating_add(1),
+        KeyCode::PageUp => app.help_scroll = app.help_scroll.saturating_sub(10),
+        KeyCode::PageDown => app.help_scroll = app.help_scroll.saturating_add(10),
+        KeyCode::Home => app.help_scroll = 0,
+        KeyCode::End => app.help_scroll = usize::MAX,
+        _ => {}
+    }
 }
 
 fn has_active_text_input(app: &App) -> bool {
@@ -5218,89 +5590,10 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         return None;
     }
     if app.active_project.is_none() || app.project_pane == ProjectPane::ProjectList {
-        match key.code {
-            KeyCode::Char('q') => app.dispatch(Command::Quit),
-            KeyCode::Left => app.content_focused = false,
-            KeyCode::Char('n') => {
-                app.project_rename_input.clear();
-                app.project_rename_cursor = 0;
-                app.project_create_compiler =
-                    if app.settings_modal.default_project_compiler.is_empty() {
-                        "latex".to_owned()
-                    } else {
-                        app.settings_modal.default_project_compiler.clone()
-                    };
-                app.mode = AppMode::ProjectCreate;
-            }
-            KeyCode::Char('r') => return Some(UiAction::RefreshProjects),
-            KeyCode::Char('R') => {
-                if let Some(project) = app.projects.get(app.projects_selected) {
-                    app.project_rename_input = project.name.clone();
-                    app.project_rename_cursor = app.project_rename_input.len();
-                    app.mode = AppMode::ProjectRename;
-                }
-            }
-            KeyCode::Char('x') => {
-                return app
-                    .projects
-                    .get(app.projects_selected)
-                    .cloned()
-                    .map(UiAction::ConfirmDeleteProject);
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                app.projects_selected = app.projects_selected.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                app.projects_selected =
-                    (app.projects_selected + 1).min(app.projects.len().saturating_sub(1));
-            }
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
-                return app
-                    .projects
-                    .get(app.projects_selected)
-                    .cloned()
-                    .map(UiAction::OpenProject);
-            }
-            _ => {}
-        }
-        return None;
+        return handle_project_list_key(app, key);
     }
-    if key.code == KeyCode::Esc
-        && app.project_pane == ProjectPane::Editor
-        && app.project_editor_insert_mode
-    {
-        app.project_editor_insert_mode = false;
-        app.project_completions.clear();
-        return None;
-    }
-    if key.code == KeyCode::Esc
-        && app.project_pane == ProjectPane::Editor
-        && app.project_editor_pending_sequence.take().is_some()
-    {
-        return None;
-    }
-    if key.code == KeyCode::Esc
-        && app.project_pane == ProjectPane::Editor
-        && app.project_editor_visual_line_anchor.is_some()
-    {
-        app.project_editor_visual_line_anchor = None;
-        return None;
-    }
-    if key.code == KeyCode::Esc {
-        if app.project_pane == ProjectPane::FileTree {
-            if prepare_project_close(app) {
-                return Some(UiAction::CloseProject);
-            }
-        } else {
-            return_to_project_file_tree(app);
-        }
-        return None;
-    }
-    if app.project_pane == ProjectPane::FileTree && key.code == KeyCode::Left {
-        if !move_project_tree_to_parent(app) && prepare_project_close(app) {
-            return Some(UiAction::CloseProject);
-        }
-        return None;
+    if let KeyHandling::Handled(action) = handle_project_back_navigation(app, key) {
+        return action.map(|action| *action);
     }
     if is_control_character_shortcut(key, 'f') && app.active_project.is_some() {
         app.project_citation_query.clear();
@@ -5322,49 +5615,7 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         return None;
     }
     if app.project_pane == ProjectPane::Editor && app.project_editor_insert_mode {
-        if !app.project_completions.is_empty() {
-            match key.code {
-                KeyCode::Up => {
-                    app.project_completion_selected =
-                        app.project_completion_selected.saturating_sub(1);
-                    return None;
-                }
-                KeyCode::Down => {
-                    app.project_completion_selected = (app.project_completion_selected + 1)
-                        .min(app.project_completions.len().saturating_sub(1));
-                    return None;
-                }
-                KeyCode::Tab | KeyCode::Enter => {
-                    if accept_project_completion(app) {
-                        return None;
-                    }
-                }
-                KeyCode::Esc => {
-                    app.project_completions.clear();
-                    return None;
-                }
-                _ => {}
-            }
-        }
-        if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
-            move_project_editor_page(app, if key.code == KeyCode::PageUp { -1 } else { 1 });
-            return None;
-        }
-        let before_change = (app.project_editor_text.clone(), app.project_editor_cursor);
-        match apply_editor_insert_key(
-            &mut app.project_editor_text,
-            &mut app.project_editor_cursor,
-            key,
-        ) {
-            EditorInsertResult::ExitInsert => app.project_editor_insert_mode = false,
-            EditorInsertResult::Changed => {
-                record_project_editor_snapshot(app, before_change);
-                app.project_editor_dirty = true;
-                app.project_view_flags.editor_manual_scroll = false;
-            }
-            EditorInsertResult::Moved => app.project_view_flags.editor_manual_scroll = false,
-            EditorInsertResult::Ignored => {}
-        }
+        handle_project_insert_key(app, key);
         return None;
     }
     // Match the shared workspace command map in every non-text-input Projects
@@ -5377,6 +5628,132 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         handle_project_editor_normal_key(app, key);
         return None;
     }
+    handle_project_workspace_pane_key(app, key)
+}
+
+fn handle_project_list_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    match key.code {
+        KeyCode::Char('q') => app.dispatch(Command::Quit),
+        KeyCode::Left => app.content_focused = false,
+        KeyCode::Char('n') => {
+            app.project_rename_input.clear();
+            app.project_rename_cursor = 0;
+            app.project_create_compiler = if app.settings_modal.default_project_compiler.is_empty()
+            {
+                "latex".to_owned()
+            } else {
+                app.settings_modal.default_project_compiler.clone()
+            };
+            app.mode = AppMode::ProjectCreate;
+        }
+        KeyCode::Char('r') => return Some(UiAction::RefreshProjects),
+        KeyCode::Char('R') => {
+            if let Some(project) = app.projects.get(app.projects_selected) {
+                app.project_rename_input = project.name.clone();
+                app.project_rename_cursor = app.project_rename_input.len();
+                app.mode = AppMode::ProjectRename;
+            }
+        }
+        KeyCode::Char('x') => {
+            return app
+                .projects
+                .get(app.projects_selected)
+                .cloned()
+                .map(UiAction::ConfirmDeleteProject);
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.projects_selected = app.projects_selected.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.projects_selected =
+                (app.projects_selected + 1).min(app.projects.len().saturating_sub(1));
+        }
+        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+            return app
+                .projects
+                .get(app.projects_selected)
+                .cloned()
+                .map(UiAction::OpenProject);
+        }
+        _ => {}
+    }
+    None
+}
+
+fn handle_project_back_navigation(app: &mut App, key: KeyEvent) -> KeyHandling {
+    if key.code == KeyCode::Esc && app.project_pane == ProjectPane::Editor {
+        if app.project_editor_insert_mode {
+            app.project_editor_insert_mode = false;
+            app.project_completions.clear();
+            return KeyHandling::Handled(None);
+        }
+        if app.project_editor_pending_sequence.take().is_some() {
+            return KeyHandling::Handled(None);
+        }
+        if app.project_editor_visual_line_anchor.take().is_some() {
+            return KeyHandling::Handled(None);
+        }
+    }
+    if key.code == KeyCode::Esc {
+        if app.project_pane == ProjectPane::FileTree {
+            return KeyHandling::Handled(
+                prepare_project_close(app)
+                    .then_some(UiAction::CloseProject)
+                    .map(Box::new),
+            );
+        }
+        return_to_project_file_tree(app);
+        return KeyHandling::Handled(None);
+    }
+    if app.project_pane == ProjectPane::FileTree && key.code == KeyCode::Left {
+        let close = !move_project_tree_to_parent(app) && prepare_project_close(app);
+        return KeyHandling::Handled(close.then_some(UiAction::CloseProject).map(Box::new));
+    }
+    KeyHandling::Ignored
+}
+
+fn handle_project_insert_key(app: &mut App, key: KeyEvent) {
+    if !app.project_completions.is_empty() {
+        match key.code {
+            KeyCode::Up => {
+                app.project_completion_selected = app.project_completion_selected.saturating_sub(1);
+                return;
+            }
+            KeyCode::Down => {
+                app.project_completion_selected = (app.project_completion_selected + 1)
+                    .min(app.project_completions.len().saturating_sub(1));
+                return;
+            }
+            KeyCode::Tab | KeyCode::Enter if accept_project_completion(app) => return,
+            KeyCode::Esc => {
+                app.project_completions.clear();
+                return;
+            }
+            _ => {}
+        }
+    }
+    if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
+        move_project_editor_page(app, if key.code == KeyCode::PageUp { -1 } else { 1 });
+        return;
+    }
+    let before_change = (app.project_editor_text.clone(), app.project_editor_cursor);
+    match apply_editor_insert_key(
+        &mut app.project_editor_text,
+        &mut app.project_editor_cursor,
+        key,
+    ) {
+        EditorInsertResult::ExitInsert => app.project_editor_insert_mode = false,
+        EditorInsertResult::Changed => {
+            record_project_editor_snapshot(app, before_change);
+            app.project_editor_dirty = true;
+            app.project_view_flags.editor_manual_scroll = false;
+        }
+        EditorInsertResult::Moved => app.project_view_flags.editor_manual_scroll = false,
+        EditorInsertResult::Ignored => {}
+    }
+}
+
+fn handle_project_workspace_pane_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     match app.project_pane {
         ProjectPane::FileTree => match key.code {
             KeyCode::Char('n') => {
@@ -5748,11 +6125,29 @@ fn paste_text_into_active_input(app: &mut App, text: &str) -> bool {
             &mut app.project_rename_input,
             &mut app.project_rename_cursor,
         ),
-        AppMode::CommandPalette => (&mut app.palette_query, &mut app.palette_query_cursor),
-        AppMode::TerminalCommand => (&mut app.terminal_command, &mut app.terminal_command_cursor),
+        AppMode::CommandPalette => {
+            let workspace = &mut app.workspace;
+            (
+                &mut workspace.palette_query,
+                &mut workspace.palette_query_cursor,
+            )
+        }
+        AppMode::TerminalCommand => {
+            let workspace = &mut app.workspace;
+            (
+                &mut workspace.terminal_command,
+                &mut workspace.terminal_command_cursor,
+            )
+        }
         AppMode::Search => (&mut app.discovery.query, &mut app.discovery.query_cursor),
         AppMode::DiscoverFilter => (&mut app.discovery.filter, &mut app.discovery.filter_cursor),
-        AppMode::WorkspaceSearch => (&mut app.workspace_query, &mut app.workspace_query_cursor),
+        AppMode::WorkspaceSearch => {
+            let workspace = &mut app.workspace;
+            (
+                &mut workspace.workspace_query,
+                &mut workspace.workspace_query_cursor,
+            )
+        }
         AppMode::Prompt => match app.metadata_prompt.as_mut() {
             Some(prompt) => (&mut prompt.value, &mut prompt.cursor),
             None => return false,
@@ -6420,20 +6815,21 @@ fn handle_project_citation_search_key(app: &mut App, key: KeyEvent) -> Option<Ui
             }
         }
         _ => {
-            let old_query = app.project_citation_query.clone();
+            let workspace = &mut app.workspace;
+            let old_query = workspace.project_citation_query.clone();
             if edit_text(
-                &mut app.project_citation_query,
-                &mut app.project_citation_cursor,
+                &mut workspace.project_citation_query,
+                &mut workspace.project_citation_cursor,
                 key,
-            ) && app.project_citation_query != old_query
+            ) && workspace.project_citation_query != old_query
             {
-                app.project_citation_results.clear();
-                app.project_citation_selected = 0;
-                app.project_citation_scroll = 0;
-                if app.project_citation_search_mode == ProjectCitationSearchMode::Local {
+                workspace.project_citation_results.clear();
+                workspace.project_citation_selected = 0;
+                workspace.project_citation_scroll = 0;
+                if workspace.project_citation_search_mode == ProjectCitationSearchMode::Local {
                     update_project_local_citation_results(app);
                 } else {
-                    app.project_citation_search_status =
+                    workspace.project_citation_search_status =
                         Some("Press Enter to search online.".into());
                 }
             }
@@ -6446,19 +6842,22 @@ fn handle_workspace_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction>
     if key.code == KeyCode::Char('>') {
         app.mode = AppMode::Normal;
         app.content_focused = true;
-        app.active_search_workspaces.remove(&app.page);
+        let page = app.page;
+        app.workspace.active_search_workspaces.remove(&page);
         return None;
     }
 
     match key.code {
         KeyCode::Esc => {
             app.mode = AppMode::Normal;
-            app.active_search_workspaces.remove(&app.page);
+            let page = app.page;
+            app.workspace.active_search_workspaces.remove(&page);
         }
         KeyCode::Down | KeyCode::Enter => {
             app.mode = AppMode::Normal;
             app.content_focused = true;
-            app.active_search_workspaces.remove(&app.page);
+            let page = app.page;
+            app.workspace.active_search_workspaces.remove(&page);
             if key.code == KeyCode::Down {
                 match app.page {
                     Page::Library => app.library.selected = 0,
@@ -6492,9 +6891,10 @@ fn handle_workspace_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction>
             app.content_focused = false;
         }
         _ => {
+            let workspace = &mut app.workspace;
             edit_text(
-                &mut app.workspace_query,
-                &mut app.workspace_query_cursor,
+                &mut workspace.workspace_query,
+                &mut workspace.workspace_query_cursor,
                 key,
             );
         }
@@ -6761,162 +7161,113 @@ fn handle_dashboard_key(app: &mut App, key: KeyEvent) -> KeyHandling {
 
 fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction>) {
     if app.active_collection.is_some() {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('h') => {
-                app.active_collection = None;
-                app.collection_papers.clear();
-                return (true, None);
-            }
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
-                let Some(&paper) = app
-                    .filtered_collection_papers()
-                    .get(app.collection_paper_selected)
-                else {
-                    return (true, None);
-                };
-                let Some(path) = &paper.pdf_path else {
-                    app.toast = Some("This paper has no local PDF to open".into());
-                    return (true, None);
-                };
-                return (
-                    true,
-                    Some(UiAction::OpenPdf {
-                        paper_id: paper.id,
-                        path: PathBuf::from(path),
-                    }),
-                );
-            }
-            KeyCode::Char('B') => {
-                return (
-                    true,
-                    app.filtered_collection_papers()
-                        .get(app.collection_paper_selected)
-                        .map(|&paper| UiAction::Bookmark(PaperTarget::Local(paper.id))),
-                );
-            }
-            KeyCode::Char('c') => {
-                return (
-                    true,
-                    app.filtered_collection_papers()
-                        .get(app.collection_paper_selected)
-                        .map(|&paper| UiAction::CopyCitation(PaperTarget::Local(paper.id))),
-                );
-            }
-            KeyCode::Char('R') => {
-                return (
-                    true,
-                    app.filtered_collection_papers()
-                        .get(app.collection_paper_selected)
-                        .map(|&paper| UiAction::RenamePdf(paper.id)),
-                );
-            }
-            KeyCode::Char('g') => {
-                return (
-                    true,
-                    app.filtered_collection_papers()
-                        .get(app.collection_paper_selected)
-                        .map(|&paper| UiAction::Prompt(PaperTarget::Local(paper.id))),
-                );
-            }
-            KeyCode::Char('n') => {
-                return (
-                    true,
-                    app.filtered_collection_papers()
-                        .get(app.collection_paper_selected)
-                        .map(|&paper| UiAction::OpenNote(PaperTarget::Local(paper.id))),
-                );
-            }
-            KeyCode::Char('x') => {
-                return (
-                    true,
-                    app.filtered_collection_papers()
-                        .get(app.collection_paper_selected)
-                        .map(|&paper| UiAction::ConfirmDeletePaper {
-                            paper_id: paper.id,
-                            title: paper.title.clone(),
-                            path: paper.pdf_path.as_ref().map(PathBuf::from),
-                        }),
-                );
-            }
-            _ => return (false, None),
-        }
+        return handle_active_collection_key(app, key);
     }
     if let Some(item) = app.filtered_collections().get(app.collection_selected) {
-        use CollectionSearchItem;
-        match item {
-            CollectionSearchItem::Collection(collection) => {
-                if matches!(
-                    key.code,
-                    KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
-                ) {
-                    return (true, Some(UiAction::OpenCollection(collection.id)));
-                }
-                if key.code == KeyCode::Char('R') {
-                    return (true, Some(UiAction::RenameCollection(collection.id)));
-                }
-                if key.code == KeyCode::Char('x') {
-                    return (
-                        true,
-                        Some(UiAction::ConfirmDeleteCollection {
-                            collection_id: collection.id,
-                            name: collection.name.clone(),
-                            path: collection.folder_path.as_ref().map(PathBuf::from),
-                        }),
-                    );
-                }
-            }
-            CollectionSearchItem::Paper(paper, _collection) => {
-                if matches!(
-                    key.code,
-                    KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
-                ) {
-                    if let Some(path) = &paper.pdf_path {
-                        return (
-                            true,
-                            Some(UiAction::OpenPdf {
-                                paper_id: paper.id,
-                                path: PathBuf::from(path),
-                            }),
-                        );
-                    }
-                    app.toast = Some("This paper has no local PDF to open".into());
-                    return (true, None);
-                }
-                if key.code == KeyCode::Char('B') {
-                    return (true, Some(UiAction::Bookmark(PaperTarget::Local(paper.id))));
-                }
-                if key.code == KeyCode::Char('c') {
-                    return (
-                        true,
-                        Some(UiAction::CopyCitation(PaperTarget::Local(paper.id))),
-                    );
-                }
-                if key.code == KeyCode::Char('R') {
-                    return (true, Some(UiAction::RenamePdf(paper.id)));
-                }
-                if key.code == KeyCode::Char('g') {
-                    return (true, Some(UiAction::Prompt(PaperTarget::Local(paper.id))));
-                }
-                if key.code == KeyCode::Char('n') {
-                    return (true, Some(UiAction::OpenNote(PaperTarget::Local(paper.id))));
-                }
-                if key.code == KeyCode::Char('x') {
-                    return (
-                        true,
-                        Some(UiAction::ConfirmDeletePaper {
-                            paper_id: paper.id,
-                            title: paper.title.clone(),
-                            path: paper.pdf_path.as_ref().map(PathBuf::from),
-                        }),
-                    );
-                }
-            }
+        let missing_pdf = matches!(item, CollectionSearchItem::Paper(paper, _) if paper.pdf_path.is_none())
+            && matches!(
+                key.code,
+                KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
+            );
+        if missing_pdf {
+            app.toast = Some("This paper has no local PDF to open".into());
+            return (true, None);
+        }
+        if let Some(result) = collection_search_item_action(item, key) {
+            return result;
         }
     }
     if key.code == KeyCode::Char('g') {
         return (true, Some(UiAction::CreateCollection));
     }
     (false, None)
+}
+
+fn handle_active_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction>) {
+    if matches!(key.code, KeyCode::Esc | KeyCode::Char('h')) {
+        app.active_collection = None;
+        app.collection_papers.clear();
+        return (true, None);
+    }
+    let Some(&paper) = app
+        .filtered_collection_papers()
+        .get(app.collection_paper_selected)
+    else {
+        return (
+            matches!(
+                key.code,
+                KeyCode::Enter
+                    | KeyCode::Right
+                    | KeyCode::Char('l' | 'B' | 'c' | 'R' | 'g' | 'n' | 'x')
+            ),
+            None,
+        );
+    };
+    let action = match key.code {
+        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+            let Some(path) = &paper.pdf_path else {
+                app.toast = Some("This paper has no local PDF to open".into());
+                return (true, None);
+            };
+            Some(UiAction::OpenPdf {
+                paper_id: paper.id,
+                path: PathBuf::from(path),
+            })
+        }
+        KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(paper.id))),
+        KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(paper.id))),
+        KeyCode::Char('R') => Some(UiAction::RenamePdf(paper.id)),
+        KeyCode::Char('g') => Some(UiAction::Prompt(PaperTarget::Local(paper.id))),
+        KeyCode::Char('n') => Some(UiAction::OpenNote(PaperTarget::Local(paper.id))),
+        KeyCode::Char('x') => Some(UiAction::ConfirmDeletePaper {
+            paper_id: paper.id,
+            title: paper.title.clone(),
+            path: paper.pdf_path.as_ref().map(PathBuf::from),
+        }),
+        _ => return (false, None),
+    };
+    (true, action)
+}
+
+fn collection_search_item_action(
+    item: &CollectionSearchItem<'_>,
+    key: KeyEvent,
+) -> Option<(bool, Option<UiAction>)> {
+    let action = match item {
+        CollectionSearchItem::Collection(collection) => match key.code {
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                Some(UiAction::OpenCollection(collection.id))
+            }
+            KeyCode::Char('R') => Some(UiAction::RenameCollection(collection.id)),
+            KeyCode::Char('x') => Some(UiAction::ConfirmDeleteCollection {
+                collection_id: collection.id,
+                name: collection.name.clone(),
+                path: collection.folder_path.as_ref().map(PathBuf::from),
+            }),
+            _ => return None,
+        },
+        CollectionSearchItem::Paper(paper, _) => match key.code {
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                let path = paper.pdf_path.as_ref().map(PathBuf::from)?;
+                Some(UiAction::OpenPdf {
+                    paper_id: paper.id,
+                    path,
+                })
+            }
+            KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(paper.id))),
+            KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(paper.id))),
+            KeyCode::Char('R') => Some(UiAction::RenamePdf(paper.id)),
+            KeyCode::Char('g') => Some(UiAction::Prompt(PaperTarget::Local(paper.id))),
+            KeyCode::Char('n') => Some(UiAction::OpenNote(PaperTarget::Local(paper.id))),
+            KeyCode::Char('x') => Some(UiAction::ConfirmDeletePaper {
+                paper_id: paper.id,
+                title: paper.title.clone(),
+                path: paper.pdf_path.as_ref().map(PathBuf::from),
+            }),
+            _ => return None,
+        },
+    };
+    Some((true, action))
 }
 
 fn handle_author_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction>) {
@@ -7585,14 +7936,17 @@ fn record_config_history(app: &mut App) {
     if app.config_editor_history.is_empty()
         || app.config_editor_history[app.config_editor_history_idx] != app.config_editor_text
     {
-        app.config_editor_history
-            .truncate(app.config_editor_history_idx + 1);
-        app.config_editor_history
-            .push(app.config_editor_text.clone());
-        if app.config_editor_history.len() > 50 {
-            app.config_editor_history.remove(0);
+        let workspace = &mut app.workspace;
+        workspace
+            .config_editor_history
+            .truncate(workspace.config_editor_history_idx + 1);
+        workspace
+            .config_editor_history
+            .push(workspace.config_editor_text.clone());
+        if workspace.config_editor_history.len() > 50 {
+            workspace.config_editor_history.remove(0);
         }
-        app.config_editor_history_idx = app.config_editor_history.len() - 1;
+        workspace.config_editor_history_idx = workspace.config_editor_history.len() - 1;
     }
 }
 
@@ -7698,7 +8052,7 @@ fn apply_config_update(
 
     if config.pdf_viewer != previous.pdf_viewer {
         runtime.pdf_viewer = config.pdf_viewer.clone().unwrap_or_else(default_pdf_viewer);
-        app.pdf_viewer = runtime.pdf_viewer.clone();
+        app.pdf_viewer.clone_from(&runtime.pdf_viewer);
         if app.pdf_viewer != "internal" && app.project_pane == ProjectPane::Preview {
             app.project_pane = ProjectPane::FileTree;
         }
@@ -7789,70 +8143,8 @@ fn handle_config_editor_key(
     theme: &mut Theme,
     senders: &ActionSenders,
 ) -> Option<UiAction> {
-    if let Some(mut cmd) = app.config_editor_command.clone() {
-        match key.code {
-            KeyCode::Esc => {
-                app.config_editor_command = None;
-            }
-            KeyCode::Char(c) => {
-                cmd.push(c);
-                app.config_editor_command = Some(cmd);
-            }
-            KeyCode::Backspace | KeyCode::Delete => {
-                let mut cursor = cmd.len();
-                let _ = edit_text(&mut cmd, &mut cursor, key);
-                app.config_editor_command = Some(cmd);
-            }
-            KeyCode::Enter => {
-                app.config_editor_command = None;
-                let trimmed = cmd.trim();
-                let mut action_to_return = None;
-                if trimmed == "w" || trimmed == "wq" {
-                    let toml_str = &app.config_editor_text;
-                    match toml::from_str::<Config>(toml_str) {
-                        Ok(new_config) => {
-                            let canonical_toml = match toml::to_string_pretty(&new_config) {
-                                Ok(toml) => toml,
-                                Err(e) => {
-                                    app.config_editor_error =
-                                        Some(format!("Serialization failed: {e}"));
-                                    return None;
-                                }
-                            };
-                            if let Err(e) = std::fs::write(&runtime.config_file, &canonical_toml) {
-                                app.config_editor_error = Some(format!("Write failed: {e}"));
-                            } else {
-                                reset_config_editor_buffer(app, canonical_toml);
-                                app.config_editor_error = None;
-                                app.toast = Some("Configuration saved and applied.".to_owned());
-                                if let Err(e) =
-                                    apply_config_update(runtime, app, &new_config, theme, senders)
-                                {
-                                    app.config_editor_error = Some(format!("Apply failed: {e}"));
-                                } else {
-                                    action_to_return = Some(UiAction::Reindex);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            app.config_editor_error = Some(format!("Invalid TOML: {e}"));
-                        }
-                    }
-                }
-                if trimmed == "q" || (trimmed == "wq" && app.config_editor_error.is_none()) {
-                    if trimmed == "q" {
-                        reload_config_editor_buffer(app, &runtime.config_file);
-                    }
-                    app.overlay_flags.config_editor_focused = false;
-                    app.content_focused = false;
-                }
-                if action_to_return.is_some() {
-                    return action_to_return;
-                }
-            }
-            _ => {}
-        }
-        return None;
+    if app.config_editor_command.is_some() {
+        return handle_config_editor_command(app, key, runtime, theme, senders);
     }
 
     if app.overlay_flags.config_editor_insert_mode {
@@ -7865,6 +8157,86 @@ fn handle_config_editor_key(
         return None;
     }
 
+    handle_config_editor_normal_key(app, key);
+    None
+}
+
+fn handle_config_editor_command(
+    app: &mut App,
+    key: KeyEvent,
+    runtime: &mut Runtime,
+    theme: &mut Theme,
+    senders: &ActionSenders,
+) -> Option<UiAction> {
+    let mut command = app.config_editor_command.clone()?;
+    match key.code {
+        KeyCode::Esc => app.config_editor_command = None,
+        KeyCode::Char(character) => {
+            command.push(character);
+            app.config_editor_command = Some(command);
+        }
+        KeyCode::Backspace | KeyCode::Delete => {
+            let mut cursor = command.len();
+            let _ = edit_text(&mut command, &mut cursor, key);
+            app.config_editor_command = Some(command);
+        }
+        KeyCode::Enter => {
+            return execute_config_editor_command(app, &command, runtime, theme, senders);
+        }
+        _ => {}
+    }
+    None
+}
+
+fn execute_config_editor_command(
+    app: &mut App,
+    command: &str,
+    runtime: &mut Runtime,
+    theme: &mut Theme,
+    senders: &ActionSenders,
+) -> Option<UiAction> {
+    app.config_editor_command = None;
+    let command = command.trim();
+    let mut action = None;
+    if command == "w" || command == "wq" {
+        let new_config = match toml::from_str::<Config>(&app.config_editor_text) {
+            Ok(config) => config,
+            Err(error) => {
+                app.config_editor_error = Some(format!("Invalid TOML: {error}"));
+                return None;
+            }
+        };
+        let canonical_toml = match toml::to_string_pretty(&new_config) {
+            Ok(toml) => toml,
+            Err(error) => {
+                app.config_editor_error = Some(format!("Serialization failed: {error}"));
+                return None;
+            }
+        };
+        if let Err(error) = std::fs::write(&runtime.config_file, &canonical_toml) {
+            app.config_editor_error = Some(format!("Write failed: {error}"));
+        } else {
+            reset_config_editor_buffer(app, canonical_toml);
+            app.config_editor_error = None;
+            app.toast = Some("Configuration saved and applied.".to_owned());
+            if let Err(error) = apply_config_update(runtime, app, &new_config, theme, senders) {
+                app.config_editor_error = Some(format!("Apply failed: {error}"));
+            } else {
+                action = Some(UiAction::Reindex);
+            }
+        }
+    }
+    if command == "q" || (command == "wq" && app.config_editor_error.is_none()) {
+        if command == "q" {
+            reload_config_editor_buffer(app, &runtime.config_file);
+        }
+        app.overlay_flags.config_editor_focused = false;
+        app.content_focused = false;
+    }
+    action
+}
+
+fn handle_config_editor_normal_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => {
             app.overlay_flags.config_editor_focused = false;
@@ -7919,46 +8291,11 @@ fn handle_config_editor_key(
             reset_config_editor_goal_column(app);
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            let text = &app.config_editor_text;
-            let cursor = &mut app.config_editor_cursor;
-            if *cursor > 0 {
-                let current_line_start = text[..*cursor].rfind('\n').map_or(0, |idx| idx + 1);
-                let col = *cursor - current_line_start;
-                if current_line_start > 0 {
-                    let prev_line_search = &text[..current_line_start - 1];
-                    let prev_line_start = prev_line_search.rfind('\n').map_or(0, |idx| idx + 1);
-                    let prev_line_len = (current_line_start - 1) - prev_line_start;
-                    let mut target = prev_line_start + col.min(prev_line_len);
-                    while target > prev_line_start && !text.is_char_boundary(target) {
-                        target -= 1;
-                    }
-                    *cursor = target;
-                }
-            }
+            move_config_editor_logical_line(app, -1);
             reset_config_editor_goal_column(app);
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            let text = &app.config_editor_text;
-            let cursor = &mut app.config_editor_cursor;
-            if *cursor < text.len() {
-                let current_line_start = text[..*cursor].rfind('\n').map_or(0, |idx| idx + 1);
-                let col = *cursor - current_line_start;
-                if let Some(current_line_end) = text[*cursor..].find('\n').map(|idx| *cursor + idx)
-                {
-                    let next_line_start = current_line_end + 1;
-                    if next_line_start <= text.len() {
-                        let next_line_end = text[next_line_start..]
-                            .find('\n')
-                            .map_or(text.len(), |idx| next_line_start + idx);
-                        let next_line_len = next_line_end - next_line_start;
-                        let mut target = next_line_start + col.min(next_line_len);
-                        while target > next_line_start && !text.is_char_boundary(target) {
-                            target -= 1;
-                        }
-                        *cursor = target;
-                    }
-                }
-            }
+            move_config_editor_logical_line(app, 1);
             reset_config_editor_goal_column(app);
         }
         KeyCode::PageUp => move_config_editor_page(app, -1),
@@ -7966,7 +8303,8 @@ fn handle_config_editor_key(
         KeyCode::Char('x') => {
             if app.config_editor_cursor < app.config_editor_text.len() {
                 record_config_history(app);
-                app.config_editor_text.remove(app.config_editor_cursor);
+                let cursor = app.config_editor_cursor;
+                app.workspace.config_editor_text.remove(cursor);
             }
             reset_config_editor_goal_column(app);
         }
@@ -7997,7 +8335,34 @@ fn handle_config_editor_key(
         }
         _ => {}
     }
-    None
+}
+
+fn move_config_editor_logical_line(app: &mut App, direction: isize) {
+    let text = &app.config_editor_text;
+    let cursor = app.config_editor_cursor;
+    let current_start = text[..cursor].rfind('\n').map_or(0, |index| index + 1);
+    let column = cursor - current_start;
+    let (target_start, target_end) = if direction < 0 && current_start > 0 {
+        let preceding = &text[..current_start - 1];
+        let start = preceding.rfind('\n').map_or(0, |index| index + 1);
+        (start, current_start - 1)
+    } else if direction > 0 && cursor < text.len() {
+        let Some(end) = text[cursor..].find('\n').map(|index| cursor + index) else {
+            return;
+        };
+        let start = end + 1;
+        let end = text[start..]
+            .find('\n')
+            .map_or(text.len(), |index| start + index);
+        (start, end)
+    } else {
+        return;
+    };
+    let mut target = target_start + column.min(target_end - target_start);
+    while target > target_start && !text.is_char_boundary(target) {
+        target -= 1;
+    }
+    app.config_editor_cursor = target;
 }
 
 fn handle_config_editor_insert_key(app: &mut App, key: KeyEvent) {
@@ -8027,9 +8392,10 @@ fn handle_config_editor_insert_key(app: &mut App, key: KeyEvent) {
     {
         record_config_history(app);
     }
+    let workspace = &mut app.workspace;
     match apply_editor_insert_key(
-        &mut app.config_editor_text,
-        &mut app.config_editor_cursor,
+        &mut workspace.config_editor_text,
+        &mut workspace.config_editor_cursor,
         key,
     ) {
         EditorInsertResult::ExitInsert => app.overlay_flags.config_editor_insert_mode = false,
@@ -8095,8 +8461,11 @@ mod tests {
     fn project_citation_search_toggles_online_and_selects_remote_results() {
         let mut app = App {
             mode: AppMode::ProjectCitationSearch,
-            project_citation_query: "graph learning".into(),
-            project_citation_cursor: "graph learning".len(),
+            workspace: AppWorkspaceState {
+                project_citation_query: "graph learning".into(),
+                project_citation_cursor: "graph learning".len(),
+                ..AppWorkspaceState::default()
+            },
             ..App::default()
         };
 
@@ -8551,12 +8920,15 @@ mod tests {
                 page,
                 content_focused: true,
                 mode: AppMode::WorkspaceSearch,
-                workspace_query: "test query".to_string(),
-                workspace_query_cursor: 10,
-                active_search_workspaces: {
-                    let mut s = HashSet::new();
-                    s.insert(page);
-                    s
+                workspace: AppWorkspaceState {
+                    workspace_query: "test query".to_string(),
+                    workspace_query_cursor: 10,
+                    active_search_workspaces: {
+                        let mut s = HashSet::new();
+                        s.insert(page);
+                        s
+                    },
+                    ..AppWorkspaceState::default()
                 },
                 ..App::default()
             };
@@ -8748,8 +9120,11 @@ mod tests {
                 page,
                 content_focused: true,
                 mode: AppMode::Normal,
-                workspace_query: "some query".to_string(),
-                workspace_query_cursor: 10,
+                workspace: AppWorkspaceState {
+                    workspace_query: "some query".to_string(),
+                    workspace_query_cursor: 10,
+                    ..AppWorkspaceState::default()
+                },
                 library: LibraryState {
                     selected: 5,
                     ..LibraryState::default()
@@ -8875,8 +9250,11 @@ mod tests {
             page: Page::Library,
             content_focused: true,
             mode: AppMode::WorkspaceSearch,
-            workspace_query: "paper".into(),
-            workspace_query_cursor: 2,
+            workspace: AppWorkspaceState {
+                workspace_query: "paper".into(),
+                workspace_query_cursor: 2,
+                ..AppWorkspaceState::default()
+            },
             ..App::default()
         };
         assert!(paste_text_into_active_input(&mut library, " new"));
@@ -8956,14 +9334,17 @@ mod tests {
     #[test]
     fn insert_mode_arrow_keys_move_without_exiting_insert_mode() {
         let mut app = App {
-            config_editor_text: "abc\ndef".into(),
-            config_editor_cursor: 1,
+            workspace: AppWorkspaceState {
+                config_editor_text: "abc\ndef".into(),
+                config_editor_cursor: 1,
+                config_editor_wrap_width: 8,
+                config_editor_viewport_height: 4,
+                ..AppWorkspaceState::default()
+            },
             overlay_flags: OverlayFlags {
                 config_editor_insert_mode: true,
                 ..OverlayFlags::default()
             },
-            config_editor_wrap_width: 8,
-            config_editor_viewport_height: 4,
             ..App::default()
         };
 
@@ -9174,8 +9555,11 @@ mod tests {
     #[test]
     fn terminal_clear_and_control_sequences_stay_inside_the_palette() {
         let mut app = App {
-            terminal_command_output: "previous output".into(),
-            terminal_command: "clear".into(),
+            workspace: AppWorkspaceState {
+                terminal_command_output: "previous output".into(),
+                terminal_command: "clear".into(),
+                ..AppWorkspaceState::default()
+            },
             ..App::default()
         };
 
@@ -10332,14 +10716,17 @@ mod tests {
     #[test]
     fn insert_mode_vertical_movement_respects_wrapped_rows() {
         let mut app = App {
-            config_editor_text: "abcdefghij".into(),
-            config_editor_cursor: 3,
+            workspace: AppWorkspaceState {
+                config_editor_text: "abcdefghij".into(),
+                config_editor_cursor: 3,
+                config_editor_wrap_width: 4,
+                config_editor_viewport_height: 3,
+                ..AppWorkspaceState::default()
+            },
             overlay_flags: OverlayFlags {
                 config_editor_insert_mode: true,
                 ..OverlayFlags::default()
             },
-            config_editor_wrap_width: 4,
-            config_editor_viewport_height: 3,
             ..App::default()
         };
 
@@ -10356,9 +10743,12 @@ mod tests {
     #[test]
     fn editor_page_navigation_moves_by_the_visible_row_count() {
         let mut app = App {
-            config_editor_text: "abcdefghijklmnop".into(),
-            config_editor_wrap_width: 4,
-            config_editor_viewport_height: 3,
+            workspace: AppWorkspaceState {
+                config_editor_text: "abcdefghijklmnop".into(),
+                config_editor_wrap_width: 4,
+                config_editor_viewport_height: 3,
+                ..AppWorkspaceState::default()
+            },
             ..App::default()
         };
 
@@ -10380,18 +10770,21 @@ mod tests {
         fs::write(&config_file, "theme = \"paper\"\n")?;
 
         let mut app = App {
-            config_editor_text: "unsaved = true".into(),
-            config_editor_cursor: 7,
+            workspace: AppWorkspaceState {
+                config_editor_text: "unsaved = true".into(),
+                config_editor_cursor: 7,
+                config_editor_error: Some("Invalid TOML".into()),
+                config_editor_scroll: 4,
+                config_editor_history: vec!["original = true".into(), "unsaved = true".into()],
+                config_editor_history_idx: 1,
+                config_editor_command: Some("q".into()),
+                config_editor_goal_column: Some(3),
+                ..AppWorkspaceState::default()
+            },
             overlay_flags: OverlayFlags {
                 config_editor_insert_mode: true,
                 ..OverlayFlags::default()
             },
-            config_editor_error: Some("Invalid TOML".into()),
-            config_editor_scroll: 4,
-            config_editor_history: vec!["original = true".into(), "unsaved = true".into()],
-            config_editor_history_idx: 1,
-            config_editor_command: Some("q".into()),
-            config_editor_goal_column: Some(3),
             ..App::default()
         };
 
@@ -11170,7 +11563,6 @@ mod tests {
         let mut app = App {
             page: Page::Credits,
             content_focused: true,
-            credits_selected: 0,
             ..App::default()
         };
 

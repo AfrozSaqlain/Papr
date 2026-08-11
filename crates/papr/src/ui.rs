@@ -577,45 +577,58 @@ fn render_projects(
     pdf_occlusion: Option<Rect>,
 ) {
     if app.active_project.is_none() || app.project_pane == ProjectPane::ProjectList {
-        let items = app.projects.iter().map(|project| {
-            workspace_list_item(vec![
-                Line::styled(
-                    &project.name,
-                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-                ),
-                Line::styled(
-                    project.path.display().to_string(),
-                    Style::default().fg(theme.muted),
-                ),
-            ])
-        });
-        let list = List::new(items)
-            .block(focus_block(
-                " PROJECTS — n NEW  ENTER/RIGHT OPEN  x DELETE  r REFRESH ",
-                app.content_focused,
-                theme,
-            ))
-            .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
-            .highlight_symbol("> ");
-        let mut state = ListState::default()
-            .with_selected(workspace_highlight_selection(app, app.projects_selected));
-        frame.render_stateful_widget(list, area, &mut state);
-        if app.projects.is_empty() {
-            frame.render_widget(
-                Paragraph::new("No projects yet. Press n to create one.")
-                    .alignment(Alignment::Center)
-                    .style(Style::default().fg(theme.muted)),
-                area,
-            );
-        }
+        render_project_list(frame, area, app, theme);
         return;
     }
-    let Some(project) = app.active_project.as_ref() else {
+    let Some(project_path) = app
+        .active_project
+        .as_ref()
+        .map(|project| project.path.clone())
+    else {
         return;
     };
-    let (file_tree_area, editor_area, right_area) = if app.pdf_viewer == "internal"
-        || app.project_view_flags.build_visible
-    {
+    let (file_tree_area, editor_area, right_area) = project_workspace_areas(area, app);
+    render_project_file_tree(frame, file_tree_area, app, theme, &project_path);
+    render_project_editor(frame, editor_area, app, theme);
+    render_project_right_pane(frame, right_area, app, theme, &project_path, pdf_occlusion);
+}
+
+fn render_project_list(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
+    let items = app.projects.iter().map(|project| {
+        workspace_list_item(vec![
+            Line::styled(
+                &project.name,
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ),
+            Line::styled(
+                project.path.display().to_string(),
+                Style::default().fg(theme.muted),
+            ),
+        ])
+    });
+    let list = List::new(items)
+        .block(focus_block(
+            " PROJECTS — n NEW  ENTER/RIGHT OPEN  x DELETE  r REFRESH ",
+            app.content_focused,
+            theme,
+        ))
+        .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
+        .highlight_symbol("> ");
+    let mut state = ListState::default()
+        .with_selected(workspace_highlight_selection(app, app.projects_selected));
+    frame.render_stateful_widget(list, area, &mut state);
+    if app.projects.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No projects yet. Press n to create one.")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme.muted)),
+            area,
+        );
+    }
+}
+
+fn project_workspace_areas(area: Rect, app: &App) -> (Rect, Rect, Option<Rect>) {
+    if app.pdf_viewer == "internal" || app.project_view_flags.build_visible {
         let panes = Layout::horizontal([
             Constraint::Length(22),
             Constraint::Ratio(1, 2),
@@ -626,11 +639,19 @@ fn render_projects(
     } else {
         let panes = Layout::horizontal([Constraint::Length(22), Constraint::Min(10)]).split(area);
         (panes[0], panes[1], None)
-    };
+    }
+}
 
+fn render_project_file_tree(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    theme: &Theme,
+    project_path: &std::path::Path,
+) {
     let files = app.project_files.iter().map(|path| {
         let mut label = path
-            .strip_prefix(&project.path)
+            .strip_prefix(project_path)
             .unwrap_or(path)
             .display()
             .to_string();
@@ -658,15 +679,18 @@ fn render_projects(
         .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
         .highlight_symbol("› ");
     let mut state = ListState::default().with_selected(Some(app.project_file_selected));
-    frame.render_stateful_widget(tree, file_tree_area, &mut state);
+    frame.render_stateful_widget(tree, area, &mut state);
+}
+
+fn render_project_editor(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let editor_title = app
         .project_editor_path
         .as_ref()
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str())
         .unwrap_or("Editor");
-    let editor_height = editor_area.height.saturating_sub(2) as usize;
-    app.project_editor_wrap_width = editor_area.width.saturating_sub(6).max(1) as usize;
+    let editor_height = area.height.saturating_sub(2) as usize;
+    app.project_editor_wrap_width = area.width.saturating_sub(6).max(1) as usize;
     app.project_editor_viewport_height = editor_height;
     let editor_view = build_config_editor_view_with_scroll_mode(
         &app.project_editor_text,
@@ -736,7 +760,7 @@ fn render_projects(
                 app.content_focused && app.project_pane == ProjectPane::Editor,
                 theme,
             )),
-        editor_area,
+        area,
     );
     if app.content_focused
         && app.project_pane == ProjectPane::Editor
@@ -744,11 +768,10 @@ fn render_projects(
         && editor_view.cursor_row < app.project_editor_scroll + editor_height
     {
         frame.set_cursor_position((
-            editor_area
-                .x
+            area.x
                 .saturating_add(5)
                 .saturating_add(u16::try_from(editor_view.cursor_col).unwrap_or(0)),
-            editor_area.y.saturating_add(1).saturating_add(
+            area.y.saturating_add(1).saturating_add(
                 u16::try_from(
                     editor_view
                         .cursor_row
@@ -757,182 +780,69 @@ fn render_projects(
                 .unwrap_or(0),
             ),
         ));
-        if !app.project_completions.is_empty() {
-            let width = editor_area.width.saturating_sub(8).clamp(24, 68);
-            let height = saturating_u16(app.project_completions.len())
-                .saturating_add(2)
-                .min(10);
-            let popup = Rect::new(
-                editor_area.x.saturating_add(4),
-                editor_area
-                    .y
-                    .saturating_add(2)
-                    .saturating_add(
-                        u16::try_from(
-                            editor_view
-                                .cursor_row
-                                .saturating_sub(app.project_editor_scroll),
-                        )
-                        .unwrap_or(0),
-                    )
-                    .min(editor_area.height.saturating_sub(height)),
-                width,
-                height,
-            );
-            let items = app.project_completions.iter().map(|item| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("{}  ", item.label),
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(&item.detail, Style::default().fg(theme.text)),
-                ]))
-            });
-            let list = List::new(items)
-                .block(focus_block(" CITATIONS — ENTER/TAB INSERT ", true, theme))
-                .highlight_style(Style::default().bg(theme.surface).fg(theme.accent));
-            let mut state =
-                ListState::default().with_selected(Some(app.project_completion_selected));
-            frame.render_widget(Clear, popup);
-            frame.render_stateful_widget(list, popup, &mut state);
-        }
+        render_project_completions(frame, area, app, theme, editor_view.cursor_row);
     }
+}
+
+fn render_project_completions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    theme: &Theme,
+    cursor_row: usize,
+) {
+    if app.project_completions.is_empty() {
+        return;
+    }
+    let width = area.width.saturating_sub(8).clamp(24, 68);
+    let height = saturating_u16(app.project_completions.len())
+        .saturating_add(2)
+        .min(10);
+    let popup = Rect::new(
+        area.x.saturating_add(4),
+        area.y
+            .saturating_add(2)
+            .saturating_add(
+                u16::try_from(cursor_row.saturating_sub(app.project_editor_scroll)).unwrap_or(0),
+            )
+            .min(area.height.saturating_sub(height)),
+        width,
+        height,
+    );
+    let items = app.project_completions.iter().map(|item| {
+        ListItem::new(Line::from(vec![
+            Span::styled(
+                format!("{}  ", item.label),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(&item.detail, Style::default().fg(theme.text)),
+        ]))
+    });
+    let list = List::new(items)
+        .block(focus_block(" CITATIONS — ENTER/TAB INSERT ", true, theme))
+        .highlight_style(Style::default().bg(theme.surface).fg(theme.accent));
+    let mut state = ListState::default().with_selected(Some(app.project_completion_selected));
+    frame.render_widget(Clear, popup);
+    frame.render_stateful_widget(list, popup, &mut state);
+}
+
+fn render_project_right_pane(
+    frame: &mut Frame<'_>,
+    area: Option<Rect>,
+    app: &mut App,
+    theme: &Theme,
+    project_path: &std::path::Path,
+    pdf_occlusion: Option<Rect>,
+) {
     if app.project_view_flags.build_visible {
-        let Some(build_area) = right_area else {
+        let Some(build_area) = area else {
             return;
         };
-        app.project_build_viewport_height = build_area.height.saturating_sub(2) as usize;
-        let build_right_title = " Alt+3 PDF PREVIEW ";
-        if app.project_view_flags.build_show_raw {
-            let raw_log = if app.project_build_raw_log.is_empty() {
-                "No compiler output captured yet.".to_owned()
-            } else {
-                app.project_build_raw_log.join("\n")
-            };
-            let line_count = app.project_build_raw_log.len().max(1);
-            app.project_build_scroll = app
-                .project_build_scroll
-                .min(line_count.saturating_sub(app.project_build_viewport_height.max(1)));
-            frame.render_widget(
-                Paragraph::new(raw_log)
-                    .scroll((
-                        u16::try_from(app.project_build_scroll).unwrap_or(u16::MAX),
-                        0,
-                    ))
-                    .wrap(Wrap { trim: false })
-                    .block(focus_block_with_right_title(
-                        " BUILD [Alt+4 · Tab PREVIEW] ",
-                        build_right_title,
-                        app.content_focused && app.project_pane == ProjectPane::Build,
-                        theme,
-                    )),
-                build_area,
-            );
-        } else {
-            let content_width = build_area.width as usize;
-            let items = app.project_build_diagnostics.iter().map(|diagnostic| {
-                let (symbol, label, color) = match diagnostic.severity {
-                    ProjectDiagnosticSeverity::Error => ("❌", "ERROR", theme.error),
-                    ProjectDiagnosticSeverity::Warning => ("⚠", "WARNING", theme.warning),
-                };
-                let mut lines = Vec::new();
-                let label_prefix = format!("{symbol} {label}: ");
-                let header_lines = wrap_text_to_spans(
-                    &label_prefix,
-                    &diagnostic.title,
-                    content_width,
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-                );
-                lines.extend(header_lines);
-
-                if !diagnostic.description.is_empty() && diagnostic.description != diagnostic.title
-                {
-                    let desc_lines = wrap_text_to_spans(
-                        "   ",
-                        &diagnostic.description,
-                        content_width,
-                        Style::default().fg(theme.muted),
-                        Style::default().fg(theme.text),
-                    );
-                    lines.extend(desc_lines);
-                }
-
-                if let Some(file) = &diagnostic.file {
-                    let location = match (diagnostic.line, diagnostic.col) {
-                        (Some(line), Some(col)) => format!("{file}:{line}:{col}"),
-                        (Some(line), None) => format!("{file}:{line}"),
-                        (None, _) => file.clone(),
-                    };
-                    let file_lines = wrap_text_to_spans(
-                        "   File : ",
-                        &location,
-                        content_width,
-                        Style::default().fg(theme.muted),
-                        Style::default().fg(theme.muted),
-                    );
-                    lines.extend(file_lines);
-                }
-
-                if let Some(code) = &diagnostic.code {
-                    let code_lines = wrap_text_to_spans(
-                        "   Code : ",
-                        code,
-                        content_width,
-                        Style::default().fg(theme.muted),
-                        Style::default().fg(theme.accent),
-                    );
-                    lines.extend(code_lines);
-                }
-
-                if let Some(hint) = &diagnostic.hint {
-                    let hint_lines = wrap_text_to_spans(
-                        "   Hint : ",
-                        hint,
-                        content_width,
-                        Style::default().fg(theme.muted),
-                        Style::default().fg(theme.muted),
-                    );
-                    lines.extend(hint_lines);
-                }
-
-                lines.push(Line::raw(""));
-                ListItem::new(lines)
-            });
-            let empty = app.project_build_diagnostics.is_empty();
-            if empty {
-                frame.render_widget(
-                    Paragraph::new(
-                        "No compiler diagnostics.\n\nThe latest build completed cleanly.",
-                    )
-                    .alignment(Alignment::Center)
-                    .style(Style::default().fg(theme.muted))
-                    .block(focus_block_with_right_title(
-                        " BUILD [Alt+4 · Tab PREVIEW] ",
-                        build_right_title,
-                        app.content_focused && app.project_pane == ProjectPane::Build,
-                        theme,
-                    )),
-                    build_area,
-                );
-            } else {
-                let list = List::new(items)
-                    .block(focus_block_with_right_title(
-                        " BUILD [Alt+4 · Tab PREVIEW] ",
-                        build_right_title,
-                        app.content_focused && app.project_pane == ProjectPane::Build,
-                        theme,
-                    ))
-                    .highlight_style(Style::default().bg(theme.surface).fg(theme.accent));
-                let mut state =
-                    ListState::default().with_selected(Some(app.project_build_selected));
-                frame.render_stateful_widget(list, build_area, &mut state);
-            }
-        }
-    } else if let Some(preview_area) = right_area {
-        let preview = project.path.join("main.pdf");
+        render_project_build(frame, build_area, app, theme);
+    } else if let Some(preview_area) = area {
+        let preview = project_path.join("main.pdf");
         if preview.exists() && app.pdf_viewer_path.as_deref() == Some(preview.as_path()) {
             let preview_block = focus_block_with_right_title(
                 " PDF PREVIEW [Alt+3 · Tab BUILD] ",
@@ -958,6 +868,117 @@ fn render_projects(
             );
         }
     }
+}
+
+fn render_project_build(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+    app.project_build_viewport_height = area.height.saturating_sub(2) as usize;
+    if app.project_view_flags.build_show_raw {
+        let raw_log = if app.project_build_raw_log.is_empty() {
+            "No compiler output captured yet.".to_owned()
+        } else {
+            app.project_build_raw_log.join("\n")
+        };
+        let line_count = app.project_build_raw_log.len().max(1);
+        app.project_build_scroll = app
+            .project_build_scroll
+            .min(line_count.saturating_sub(app.project_build_viewport_height.max(1)));
+        frame.render_widget(
+            Paragraph::new(raw_log)
+                .scroll((
+                    u16::try_from(app.project_build_scroll).unwrap_or(u16::MAX),
+                    0,
+                ))
+                .wrap(Wrap { trim: false })
+                .block(project_build_block(app, theme)),
+            area,
+        );
+        return;
+    }
+    if app.project_build_diagnostics.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No compiler diagnostics.\n\nThe latest build completed cleanly.")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme.muted))
+                .block(project_build_block(app, theme)),
+            area,
+        );
+        return;
+    }
+    let items = app
+        .project_build_diagnostics
+        .iter()
+        .map(|diagnostic| project_diagnostic_item(diagnostic, area.width as usize, theme));
+    let list = List::new(items)
+        .block(project_build_block(app, theme))
+        .highlight_style(Style::default().bg(theme.surface).fg(theme.accent));
+    let mut state = ListState::default().with_selected(Some(app.project_build_selected));
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn project_build_block<'a>(app: &App, theme: &Theme) -> Block<'a> {
+    focus_block_with_right_title(
+        " BUILD [Alt+4 · Tab PREVIEW] ",
+        " Alt+3 PDF PREVIEW ",
+        app.content_focused && app.project_pane == ProjectPane::Build,
+        theme,
+    )
+}
+
+fn project_diagnostic_item<'a>(
+    diagnostic: &'a papr_core::ProjectBuildDiagnostic,
+    width: usize,
+    theme: &Theme,
+) -> ListItem<'a> {
+    let (symbol, label, color) = match diagnostic.severity {
+        ProjectDiagnosticSeverity::Error => ("❌", "ERROR", theme.error),
+        ProjectDiagnosticSeverity::Warning => ("⚠", "WARNING", theme.warning),
+    };
+    let mut lines = wrap_text_to_spans(
+        &format!("{symbol} {label}: "),
+        &diagnostic.title,
+        width,
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+    );
+    if !diagnostic.description.is_empty() && diagnostic.description != diagnostic.title {
+        lines.extend(wrap_text_to_spans(
+            "   ",
+            &diagnostic.description,
+            width,
+            Style::default().fg(theme.muted),
+            Style::default().fg(theme.text),
+        ));
+    }
+    if let Some(file) = &diagnostic.file {
+        let location = match (diagnostic.line, diagnostic.col) {
+            (Some(line), Some(col)) => format!("{file}:{line}:{col}"),
+            (Some(line), None) => format!("{file}:{line}"),
+            (None, _) => file.clone(),
+        };
+        lines.extend(wrap_text_to_spans(
+            "   File : ",
+            &location,
+            width,
+            Style::default().fg(theme.muted),
+            Style::default().fg(theme.muted),
+        ));
+    }
+    for (prefix, value, style) in [
+        ("   Code : ", diagnostic.code.as_deref(), theme.accent),
+        ("   Hint : ", diagnostic.hint.as_deref(), theme.muted),
+    ] {
+        if let Some(value) = value {
+            lines.extend(wrap_text_to_spans(
+                prefix,
+                value,
+                width,
+                Style::default().fg(theme.muted),
+                Style::default().fg(style),
+            ));
+        }
+    }
+    lines.push(Line::raw(""));
+    ListItem::new(lines)
 }
 
 fn render_workspace_search_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
@@ -1948,120 +1969,12 @@ fn markdown_preview(body: &str, theme: &Theme) -> MarkdownPreview {
 
     for (event, range) in Parser::new_ext(body, options).into_offset_iter() {
         match event {
-            Event::Start(Tag::Paragraph) => {
-                preserve_source_spacing(&mut renderer, body, range.start);
-                renderer.block_prefix();
-            }
-            Event::Start(Tag::Heading { level, .. }) => {
-                renderer.finish_line();
-                preserve_source_spacing(&mut renderer, body, range.start);
-                renderer.block_prefix();
-                renderer.styles.push(
-                    renderer
-                        .style()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                );
-                renderer.push(
-                    format!("{} ", "━".repeat(level as usize + 1)),
-                    renderer.style(),
-                );
-            }
-            Event::End(TagEnd::Heading(_)) => {
-                renderer.styles.pop();
-                renderer.finish_line();
-            }
-            Event::Start(Tag::Emphasis) => renderer
-                .styles
-                .push(renderer.style().add_modifier(Modifier::ITALIC)),
-            Event::Start(Tag::Strong) => renderer
-                .styles
-                .push(renderer.style().add_modifier(Modifier::BOLD)),
-            Event::Start(Tag::Strikethrough) => renderer
-                .styles
-                .push(renderer.style().add_modifier(Modifier::CROSSED_OUT)),
-            Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough) => {
-                renderer.styles.pop();
-            }
-            Event::Start(Tag::Link { dest_url, .. }) => {
-                renderer.link_destinations.push((
-                    dest_url.to_string(),
-                    renderer.lines.len(),
-                    renderer.current_width(),
-                ));
-                renderer.styles.push(
-                    renderer
-                        .style()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::UNDERLINED),
-                );
-            }
-            Event::End(TagEnd::Link) => {
-                renderer.styles.pop();
-                if let Some((destination, line, column)) = renderer.link_destinations.pop() {
-                    let width = renderer.current_width().saturating_sub(column);
-                    if width > 0 && line == renderer.lines.len() {
-                        renderer.hyperlinks.push(MarkdownLink {
-                            line,
-                            column,
-                            width,
-                            destination: destination.clone(),
-                        });
-                    }
-                }
-            }
-            Event::Start(Tag::Image { dest_url, .. }) => {
-                renderer.image_destinations.push(dest_url.to_string());
-                renderer.push("🖼 ", Style::default().fg(theme.secondary));
-                renderer.styles.push(
-                    renderer
-                        .style()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::UNDERLINED),
-                );
-            }
-            Event::End(TagEnd::Image) => {
-                renderer.styles.pop();
-                if let Some(destination) = renderer.image_destinations.pop() {
-                    renderer.push(
-                        format!(" ({destination})"),
-                        Style::default().fg(theme.muted),
-                    );
-                }
-            }
-            Event::Start(Tag::BlockQuote(_)) => {
-                renderer.finish_line();
-                preserve_source_spacing(&mut renderer, body, range.start);
-                renderer.quote_depth += 1;
-            }
-            Event::End(TagEnd::BlockQuote(_)) => {
-                renderer.finish_line();
-                renderer.quote_depth = renderer.quote_depth.saturating_sub(1);
-            }
-            Event::Start(Tag::List(first)) => {
-                renderer.finish_line();
-                preserve_source_spacing(&mut renderer, body, range.start);
-                renderer.lists.push(first);
-            }
-            Event::End(TagEnd::List(_)) => {
-                renderer.finish_line();
-                renderer.lists.pop();
-            }
-            Event::Start(Tag::Item) => renderer.start_item(),
+            Event::Start(tag) => start_markdown_tag(&mut renderer, tag, body, range.start, theme),
+            Event::End(tag) => end_markdown_tag(&mut renderer, tag, theme),
             Event::TaskListMarker(done) => renderer.push(
                 if done { "[x] " } else { "[ ] " },
                 Style::default().fg(if done { theme.success } else { theme.warning }),
             ),
-            Event::Start(Tag::CodeBlock(kind)) => {
-                renderer.finish_line();
-                preserve_source_spacing(&mut renderer, body, range.start);
-                let language = match kind {
-                    CodeBlockKind::Fenced(language) => language.to_string(),
-                    CodeBlockKind::Indented => String::new(),
-                };
-                renderer.code_block = Some((language, String::new()));
-            }
-            Event::End(TagEnd::CodeBlock) => renderer.finish_code_block(),
             Event::Code(code) => renderer.push(
                 code.to_string(),
                 renderer.style().fg(theme.success).bg(theme.surface),
@@ -2085,42 +1998,7 @@ fn markdown_preview(body: &str, theme: &Theme) -> MarkdownPreview {
             Event::FootnoteReference(label) => {
                 renderer.push(format!("[^{label}]"), Style::default().fg(theme.accent));
             }
-            Event::Start(Tag::FootnoteDefinition(label)) => {
-                renderer.finish_line();
-                renderer.push(format!("[^{label}]: "), Style::default().fg(theme.accent));
-            }
-            Event::Start(Tag::Table(_)) => {
-                renderer.finish_line();
-                preserve_source_spacing(&mut renderer, body, range.start);
-                renderer.table = Some(MarkdownTable::default());
-            }
-            Event::End(TagEnd::Table) => renderer.finish_table(),
-            Event::Start(Tag::TableRow) => {
-                if let Some(table) = &mut renderer.table
-                    && !table.row.is_empty()
-                {
-                    table.rows.push(std::mem::take(&mut table.row));
-                }
-            }
-            Event::Start(Tag::TableCell) => {
-                if let Some(table) = &mut renderer.table {
-                    table.in_cell = true;
-                }
-            }
-            Event::End(TagEnd::TableCell) => {
-                if let Some(table) = &mut renderer.table {
-                    table.row.push(std::mem::take(&mut table.cell));
-                    table.in_cell = false;
-                }
-            }
-            Event::End(TagEnd::TableRow) => {
-                if let Some(table) = &mut renderer.table {
-                    table.rows.push(std::mem::take(&mut table.row));
-                }
-            }
-            Event::End(TagEnd::Paragraph | TagEnd::FootnoteDefinition | TagEnd::Item)
-            | Event::SoftBreak
-            | Event::HardBreak => renderer.finish_line(),
+            Event::SoftBreak | Event::HardBreak => renderer.finish_line(),
             Event::Rule => {
                 renderer.finish_line();
                 renderer.lines.push(Line::styled(
@@ -2129,7 +2007,6 @@ fn markdown_preview(body: &str, theme: &Theme) -> MarkdownPreview {
                 ));
             }
             Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => renderer.text(&text),
-            Event::Start(_) | Event::End(_) => {}
         }
     }
     renderer.finish_code_block();
@@ -2138,6 +2015,168 @@ fn markdown_preview(body: &str, theme: &Theme) -> MarkdownPreview {
     MarkdownPreview {
         lines: renderer.lines,
         hyperlinks: renderer.hyperlinks,
+    }
+}
+
+fn start_markdown_tag(
+    renderer: &mut MarkdownRenderer<'_>,
+    tag: Tag<'_>,
+    body: &str,
+    start: usize,
+    theme: &Theme,
+) {
+    match tag {
+        Tag::Paragraph => {
+            preserve_source_spacing(renderer, body, start);
+            renderer.block_prefix();
+        }
+        Tag::Heading { level, .. } => {
+            renderer.finish_line();
+            preserve_source_spacing(renderer, body, start);
+            renderer.block_prefix();
+            renderer.styles.push(
+                renderer
+                    .style()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            );
+            renderer.push(
+                format!("{} ", "━".repeat(level as usize + 1)),
+                renderer.style(),
+            );
+        }
+        Tag::Emphasis => renderer
+            .styles
+            .push(renderer.style().add_modifier(Modifier::ITALIC)),
+        Tag::Strong => renderer
+            .styles
+            .push(renderer.style().add_modifier(Modifier::BOLD)),
+        Tag::Strikethrough => renderer
+            .styles
+            .push(renderer.style().add_modifier(Modifier::CROSSED_OUT)),
+        Tag::Link { dest_url, .. } => {
+            renderer.link_destinations.push((
+                dest_url.to_string(),
+                renderer.lines.len(),
+                renderer.current_width(),
+            ));
+            renderer.styles.push(
+                renderer
+                    .style()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::UNDERLINED),
+            );
+        }
+        Tag::Image { dest_url, .. } => {
+            renderer.image_destinations.push(dest_url.to_string());
+            renderer.push("🖼 ", Style::default().fg(theme.secondary));
+            renderer.styles.push(
+                renderer
+                    .style()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::UNDERLINED),
+            );
+        }
+        Tag::BlockQuote(_) => {
+            renderer.finish_line();
+            preserve_source_spacing(renderer, body, start);
+            renderer.quote_depth += 1;
+        }
+        Tag::List(first) => {
+            renderer.finish_line();
+            preserve_source_spacing(renderer, body, start);
+            renderer.lists.push(first);
+        }
+        Tag::Item => renderer.start_item(),
+        Tag::CodeBlock(kind) => {
+            renderer.finish_line();
+            preserve_source_spacing(renderer, body, start);
+            let language = match kind {
+                CodeBlockKind::Fenced(language) => language.to_string(),
+                CodeBlockKind::Indented => String::new(),
+            };
+            renderer.code_block = Some((language, String::new()));
+        }
+        Tag::FootnoteDefinition(label) => {
+            renderer.finish_line();
+            renderer.push(format!("[^{label}]: "), Style::default().fg(theme.accent));
+        }
+        Tag::Table(_) => {
+            renderer.finish_line();
+            preserve_source_spacing(renderer, body, start);
+            renderer.table = Some(MarkdownTable::default());
+        }
+        Tag::TableRow => {
+            if let Some(table) = &mut renderer.table
+                && !table.row.is_empty()
+            {
+                table.rows.push(std::mem::take(&mut table.row));
+            }
+        }
+        Tag::TableCell => {
+            if let Some(table) = &mut renderer.table {
+                table.in_cell = true;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn end_markdown_tag(renderer: &mut MarkdownRenderer<'_>, tag: TagEnd, theme: &Theme) {
+    match tag {
+        TagEnd::Heading(_) => {
+            renderer.styles.pop();
+            renderer.finish_line();
+        }
+        TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
+            renderer.styles.pop();
+        }
+        TagEnd::Link => {
+            renderer.styles.pop();
+            if let Some((destination, line, column)) = renderer.link_destinations.pop() {
+                let width = renderer.current_width().saturating_sub(column);
+                if width > 0 && line == renderer.lines.len() {
+                    renderer.hyperlinks.push(MarkdownLink {
+                        line,
+                        column,
+                        width,
+                        destination,
+                    });
+                }
+            }
+        }
+        TagEnd::Image => {
+            renderer.styles.pop();
+            if let Some(destination) = renderer.image_destinations.pop() {
+                renderer.push(
+                    format!(" ({destination})"),
+                    Style::default().fg(theme.muted),
+                );
+            }
+        }
+        TagEnd::BlockQuote(_) => {
+            renderer.finish_line();
+            renderer.quote_depth = renderer.quote_depth.saturating_sub(1);
+        }
+        TagEnd::List(_) => {
+            renderer.finish_line();
+            renderer.lists.pop();
+        }
+        TagEnd::CodeBlock => renderer.finish_code_block(),
+        TagEnd::Table => renderer.finish_table(),
+        TagEnd::TableCell => {
+            if let Some(table) = &mut renderer.table {
+                table.row.push(std::mem::take(&mut table.cell));
+                table.in_cell = false;
+            }
+        }
+        TagEnd::TableRow => {
+            if let Some(table) = &mut renderer.table {
+                table.rows.push(std::mem::take(&mut table.row));
+            }
+        }
+        TagEnd::Paragraph | TagEnd::FootnoteDefinition | TagEnd::Item => renderer.finish_line(),
+        _ => {}
     }
 }
 
@@ -4957,127 +4996,12 @@ struct PaperLineContext<'a> {
 
 fn build_paper_lines<'a>(app: &App, theme: &Theme, context: PaperLineContext<'a>) -> Vec<Line<'a>> {
     let PaperLineContext {
-        paper_id,
         title,
         authors,
-        reading_status,
-        file_size,
-        availability,
-        bookmark_year,
-        bookmark_journal,
-        bookmark_doi,
-        bookmark_page,
-        download_label,
         available_width,
+        ..
     } = context;
-    let mut stats_spans = Vec::new();
-
-    // 1. Read/Unread Status
-    if !reading_status.is_empty() {
-        stats_spans.push(Span::styled(
-            reading_status.to_string(),
-            Style::default().fg(theme.muted),
-        ));
-    }
-
-    // 2. Bookmarks details
-    if let Some(year) = bookmark_year {
-        if !stats_spans.is_empty() {
-            stats_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
-        }
-        stats_spans.push(Span::styled(
-            year.to_string(),
-            Style::default().fg(theme.muted),
-        ));
-    }
-    if let Some(journal) = bookmark_journal {
-        if !stats_spans.is_empty() {
-            stats_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
-        }
-        stats_spans.push(Span::styled(
-            journal.to_string(),
-            Style::default().fg(theme.muted),
-        ));
-    } else if let Some(doi) = bookmark_doi {
-        if !stats_spans.is_empty() {
-            stats_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
-        }
-        stats_spans.push(Span::styled(
-            format!("DOI {doi}"),
-            Style::default().fg(theme.muted),
-        ));
-    }
-    if let Some(page) = bookmark_page {
-        if !stats_spans.is_empty() {
-            stats_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
-        }
-        stats_spans.push(Span::styled(
-            format!("page {page}"),
-            Style::default().fg(theme.muted),
-        ));
-    }
-
-    // 3. Group (if any)
-    let collection_name = paper_id.and_then(|id| get_paper_collection_name(app, id));
-    if let Some(col_name) = collection_name {
-        if !stats_spans.is_empty() {
-            stats_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
-        }
-        stats_spans.push(Span::styled("(", Style::default().fg(theme.muted)));
-        stats_spans.push(Span::styled(
-            col_name,
-            Style::default()
-                .bg(theme.surface)
-                .fg(theme.secondary)
-                .add_modifier(Modifier::BOLD),
-        ));
-        stats_spans.push(Span::styled(")", Style::default().fg(theme.muted)));
-    }
-
-    // 4. File Size
-    if let Some(size) = file_size {
-        if !stats_spans.is_empty() {
-            stats_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
-        }
-        stats_spans.push(Span::styled(
-            format_bytes(size),
-            Style::default().fg(theme.muted),
-        ));
-    } else if file_size.is_none()
-        && bookmark_year.is_none()
-        && download_label.is_none()
-        && paper_id.is_some()
-    {
-        if !stats_spans.is_empty() {
-            stats_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
-        }
-        stats_spans.push(Span::styled(
-            "metadata only",
-            Style::default().fg(theme.muted),
-        ));
-    }
-
-    // 5. Availability (Local PDF / Remote metadata)
-    if let Some(avail) = availability {
-        if !stats_spans.is_empty() {
-            stats_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
-        }
-        stats_spans.push(Span::styled(
-            avail.to_string(),
-            Style::default().fg(theme.muted),
-        ));
-    }
-
-    // 6. Download label
-    if let Some((dl_lbl, dl_col)) = download_label {
-        if !stats_spans.is_empty() {
-            stats_spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
-        }
-        stats_spans.push(Span::styled(
-            dl_lbl.to_string(),
-            Style::default().fg(dl_col),
-        ));
-    }
+    let stats_spans = paper_stats_spans(app, theme, context);
 
     let stats_len: usize = stats_spans.iter().map(ratatui::prelude::Span::width).sum();
     let authors_str = if authors.is_empty() {
@@ -5131,6 +5055,75 @@ fn build_paper_lines<'a>(app: &App, theme: &Theme, context: PaperLineContext<'a>
         }
         lines
     }
+}
+
+fn paper_stats_spans<'a>(app: &App, theme: &Theme, context: PaperLineContext<'a>) -> Vec<Span<'a>> {
+    let mut spans = Vec::new();
+    if !context.reading_status.is_empty() {
+        push_paper_stat(
+            &mut spans,
+            context.reading_status.to_owned(),
+            theme.muted,
+            theme,
+        );
+    }
+    if let Some(year) = context.bookmark_year {
+        push_paper_stat(&mut spans, year.to_owned(), theme.muted, theme);
+    }
+    if let Some(journal) = context.bookmark_journal {
+        push_paper_stat(&mut spans, journal.to_owned(), theme.muted, theme);
+    } else if let Some(doi) = context.bookmark_doi {
+        push_paper_stat(&mut spans, format!("DOI {doi}"), theme.muted, theme);
+    }
+    if let Some(page) = context.bookmark_page {
+        push_paper_stat(&mut spans, format!("page {page}"), theme.muted, theme);
+    }
+    if let Some(name) = context
+        .paper_id
+        .and_then(|id| get_paper_collection_name(app, id))
+    {
+        push_paper_separator(&mut spans, theme);
+        spans.push(Span::styled("(", Style::default().fg(theme.muted)));
+        spans.push(Span::styled(
+            name,
+            Style::default()
+                .bg(theme.surface)
+                .fg(theme.secondary)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(")", Style::default().fg(theme.muted)));
+    }
+    if let Some(size) = context.file_size {
+        push_paper_stat(&mut spans, format_bytes(size), theme.muted, theme);
+    } else if context.bookmark_year.is_none()
+        && context.download_label.is_none()
+        && context.paper_id.is_some()
+    {
+        push_paper_stat(&mut spans, "metadata only".to_owned(), theme.muted, theme);
+    }
+    if let Some(availability) = context.availability {
+        push_paper_stat(&mut spans, availability.to_owned(), theme.muted, theme);
+    }
+    if let Some((label, color)) = context.download_label {
+        push_paper_stat(&mut spans, label.to_owned(), color, theme);
+    }
+    spans
+}
+
+fn push_paper_separator(spans: &mut Vec<Span<'_>>, theme: &Theme) {
+    if !spans.is_empty() {
+        spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
+    }
+}
+
+fn push_paper_stat(
+    spans: &mut Vec<Span<'_>>,
+    value: String,
+    color: ratatui::style::Color,
+    theme: &Theme,
+) {
+    push_paper_separator(spans, theme);
+    spans.push(Span::styled(value, Style::default().fg(color)));
 }
 
 #[cfg(test)]
@@ -5684,7 +5677,10 @@ Image: ![plot](plot.png)[^1]
         let mut terminal = Terminal::new(backend)?;
         let mut app = App {
             page: Page::Bookmarks,
-            workspace_query: "target".into(),
+            workspace: AppWorkspaceState {
+                workspace_query: "target".into(),
+                ..AppWorkspaceState::default()
+            },
             bookmarks: vec![
                 BookmarkSummary {
                     id: 1,

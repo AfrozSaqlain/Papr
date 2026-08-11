@@ -59,7 +59,10 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Clear, Paragraph, Widget},
 };
-use ratatui_image::picker::{Picker, ProtocolType};
+use ratatui_image::{
+    Resize, StatefulImage,
+    picker::{Picker, ProtocolType},
+};
 
 // ---------------------------------------------------------------------------
 // Cache key helpers
@@ -1062,6 +1065,174 @@ pub fn draw_pdf_viewer_in(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     draw_pdf_viewer_in_with_occlusion(frame, app, area, None);
 }
 
+struct ViewerFrameData {
+    font_w: u16,
+    font_h: u16,
+    page_data: Option<RenderedPage>,
+    next_page_data: Option<RenderedPage>,
+    current_page: usize,
+    current_scroll_px: f64,
+    last_crop_key: Option<CropKey>,
+    has_encoded_frame: bool,
+    is_kitty: bool,
+}
+
+struct ViewerLayout {
+    pdf_path: PathBuf,
+    pdf_area: Rect,
+    status_area: Rect,
+    page_fit: bool,
+}
+
+fn prepare_viewer_layout(frame: &mut Frame<'_>, app: &mut App, area: Rect) -> Option<ViewerLayout> {
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(Color::Rgb(20, 20, 20))),
+        area,
+    );
+    let Some(pdf_path) = app.pdf_viewer_path.clone() else {
+        frame.render_widget(
+            Paragraph::new("No PDF file open").style(Style::default().fg(Color::Red)),
+            area,
+        );
+        return None;
+    };
+    if let Some(total_pages) = page_count(&pdf_path) {
+        app.pdf_viewer_total_pages = total_pages;
+        app.pdf_viewer_page = app.pdf_viewer_page.min(total_pages.max(1));
+    }
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(area);
+    Some(ViewerLayout {
+        pdf_path,
+        pdf_area: chunks[0],
+        status_area: chunks[1],
+        page_fit: app.page == Page::Projects
+            && app.active_project.is_some()
+            && app.pdf_viewer == "internal",
+    })
+}
+
+fn prepare_viewer_frame(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    pdf_area: Rect,
+    pdf_path: &Path,
+    page_fit: bool,
+) -> Option<ViewerFrameData> {
+    let cache_arc = get_cache();
+    let Ok(mut cache) = cache_arc.lock() else {
+        return None;
+    };
+    let Some(picker) = cache.picker.as_ref() else {
+        drop(cache);
+        frame.render_widget(
+            Paragraph::new(
+                "Terminal graphics not detected (Kitty / Sixel / iTerm2 / halfblocks). \
+                 Press Esc to exit.",
+            )
+            .style(Style::default().fg(Color::Yellow))
+            .alignment(ratatui::layout::Alignment::Center),
+            area,
+        );
+        return None;
+    };
+    let (font_w, font_h) = picker.font_size();
+    let is_kitty = matches!(picker.protocol_type(), ProtocolType::Kitty);
+    let pixel_w = u32::from(pdf_area.width) * u32::from(font_w);
+    let pixel_h = u32::from(pdf_area.height) * u32::from(font_h);
+    if pixel_w == 0 || pixel_h == 0 {
+        return None;
+    }
+    let generation = *cache.document_generations.get(pdf_path).unwrap_or(&0);
+    cache
+        .document_widths
+        .insert(pdf_path.to_path_buf(), pixel_w);
+    let selected_page = app.pdf_viewer_page;
+    cache
+        .pages
+        .retain(|(path, cached_generation, page, _, cached_width), _| {
+            path != pdf_path
+                || (*cached_generation == generation
+                    && *cached_width == pixel_w
+                    && page.abs_diff(selected_page) <= 2)
+        });
+    cancel_render_jobs(&mut cache, |(path, _, _, _, cached_width)| {
+        path == pdf_path && *cached_width != pixel_w
+    });
+    cache.last_viewport_h = pixel_h;
+    update_viewer_scroll(&mut cache, app.pdf_viewer_total_pages, pixel_h, page_fit);
+    app.pdf_viewer_page = cache.current_page;
+    app.pdf_viewer_scroll_y = (cache.current_scroll_px / f64::from(font_h))
+        .to_u32()
+        .unwrap_or(u32::MAX);
+    let key = (
+        pdf_path.to_path_buf(),
+        generation,
+        cache.current_page,
+        DPI,
+        pixel_w,
+    );
+    let next_key = (
+        pdf_path.to_path_buf(),
+        generation,
+        cache.current_page + 1,
+        DPI,
+        pixel_w,
+    );
+    Some(ViewerFrameData {
+        font_w,
+        font_h,
+        page_data: cache.pages.get(&key).cloned(),
+        next_page_data: cache.pages.get(&next_key).cloned(),
+        current_page: cache.current_page,
+        current_scroll_px: cache.current_scroll_px,
+        last_crop_key: cache.last_crop_key.clone(),
+        has_encoded_frame: cache.last_encoded.is_some(),
+        is_kitty,
+    })
+}
+
+fn update_viewer_scroll(cache: &mut PageCache, total_pages: usize, pixel_h: u32, page_fit: bool) {
+    let now = std::time::Instant::now();
+    let elapsed = cache
+        .last_update
+        .map_or(0.0, |previous| (now - previous).as_secs_f64());
+    cache.last_update = Some(now);
+    let default_height = f64::from(pixel_h) * 1.5;
+    if page_fit {
+        cache.target_scroll_px = 0.0;
+        cache.current_scroll_px = 0.0;
+        return;
+    }
+    if elapsed <= 0.0 {
+        return;
+    }
+    let target = to_relative_px(
+        cache.target_page,
+        cache.target_scroll_px,
+        cache.current_page,
+        &cache.pages,
+        default_height,
+    );
+    let difference = target - cache.current_scroll_px;
+    cache.current_scroll_px = if difference.abs() > 1.0 {
+        cache.current_scroll_px + difference * (1.0 - (-18.0 * elapsed).exp())
+    } else {
+        target
+    };
+    normalize_coords(
+        &mut cache.current_page,
+        &mut cache.current_scroll_px,
+        total_pages,
+        &cache.pages,
+        default_height,
+    );
+}
+
 /// Draw the PDF while leaving an overlapping terminal-cell region available
 /// to a later overlay widget. Kitty rows are split around that exact region.
 pub fn draw_pdf_viewer_in_with_occlusion(
@@ -1070,220 +1241,36 @@ pub fn draw_pdf_viewer_in_with_occlusion(
     area: Rect,
     occlusion: Option<Rect>,
 ) {
-    // Kitty placeholders mark cells as skipped. Clear the entire pane before
-    // every blit so an invalidated image cannot leave skipped/stale cells in a
-    // neighbouring split-pane region.
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(Color::Rgb(20, 20, 20))),
-        area,
-    );
-
-    let pdf_path = if let Some(p) = &app.pdf_viewer_path {
-        p.clone()
-    } else {
-        frame.render_widget(
-            Paragraph::new("No PDF file open").style(Style::default().fg(Color::Red)),
-            area,
-        );
+    let Some(layout) = prepare_viewer_layout(frame, app, area) else {
         return;
     };
-    if let Some(total_pages) = page_count(&pdf_path) {
-        app.pdf_viewer_total_pages = total_pages;
-        app.pdf_viewer_page = app.pdf_viewer_page.min(total_pages.max(1));
-    }
-    let page_fit =
-        app.page == Page::Projects && app.active_project.is_some() && app.pdf_viewer == "internal";
+    let ViewerLayout {
+        pdf_path,
+        pdf_area,
+        status_area,
+        page_fit,
+    } = layout;
 
-    // Layout
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(area);
-    let pdf_area = chunks[0];
-    let status_area = chunks[1];
-
-    // ── Single lock: read picker + font size, run physics, read page data ──
-    let (
-        font_w,
-        font_h,
-        page_data_opt,
-        next_page_data_opt,
-        current_page,
-        current_scroll_px_val,
-        last_crop_key,
-        last_encoded_is_some,
-        is_kitty,
-    ) = {
-        let cache_arc = get_cache();
-        let Ok(mut g) = cache_arc.lock() else {
-            return;
-        };
-
-        let (font_w, font_h, is_kitty) = if let Some(p) = g.picker.as_ref() {
-            let (fw, fh) = p.font_size();
-            // Detect Kitty protocol by checking the picker's protocol type
-            let is_kitty = matches!(p.protocol_type(), ProtocolType::Kitty);
-            (fw, fh, is_kitty)
-        } else {
-            // No graphics protocol detected
-            drop(g);
-            frame.render_widget(
-                Paragraph::new(
-                    "Terminal graphics not detected (Kitty / Sixel / iTerm2 / halfblocks). \
-                     Press Esc to exit.",
-                )
-                .style(Style::default().fg(Color::Yellow))
-                .alignment(ratatui::layout::Alignment::Center),
-                area,
-            );
-            return;
-        };
-
-        let pixel_w = u32::from(pdf_area.width) * u32::from(font_w);
-        let pixel_h = u32::from(pdf_area.height) * u32::from(font_h);
-        if pixel_w == 0 || pixel_h == 0 {
-            return;
-        }
-
-        let generation = *g.document_generations.get(&pdf_path).unwrap_or(&0);
-        g.document_widths.insert(pdf_path.clone(), pixel_w);
-
-        // Evict distant pages and stale terminal-width variants. The old code
-        // considered only page number, so every resize could retain another
-        // complete set of page rasters.
-        let current_page_val = app.pdf_viewer_page;
-        g.pages
-            .retain(|(path, cached_generation, page, _, cached_width), _| {
-                path != &pdf_path
-                    || (*cached_generation == generation
-                        && *cached_width == pixel_w
-                        && page.abs_diff(current_page_val) <= 2)
-            });
-        cancel_render_jobs(&mut g, |(path, _, _, _, cached_width)| {
-            path == &pdf_path && *cached_width != pixel_w
-        });
-
-        g.last_viewport_h = pixel_h;
-
-        // The embedded Project preview is a discrete page viewer.  Its
-        // fullscreen counterpart keeps the existing smooth scrolling model.
-        let now = std::time::Instant::now();
-        let dt = g.last_update.map_or(0.0, |t| (now - t).as_secs_f64());
-        g.last_update = Some(now);
-
-        let total_pages = app.pdf_viewer_total_pages;
-        let default_h = f64::from(pixel_h) * 1.5;
-
-        if page_fit {
-            g.target_scroll_px = 0.0;
-            g.current_scroll_px = 0.0;
-        } else if dt > 0.0 {
-            let target_rel = to_relative_px(
-                g.target_page,
-                g.target_scroll_px,
-                g.current_page,
-                &g.pages,
-                default_h,
-            );
-            let diff = target_rel - g.current_scroll_px;
-            // Tighter spring: snaps within 1 px instead of dragging for several frames
-            if diff.abs() > 1.0 {
-                let lerp_factor = 1.0 - (-18.0 * dt).exp();
-                g.current_scroll_px += diff * lerp_factor;
-            } else {
-                g.current_scroll_px = target_rel;
-            }
-            let mut cp = g.current_page;
-            let mut cs = g.current_scroll_px;
-            normalize_coords(&mut cp, &mut cs, total_pages, &g.pages, default_h);
-            g.current_page = cp;
-            g.current_scroll_px = cs;
-        }
-
-        app.pdf_viewer_page = g.current_page;
-        app.pdf_viewer_scroll_y = (g.current_scroll_px / f64::from(font_h))
-            .to_u32()
-            .unwrap_or(u32::MAX);
-
-        let dpi = DPI;
-        let key: PageKey = (pdf_path.clone(), generation, g.current_page, dpi, pixel_w);
-        let page_data = g.pages.get(&key).cloned();
-        let next_key: PageKey = (
-            pdf_path.clone(),
-            generation,
-            g.current_page + 1,
-            dpi,
-            pixel_w,
-        );
-        let next_page_data = g.pages.get(&next_key).cloned();
-
-        let last_crop_key = g.last_crop_key.clone();
-        let last_encoded_is_some = g.last_encoded.is_some();
-
-        (
-            font_w,
-            font_h,
-            page_data,
-            next_page_data,
-            g.current_page,
-            g.current_scroll_px,
-            last_crop_key,
-            last_encoded_is_some,
-            is_kitty,
-        )
+    let Some(view) = prepare_viewer_frame(frame, app, area, pdf_area, &pdf_path, page_fit) else {
+        return;
     };
-    // ── Lock released ────────────────────────────────────────────────────
 
-    let pixel_w = u32::from(pdf_area.width) * u32::from(font_w);
-    let pixel_h = u32::from(pdf_area.height) * u32::from(font_h);
+    let pixel_w = u32::from(pdf_area.width) * u32::from(view.font_w);
+    let pixel_h = u32::from(pdf_area.height) * u32::from(view.font_h);
     if pixel_w == 0 || pixel_h == 0 {
         return;
     }
 
-    let dpi = DPI;
+    request_visible_pages(
+        &pdf_path,
+        view.current_page,
+        app.pdf_viewer_total_pages,
+        pixel_w,
+    );
 
-    // Submit the visible page first, then favor forward scrolling. The bounded
-    // renderer queue prevents speculative neighbours from delaying the page
-    // the user is actually waiting for.
-    for (candidate, priority) in [
-        (Some(current_page), true),
-        (current_page.checked_add(1), false),
-        (current_page.checked_sub(1), false),
-        (current_page.checked_add(2), false),
-        (current_page.checked_sub(2), false),
-    ] {
-        if let Some(page) = candidate.filter(|page| *page <= app.pdf_viewer_total_pages) {
-            request_page(&pdf_path, page, dpi, pixel_w, priority);
-        }
-    }
-
-    let Some(page_data) = page_data_opt else {
-        let dots = match (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_millis()
-            / 250)
-            % 4
-        {
-            0 => "   ",
-            1 => ".  ",
-            2 => ".. ",
-            _ => "...",
-        };
-        frame.render_widget(
-            Paragraph::new(format!(
-                "Rendering page {current_page}{dots}  (press Esc to cancel)"
-            ))
-            .style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .alignment(ratatui::layout::Alignment::Center),
-            pdf_area,
-        );
-        render_status_bar(frame, status_area, &pdf_path, current_page, app, 0, 0);
+    let Some(page_data) = view.page_data else {
+        render_pending_page(frame, pdf_area, view.current_page);
+        render_status_bar(frame, status_area, &pdf_path, view.current_page, app, 0, 0);
         return;
     };
 
@@ -1297,154 +1284,237 @@ pub fn draw_pdf_viewer_in_with_occlusion(
     let scroll_px = if page_fit {
         0
     } else {
-        current_scroll_px_val
+        view.current_scroll_px
             .to_u32()
             .unwrap_or(u32::MAX)
             .min(page_h)
     };
-    let max_scroll_cells = max_scroll_px / u32::from(font_h);
+    let max_scroll_cells = max_scroll_px / u32::from(view.font_h);
     app.pdf_viewer_max_scroll_y = max_scroll_cells;
 
     // Build the crop key for this frame
     let crop_key = CropKey {
         path_fp: path_fingerprint(&pdf_path),
-        page: current_page,
-        dpi,
+        page: view.current_page,
+        dpi: DPI,
         pixel_w,
         crop_y: scroll_px,
         crop_h: pixel_h,
         page_fit,
     };
 
-    let need_encode = last_crop_key.as_ref() != Some(&crop_key);
-
-    if need_encode || !last_encoded_is_some {
-        // Crop/stitch the pixel data
-        let cropped = if page_fit {
-            fit_page_to_viewport(&page_data.image, pixel_w, pixel_h)
-        } else if scroll_px + pixel_h > page_h && current_page < app.pdf_viewer_total_pages {
-            if let Some(next_page) = next_page_data_opt {
-                crop_and_stitch(&page_data.image, &next_page.image, scroll_px, pixel_h)
-            } else {
-                crop_single_with_padding(&page_data.image, scroll_px, pixel_h)
-            }
-        } else {
-            let actual_crop_h = pixel_h.min(page_h.saturating_sub(scroll_px));
-            if actual_crop_h < pixel_h {
-                crop_single_with_padding(&page_data.image, scroll_px, pixel_h)
-            } else {
-                crop_view(&page_data.image, scroll_px, pixel_h)
-            }
-        };
-
-        if is_kitty {
-            // Encode directly with our own Kitty encoder — zero redundant work
-            let cache_arc = get_cache();
-            if let Ok(mut g) = cache_arc.lock() {
-                let id = g.next_kitty_id;
-                g.next_kitty_id = g.next_kitty_id.wrapping_add(1).max(1);
-                let transmit_seq = kitty_transmit(&cropped, id);
-                let path_fp = path_fingerprint(&pdf_path);
-                let retire_image_id = g
-                    .resident_kitty_image
-                    .filter(|(resident_fp, _)| *resident_fp == path_fp)
-                    .map(|(_, resident_id)| resident_id);
-
-                let [_id_extra, id_r, id_g, id_b] = id.to_be_bytes();
-                let id_color = format!("\x1b[38;2;{id_r};{id_g};{id_b}m");
-                g.last_encoded = Some(EncodedFrame {
-                    // The image upload and the placeholders must be emitted
-                    // by the same terminal draw transaction.  Writing the
-                    // upload directly to stdout races Ratatui's buffered
-                    // cursor updates and can associate it with an old frame.
-                    transmit_seq,
-                    image_id: id,
-                    cols: pdf_area.width,
-                    rows: pdf_area.height,
-                    id_color,
-                    retire_image_id,
-                });
-                g.resident_kitty_image = Some((path_fp, id));
-                g.last_crop_key = Some(crop_key);
-            }
-        } else {
-            // Non-Kitty protocol fallback: use ratatui-image StatefulProtocol
-            // (Sixel, iTerm2, halfblocks) — these are inherently full-frame anyway.
-            use ratatui_image::{Resize, StatefulImage};
-            let cache_arc = get_cache();
-            if let Ok(mut g) = cache_arc.lock() {
-                g.last_crop_key = Some(crop_key);
-                let Some(picker) = g.picker.as_ref() else {
-                    return;
-                };
-                let proto = picker.new_resize_protocol(cropped);
-                drop(g);
-                let mut local_proto = proto;
-                frame.render_stateful_widget(
-                    StatefulImage::new().resize(Resize::Fit(None)),
-                    pdf_area,
-                    &mut local_proto,
-                );
-                render_status_bar(
-                    frame,
-                    status_area,
-                    &pdf_path,
-                    current_page,
-                    app,
-                    app.pdf_viewer_scroll_y,
-                    max_scroll_cells,
-                );
-                return;
-            }
-        }
+    let needs_encode = view.last_crop_key.as_ref() != Some(&crop_key);
+    if (needs_encode || !view.has_encoded_frame)
+        && encode_pdf_crop(
+            frame,
+            pdf_area,
+            &pdf_path,
+            CropRenderContext {
+                page_data: &page_data,
+                next_page_data: view.next_page_data.as_ref(),
+                crop_key,
+                pixel_w,
+                pixel_h,
+                scroll_px,
+                page_fit,
+                current_page: view.current_page,
+                total_pages: app.pdf_viewer_total_pages,
+                is_kitty: view.is_kitty,
+            },
+        )
+    {
+        render_status_bar(
+            frame,
+            status_area,
+            &pdf_path,
+            view.current_page,
+            app,
+            app.pdf_viewer_scroll_y,
+            max_scroll_cells,
+        );
+        return;
     }
 
-    // ── Blit: write unicode placeholders (zero image data re-upload) ─────
-    if is_kitty {
-        let cache_arc = get_cache();
-        if let Ok(mut g) = cache_arc.lock()
-            && let Some(ref mut encoded) = g.last_encoded
-        {
-            let can_emit = !fully_covered(pdf_area, occlusion);
-            let should_transmit = can_emit && !encoded.transmit_seq.is_empty();
-            // Clone the encoded frame so we can drop the lock before
-            // rendering. A fully covered frame keeps a pending upload
-            // until at least one placeholder segment is visible.
-            let blit_frame = EncodedFrame {
-                transmit_seq: if should_transmit {
-                    std::mem::take(&mut encoded.transmit_seq)
-                } else {
-                    String::new()
-                },
-                image_id: encoded.image_id,
-                cols: encoded.cols,
-                rows: encoded.rows,
-                id_color: encoded.id_color.clone(),
-                retire_image_id: if should_transmit {
-                    encoded.retire_image_id.take()
-                } else {
-                    None
-                },
-            };
-            drop(g);
-            frame.render_widget(
-                KittyBlit {
-                    encoded: &blit_frame,
-                    occlusion,
-                },
-                pdf_area,
-            );
-        }
+    if view.is_kitty {
+        blit_kitty_frame(frame, pdf_area, occlusion);
     }
 
     render_status_bar(
         frame,
         status_area,
         &pdf_path,
-        current_page,
+        view.current_page,
         app,
         app.pdf_viewer_scroll_y,
         max_scroll_cells,
+    );
+}
+
+fn request_visible_pages(pdf_path: &Path, current: usize, total: usize, pixel_w: u32) {
+    for (candidate, priority) in [
+        (Some(current), true),
+        (current.checked_add(1), false),
+        (current.checked_sub(1), false),
+        (current.checked_add(2), false),
+        (current.checked_sub(2), false),
+    ] {
+        if let Some(page) = candidate.filter(|page| *page <= total) {
+            request_page(pdf_path, page, DPI, pixel_w, priority);
+        }
+    }
+}
+
+fn render_pending_page(frame: &mut Frame<'_>, area: Rect, page: usize) {
+    let dots = match (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_millis()
+        / 250)
+        % 4
+    {
+        0 => "   ",
+        1 => ".  ",
+        2 => ".. ",
+        _ => "...",
+    };
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Rendering page {page}{dots}  (press Esc to cancel)"
+        ))
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .alignment(ratatui::layout::Alignment::Center),
+        area,
+    );
+}
+
+struct CropRenderContext<'a> {
+    page_data: &'a RenderedPage,
+    next_page_data: Option<&'a RenderedPage>,
+    crop_key: CropKey,
+    pixel_w: u32,
+    pixel_h: u32,
+    scroll_px: u32,
+    page_fit: bool,
+    current_page: usize,
+    total_pages: usize,
+    is_kitty: bool,
+}
+
+/// Returns true when a non-Kitty frame was rendered immediately.
+fn encode_pdf_crop(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    pdf_path: &Path,
+    context: CropRenderContext<'_>,
+) -> bool {
+    let page_height = context.page_data.pixel_h;
+    let cropped = if context.page_fit {
+        fit_page_to_viewport(&context.page_data.image, context.pixel_w, context.pixel_h)
+    } else if context.scroll_px + context.pixel_h > page_height
+        && context.current_page < context.total_pages
+    {
+        context.next_page_data.map_or_else(
+            || {
+                crop_single_with_padding(
+                    &context.page_data.image,
+                    context.scroll_px,
+                    context.pixel_h,
+                )
+            },
+            |next| {
+                crop_and_stitch(
+                    &context.page_data.image,
+                    &next.image,
+                    context.scroll_px,
+                    context.pixel_h,
+                )
+            },
+        )
+    } else if context
+        .pixel_h
+        .min(page_height.saturating_sub(context.scroll_px))
+        < context.pixel_h
+    {
+        crop_single_with_padding(&context.page_data.image, context.scroll_px, context.pixel_h)
+    } else {
+        crop_view(&context.page_data.image, context.scroll_px, context.pixel_h)
+    };
+    let cache_arc = get_cache();
+    let Ok(mut cache) = cache_arc.lock() else {
+        return false;
+    };
+    cache.last_crop_key = Some(context.crop_key);
+    if context.is_kitty {
+        store_kitty_frame(&mut cache, &cropped, pdf_path, area);
+        return false;
+    }
+    let Some(picker) = cache.picker.as_ref() else {
+        return false;
+    };
+    let mut protocol = picker.new_resize_protocol(cropped);
+    drop(cache);
+    frame.render_stateful_widget(
+        StatefulImage::new().resize(Resize::Fit(None)),
+        area,
+        &mut protocol,
+    );
+    true
+}
+
+fn store_kitty_frame(cache: &mut PageCache, image: &DynamicImage, pdf_path: &Path, area: Rect) {
+    let id = cache.next_kitty_id;
+    cache.next_kitty_id = cache.next_kitty_id.wrapping_add(1).max(1);
+    let path_fp = path_fingerprint(pdf_path);
+    let retire_image_id = cache
+        .resident_kitty_image
+        .filter(|(resident_fp, _)| *resident_fp == path_fp)
+        .map(|(_, resident_id)| resident_id);
+    let [_id_extra, id_r, id_g, id_b] = id.to_be_bytes();
+    cache.last_encoded = Some(EncodedFrame {
+        transmit_seq: kitty_transmit(image, id),
+        image_id: id,
+        cols: area.width,
+        rows: area.height,
+        id_color: format!("\x1b[38;2;{id_r};{id_g};{id_b}m"),
+        retire_image_id,
+    });
+    cache.resident_kitty_image = Some((path_fp, id));
+}
+
+fn blit_kitty_frame(frame: &mut Frame<'_>, area: Rect, occlusion: Option<Rect>) {
+    let cache_arc = get_cache();
+    let Ok(mut cache) = cache_arc.lock() else {
+        return;
+    };
+    let Some(encoded) = cache.last_encoded.as_mut() else {
+        return;
+    };
+    let should_transmit = !fully_covered(area, occlusion) && !encoded.transmit_seq.is_empty();
+    let blit_frame = EncodedFrame {
+        transmit_seq: if should_transmit {
+            std::mem::take(&mut encoded.transmit_seq)
+        } else {
+            String::new()
+        },
+        image_id: encoded.image_id,
+        cols: encoded.cols,
+        rows: encoded.rows,
+        id_color: encoded.id_color.clone(),
+        retire_image_id: should_transmit
+            .then(|| encoded.retire_image_id.take())
+            .flatten(),
+    };
+    drop(cache);
+    frame.render_widget(
+        KittyBlit {
+            encoded: &blit_frame,
+            occlusion,
+        },
+        area,
     );
 }
 

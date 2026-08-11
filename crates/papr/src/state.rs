@@ -904,6 +904,107 @@ pub struct OverlayFlags {
     pub config_editor_insert_mode: bool,
 }
 
+/// Secondary workspace state exposed through [`App`]'s dereference implementation.
+#[derive(Debug)]
+pub struct AppWorkspaceState {
+    pub(crate) palette_selected: usize,
+    pub(crate) palette_scroll: usize,
+    pub(crate) palette_query: String,
+    pub(crate) palette_query_cursor: usize,
+    pub(crate) terminal_command: String,
+    pub(crate) terminal_command_cursor: usize,
+    pub(crate) terminal_command_output: String,
+    pub(crate) terminal_command_directory: Option<std::path::PathBuf>,
+    pub(crate) terminal_completions: Vec<String>,
+    pub(crate) terminal_completion_selected: Option<usize>,
+    pub(crate) terminal_completion_token_start: usize,
+    pub(crate) credits_selected: usize,
+    pub(crate) credits_scroll: usize,
+    pub(crate) workspace_query: String,
+    pub(crate) workspace_query_cursor: usize,
+    pub(crate) active_search_workspaces: std::collections::HashSet<Page>,
+    pub(crate) project_completions: Vec<papr_core::CompletionItem>,
+    pub(crate) project_completion_selected: usize,
+    pub(crate) project_citation_query: String,
+    pub(crate) project_citation_cursor: usize,
+    pub(crate) project_citation_results: Vec<ProjectCitationResult>,
+    pub(crate) project_citation_search_mode: ProjectCitationSearchMode,
+    pub(crate) project_citation_search_status: Option<String>,
+    pub(crate) project_citation_selected: usize,
+    pub(crate) project_citation_scroll: usize,
+    pub(crate) project_bib_titles: std::collections::HashSet<String>,
+    pub(crate) config_editor_text: String,
+    pub(crate) config_editor_cursor: usize,
+    pub(crate) config_editor_error: Option<String>,
+    pub(crate) config_editor_scroll: usize,
+    pub(crate) config_editor_history: Vec<String>,
+    pub(crate) config_editor_history_idx: usize,
+    pub(crate) config_editor_command: Option<String>,
+    pub(crate) config_editor_wrap_width: usize,
+    pub(crate) config_editor_viewport_height: usize,
+    pub(crate) config_editor_goal_column: Option<usize>,
+    pub(crate) pdf_viewer_path: Option<std::path::PathBuf>,
+    pub(crate) pdf_viewer_page: usize,
+    pub(crate) pdf_viewer_scroll_y: u32,
+    pub(crate) pdf_viewer_total_pages: usize,
+    pub(crate) pdf_viewer_page_pixel_h: u32,
+    pub(crate) pdf_viewer_max_scroll_y: u32,
+    pub(crate) active_pdf_session_id: Option<i64>,
+    pub(crate) active_pdf_session_start: Option<std::time::Instant>,
+    pub(crate) pdf_viewer: String,
+}
+
+impl Default for AppWorkspaceState {
+    fn default() -> Self {
+        Self {
+            palette_selected: 0,
+            palette_scroll: 0,
+            palette_query: String::new(),
+            palette_query_cursor: 0,
+            terminal_command: String::new(),
+            terminal_command_cursor: 0,
+            terminal_command_output: String::new(),
+            terminal_command_directory: None,
+            terminal_completions: Vec::new(),
+            terminal_completion_selected: None,
+            terminal_completion_token_start: 0,
+            credits_selected: 0,
+            credits_scroll: 0,
+            workspace_query: String::new(),
+            workspace_query_cursor: 0,
+            active_search_workspaces: std::collections::HashSet::new(),
+            project_completions: Vec::new(),
+            project_completion_selected: 0,
+            project_citation_query: String::new(),
+            project_citation_cursor: 0,
+            project_citation_results: Vec::new(),
+            project_citation_search_mode: ProjectCitationSearchMode::default(),
+            project_citation_search_status: None,
+            project_citation_selected: 0,
+            project_citation_scroll: 0,
+            project_bib_titles: std::collections::HashSet::new(),
+            config_editor_text: String::new(),
+            config_editor_cursor: 0,
+            config_editor_error: None,
+            config_editor_scroll: 0,
+            config_editor_history: Vec::new(),
+            config_editor_history_idx: 0,
+            config_editor_command: None,
+            config_editor_wrap_width: 1,
+            config_editor_viewport_height: 0,
+            config_editor_goal_column: None,
+            pdf_viewer_path: None,
+            pdf_viewer_page: 1,
+            pdf_viewer_scroll_y: 0,
+            pdf_viewer_total_pages: 0,
+            pdf_viewer_page_pixel_h: 0,
+            pdf_viewer_max_scroll_y: 0,
+            active_pdf_session_id: None,
+            active_pdf_session_start: None,
+            pdf_viewer: "internal".to_owned(),
+        }
+    }
+}
 /// Complete UI state independent of terminal rendering.
 #[derive(Debug)]
 pub struct App {
@@ -935,38 +1036,8 @@ pub struct App {
     pub today_scroll: usize,
     /// Loading state for the latest-paper feed.
     pub today_status: DiscoveryStatus,
-    /// Browse Papr selected row.
-    pub palette_selected: usize,
-    /// Vertical list scroll offset for Browse Papr.
-    pub palette_scroll: usize,
-    /// Browse Papr search query.
-    pub palette_query: String,
-    /// Cursor position in Browse Papr query.
-    pub palette_query_cursor: usize,
-    /// Command entered in the terminal command palette.
-    pub terminal_command: String,
-    /// Cursor position in the terminal command palette.
-    pub terminal_command_cursor: usize,
-    /// Most recent terminal command output.
-    pub terminal_command_output: String,
-    /// Working directory for the terminal command palette session.
-    pub terminal_command_directory: Option<std::path::PathBuf>,
-    /// Candidates currently shown by terminal completion.
-    pub terminal_completions: Vec<String>,
-    /// Highlighted terminal completion candidate.
-    pub terminal_completion_selected: Option<usize>,
-    /// Start of the token being completed in the terminal input.
-    pub terminal_completion_token_start: usize,
-    /// Selected credits item row.
-    pub credits_selected: usize,
-    /// Vertical list scroll offset for credits list.
-    pub credits_scroll: usize,
-    /// Local workspace search query.
-    pub workspace_query: String,
-    /// Cursor position in workspace query.
-    pub workspace_query_cursor: usize,
-    /// Active search mode for each supported workspace page.
-    pub active_search_workspaces: std::collections::HashSet<Page>,
+    /// Secondary state for search, palettes, citations, editors, and PDF viewing.
+    pub(crate) workspace: AppWorkspaceState,
     /// Projects discovered in the configured projects directory and registry.
     pub projects: Vec<Project>,
     /// Selected project in the browser.
@@ -1005,10 +1076,6 @@ pub struct App {
     pub project_view_flags: ProjectViewFlags,
     /// Pending first key of a multi-key Normal-mode editor command.
     pub project_editor_pending_sequence: Option<ProjectEditorPendingSequence>,
-    /// Items currently offered by the editor completion engine.
-    pub project_completions: Vec<papr_core::CompletionItem>,
-    /// Selected item in the completion popup.
-    pub project_completion_selected: usize,
     /// Last compiler status shown in the writing workspace.
     pub project_build_status: String,
     /// Latest structured compiler diagnostics, preserving the last good PDF on failure.
@@ -1029,23 +1096,6 @@ pub struct App {
     pub project_create_compiler: String,
     /// Byte cursor within the project name modal input.
     pub project_rename_cursor: usize,
-    /// Search query in the project citation modal.
-    pub project_citation_query: String,
-    /// Byte cursor in the project citation search input.
-    pub project_citation_cursor: usize,
-    /// Matching local or online papers in the project citation modal.
-    pub project_citation_results: Vec<ProjectCitationResult>,
-    /// Active source for the project citation modal.
-    pub project_citation_search_mode: ProjectCitationSearchMode,
-    /// Current online-search progress or error, if any.
-    pub project_citation_search_status: Option<String>,
-    /// Selected item in the project citation modal.
-    pub project_citation_selected: usize,
-    /// Vertical scroll offset for the project citation results.
-    pub project_citation_scroll: usize,
-    /// Lowercased titles of BibTeX entries already present in the project's .bib file.
-    /// Updated whenever the `CitationSource` index refreshes or a new citation is inserted.
-    pub project_bib_titles: std::collections::HashSet<String>,
     /// File or folder being renamed from the active project tree.
     pub project_entry_rename_path: Option<std::path::PathBuf>,
     /// Remote paper discovery state.
@@ -1132,50 +1182,24 @@ pub struct App {
     pub notes_selected: usize,
     /// Vertical scroll offset for notes papers.
     pub notes_scroll: usize,
-    /// Text of the config.toml file.
-    pub config_editor_text: String,
-    /// Byte cursor position in `config_editor_text`.
-    pub config_editor_cursor: usize,
-    /// Validation error message if the saved configuration is invalid.
-    pub config_editor_error: Option<String>,
-    /// Vertical scroll offset of the editor.
-    pub config_editor_scroll: usize,
-    /// Undo history log of configuration states.
-    pub config_editor_history: Vec<String>,
-    /// Index pointing to active state in `config_editor_history`.
-    pub config_editor_history_idx: usize,
-    /// Current Vim command string being entered.
-    pub config_editor_command: Option<String>,
-    /// Cached wrapped content width of the editor viewport.
-    pub config_editor_wrap_width: usize,
-    /// Cached visible height of the editor viewport in visual rows.
-    pub config_editor_viewport_height: usize,
-    /// Preferred visual column for vertical cursor movement.
-    pub config_editor_goal_column: Option<usize>,
-    /// Internal PDF viewer path.
-    pub pdf_viewer_path: Option<std::path::PathBuf>,
-    /// Internal PDF viewer current page (1-indexed).
-    pub pdf_viewer_page: usize,
-    /// Scroll offset within the current page in terminal cell rows.
-    pub pdf_viewer_scroll_y: u32,
-    /// Internal PDF viewer total page count.
-    pub pdf_viewer_total_pages: usize,
-    /// Full pixel height of the last rendered page (used for upward page transitions).
-    pub pdf_viewer_page_pixel_h: u32,
-    /// Maximum `scroll_y` (in cell rows) for the current page and viewport.
-    /// Written by `draw_pdf_viewer` every frame; read by `pdf_scroll` to detect
-    /// when the user has reached the bottom of the page.
-    pub pdf_viewer_max_scroll_y: u32,
-    /// Active internal reading session ID.
-    pub active_pdf_session_id: Option<i64>,
-    /// Active internal reading session start time.
-    pub active_pdf_session_start: Option<std::time::Instant>,
-    /// Configured PDF viewer name.
-    pub pdf_viewer: String,
     /// State of the interactive settings modal.
     pub settings_modal: SettingsModalState,
     /// Available startup page choices.
     pub startup_page_options: Vec<String>,
+}
+
+impl std::ops::Deref for App {
+    type Target = AppWorkspaceState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.workspace
+    }
+}
+
+impl std::ops::DerefMut for App {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.workspace
+    }
 }
 
 impl Default for App {
@@ -1195,22 +1219,7 @@ impl Default for App {
             today_selected: 0,
             today_scroll: 0,
             today_status: DiscoveryStatus::Idle,
-            palette_selected: 0,
-            palette_scroll: 0,
-            palette_query: String::new(),
-            palette_query_cursor: 0,
-            terminal_command: String::new(),
-            terminal_command_cursor: 0,
-            terminal_command_output: String::new(),
-            terminal_command_directory: None,
-            terminal_completions: Vec::new(),
-            terminal_completion_selected: None,
-            terminal_completion_token_start: 0,
-            credits_selected: 0,
-            credits_scroll: 0,
-            workspace_query: String::new(),
-            workspace_query_cursor: 0,
-            active_search_workspaces: std::collections::HashSet::new(),
+            workspace: AppWorkspaceState::default(),
             projects: Vec::new(),
             projects_selected: 0,
             active_project: None,
@@ -1230,8 +1239,6 @@ impl Default for App {
             project_editor_viewport_height: 0,
             project_view_flags: ProjectViewFlags::default(),
             project_editor_pending_sequence: None,
-            project_completions: Vec::new(),
-            project_completion_selected: 0,
             project_build_status: "Idle".into(),
             project_build_diagnostics: Vec::new(),
             project_build_raw_log: Vec::new(),
@@ -1242,14 +1249,6 @@ impl Default for App {
             project_rename_input: String::new(),
             project_create_compiler: "latex".to_owned(),
             project_rename_cursor: 0,
-            project_citation_query: String::new(),
-            project_citation_cursor: 0,
-            project_citation_results: Vec::new(),
-            project_citation_search_mode: ProjectCitationSearchMode::default(),
-            project_citation_search_status: None,
-            project_citation_selected: 0,
-            project_citation_scroll: 0,
-            project_bib_titles: std::collections::HashSet::new(),
             project_entry_rename_path: None,
             discovery: DiscoveryState::default(),
             paper_detail_scroll: 0,
@@ -1293,25 +1292,6 @@ impl Default for App {
             notes_papers: Vec::new(),
             notes_selected: 0,
             notes_scroll: 0,
-            config_editor_text: String::new(),
-            config_editor_cursor: 0,
-            config_editor_error: None,
-            config_editor_scroll: 0,
-            config_editor_history: Vec::new(),
-            config_editor_history_idx: 0,
-            config_editor_command: None,
-            config_editor_wrap_width: 1,
-            config_editor_viewport_height: 0,
-            config_editor_goal_column: None,
-            pdf_viewer_path: None,
-            pdf_viewer_page: 1,
-            pdf_viewer_scroll_y: 0,
-            pdf_viewer_total_pages: 0,
-            pdf_viewer_page_pixel_h: 0,
-            pdf_viewer_max_scroll_y: 0,
-            active_pdf_session_id: None,
-            active_pdf_session_start: None,
-            pdf_viewer: "internal".to_string(),
             settings_modal: SettingsModalState::default(),
             startup_page_options: vec![
                 "dashboard".into(),
@@ -1723,128 +1703,8 @@ impl App {
     /// Apply a semantic command to the state machine.
     pub fn dispatch(&mut self, command: Command) {
         match command {
-            Command::MoveUp => {
-                if !self.content_focused {
-                    self.sidebar_index = self.sidebar_index.saturating_sub(1);
-                    self.page = Page::ALL[self.sidebar_index];
-                } else if self.page == Page::Dashboard && !self.today_papers.is_empty() {
-                    self.today_selected = self.today_selected.saturating_sub(1);
-                } else if self.page == Page::Discover {
-                    self.discovery.selected = self.discovery.selected.saturating_sub(1);
-                    self.discovery.store_page_view();
-                } else if self.page == Page::Library {
-                    if self.library.selected == 0 {
-                        self.mode = AppMode::WorkspaceSearch;
-                    } else {
-                        self.library.selected -= 1;
-                    }
-                } else if self.page == Page::Downloads {
-                    if self.download_selected == 0 {
-                        self.mode = AppMode::WorkspaceSearch;
-                    } else {
-                        self.download_selected -= 1;
-                    }
-                } else if self.page == Page::Collections {
-                    if self.active_collection.is_some() {
-                        if self.collection_paper_selected == 0 {
-                            self.mode = AppMode::WorkspaceSearch;
-                        } else {
-                            self.collection_paper_selected -= 1;
-                        }
-                    } else {
-                        if self.collection_selected == 0 {
-                            self.mode = AppMode::WorkspaceSearch;
-                        } else {
-                            self.collection_selected -= 1;
-                        }
-                    }
-                } else if self.page == Page::Authors {
-                    if self.active_author.is_some() {
-                        if self.author_paper_selected == 0 {
-                            self.mode = AppMode::WorkspaceSearch;
-                        } else {
-                            self.author_paper_selected -= 1;
-                        }
-                    } else {
-                        if self.author_selected == 0 {
-                            self.mode = AppMode::WorkspaceSearch;
-                        } else {
-                            self.author_selected -= 1;
-                        }
-                    }
-                } else if self.page == Page::Bookmarks {
-                    if self.bookmark_selected == 0 {
-                        self.mode = AppMode::WorkspaceSearch;
-                    } else {
-                        self.bookmark_selected -= 1;
-                    }
-                } else if self.page == Page::Notes {
-                    if self.notes_selected == 0 {
-                        self.mode = AppMode::WorkspaceSearch;
-                    } else {
-                        self.notes_selected -= 1;
-                    }
-                } else if self.page == Page::ReadingQueue {
-                    if self.reading_queue_selected == 0 {
-                        self.mode = AppMode::WorkspaceSearch;
-                    } else {
-                        self.reading_queue_selected -= 1;
-                    }
-                } else if self.page == Page::Credits {
-                    self.credits_selected = self.credits_selected.saturating_sub(1);
-                }
-                if self.mode == AppMode::WorkspaceSearch {
-                    self.active_search_workspaces.insert(self.page);
-                }
-            }
-            Command::MoveDown => {
-                if !self.content_focused {
-                    self.sidebar_index =
-                        (self.sidebar_index + 1).min(Page::ALL.len().saturating_sub(1));
-                    self.page = Page::ALL[self.sidebar_index];
-                } else if self.page == Page::Dashboard && !self.today_papers.is_empty() {
-                    self.today_selected =
-                        (self.today_selected + 1).min(self.today_papers.len().saturating_sub(1));
-                } else if self.page == Page::Discover {
-                    self.discovery.selected = (self.discovery.selected + 1)
-                        .min(self.discovery.visible_page_len().saturating_sub(1));
-                    self.discovery.store_page_view();
-                } else if self.page == Page::Library {
-                    self.library.selected = (self.library.selected + 1)
-                        .min(self.filtered_library_papers().len().saturating_sub(1));
-                } else if self.page == Page::Downloads {
-                    self.download_selected = (self.download_selected + 1)
-                        .min(self.filtered_downloads().len().saturating_sub(1));
-                } else if self.page == Page::Collections {
-                    if self.active_collection.is_some() {
-                        self.collection_paper_selected = (self.collection_paper_selected + 1)
-                            .min(self.filtered_collection_papers().len().saturating_sub(1));
-                    } else {
-                        self.collection_selected = (self.collection_selected + 1)
-                            .min(self.filtered_collections().len().saturating_sub(1));
-                    }
-                } else if self.page == Page::Authors {
-                    if self.active_author.is_some() {
-                        self.author_paper_selected = (self.author_paper_selected + 1)
-                            .min(self.filtered_author_papers().len().saturating_sub(1));
-                    } else {
-                        self.author_selected = (self.author_selected + 1)
-                            .min(self.filtered_authors().len().saturating_sub(1));
-                    }
-                } else if self.page == Page::Bookmarks {
-                    self.bookmark_selected = (self.bookmark_selected + 1)
-                        .min(self.filtered_bookmarks().len().saturating_sub(1));
-                } else if self.page == Page::Notes {
-                    self.notes_selected = (self.notes_selected + 1)
-                        .min(self.filtered_notes_papers().len().saturating_sub(1));
-                } else if self.page == Page::ReadingQueue {
-                    self.reading_queue_selected = (self.reading_queue_selected + 1)
-                        .min(self.filtered_reading_queue_papers().len().saturating_sub(1));
-                } else if self.page == Page::Credits {
-                    self.credits_selected = (self.credits_selected + 1)
-                        .min(self.credits_items().len().saturating_sub(1));
-                }
-            }
+            Command::MoveUp => self.move_selection_up(),
+            Command::MoveDown => self.move_selection_down(),
             Command::Open => {
                 if !self.content_focused {
                     self.page = Page::ALL[self.sidebar_index];
@@ -1893,15 +1753,144 @@ impl App {
                     if self.mode == AppMode::WorkspaceSearch {
                         self.mode = AppMode::Normal;
                         self.content_focused = true;
-                        self.active_search_workspaces.remove(&self.page);
+                        let page = self.page;
+                        self.workspace.active_search_workspaces.remove(&page);
                     } else {
                         self.mode = AppMode::WorkspaceSearch;
                         self.content_focused = true;
-                        self.active_search_workspaces.insert(self.page);
+                        let page = self.page;
+                        self.workspace.active_search_workspaces.insert(page);
                     }
                 }
             }
             Command::Quit => self.session_flags.should_quit = true,
+        }
+    }
+
+    fn move_selection_up(&mut self) {
+        if self.content_focused {
+            self.move_workspace_selection_up();
+        } else {
+            self.sidebar_index = self.sidebar_index.saturating_sub(1);
+            self.page = Page::ALL[self.sidebar_index];
+        }
+        if self.mode == AppMode::WorkspaceSearch {
+            let page = self.page;
+            self.workspace.active_search_workspaces.insert(page);
+        }
+    }
+
+    fn move_workspace_selection_up(&mut self) {
+        let selection = match self.page {
+            Page::Library => Some(&mut self.library.selected),
+            Page::Downloads => Some(&mut self.download_selected),
+            Page::Bookmarks => Some(&mut self.bookmark_selected),
+            Page::Notes => Some(&mut self.notes_selected),
+            Page::ReadingQueue => Some(&mut self.reading_queue_selected),
+            _ => None,
+        };
+        if let Some(selection) = selection {
+            if *selection == 0 {
+                self.mode = AppMode::WorkspaceSearch;
+            } else {
+                *selection -= 1;
+            }
+            return;
+        }
+        match self.page {
+            Page::Dashboard if !self.today_papers.is_empty() => {
+                self.today_selected = self.today_selected.saturating_sub(1);
+            }
+            Page::Discover => {
+                self.discovery.selected = self.discovery.selected.saturating_sub(1);
+                self.discovery.store_page_view();
+            }
+            Page::Collections => {
+                let selection = if self.active_collection.is_some() {
+                    &mut self.collection_paper_selected
+                } else {
+                    &mut self.collection_selected
+                };
+                if *selection == 0 {
+                    self.mode = AppMode::WorkspaceSearch;
+                } else {
+                    *selection -= 1;
+                }
+            }
+            Page::Authors => {
+                let selection = if self.active_author.is_some() {
+                    &mut self.author_paper_selected
+                } else {
+                    &mut self.author_selected
+                };
+                if *selection == 0 {
+                    self.mode = AppMode::WorkspaceSearch;
+                } else {
+                    *selection -= 1;
+                }
+            }
+            Page::Credits => self.credits_selected = self.credits_selected.saturating_sub(1),
+            _ => {}
+        }
+    }
+
+    fn move_selection_down(&mut self) {
+        if !self.content_focused {
+            self.sidebar_index = (self.sidebar_index + 1).min(Page::ALL.len().saturating_sub(1));
+            self.page = Page::ALL[self.sidebar_index];
+            return;
+        }
+        match self.page {
+            Page::Dashboard if !self.today_papers.is_empty() => {
+                self.today_selected =
+                    (self.today_selected + 1).min(self.today_papers.len().saturating_sub(1));
+            }
+            Page::Discover => {
+                self.discovery.selected = (self.discovery.selected + 1)
+                    .min(self.discovery.visible_page_len().saturating_sub(1));
+                self.discovery.store_page_view();
+            }
+            Page::Library => {
+                self.library.selected = (self.library.selected + 1)
+                    .min(self.filtered_library_papers().len().saturating_sub(1));
+            }
+            Page::Downloads => {
+                self.download_selected = (self.download_selected + 1)
+                    .min(self.filtered_downloads().len().saturating_sub(1));
+            }
+            Page::Collections if self.active_collection.is_some() => {
+                self.collection_paper_selected = (self.collection_paper_selected + 1)
+                    .min(self.filtered_collection_papers().len().saturating_sub(1));
+            }
+            Page::Collections => {
+                self.collection_selected = (self.collection_selected + 1)
+                    .min(self.filtered_collections().len().saturating_sub(1));
+            }
+            Page::Authors if self.active_author.is_some() => {
+                self.author_paper_selected = (self.author_paper_selected + 1)
+                    .min(self.filtered_author_papers().len().saturating_sub(1));
+            }
+            Page::Authors => {
+                self.author_selected =
+                    (self.author_selected + 1).min(self.filtered_authors().len().saturating_sub(1));
+            }
+            Page::Bookmarks => {
+                self.bookmark_selected = (self.bookmark_selected + 1)
+                    .min(self.filtered_bookmarks().len().saturating_sub(1));
+            }
+            Page::Notes => {
+                self.notes_selected = (self.notes_selected + 1)
+                    .min(self.filtered_notes_papers().len().saturating_sub(1));
+            }
+            Page::ReadingQueue => {
+                self.reading_queue_selected = (self.reading_queue_selected + 1)
+                    .min(self.filtered_reading_queue_papers().len().saturating_sub(1));
+            }
+            Page::Credits => {
+                self.credits_selected =
+                    (self.credits_selected + 1).min(self.credits_items().len().saturating_sub(1));
+            }
+            _ => {}
         }
     }
 }
