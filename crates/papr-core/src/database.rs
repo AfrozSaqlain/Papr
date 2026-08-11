@@ -636,7 +636,7 @@ impl Database {
         feed_date: &str,
         keyword_signature: &str,
     ) -> Result<Option<Vec<RemotePaper>>, DatabaseError> {
-        self.connection
+        let papers = self.connection
             .query_row(
                 "SELECT payload FROM dashboard_feed_cache
                  WHERE feed_date = ?1 AND keyword_signature = ?2",
@@ -644,8 +644,21 @@ impl Database {
                 |row| row.get::<_, String>(0),
             )
             .optional()?
-            .map(|payload| serde_json::from_str(&payload).map_err(Into::into))
-            .transpose()
+            .map(|payload| {
+                serde_json::from_str(&payload).map_err(DatabaseError::from)
+            })
+            .transpose()?;
+
+        if papers.as_ref().is_some_and(Vec::is_empty) {
+            self.connection.execute(
+                "DELETE FROM dashboard_feed_cache
+                 WHERE feed_date = ?1 AND keyword_signature = ?2",
+                params![feed_date, keyword_signature],
+            )?;
+            return Ok(None);
+        }
+
+        Ok(papers)
     }
 
     /// Save the dashboard feed for one local date and keyword set.
@@ -659,6 +672,9 @@ impl Database {
         keyword_signature: &str,
         papers: &[RemotePaper],
     ) -> Result<(), DatabaseError> {
+        if papers.is_empty() {
+            return Ok(());
+        }
         let payload = serde_json::to_string(papers)?;
         self.connection.execute(
             "INSERT INTO dashboard_feed_cache
@@ -2878,6 +2894,35 @@ mod tests {
                 .dashboard_feed_cache("2026-07-13", "different")?
                 .is_none()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn empty_dashboard_feed_cache_is_not_retained_or_returned()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+
+        database.save_dashboard_feed_cache("2026-07-13", "gravity", &[])?;
+        assert!(database
+            .dashboard_feed_cache("2026-07-13", "gravity")?
+            .is_none());
+
+        database.connection.execute(
+            "INSERT INTO dashboard_feed_cache (feed_date, keyword_signature, payload)
+             VALUES (?1, ?2, ?3)",
+            params!["2026-07-13", "legacy-empty", "[]"],
+        )?;
+        assert!(database
+            .dashboard_feed_cache("2026-07-13", "legacy-empty")?
+            .is_none());
+        let retained: i64 = database.connection.query_row(
+            "SELECT COUNT(*) FROM dashboard_feed_cache
+             WHERE feed_date = ?1 AND keyword_signature = ?2",
+            params!["2026-07-13", "legacy-empty"],
+            |row| row.get(0),
+        )?;
+        assert_eq!(retained, 0);
+
         Ok(())
     }
 
