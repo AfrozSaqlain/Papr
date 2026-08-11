@@ -39,21 +39,31 @@ pub struct CitationSource {
 
 impl CitationSource {
     /// Construct a source from already-indexed bibliography records.
-    pub fn new(entries: Vec<CitationEntry>) -> Self { Self { entries } }
+    pub fn new(entries: Vec<CitationEntry>) -> Self {
+        Self { entries }
+    }
 
     /// Return all indexed bibliography records (e.g. to build an "already added" set).
-    pub fn all_entries(&self) -> &[CitationEntry] { &self.entries }
+    pub fn all_entries(&self) -> &[CitationEntry] {
+        &self.entries
+    }
 
     /// Parse the useful fields from BibTeX. This deliberately accepts common
     /// hand-written BibTeX formatting rather than requiring a strict parser.
     pub fn parse_bibtex(input: &str) -> Vec<CitationEntry> {
         let mut entries = Vec::new();
         for chunk in input.split('@').skip(1) {
-            let Some(open) = chunk.find(|c| c == '{' || c == '(') else { continue; };
+            let Some(open) = chunk.find(|c| c == '{' || c == '(') else {
+                continue;
+            };
             let body = &chunk[open + 1..];
-            let Some(comma) = body.find(',') else { continue; };
+            let Some(comma) = body.find(',') else {
+                continue;
+            };
             let key = body[..comma].trim();
-            if key.is_empty() || key.starts_with("comment") || key.starts_with("string") { continue; }
+            if key.is_empty() || key.starts_with("comment") || key.starts_with("string") {
+                continue;
+            }
             let fields = &body[comma + 1..];
             let field = |name: &str| bib_field(fields, name);
             entries.push(CitationEntry {
@@ -69,25 +79,48 @@ impl CitationSource {
 
 impl CompletionSource for CitationSource {
     fn complete(&self, text: &str, cursor: usize) -> Vec<CompletionItem> {
-        let Some(query) = citation_query(text, cursor) else { return Vec::new(); };
+        let Some(query) = citation_query(text, cursor) else {
+            return Vec::new();
+        };
         let query = query.to_ascii_lowercase();
-        let mut matches = self.entries.iter().filter_map(|entry| {
-            let haystack = format!("{} {} {} {}", entry.key, entry.author, entry.title, entry.year).to_ascii_lowercase();
-            fuzzy_score(&query, &haystack).map(|score| (score, entry))
-        }).collect::<Vec<_>>();
-        matches.sort_by(|(left, left_entry), (right, right_entry)| right.cmp(left).then_with(|| left_entry.key.cmp(&right_entry.key)));
-        matches.into_iter().take(8).map(|(_, entry)| {
-            let label = if entry.title.trim().is_empty() {
-                entry.key.clone()
-            } else {
-                entry.title.trim().to_string()
-            };
-            CompletionItem {
-                insert_text: entry.key.clone(),
-                label,
-                detail: format!("{} — {} ({})", first_author(&entry.author), entry.title, entry.year),
-            }
-        }).collect()
+        let mut matches = self
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let haystack = format!(
+                    "{} {} {} {}",
+                    entry.key, entry.author, entry.title, entry.year
+                )
+                .to_ascii_lowercase();
+                fuzzy_score(&query, &haystack).map(|score| (score, entry))
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by(|(left, left_entry), (right, right_entry)| {
+            right
+                .cmp(left)
+                .then_with(|| left_entry.key.cmp(&right_entry.key))
+        });
+        matches
+            .into_iter()
+            .take(8)
+            .map(|(_, entry)| {
+                let label = if entry.title.trim().is_empty() {
+                    entry.key.clone()
+                } else {
+                    entry.title.trim().to_string()
+                };
+                CompletionItem {
+                    insert_text: entry.key.clone(),
+                    label,
+                    detail: format!(
+                        "{} — {} ({})",
+                        first_author(&entry.author),
+                        entry.title,
+                        entry.year
+                    ),
+                }
+            })
+            .collect()
     }
 }
 
@@ -95,14 +128,24 @@ impl CompletionSource for CitationSource {
 /// all commands whose name contains `cite`, including natbib and biblatex.
 pub fn citation_query(text: &str, cursor: usize) -> Option<&str> {
     let cursor = cursor.min(text.len());
-    if !text.is_char_boundary(cursor) { return None; }
+    if !text.is_char_boundary(cursor) {
+        return None;
+    }
     let before = &text[..cursor];
     let brace = before.rfind('{')?;
-    let command = before[..brace].rsplit_once('\\')?.1
-        .chars().take_while(|c| c.is_ascii_alphabetic() || *c == '*').collect::<String>();
-    if command.is_empty() || !command.to_ascii_lowercase().contains("cite") { return None; }
+    let command = before[..brace]
+        .rsplit_once('\\')?
+        .1
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic() || *c == '*')
+        .collect::<String>();
+    if command.is_empty() || !command.to_ascii_lowercase().contains("cite") {
+        return None;
+    }
     let current = &before[brace + 1..];
-    if current.contains('}') { return None; }
+    if current.contains('}') {
+        return None;
+    }
     Some(current.rsplit(',').next().unwrap_or_default().trim_start())
 }
 
@@ -112,7 +155,13 @@ fn bib_field(fields: &str, name: &str) -> Option<String> {
     loop {
         let found = lower[start..].find(name)? + start;
         let mut value_start = found + name.len();
-        while lower.as_bytes().get(value_start).is_some_and(u8::is_ascii_whitespace) { value_start += 1; }
+        while lower
+            .as_bytes()
+            .get(value_start)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            value_start += 1;
+        }
         if lower.as_bytes().get(value_start) == Some(&b'=') {
             start = value_start + 1;
             break;
@@ -121,16 +170,31 @@ fn bib_field(fields: &str, name: &str) -> Option<String> {
     }
     let value = fields[start..].trim_start();
     let trimmed_start = value.trim_start_matches(['{', '"']);
-    let end = trimmed_start.find(|c| c == '}' || c == '"' || c == ',').unwrap_or(trimmed_start.len());
-    Some(trimmed_start.get(..end).unwrap_or(trimmed_start).trim().replace('\n', " "))
+    let end = trimmed_start
+        .find(|c| c == '}' || c == '"' || c == ',')
+        .unwrap_or(trimmed_start.len());
+    Some(
+        trimmed_start
+            .get(..end)
+            .unwrap_or(trimmed_start)
+            .trim()
+            .replace('\n', " "),
+    )
 }
 
 fn first_author(author: &str) -> String {
-    author.split(" and ").next().unwrap_or(author).trim().to_owned()
+    author
+        .split(" and ")
+        .next()
+        .unwrap_or(author)
+        .trim()
+        .to_owned()
 }
 
 fn fuzzy_score(needle: &str, haystack: &str) -> Option<i32> {
-    if needle.is_empty() { return Some(0); }
+    if needle.is_empty() {
+        return Some(0);
+    }
     let mut at = 0usize;
     let mut score = 0;
     for wanted in needle.chars() {
@@ -146,20 +210,38 @@ mod tests {
     use super::*;
     #[test]
     fn completes_current_key_in_multi_citation_command() {
-        let source = CitationSource::new(vec![CitationEntry { key: "einstein1905".into(), author: "Albert Einstein".into(), title: "On a heuristic viewpoint".into(), year: "1905".into() }]);
+        let source = CitationSource::new(vec![CitationEntry {
+            key: "einstein1905".into(),
+            author: "Albert Einstein".into(),
+            title: "On a heuristic viewpoint".into(),
+            year: "1905".into(),
+        }]);
         assert_eq!(citation_query("\\cite{newton1687, eins", 22), Some("eins"));
-        assert_eq!(source.complete("\\cite{newton1687, eins", 22)[0].insert_text, "einstein1905");
+        assert_eq!(
+            source.complete("\\cite{newton1687, eins", 22)[0].insert_text,
+            "einstein1905"
+        );
     }
     #[test]
     fn parses_and_matches_metadata() {
-        let source = CitationSource::new(CitationSource::parse_bibtex("@article{einstein1905, author = {Albert Einstein}, title = {On the Electrodynamics of Moving Bodies}, year = {1905}}"));
-        assert_eq!(source.complete("\\autocite{moving", 16)[0].label, "On the Electrodynamics of Moving Bodies");
-        assert_eq!(source.complete("\\autocite{moving", 16)[0].insert_text, "einstein1905");
+        let source = CitationSource::new(CitationSource::parse_bibtex(
+            "@article{einstein1905, author = {Albert Einstein}, title = {On the Electrodynamics of Moving Bodies}, year = {1905}}",
+        ));
+        assert_eq!(
+            source.complete("\\autocite{moving", 16)[0].label,
+            "On the Electrodynamics of Moving Bodies"
+        );
+        assert_eq!(
+            source.complete("\\autocite{moving", 16)[0].insert_text,
+            "einstein1905"
+        );
         assert!(citation_query("plain text", 10).is_none());
     }
     #[test]
     fn falls_back_to_citation_key_when_title_is_missing() {
-        let source = CitationSource::new(CitationSource::parse_bibtex("@article{no_title_key, author = {Jane Doe}, year = {2020}}"));
+        let source = CitationSource::new(CitationSource::parse_bibtex(
+            "@article{no_title_key, author = {Jane Doe}, year = {2020}}",
+        ));
         let items = source.complete("\\cite{no_title", 14);
         assert_eq!(items[0].label, "no_title_key");
         assert_eq!(items[0].insert_text, "no_title_key");

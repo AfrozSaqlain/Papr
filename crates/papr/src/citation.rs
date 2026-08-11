@@ -87,11 +87,14 @@ pub async fn fetch_and_copy_citation(
     };
 
     if copy_to_clipboard(&bibtex) {
-        let _ = sender.send(crate::AppEvent::Toast(
-            format!("Citation copied to clipboard {}", source),
-        ));
+        let _ = sender.send(crate::AppEvent::Toast(format!(
+            "Citation copied to clipboard {}",
+            source
+        )));
     } else {
-        let _ = sender.send(crate::AppEvent::Toast("Failed to write to clipboard".into()));
+        let _ = sender.send(crate::AppEvent::Toast(
+            "Failed to write to clipboard".into(),
+        ));
     }
 }
 
@@ -109,7 +112,6 @@ pub async fn fetch_and_insert_project_citation(
         bib_path,
     });
 }
-
 
 pub fn generate_bibtex(metadata: &CitationMetadata) -> (String, String) {
     let mut bibtex = String::new();
@@ -168,15 +170,28 @@ fn extract_doi(s: &str) -> Option<String> {
 fn best_effort_key(metadata: &CitationMetadata) -> String {
     let mut key = String::new();
     if let Some(first_author) = metadata.authors.split(" and ").next() {
-        let last_name = first_author.split_whitespace().last().unwrap_or(first_author);
-        key.push_str(&last_name.to_lowercase().replace(|c: char| !c.is_alphanumeric(), ""));
+        let last_name = first_author
+            .split_whitespace()
+            .last()
+            .unwrap_or(first_author);
+        key.push_str(
+            &last_name
+                .to_lowercase()
+                .replace(|c: char| !c.is_alphanumeric(), ""),
+        );
     } else {
         key.push_str("paper");
     }
     if let Some(year) = &metadata.year {
         key.push_str(year);
     }
-    let first_title_word = metadata.title.split_whitespace().next().unwrap_or("").to_lowercase().replace(|c: char| !c.is_alphanumeric(), "");
+    let first_title_word = metadata
+        .title
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_lowercase()
+        .replace(|c: char| !c.is_alphanumeric(), "");
     if !first_title_word.is_empty() {
         key.push_str(&first_title_word);
     }
@@ -188,8 +203,8 @@ fn best_effort_key(metadata: &CitationMetadata) -> String {
 }
 
 fn copy_to_clipboard(text: &str) -> bool {
-    use std::process::{Command, Stdio};
     use std::io::Write;
+    use std::process::{Command, Stdio};
 
     // Try wl-copy first (Wayland native, persists perfectly)
     if let Ok(mut child) = Command::new("wl-copy")
@@ -238,11 +253,11 @@ fn copy_to_clipboard(text: &str) -> bool {
     }
 
     // Fallback to arboard
-    static CLIPBOARD: std::sync::OnceLock<std::sync::Mutex<Option<arboard::Clipboard>>> = std::sync::OnceLock::new();
-    
-    let clip_mutex = CLIPBOARD.get_or_init(|| {
-        std::sync::Mutex::new(arboard::Clipboard::new().ok())
-    });
+    static CLIPBOARD: std::sync::OnceLock<std::sync::Mutex<Option<arboard::Clipboard>>> =
+        std::sync::OnceLock::new();
+
+    let clip_mutex =
+        CLIPBOARD.get_or_init(|| std::sync::Mutex::new(arboard::Clipboard::new().ok()));
 
     if let Ok(mut lock) = clip_mutex.lock() {
         if let Some(clipboard) = lock.as_mut() {

@@ -1,6 +1,9 @@
 //! Cross-platform filesystem path normalization.
 
-use std::{io, path::{Path, PathBuf}};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 /// Resolve a path through the filesystem while preserving the native path form
 /// expected by applications and users on every supported platform.
@@ -67,7 +70,6 @@ pub fn validate_collection_name(name: &str) -> Result<(), InvalidCollectionName>
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,10 +92,7 @@ mod tests {
 /// Gets the page count of a PDF using `pdfinfo`.
 /// Falls back to returning 1 if it fails.
 pub fn get_pdf_page_count(path: &Path) -> usize {
-    if let Ok(output) = std::process::Command::new("pdfinfo")
-        .arg(path)
-        .output()
-    {
+    if let Ok(output) = std::process::Command::new("pdfinfo").arg(path).output() {
         if output.status.success() {
             let text = String::from_utf8_lossy(&output.stdout);
             for line in text.lines() {

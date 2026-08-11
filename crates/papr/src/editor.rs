@@ -1,6 +1,4 @@
-//! Pure text editing math and geometry.
-
-
+//! TUI text editing math and geometry.
 
 /// Returns the number of visual rows needed to display `char_len` characters wrapped at `wrap_width`.
 pub fn config_editor_wrap_rows(char_len: usize, wrap_width: usize) -> usize {
@@ -11,23 +9,19 @@ pub fn config_editor_wrap_rows(char_len: usize, wrap_width: usize) -> usize {
     }
 }
 
-
 /// Returns the cursor index at the start of the visual line containing `cursor`.
 pub fn config_editor_line_start(text: &str, cursor: usize) -> usize {
     let cursor = cursor.min(text.len());
-    text[..cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0)
+    text[..cursor].rfind('\n').map_or(0, |index| index + 1)
 }
-
 
 /// Returns the cursor index at the end of the visual line containing `cursor`.
 pub fn config_editor_line_end(text: &str, cursor: usize) -> usize {
     let cursor = cursor.min(text.len());
     text[cursor..]
         .find('\n')
-        .map(|idx| cursor + idx)
-        .unwrap_or(text.len())
+        .map_or(text.len(), |index| cursor + index)
 }
-
 
 /// Returns the cursor index of the previous character boundary before `cursor`.
 pub fn prev_char_boundary(text: &str, cursor: usize) -> usize {
@@ -41,7 +35,6 @@ pub fn prev_char_boundary(text: &str, cursor: usize) -> usize {
     prev
 }
 
-
 /// Returns the cursor index of the next character boundary after `cursor`.
 pub fn next_char_boundary(text: &str, cursor: usize) -> usize {
     if cursor >= text.len() {
@@ -54,14 +47,13 @@ pub fn next_char_boundary(text: &str, cursor: usize) -> usize {
     next.min(text.len())
 }
 
-
 /// Returns the cursor index of the previous word boundary before `cursor`.
 pub fn prev_word_boundary(text: &str, cursor: usize) -> usize {
     if cursor == 0 {
         return 0;
     }
     let mut pos = cursor.min(text.len());
-    
+
     // First, skip any whitespace/newlines to the left
     while pos > 0 {
         let prev = prev_char_boundary(text, pos);
@@ -71,16 +63,16 @@ pub fn prev_word_boundary(text: &str, cursor: usize) -> usize {
         }
         pos = prev;
     }
-    
+
     if pos == 0 {
         return 0;
     }
-    
+
     // Now determine the type of character we are on
     let prev = prev_char_boundary(text, pos);
     let first_ch = text[prev..pos].chars().next().unwrap_or('\n');
     let is_word_char = first_ch.is_alphanumeric() || first_ch == '_';
-    
+
     // Skip characters of the same type
     while pos > 0 {
         let prev = prev_char_boundary(text, pos);
@@ -94,10 +86,9 @@ pub fn prev_word_boundary(text: &str, cursor: usize) -> usize {
         }
         pos = prev;
     }
-    
+
     pos
 }
-
 
 /// Returns the cursor index of the next word boundary after `cursor`.
 pub fn next_word_boundary(text: &str, cursor: usize) -> usize {
@@ -105,10 +96,10 @@ pub fn next_word_boundary(text: &str, cursor: usize) -> usize {
     if pos >= text.len() {
         return text.len();
     }
-    
+
     // Determine the type of character at the cursor
     let first_ch = text[pos..].chars().next().unwrap_or('\n');
-    
+
     if first_ch.is_whitespace() {
         // Skip whitespace/newlines
         while pos < text.len() {
@@ -144,10 +135,9 @@ pub fn next_word_boundary(text: &str, cursor: usize) -> usize {
             pos = next;
         }
     }
-    
+
     pos
 }
-
 
 /// Converts a visual character column back to a string byte index.
 pub fn byte_index_for_char_column(text: &str, char_col: usize) -> usize {
@@ -156,10 +146,8 @@ pub fn byte_index_for_char_column(text: &str, char_col: usize) -> usize {
     }
     text.char_indices()
         .nth(char_col)
-        .map(|(idx, _)| idx)
-        .unwrap_or(text.len())
+        .map_or(text.len(), |(index, _)| index)
 }
-
 
 /// Returns the visual position `(row, column)` for a given byte `cursor` wrapped at `wrap_width`.
 pub fn cursor_visual_position(text: &str, cursor: usize, wrap_width: usize) -> (usize, usize) {
@@ -179,13 +167,15 @@ pub fn cursor_visual_position(text: &str, cursor: usize, wrap_width: usize) -> (
         .map(|segment| config_editor_wrap_rows(segment.chars().count(), wrap_width))
         .sum::<usize>();
 
-    if line_col == line_len && line_len > 0 && line_len % wrap_width == 0 {
-        (rows_before + (line_col / wrap_width).saturating_sub(1), wrap_width - 1)
+    if line_col == line_len && line_len > 0 && line_len.is_multiple_of(wrap_width) {
+        (
+            rows_before + (line_col / wrap_width).saturating_sub(1),
+            wrap_width - 1,
+        )
     } else {
         (rows_before + (line_col / wrap_width), line_col % wrap_width)
     }
 }
-
 
 /// Computes the string byte index corresponding to a `target_row` and `target_col` wrapped at `wrap_width`.
 pub fn cursor_from_visual_position(
@@ -212,7 +202,6 @@ pub fn cursor_from_visual_position(
 
     text.len()
 }
-
 
 /// Expand stored tab characters only for display. The buffer remains byte-for-
 /// byte unchanged while cursor geometry and wrapping use terminal cell widths.
@@ -248,6 +237,13 @@ pub fn expand_tabs_for_editor_view(text: &str, cursor: usize, tab_width: usize) 
     (display, display_cursor)
 }
 
+/// Returns the 0-indexed line number corresponding to the given byte cursor in the text.
+pub fn project_editor_line_at(text: &str, cursor: usize) -> usize {
+    text[..cursor.min(text.len())]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+}
 
 #[cfg(test)]
 mod tests {
@@ -259,10 +255,3 @@ mod tests {
         assert_eq!((row, col), (0, 3));
     }
 }
-
-
-/// Returns the 0-indexed line number corresponding to the given byte cursor in the text.
-pub fn project_editor_line_at(text: &str, cursor: usize) -> usize {
-    text[..cursor.min(text.len())].bytes().filter(|byte| *byte == b'\n').count()
-}
-

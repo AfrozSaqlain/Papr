@@ -183,7 +183,11 @@ impl BookmarkSummary {
         std::path::Path::new(&self.pdf_path)
             .file_stem()
             .and_then(|name| name.to_str())
-            .unwrap_or_else(|| self.paper_title.strip_suffix(".pdf").unwrap_or(&self.paper_title))
+            .unwrap_or_else(|| {
+                self.paper_title
+                    .strip_suffix(".pdf")
+                    .unwrap_or(&self.paper_title)
+            })
     }
 }
 

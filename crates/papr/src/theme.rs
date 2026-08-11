@@ -190,7 +190,8 @@ fn builtin(name: &str) -> Option<ThemeSpec> {
             "f7f7f5", "ffffff", "202124", "6b7280", "2563eb", "7c3aed", "15803d", "a16207",
             "b91c1c", "d1d5db",
         ),
-        "rose-pink" | "rosepink" | "rose-pink-dark" | "rosepinkdark" | "rose-pine-dark" | "rosepinedark" => (
+        "rose-pink" | "rosepink" | "rose-pink-dark" | "rosepinkdark" | "rose-pine-dark"
+        | "rosepinedark" => (
             "241b1d", "2d2224", "f5e6e8", "a38f92", "ffb3c1", "e0b1cb", "b7e4c7", "fcd5a1",
             "ff85a1", "3d2d30",
         ),

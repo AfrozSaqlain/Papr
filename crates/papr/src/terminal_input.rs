@@ -1,6 +1,6 @@
-#![allow(missing_docs)]
-use std::path::{Path, PathBuf};
+//! Terminal command parsing and completion for the interactive TUI.
 use anyhow::Result;
+use std::path::{Path, PathBuf};
 
 pub fn parse_command(command: &str) -> Result<Vec<String>> {
     let mut args = Vec::new();
@@ -14,10 +14,7 @@ pub fn parse_command(command: &str) -> Result<Vec<String>> {
                 // meaning only when it precedes syntax we explicitly support.
                 match chars.peek().copied() {
                     Some(next)
-                        if next.is_whitespace()
-                            || next == '\\'
-                            || next == '\''
-                            || next == '\"' =>
+                        if next.is_whitespace() || next == '\\' || next == '\'' || next == '\"' =>
                     {
                         current.push(next);
                         let _ = chars.next();
@@ -48,42 +45,58 @@ pub fn terminal_path_candidates(prefix: &str, directory: Option<&Path>) -> Vec<S
     let working_directory = directory
         .map(Path::to_path_buf)
         .or_else(|| std::env::current_dir().ok());
-    let Some(working_directory) = working_directory else { return Vec::new(); };
-    let (search_directory, display_parent, name_prefix) = if let Some(path) = prefix.strip_prefix("~/") {
-        let Some(home) = terminal_home_directory() else { return Vec::new(); };
-        let typed_path = Path::new(path);
-        let (parent, name_prefix) = terminal_path_parent_and_prefix(typed_path, path);
-        let search_directory = parent
-            .as_ref()
-            .map_or_else(|| home.clone(), |parent| home.join(parent));
-        let display_parent = Some(parent.as_ref().map_or_else(
-            || "~".to_owned(),
-            |parent| format!("~{}{}", std::path::MAIN_SEPARATOR, parent.display()),
-        ));
-        (search_directory, display_parent, name_prefix)
-    } else {
-        let typed_path = Path::new(prefix);
-        let (parent, name_prefix) = terminal_path_parent_and_prefix(typed_path, prefix);
-        let search_directory = parent.as_ref().map_or_else(|| working_directory.clone(), |parent| {
-            if parent.is_absolute() { parent.to_path_buf() } else { working_directory.join(parent) }
-        });
-        let display_parent = parent;
-        (search_directory, display_parent.map(|parent| parent.display().to_string()), name_prefix)
+    let Some(working_directory) = working_directory else {
+        return Vec::new();
     };
-    let Ok(entries) = std::fs::read_dir(search_directory) else { return Vec::new(); };
+    let (search_directory, display_parent, name_prefix) =
+        if let Some(path) = prefix.strip_prefix("~/") {
+            let Some(home) = terminal_home_directory() else {
+                return Vec::new();
+            };
+            let typed_path = Path::new(path);
+            let (parent, name_prefix) = terminal_path_parent_and_prefix(typed_path, path);
+            let search_directory = parent
+                .as_ref()
+                .map_or_else(|| home.clone(), |parent| home.join(parent));
+            let display_parent = Some(parent.as_ref().map_or_else(
+                || "~".to_owned(),
+                |parent| format!("~{}{}", std::path::MAIN_SEPARATOR, parent.display()),
+            ));
+            (search_directory, display_parent, name_prefix)
+        } else {
+            let typed_path = Path::new(prefix);
+            let (parent, name_prefix) = terminal_path_parent_and_prefix(typed_path, prefix);
+            let search_directory = parent.as_ref().map_or_else(
+                || working_directory.clone(),
+                |parent| {
+                    if parent.is_absolute() {
+                        parent.clone()
+                    } else {
+                        working_directory.join(parent)
+                    }
+                },
+            );
+            let display_parent = parent;
+            (
+                search_directory,
+                display_parent.map(|parent| parent.display().to_string()),
+                name_prefix,
+            )
+        };
+    let Ok(entries) = std::fs::read_dir(search_directory) else {
+        return Vec::new();
+    };
     let mut candidates = entries
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if !name
-                .to_lowercase()
-                .starts_with(&name_prefix.to_lowercase())
-            {
+            if !name.to_lowercase().starts_with(&name_prefix.to_lowercase()) {
                 return None;
             }
-            let mut candidate = display_parent
-                .as_ref()
-                .map_or_else(|| name.clone(), |parent| format!("{parent}{}{}", std::path::MAIN_SEPARATOR, name));
+            let mut candidate = display_parent.as_ref().map_or_else(
+                || name.clone(),
+                |parent| format!("{parent}{}{}", std::path::MAIN_SEPARATOR, name),
+            );
             if entry.path().is_dir() {
                 candidate.push(std::path::MAIN_SEPARATOR);
             }
@@ -139,4 +152,3 @@ pub fn sanitize_terminal_output(output: &str) -> String {
         .filter(|character| matches!(character, '\n' | '\t') || !character.is_control())
         .collect()
 }
-

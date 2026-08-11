@@ -51,8 +51,8 @@ impl Paths {
         // bundle identifier on macOS. Papr is independently distributed, so
         // using its application name for both fields created `papr/papr` on
         // Windows (and `org.papr.papr` on macOS).
-        let dirs = ProjectDirs::from("org", "", "papr")
-            .ok_or(ConfigError::MissingPlatformDirectories)?;
+        let dirs =
+            ProjectDirs::from("org", "", "papr").ok_or(ConfigError::MissingPlatformDirectories)?;
         Ok(Self::from_project_dirs(&dirs))
     }
 
@@ -152,12 +152,16 @@ impl Config {
         struct PathValue {
             val: PathBuf,
         }
-        let serialized_path = toml::to_string(&PathValue { val: paths.downloads_dir.clone() })?;
+        let serialized_path = toml::to_string(&PathValue {
+            val: paths.downloads_dir.clone(),
+        })?;
         let downloads_dir_str = serialized_path
             .strip_prefix("val = ")
             .unwrap_or(&serialized_path)
             .trim_end();
-        let serialized_projects_path = toml::to_string(&PathValue { val: paths.projects_dir.clone() })?;
+        let serialized_projects_path = toml::to_string(&PathValue {
+            val: paths.projects_dir.clone(),
+        })?;
         let projects_dir_str = serialized_projects_path
             .strip_prefix("val = ")
             .unwrap_or(&serialized_projects_path)
@@ -167,7 +171,9 @@ impl Config {
         struct StringValue {
             val: String,
         }
-        let serialized_viewer = toml::to_string(&StringValue { val: default_pdf_viewer.to_string() })?;
+        let serialized_viewer = toml::to_string(&StringValue {
+            val: default_pdf_viewer.to_string(),
+        })?;
         let pdf_viewer_str = serialized_viewer
             .strip_prefix("val = ")
             .unwrap_or(&serialized_viewer)
@@ -312,9 +318,9 @@ mod tests {
         };
 
         let config = Config::load_or_create(&paths)?;
-        
+
         let content = std::fs::read_to_string(&paths.config_file)?;
-        
+
         assert!(content.contains("theme ="));
         assert!(content.contains("startup_page ="));
         assert!(content.contains("pdf_viewer ="));
@@ -323,15 +329,21 @@ mod tests {
         assert!(content.contains("dashboard_keywords ="));
         assert!(content.contains("enabled_plugins ="));
         assert!(content.contains("projects_directory ="));
-        assert!(content.find("download_path =").unwrap() < content.find("projects_directory =").unwrap());
-        assert!(content.find("projects_directory =").unwrap() < content.find("dashboard_keywords =").unwrap());
-        
+        assert!(
+            content.find("download_path =").unwrap()
+                < content.find("projects_directory =").unwrap()
+        );
+        assert!(
+            content.find("projects_directory =").unwrap()
+                < content.find("dashboard_keywords =").unwrap()
+        );
+
         let parsed: Config = toml::from_str(&content)?;
         assert_eq!(parsed.theme, config.theme);
         assert_eq!(parsed.startup_page, config.startup_page);
         assert_eq!(config.default_project_compiler, "typst");
         assert_eq!(parsed.default_project_compiler, "typst");
-        
+
         let expected_viewer = if cfg!(target_os = "macos") {
             "open".to_string()
         } else if cfg!(target_os = "windows") {
@@ -342,8 +354,14 @@ mod tests {
         assert_eq!(parsed.pdf_viewer, Some(expected_viewer));
 
         let rewritten = toml::to_string_pretty(&parsed)?;
-        assert!(rewritten.find("download_path =").unwrap() < rewritten.find("projects_directory =").unwrap());
-        assert!(rewritten.find("projects_directory =").unwrap() < rewritten.find("dashboard_keywords =").unwrap());
+        assert!(
+            rewritten.find("download_path =").unwrap()
+                < rewritten.find("projects_directory =").unwrap()
+        );
+        assert!(
+            rewritten.find("projects_directory =").unwrap()
+                < rewritten.find("dashboard_keywords =").unwrap()
+        );
 
         std::fs::remove_dir_all(&temp_dir)?;
         Ok(())
@@ -369,8 +387,10 @@ mod tests {
         let config = Config::load_or_create(&paths)?;
 
         assert_eq!(config.default_project_compiler, "latex");
-        assert!(std::fs::read_to_string(&paths.config_file)?
-            .contains("default_project_compiler = \"latex\""));
+        assert!(
+            std::fs::read_to_string(&paths.config_file)?
+                .contains("default_project_compiler = \"latex\"")
+        );
 
         std::fs::remove_dir_all(temp_dir)?;
         Ok(())
@@ -391,14 +411,16 @@ mod tests {
             struct StringValue {
                 val: String,
             }
-            let serialized = toml::to_string(&StringValue { val: viewer.to_string() })?;
+            let serialized = toml::to_string(&StringValue {
+                val: viewer.to_string(),
+            })?;
             let formatted_viewer = serialized
                 .strip_prefix("val = ")
                 .unwrap_or(&serialized)
                 .trim_end();
-            
+
             let toml_content = format!("pdf_viewer = {}\n", formatted_viewer);
-            
+
             #[derive(Deserialize)]
             struct MockConfig {
                 pdf_viewer: String,

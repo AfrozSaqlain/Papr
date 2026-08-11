@@ -109,9 +109,10 @@ impl PluginRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PluginAction {
-    /// Show a non-blocking message.
-    Notify {
-        /// User-facing text.
+    /// Emit informational text for the host application to present as appropriate.
+    #[serde(rename = "notify")]
+    Message {
+        /// Informational text supplied by the plugin.
         message: String,
     },
     /// Add the paper in context to a collection.
@@ -180,7 +181,9 @@ pub struct PluginHost {
 
 fn ensure_builtin_plugins(root: &Path) -> Result<(), std::io::Error> {
     let has_dirs = if let Ok(entries) = std::fs::read_dir(root) {
-        entries.filter_map(Result::ok).any(|entry| entry.path().is_dir())
+        entries
+            .filter_map(Result::ok)
+            .any(|entry| entry.path().is_dir())
     } else {
         false
     };
@@ -570,7 +573,8 @@ mod tests {
     }
 
     #[test]
-    fn creates_builtin_auto_tagger_when_plugins_dir_is_empty() -> Result<(), Box<dyn std::error::Error>> {
+    fn creates_builtin_auto_tagger_when_plugins_dir_is_empty()
+    -> Result<(), Box<dyn std::error::Error>> {
         let root = temporary_root("empty_builtin");
         fs::create_dir_all(&root)?;
 

@@ -58,6 +58,30 @@ pub struct RankedCandidatePage {
     pub next_start: Option<u16>,
 }
 
+/// Parameters for one incremental ranked-candidate request.
+#[derive(Debug, Clone, Copy)]
+pub struct RankedCandidatePageRequest<'a> {
+    /// User-entered arXiv query.
+    pub query: &'a str,
+    /// Candidates retained from earlier pages.
+    pub existing: &'a [RemotePaper],
+    /// Offset of the page to request.
+    pub start: u16,
+    /// Maximum number of candidates across all pages.
+    pub candidate_limit: u16,
+    /// Maximum number of candidates requested in this page.
+    pub batch_size: u16,
+}
+
+/// Retry policy for an incremental arXiv page request.
+#[derive(Debug, Clone, Copy)]
+pub struct ArxivRetryPolicy {
+    /// Number of retries after the initial request.
+    pub attempts: u8,
+    /// Delay before the first retry; subsequent delays use exponential backoff.
+    pub base_delay: Duration,
+}
+
 impl ArxivClient {
     /// Build a client with a descriptive user agent and request timeout.
     ///
@@ -106,6 +130,11 @@ impl ArxivClient {
     ///
     /// The returned vector is suitable for client-side pagination: its order is final
     /// until the caller starts a new search.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a request fails, Atom content is malformed, or the
+    /// candidate ranking task cannot complete.
     pub async fn search_ranked_candidates(
         &self,
         query: &str,
@@ -145,6 +174,11 @@ impl ArxivClient {
     /// Each snapshot is ranked against every candidate received so far. The final
     /// batch is ranked once, for the returned authoritative result suitable for
     /// caching and pagination.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a request fails, Atom content is malformed, or a
+    /// candidate ranking task cannot complete.
     pub async fn search_ranked_candidates_incremental<F>(
         &self,
         query: &str,
@@ -191,6 +225,11 @@ impl ArxivClient {
     ///
     /// Callers retain the returned page state and can retry the same `start` offset
     /// without losing already loaded papers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the page request fails, Atom content is malformed,
+    /// or the candidate ranking task cannot complete.
     pub async fn search_ranked_candidate_page(
         &self,
         query: &str,
@@ -233,6 +272,45 @@ impl ArxivClient {
         })
     }
 
+    /// Fetch one ranked page with bounded exponential-backoff retries.
+    ///
+    /// # Errors
+    ///
+    /// Returns the final arXiv request or response-processing error after the
+    /// configured retries have been exhausted.
+    pub async fn search_ranked_candidate_page_with_retry<F>(
+        &self,
+        request: RankedCandidatePageRequest<'_>,
+        retry_policy: ArxivRetryPolicy,
+        mut on_retry: F,
+    ) -> Result<RankedCandidatePage, ArxivError>
+    where
+        F: FnMut(u8, u8),
+    {
+        let mut retry = 0_u8;
+        loop {
+            match self
+                .search_ranked_candidate_page(
+                    request.query,
+                    request.existing,
+                    request.start,
+                    request.candidate_limit,
+                    request.batch_size,
+                )
+                .await
+            {
+                Ok(page) => return Ok(page),
+                Err(error) if retry == retry_policy.attempts => return Err(error),
+                Err(_) => {
+                    on_retry(retry + 1, retry_policy.attempts);
+                    let multiplier = 1_u32 << u32::from(retry);
+                    tokio::time::sleep(retry_policy.base_delay * multiplier).await;
+                    retry += 1;
+                }
+            }
+        }
+    }
+
     /// Load the newest submissions across arXiv for the dashboard.
     ///
     /// # Errors
@@ -252,7 +330,8 @@ impl ArxivClient {
         start: u16,
         limit: u16,
     ) -> Result<Vec<RemotePaper>, ArxivError> {
-        self.query(LATEST_QUERY, start, limit, "submittedDate").await
+        self.query(LATEST_QUERY, start, limit, "submittedDate")
+            .await
     }
 
     /// Search arXiv and return the newest matching submissions first.
@@ -280,7 +359,9 @@ impl ArxivClient {
         limit: u16,
     ) -> Result<Vec<RemotePaper>, ArxivError> {
         if let Some(arxiv_id) = parse_arxiv_id(query) {
-            if start == 0 && let Some(paper) = self.get_by_id(&arxiv_id).await? {
+            if start == 0
+                && let Some(paper) = self.get_by_id(&arxiv_id).await?
+            {
                 return Ok(vec![paper]);
             }
             return Ok(Vec::new());

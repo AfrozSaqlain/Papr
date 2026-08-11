@@ -640,7 +640,8 @@ impl Database {
         feed_date: &str,
         keyword_signature: &str,
     ) -> Result<Option<Vec<RemotePaper>>, DatabaseError> {
-        let papers = self.connection
+        let papers = self
+            .connection
             .query_row(
                 "SELECT payload FROM dashboard_feed_cache
                  WHERE feed_date = ?1 AND keyword_signature = ?2",
@@ -648,9 +649,7 @@ impl Database {
                 |row| row.get::<_, String>(0),
             )
             .optional()?
-            .map(|payload| {
-                serde_json::from_str(&payload).map_err(DatabaseError::from)
-            })
+            .map(|payload| serde_json::from_str(&payload).map_err(DatabaseError::from))
             .transpose()?;
 
         if papers.as_ref().is_some_and(Vec::is_empty) {
@@ -2948,18 +2947,22 @@ mod tests {
         let database = Database::in_memory()?;
 
         database.save_dashboard_feed_cache("2026-07-13", "gravity", &[])?;
-        assert!(database
-            .dashboard_feed_cache("2026-07-13", "gravity")?
-            .is_none());
+        assert!(
+            database
+                .dashboard_feed_cache("2026-07-13", "gravity")?
+                .is_none()
+        );
 
         database.connection.execute(
             "INSERT INTO dashboard_feed_cache (feed_date, keyword_signature, payload)
              VALUES (?1, ?2, ?3)",
             params!["2026-07-13", "legacy-empty", "[]"],
         )?;
-        assert!(database
-            .dashboard_feed_cache("2026-07-13", "legacy-empty")?
-            .is_none());
+        assert!(
+            database
+                .dashboard_feed_cache("2026-07-13", "legacy-empty")?
+                .is_none()
+        );
         let retained: i64 = database.connection.query_row(
             "SELECT COUNT(*) FROM dashboard_feed_cache
              WHERE feed_date = ?1 AND keyword_signature = ?2",
@@ -2989,9 +2992,11 @@ mod tests {
         };
         database.save_dashboard_feed_cache("2026-07-13", "gravity", &[paper])?;
 
-        assert!(database
-            .dashboard_paper_ids_since("2026-07-13")?
-            .contains("https://arxiv.org/abs/2607.00001"));
+        assert!(
+            database
+                .dashboard_paper_ids_since("2026-07-13")?
+                .contains("https://arxiv.org/abs/2607.00001")
+        );
         assert!(database.dashboard_paper_ids_since("2026-07-14")?.is_empty());
         Ok(())
     }

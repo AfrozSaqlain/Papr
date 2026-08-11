@@ -3,13 +3,16 @@
 use std::io::{self, Stdout};
 
 use crossterm::{
+    cursor::SetCursorStyle,
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
-    cursor::SetCursorStyle,
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement},
+    terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+        supports_keyboard_enhancement,
+    },
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
@@ -64,7 +67,11 @@ impl TerminalSession {
                 return Err(error);
             }
         };
-        Ok(Self { terminal, keyboard_enhancement_enabled, command_cursor_active: false })
+        Ok(Self {
+            terminal,
+            keyboard_enhancement_enabled,
+            command_cursor_active: false,
+        })
     }
 
     /// Borrow the ratatui terminal for drawing.

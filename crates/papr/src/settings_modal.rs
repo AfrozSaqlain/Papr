@@ -9,16 +9,13 @@
 //! All changes are staged in [`SettingsModalState`] and written to disk
 //! when the user explicitly applies them.
 
+use crate::editor::{next_word_boundary, prev_word_boundary};
 use crate::state::*;
 use crate::theme::*;
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use papr_core::{
-    prev_word_boundary, next_word_boundary,
-
-
-    Config,     };
+use papr_core::Config;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -279,10 +276,7 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
     // available as normal text in an actively edited settings field.
     if key.code == KeyCode::Char('/') && !is_editing {
         app.page = Page::Discover;
-        if let Some(index) = Page::ALL
-            .iter()
-            .position(|&page| page == Page::Discover)
-        {
+        if let Some(index) = Page::ALL.iter().position(|&page| page == Page::Discover) {
             app.sidebar_index = index;
         }
         app.content_focused = true;
@@ -1533,7 +1527,11 @@ fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
         Paragraph::new(Line::styled(
             startup_text,
             Style::default()
-                .fg(if startup_focused { theme.text } else { theme.muted })
+                .fg(if startup_focused {
+                    theme.text
+                } else {
+                    theme.muted
+                })
                 .add_modifier(if startup_focused {
                     Modifier::BOLD
                 } else {
@@ -1578,9 +1576,13 @@ fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
     render_dashboard_keywords(frame, chunks[2], app, keywords_focused, theme);
 
     // default_project_compiler
-    let compiler_focused =
-        is_body_active && app.settings_modal.general_focus == GeneralTabFocus::DefaultProjectCompiler;
-    let compiler_block = focused_block(" Default Project Compiler (◄/► to cycle) ", compiler_focused, theme);
+    let compiler_focused = is_body_active
+        && app.settings_modal.general_focus == GeneralTabFocus::DefaultProjectCompiler;
+    let compiler_block = focused_block(
+        " Default Project Compiler (◄/► to cycle) ",
+        compiler_focused,
+        theme,
+    );
     let compiler_label = match app.settings_modal.default_project_compiler.as_str() {
         "typst" => "Typst",
         _ => "LaTeX",
@@ -1590,7 +1592,11 @@ fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
         Paragraph::new(Line::styled(
             compiler_text,
             Style::default()
-                .fg(if compiler_focused { theme.text } else { theme.muted })
+                .fg(if compiler_focused {
+                    theme.text
+                } else {
+                    theme.muted
+                })
                 .add_modifier(if compiler_focused {
                     Modifier::BOLD
                 } else {
@@ -1955,10 +1961,7 @@ fn render_plugins_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
                 Span::raw("  "),
                 Span::styled(format!("[{}] ", check), check_style),
                 Span::styled(format!("{} ", plugin.name), name_style),
-                Span::styled(
-                    format!("v{}", plugin.version),
-                    detail_style,
-                ),
+                Span::styled(format!("v{}", plugin.version), detail_style),
                 Span::raw("  "),
                 Span::styled(&plugin.description, detail_style),
             ]))
@@ -2061,10 +2064,6 @@ fn next_char_boundary(text: &str, cursor: usize) -> usize {
     next.min(text.len())
 }
 
-
-
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2162,10 +2161,8 @@ mod tests {
         app.settings_modal.tab = SettingsTab::Theme;
         app.settings_modal.tab_bar_focused = true;
 
-        let result = handle_settings_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
-        );
+        let result =
+            handle_settings_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
 
         assert!(matches!(result, SettingsKeyResult::ReturnToSidebar));
         assert_eq!(app.settings_modal.tab, SettingsTab::Theme);
@@ -2178,10 +2175,8 @@ mod tests {
         app.settings_modal.tab = SettingsTab::Theme;
         app.settings_modal.tab_bar_focused = false;
 
-        let result = handle_settings_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
-        );
+        let result =
+            handle_settings_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
 
         assert!(matches!(result, SettingsKeyResult::ReturnToSidebar));
         assert_eq!(app.settings_modal.tab, SettingsTab::Theme);
@@ -2240,11 +2235,17 @@ mod tests {
         app.settings_modal.pdf_viewer = "alpha, beta".into();
         app.settings_modal.pdf_viewer_cursor = app.settings_modal.pdf_viewer.len();
 
-        let _ = handle_settings_key(&mut app, KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+        let _ = handle_settings_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL),
+        );
         assert_eq!(app.settings_modal.pdf_viewer, "alpha, ");
 
         app.settings_modal.pdf_viewer_cursor = 0;
-        let _ = handle_settings_key(&mut app, KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL));
+        let _ = handle_settings_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL),
+        );
         assert_eq!(app.settings_modal.pdf_viewer, ", ");
     }
 

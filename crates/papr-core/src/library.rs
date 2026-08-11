@@ -11,6 +11,8 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use thiserror::Error;
 use walkdir::WalkDir;
 
+use crate::database::{Database, DatabaseError};
+
 /// Metadata collected from a local PDF before database ingestion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportedPdf {
@@ -35,6 +37,121 @@ pub struct CollectionDirectory {
     pub library_root: PathBuf,
     /// Directory path relative to the library root.
     pub relative_path: PathBuf,
+}
+
+/// One paper processed by a library ingestion workflow.
+#[derive(Debug, Clone)]
+pub struct IngestedPdf {
+    /// Inspected filesystem metadata.
+    pub pdf: ImportedPdf,
+    /// Resolved database identifier.
+    pub paper_id: Option<i64>,
+    /// Whether this ingestion created a new database paper.
+    pub newly_imported: bool,
+}
+
+/// Result of reconciling one complete filesystem scan.
+#[derive(Debug, Clone)]
+pub struct LibraryIngestionResult {
+    /// Number of PDFs found by the scan.
+    pub found: usize,
+    /// Per-paper persistence results.
+    pub papers: Vec<IngestedPdf>,
+}
+
+/// Coordinates filesystem scan results with persistent library organization.
+pub struct LibraryIngestionService<'a> {
+    database: &'a Database,
+    collection_roots: &'a [PathBuf],
+}
+
+impl<'a> LibraryIngestionService<'a> {
+    /// Bind ingestion to one database and set of collection roots.
+    #[must_use]
+    pub const fn new(database: &'a Database, collection_roots: &'a [PathBuf]) -> Self {
+        Self {
+            database,
+            collection_roots,
+        }
+    }
+
+    /// Persist and reconcile one complete filesystem scan.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a collection or paper cannot be persisted or
+    /// reconciled with the database.
+    pub fn ingest_scan(
+        &self,
+        pdfs: Vec<ImportedPdf>,
+        directories: &[CollectionDirectory],
+    ) -> Result<LibraryIngestionResult, DatabaseError> {
+        for directory in directories {
+            self.database.sync_collection_directory(directory)?;
+        }
+        let found = pdfs.len();
+        let mut papers = Vec::with_capacity(found);
+        for pdf in pdfs {
+            papers.push(self.ingest_pdf(pdf)?);
+        }
+        self.database
+            .reconcile_collections(self.collection_roots, directories)?;
+        Ok(LibraryIngestionResult { found, papers })
+    }
+
+    /// Persist and classify one inspected PDF.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the paper cannot be imported, resolved, or assigned
+    /// to its filesystem collection.
+    pub fn ingest_pdf(&self, pdf: ImportedPdf) -> Result<IngestedPdf, DatabaseError> {
+        let newly_imported = self.database.import_pdf(&pdf)?;
+        let paper_id = self.database.paper_id_for_pdf(&pdf)?;
+        if let Some(paper_id) = paper_id {
+            sync_pdf_collection_membership(self.database, paper_id, &pdf, self.collection_roots)?;
+        }
+        Ok(IngestedPdf {
+            pdf,
+            paper_id,
+            newly_imported,
+        })
+    }
+
+    /// Reconcile collection membership for a paper persisted by another workflow.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when collection membership cannot be updated.
+    pub fn reconcile_paper(&self, paper_id: i64, pdf: &ImportedPdf) -> Result<(), DatabaseError> {
+        sync_pdf_collection_membership(self.database, paper_id, pdf, self.collection_roots)
+    }
+}
+
+fn sync_pdf_collection_membership(
+    database: &Database,
+    paper_id: i64,
+    pdf: &ImportedPdf,
+    roots: &[PathBuf],
+) -> Result<(), DatabaseError> {
+    let Some(root) = roots
+        .iter()
+        .filter(|root| pdf.path.starts_with(root))
+        .max_by_key(|root| root.components().count())
+    else {
+        database.clear_collection_membership(paper_id)?;
+        return Ok(());
+    };
+    let mut classified = pdf.clone();
+    classified.library_root = Some(root.clone());
+    classified.relative_directory = pdf
+        .path
+        .parent()
+        .and_then(|parent| parent.strip_prefix(root).ok())
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .map(Path::to_path_buf);
+    database.sync_pdf_collection(paper_id, &classified)?;
+    Ok(())
 }
 
 /// Local library indexing errors.
@@ -63,7 +180,8 @@ impl LibraryIndexer {
             .filter_map(Result::ok)
             .filter(|entry| entry.file_type().is_file() && is_pdf(entry.path()))
             .filter(|entry| {
-                let p = std::fs::canonicalize(entry.path()).unwrap_or_else(|_| entry.path().to_path_buf());
+                let p = std::fs::canonicalize(entry.path())
+                    .unwrap_or_else(|_| entry.path().to_path_buf());
                 seen.insert(p)
             })
             .filter_map(|entry| Self::inspect_in_roots(entry.path(), roots).ok())
@@ -80,7 +198,8 @@ impl LibraryIndexer {
             .filter_map(Result::ok)
             .filter(|entry| entry.file_type().is_file() && is_pdf(entry.path()))
             .filter(|entry| {
-                let p = std::fs::canonicalize(entry.path()).unwrap_or_else(|_| entry.path().to_path_buf());
+                let p = std::fs::canonicalize(entry.path())
+                    .unwrap_or_else(|_| entry.path().to_path_buf());
                 seen.insert(p)
             })
             .count() as u64
@@ -96,7 +215,8 @@ impl LibraryIndexer {
             .filter_map(Result::ok)
             .filter(|entry| entry.file_type().is_file() && is_pdf(entry.path()))
             .filter(|entry| {
-                let p = std::fs::canonicalize(entry.path()).unwrap_or_else(|_| entry.path().to_path_buf());
+                let p = std::fs::canonicalize(entry.path())
+                    .unwrap_or_else(|_| entry.path().to_path_buf());
                 seen.insert(p)
             })
             .map(|entry| entry.metadata().map(|m| m.len()).unwrap_or(0))
@@ -201,7 +321,8 @@ impl LibraryIndexer {
             .max_by_key(|(_, canonical_root)| canonical_root.components().count())
         {
             pdf.library_root = Some(root.clone());
-            pdf.relative_directory = pdf.path
+            pdf.relative_directory = pdf
+                .path
                 .parent()
                 .and_then(|parent| parent.strip_prefix(canonical_root).ok())
                 .filter(|relative| !relative.as_os_str().is_empty())
@@ -209,7 +330,6 @@ impl LibraryIndexer {
         }
         Ok(pdf)
     }
-
 }
 
 /// Keeps a native filesystem watcher alive for configured library roots.
@@ -318,7 +438,8 @@ mod tests {
 
     #[test]
     fn nested_roots_do_not_double_count() -> Result<(), Box<dyn std::error::Error>> {
-        let root = std::env::temp_dir().join(format!("papr-nested-roots-test-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("papr-nested-roots-test-{}", std::process::id()));
         let sub = root.join("downloads");
         fs::create_dir_all(&sub)?;
         let pdf = sub.join("paper.pdf");

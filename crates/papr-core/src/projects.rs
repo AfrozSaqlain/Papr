@@ -5,7 +5,15 @@
 
 #![allow(missing_docs)] // Public fields are self-describing serialized metadata.
 
-use std::{fs, path::{Path, PathBuf}, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    fs,
+    io::{BufRead, BufReader},
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    sync::Arc,
+    thread::JoinHandle,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -52,21 +60,34 @@ pub struct ProjectManager {
 }
 
 impl ProjectManager {
+    /// Create a project manager rooted at the supplied directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the root cannot be created or normalized.
     pub fn new(root: PathBuf) -> Result<Self, ProjectError> {
         fs::create_dir_all(&root)?;
         // Retain a single absolute, filesystem-normalized representation for
         // managed, external, persisted, and UI-facing project paths.
-        Ok(Self { root: canonicalize_path(root)? })
+        Ok(Self {
+            root: canonicalize_path(root)?,
+        })
     }
 
     #[must_use]
-    pub fn root(&self) -> &Path { &self.root }
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
 
-    fn registry_path(&self) -> PathBuf { self.root.join(REGISTRY_FILE) }
+    fn registry_path(&self) -> PathBuf {
+        self.root.join(REGISTRY_FILE)
+    }
 
     fn read_registry(&self) -> Result<Registry, ProjectError> {
         let path = self.registry_path();
-        if !path.exists() { return Ok(Registry::default()); }
+        if !path.exists() {
+            return Ok(Registry::default());
+        }
         let mut registry: Registry = toml::from_str(&fs::read_to_string(path)?)?;
         // Older registries may contain relative paths. Normalize at the
         // serialization boundary before any equality or containment check.
@@ -88,31 +109,61 @@ impl ProjectManager {
 
     /// Discover directories in the configured root and merge external/recent
     /// projects from metadata. The registry itself is never exposed as a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the project directory or registry cannot be read or
+    /// the normalized registry cannot be persisted.
     pub fn list(&self) -> Result<Vec<Project>, ProjectError> {
         let mut registry = self.read_registry()?;
         let mut projects = Vec::new();
         for entry in fs::read_dir(&self.root)? {
             let entry = entry?;
-            if !entry.file_type()?.is_dir() { continue; }
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
-            let opened_at = registry.projects.iter().find(|p| p.path == path).map_or(0, |p| p.opened_at);
-            projects.push(Project { name, path, opened_at });
+            let opened_at = registry
+                .projects
+                .iter()
+                .find(|p| p.path == path)
+                .map_or(0, |p| p.opened_at);
+            projects.push(Project {
+                name,
+                path,
+                opened_at,
+            });
         }
         registry.projects.retain(|p| p.path.is_dir());
         for project in &registry.projects {
-            if !projects.iter().any(|p| p.path == project.path) { projects.push(project.clone()); }
+            if !projects.iter().any(|p| p.path == project.path) {
+                projects.push(project.clone());
+            }
         }
-        projects.sort_by(|a, b| b.opened_at.cmp(&a.opened_at).then_with(|| a.name.cmp(&b.name)));
-        self.write_registry(&Registry { projects: projects.clone() })?;
+        projects.sort_by(|a, b| {
+            b.opened_at
+                .cmp(&a.opened_at)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        self.write_registry(&Registry {
+            projects: projects.clone(),
+        })?;
         Ok(projects)
     }
 
     /// Create a conventional, immediately-compilable LaTeX or Typst project.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid or duplicate name, or when starter files
+    /// cannot be written.
     pub fn create(&self, name: &str, compiler: &str) -> Result<Project, ProjectError> {
         validate_name(name)?;
         let path = self.root.join(name);
-        if path.exists() { return Err(ProjectError::AlreadyExists(name.into())); }
+        if path.exists() {
+            return Err(ProjectError::AlreadyExists(name.into()));
+        }
         fs::create_dir_all(path.join("figures"))?;
         fs::create_dir_all(path.join("sections"))?;
         if compiler == "typst" {
@@ -122,17 +173,35 @@ impl ProjectManager {
         } else {
             fs::write(path.join("main.tex"), default_main_tex(name))?;
             fs::write(path.join("references.bib"), "% Add BibTeX entries here.\n")?;
-            fs::write(path.join(".gitignore"), "*.aux\n*.bbl\n*.blg\n*.fdb_latexmk\n*.fls\n*.log\n*.out\n*.pdf\n")?;
+            fs::write(
+                path.join(".gitignore"),
+                "*.aux\n*.bbl\n*.blg\n*.fdb_latexmk\n*.fls\n*.log\n*.out\n*.pdf\n",
+            )?;
         }
         self.open(path)
     }
 
     /// Add an existing project (including one outside the managed root).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the path is not a directory, cannot be normalized,
+    /// or cannot be saved to the project registry.
     pub fn open(&self, path: PathBuf) -> Result<Project, ProjectError> {
-        if !path.is_dir() { return Err(ProjectError::NotFound(path)); }
+        if !path.is_dir() {
+            return Err(ProjectError::NotFound(path));
+        }
         let path = canonicalize_path(&path)?;
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("Untitled project").to_owned();
-        let project = Project { name, path, opened_at: now() };
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("Untitled project")
+            .to_owned();
+        let project = Project {
+            name,
+            path,
+            opened_at: now(),
+        };
         let mut registry = self.read_registry()?;
         registry.projects.retain(|p| p.path != project.path);
         registry.projects.push(project.clone());
@@ -140,10 +209,18 @@ impl ProjectManager {
         Ok(project)
     }
 
+    /// Rename a project and update its registry entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid or duplicate name, or when the directory
+    /// or registry cannot be updated.
     pub fn rename(&self, project: &Project, name: &str) -> Result<Project, ProjectError> {
         validate_name(name)?;
         let new_path = project.path.parent().unwrap_or(&self.root).join(name);
-        if new_path != project.path && new_path.exists() { return Err(ProjectError::AlreadyExists(name.into())); }
+        if new_path != project.path && new_path.exists() {
+            return Err(ProjectError::AlreadyExists(name.into()));
+        }
         fs::rename(&project.path, &new_path)?;
         let renamed = Project {
             name: name.into(),
@@ -151,14 +228,27 @@ impl ProjectManager {
             opened_at: project.opened_at,
         };
         let mut registry = self.read_registry()?;
-        if let Some(item) = registry.projects.iter_mut().find(|p| p.path == project.path) { *item = renamed.clone(); }
+        if let Some(item) = registry
+            .projects
+            .iter_mut()
+            .find(|p| p.path == project.path)
+        {
+            *item = renamed.clone();
+        }
         self.write_registry(&registry)?;
         Ok(renamed)
     }
 
     /// Delete a project directory. Callers should show their own confirmation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the project no longer exists or its directory or
+    /// registry entry cannot be removed.
     pub fn delete(&self, project: &Project) -> Result<(), ProjectError> {
-        if !project.path.is_dir() { return Err(ProjectError::NotFound(project.path.clone())); }
+        if !project.path.is_dir() {
+            return Err(ProjectError::NotFound(project.path.clone()));
+        }
         fs::remove_dir_all(&project.path)?;
         let mut registry = self.read_registry()?;
         registry.projects.retain(|p| p.path != project.path);
@@ -167,18 +257,29 @@ impl ProjectManager {
 }
 
 fn validate_name(name: &str) -> Result<(), ProjectError> {
-    if name.trim().is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." { Err(ProjectError::InvalidName) } else { Ok(()) }
+    if name.trim().is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
+        Err(ProjectError::InvalidName)
+    } else {
+        Ok(())
+    }
 }
 
-fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() }
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 
 fn default_main_tex(title: &str) -> String {
-    format!("\\documentclass[11pt]{{article}}\n\\usepackage[utf8]{{inputenc}}\n\\usepackage{{graphicx}}\n\\usepackage{{amsmath,amssymb,amsthm}}\n\\usepackage[a4paper,margin=1in]{{geometry}}\n\\usepackage{{enumerate}}\n\\usepackage{{float}}\n\n\\setlength{{\\parindent}}{{0em}}\n\n\\title{{{title}}}\n\\author{{}}\n\\date{{\\today}}\n\n\\begin{{document}}\n\\maketitle\n\n\\begin{{abstract}}\nWrite your abstract here.\n\\end{{abstract}}\n\n\\section{{Introduction}}\nStart writing.\n\n\\bibliographystyle{{plain}}\n\\bibliography{{references}}\n\\end{{document}}\n")
+    format!(
+        "\\documentclass[11pt]{{article}}\n\\usepackage[utf8]{{inputenc}}\n\\usepackage{{graphicx}}\n\\usepackage{{amsmath,amssymb,amsthm}}\n\\usepackage[a4paper,margin=1in]{{geometry}}\n\\usepackage{{enumerate}}\n\\usepackage{{float}}\n\n\\setlength{{\\parindent}}{{0em}}\n\n\\title{{{title}}}\n\\author{{}}\n\\date{{\\today}}\n\n\\begin{{document}}\n\\maketitle\n\n\\begin{{abstract}}\nWrite your abstract here.\n\\end{{abstract}}\n\n\\section{{Introduction}}\nStart writing.\n\n\\bibliographystyle{{plain}}\n\\bibliography{{references}}\n\\end{{document}}\n"
+    )
 }
 
 fn default_main_typ(title: &str) -> String {
     format!(
-r#"#set document(title: "{title}")
+        r#"#set document(title: "{title}")
 #set page(paper: "a4", margin: 1in)
 
 #align(center)[
@@ -196,31 +297,47 @@ Start writing.
 }
 
 /// Turn TeX's line-oriented output into diagnostics that can be displayed and navigated.
+#[must_use]
 pub fn parse_latex_diagnostics(log: &[String], project_root: &Path) -> Vec<ProjectBuildDiagnostic> {
     let files = tex_file_context(log);
     let locations = tex_locations(log, &files);
-    let diagnostic_indexes = log.iter().enumerate()
-        .filter_map(|(index, output)| latex_diagnostic(output).map(|diagnostic| (index, diagnostic)))
+    let diagnostic_indexes = log
+        .iter()
+        .enumerate()
+        .filter_map(|(index, output)| {
+            latex_diagnostic(output).map(|diagnostic| (index, diagnostic))
+        })
         .collect::<Vec<_>>();
     let mut diagnostics = Vec::new();
     let mut previous_location = None;
 
     for (position, (index, (severity, description))) in diagnostic_indexes.iter().enumerate() {
-        let next_diagnostic = diagnostic_indexes.get(position + 1).map_or(log.len(), |(index, _)| *index);
+        let next_diagnostic = diagnostic_indexes
+            .get(position + 1)
+            .map_or(log.len(), |(index, _)| *index);
         let source_file = files[*index].clone();
         // TeX puts the useful `l.<n>` entry either immediately after an error,
         // before a package-generated message, or in the enclosing log block.
-        let location = locations.iter()
+        let location = locations
+            .iter()
             .filter(|location| location.index >= *index && location.index < next_diagnostic)
             .min_by_key(|location| location.index)
             .cloned()
-            .or_else(|| locations.iter()
-                .rev()
-                .find(|location| location.index < *index && index.saturating_sub(location.index) <= 40)
-                .cloned())
+            .or_else(|| {
+                locations
+                    .iter()
+                    .rev()
+                    .find(|location| {
+                        location.index < *index && index.saturating_sub(location.index) <= 40
+                    })
+                    .cloned()
+            })
             .or_else(|| previous_location.clone());
-        let source_file = location.as_ref().map_or(source_file, |location| location.file.clone());
-        let (line, compiler_code) = location.as_ref()
+        let source_file = location
+            .as_ref()
+            .map_or(source_file, |location| location.file.clone());
+        let (line, compiler_code) = location
+            .as_ref()
             .map(|location| (Some(location.line), location.code.clone()))
             .unwrap_or((None, None));
         if let Some(location) = &location {
@@ -261,6 +378,134 @@ pub fn parse_latex_diagnostics(log: &[String], project_root: &Path) -> Vec<Proje
     diagnostics
 }
 
+/// Lifecycle signal inferred from one line emitted by `latexmk`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LatexBuildSignal {
+    /// A compilation pass began.
+    Started,
+    /// The build completed successfully.
+    Succeeded,
+    /// The build completed with errors.
+    Failed,
+}
+
+/// Structured events emitted by a continuously running `latexmk` process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LatexBuildEvent {
+    /// Raw compiler output.
+    LogLine(String),
+    /// A compilation lifecycle transition.
+    Signal(LatexBuildSignal),
+}
+
+/// Owns the reusable `latexmk` process lifecycle and output readers.
+pub struct LatexBuildProcess {
+    child: Child,
+    readers: Vec<JoinHandle<()>>,
+    stopped: bool,
+}
+
+impl LatexBuildProcess {
+    /// Start continuous PDF compilation and forward structured events.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the `latexmk` process cannot be spawned.
+    pub fn start(
+        project_root: &Path,
+        on_event: impl Fn(LatexBuildEvent) + Send + Sync + 'static,
+    ) -> Result<Self, std::io::Error> {
+        let mut command = Command::new("latexmk");
+        command
+            .args(["-pdf", "-pvc", "-view=none", "main.tex"])
+            .current_dir(project_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command.spawn()?;
+        let on_event = Arc::new(on_event);
+        let mut readers = Vec::with_capacity(2);
+        if let Some(stdout) = child.stdout.take() {
+            readers.push(spawn_latexmk_reader(stdout, on_event.clone()));
+        }
+        if let Some(stderr) = child.stderr.take() {
+            readers.push(spawn_latexmk_reader(stderr, on_event));
+        }
+        Ok(Self {
+            child,
+            readers,
+            stopped: false,
+        })
+    }
+
+    /// Stop `latexmk` and all active TeX subprocesses, then join output readers.
+    pub fn stop(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
+        #[cfg(unix)]
+        {
+            let process_group = format!("-{}", self.child.id());
+            let _ = Command::new("kill")
+                .args(["-KILL", "--", &process_group])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        for reader in self.readers.drain(..) {
+            let _ = reader.join();
+        }
+    }
+}
+
+impl Drop for LatexBuildProcess {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn spawn_latexmk_reader(
+    reader: impl std::io::Read + Send + 'static,
+    on_event: Arc<impl Fn(LatexBuildEvent) + Send + Sync + 'static>,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        for line in BufReader::new(reader).lines().map_while(Result::ok) {
+            on_event(LatexBuildEvent::LogLine(line.clone()));
+            if let Some(signal) = classify_latexmk_line(&line) {
+                on_event(LatexBuildEvent::Signal(signal));
+            }
+        }
+    })
+}
+
+/// Classify `latexmk` output without coupling process execution to a frontend.
+#[must_use]
+pub fn classify_latexmk_line(line: &str) -> Option<LatexBuildSignal> {
+    let normalized = line.to_ascii_lowercase();
+    if normalized.contains("applying rule 'pdflatex'") || normalized.contains("compiling ...") {
+        Some(LatexBuildSignal::Started)
+    } else if (normalized.contains("all targets") && normalized.contains("up-to-date"))
+        || normalized.contains("compiled successfully")
+    {
+        Some(LatexBuildSignal::Succeeded)
+    } else if normalized.contains("errors, so i did not")
+        || normalized.contains("compiled with errors")
+    {
+        Some(LatexBuildSignal::Failed)
+    } else {
+        None
+    }
+}
+
 #[derive(Clone)]
 struct TexLocation {
     index: usize,
@@ -289,45 +534,67 @@ fn latex_diagnostic(output: &str) -> Option<(ProjectDiagnosticSeverity, String)>
         || (text.starts_with("Package ") && text.contains(" Warning:"))
         || text.starts_with("Overfull \\hbox")
         || text.starts_with("Underfull \\hbox"))
-        .then(|| (ProjectDiagnosticSeverity::Warning, text.to_owned()))
+    .then(|| (ProjectDiagnosticSeverity::Warning, text.to_owned()))
 }
 
 fn tex_file_context(log: &[String]) -> Vec<String> {
     let mut stack = vec!["main.tex".to_owned()];
-    log.iter().map(|output| {
-        let references = tex_file_references(output);
-        for file in &references {
-            if stack.last() != Some(file) {
-                stack.push(file.clone());
+    log.iter()
+        .map(|output| {
+            let references = tex_file_references(output);
+            for file in &references {
+                if stack.last() != Some(file) {
+                    stack.push(file.clone());
+                }
             }
-        }
-        let current = references.last().cloned()
-            .unwrap_or_else(|| stack.last().cloned().unwrap_or_else(|| "main.tex".into()));
-        let closes = output.chars().filter(|character| *character == ')').count();
-        for _ in 0..closes {
-            if stack.len() > 1 {
-                stack.pop();
+            let current = references
+                .last()
+                .cloned()
+                .unwrap_or_else(|| stack.last().cloned().unwrap_or_else(|| "main.tex".into()));
+            let closes = output.chars().filter(|character| *character == ')').count();
+            for _ in 0..closes {
+                if stack.len() > 1 {
+                    stack.pop();
+                }
             }
-        }
-        current
-    }).collect()
+            current
+        })
+        .collect()
 }
 
 fn tex_locations(log: &[String], files: &[String]) -> Vec<TexLocation> {
-    log.iter().enumerate().filter_map(|(index, output)| {
-        let (line, code) = compiler_location_in_line(output)?;
-        let file = tex_file_references(output).last().cloned().unwrap_or_else(|| files[index].clone());
-        Some(TexLocation { index, file, line, code })
-    }).collect()
+    log.iter()
+        .enumerate()
+        .filter_map(|(index, output)| {
+            let (line, code) = compiler_location_in_line(output)?;
+            let file = tex_file_references(output)
+                .last()
+                .cloned()
+                .unwrap_or_else(|| files[index].clone());
+            Some(TexLocation {
+                index,
+                file,
+                line,
+                code,
+            })
+        })
+        .collect()
 }
 
 fn tex_file_references(output: &str) -> Vec<String> {
-    output.split(|character: char| character.is_whitespace() || matches!(character, '(' | ')' | '[' | ']' | '"' | '\''))
+    output
+        .split(|character: char| {
+            character.is_whitespace() || matches!(character, '(' | ')' | '[' | ']' | '"' | '\'')
+        })
         .filter_map(|candidate| {
             let candidate = candidate.trim_start_matches("./");
-            [".tex", ".sty", ".cls", ".ltx", ".bib"].iter().find_map(|extension| {
-                candidate.find(extension).map(|index| candidate[..index + extension.len()].to_owned())
-            })
+            [".tex", ".sty", ".cls", ".ltx", ".bib"]
+                .iter()
+                .find_map(|extension| {
+                    candidate
+                        .find(extension)
+                        .map(|index| candidate[..index + extension.len()].to_owned())
+                })
         })
         .collect()
 }
@@ -336,7 +603,10 @@ fn compiler_location_in_line(output: &str) -> Option<(usize, Option<String>)> {
     let text = output.trim();
     if let Some(offset) = text.find("l.") {
         let rest = text[offset + 2..].trim_start();
-        let digits = rest.chars().take_while(char::is_ascii_digit).collect::<String>();
+        let digits = rest
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>();
         if let Ok(line) = digits.parse() {
             let code = rest[digits.len()..].trim();
             return Some((line, (!code.is_empty()).then(|| code.to_owned())));
@@ -344,7 +614,13 @@ fn compiler_location_in_line(output: &str) -> Option<(usize, Option<String>)> {
     }
 
     let lower = text.to_ascii_lowercase();
-    for marker in ["on input line ", "on line ", "at line ", "at lines ", "line "] {
+    for marker in [
+        "on input line ",
+        "on line ",
+        "at line ",
+        "at lines ",
+        "line ",
+    ] {
         if let Some(offset) = lower.find(marker) {
             if let Some(line) = parse_line_number(&lower[offset + marker.len()..]) {
                 return Some((line, None));
@@ -377,7 +653,8 @@ fn file_line_number(output: &str) -> Option<usize> {
 }
 
 fn parse_line_number(text: &str) -> Option<usize> {
-    let digits = text.trim_start_matches(|character: char| !character.is_ascii_digit())
+    let digits = text
+        .trim_start_matches(|character: char| !character.is_ascii_digit())
         .chars()
         .take_while(char::is_ascii_digit)
         .collect::<String>();
@@ -385,13 +662,22 @@ fn parse_line_number(text: &str) -> Option<usize> {
 }
 
 fn diagnostic_title(severity: ProjectDiagnosticSeverity, description: &str) -> String {
-    for title in ["Undefined control sequence", "Missing $ inserted", "Missing } inserted", "Emergency stop"] {
+    for title in [
+        "Undefined control sequence",
+        "Missing $ inserted",
+        "Missing } inserted",
+        "Emergency stop",
+    ] {
         if description.starts_with(title) {
             return title.to_owned();
         }
     }
-    if description.starts_with("Overfull \\hbox") { return "Overfull \\hbox".into(); }
-    if description.starts_with("Underfull \\hbox") { return "Underfull \\hbox".into(); }
+    if description.starts_with("Overfull \\hbox") {
+        return "Overfull \\hbox".into();
+    }
+    if description.starts_with("Underfull \\hbox") {
+        return "Underfull \\hbox".into();
+    }
     match severity {
         ProjectDiagnosticSeverity::Error => "LaTeX Error".into(),
         ProjectDiagnosticSeverity::Warning => "LaTeX Warning".into(),
@@ -458,9 +744,9 @@ mod tests {
         assert_eq!(diagnostics[1].line, Some(14));
     }
 
-
     #[test]
-    fn creates_discovers_and_persists_external_projects() -> Result<(), Box<dyn std::error::Error>> {
+    fn creates_discovers_and_persists_external_projects() -> Result<(), Box<dyn std::error::Error>>
+    {
         let root = std::env::temp_dir().join(format!("papr-projects-{}", now()));
         let manager = ProjectManager::new(root.clone())?;
         let created = manager.create("paper", "latex")?;
@@ -475,7 +761,10 @@ mod tests {
         assert!(main.contains("\\setlength{\\parindent}{0em}"));
         assert!(!main.contains("\\setlength{\\parskip}"));
         assert_eq!(manager.list()?.len(), 1);
-        let external = root.parent().unwrap().join(format!("papr-external-{}", now()));
+        let parent = root
+            .parent()
+            .ok_or_else(|| std::io::Error::other("temporary project root has no parent"))?;
+        let external = parent.join(format!("papr-external-{}", now()));
         fs::create_dir_all(&external)?;
         manager.open(external.clone())?;
         assert_eq!(manager.list()?.len(), 2);
@@ -504,12 +793,13 @@ mod tests {
         let projects = manager.list()?;
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].path, created.path);
-        assert!(fs::read_to_string(manager.registry_path())?
-            .contains(&created.path.display().to_string()));
+        assert!(
+            fs::read_to_string(manager.registry_path())?
+                .contains(&created.path.display().to_string())
+        );
         fs::remove_dir_all(root)?;
         Ok(())
     }
-
 }
 
 /// Severity assigned to a parsed LaTeX compiler diagnostic.

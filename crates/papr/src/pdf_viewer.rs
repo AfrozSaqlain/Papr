@@ -269,8 +269,7 @@ pub fn reset_for_new_document(new_path: &Path) {
             .entry(new_path.to_path_buf())
             .or_default();
         g.page_counts.retain(|(path, _), _| path == new_path);
-        g.page_count_in_flight
-            .retain(|(path, _)| path == new_path);
+        g.page_count_in_flight.retain(|(path, _)| path == new_path);
         let new_fp = path_fingerprint(new_path);
         if let Some((resident_fp, image_id)) = g.resident_kitty_image
             && resident_fp != new_fp
@@ -307,8 +306,7 @@ pub fn invalidate_document(path: &Path) {
         g.render_queue.retain(|job| job.pdf_path != path);
         g.document_widths.remove(path);
         g.page_counts.retain(|(cached, _), _| cached != path);
-        g.page_count_in_flight
-            .retain(|(cached, _)| cached != path);
+        g.page_count_in_flight.retain(|(cached, _)| cached != path);
         g.last_crop_key = None;
         g.last_encoded = None;
     }
@@ -333,8 +331,7 @@ pub fn release_document(path: &Path) {
         g.render_queue.retain(|job| job.pdf_path != path);
         g.document_widths.remove(path);
         g.page_counts.retain(|(cached, _), _| cached != path);
-        g.page_count_in_flight
-            .retain(|(cached, _)| cached != path);
+        g.page_count_in_flight.retain(|(cached, _)| cached != path);
         let mut retained_temp_files = Vec::with_capacity(g.temp_files.len());
         for (document, file) in g.temp_files.drain(..) {
             if document == path {
@@ -513,9 +510,7 @@ fn pump_render_queue() {
             if g.active_renders >= MAX_CONCURRENT_RENDERS {
                 return;
             }
-            if g.active_renders > 0
-                && g.render_queue.front().is_some_and(|job| !job.priority)
-            {
+            if g.active_renders > 0 && g.render_queue.front().is_some_and(|job| !job.priority) {
                 // Keep one renderer slot free for a newly visible page. This
                 // also lets the first page use Poppler without prefetch CPU
                 // contention, while still allowing a priority render to join
@@ -570,8 +565,7 @@ fn pump_render_queue() {
                     }
                     Ok(page_data) => {
                         g.pages.insert(key, page_data);
-                        if raster.exists()
-                            && !g.temp_files.iter().any(|(_, file)| file == &raster)
+                        if raster.exists() && !g.temp_files.iter().any(|(_, file)| file == &raster)
                         {
                             g.temp_files.push((pdf_path.clone(), raster));
                         }
@@ -1000,10 +994,7 @@ fn render_kitty_placeholders(
 
             // Restore the cursor and finish at the PDF pane's bottom-right,
             // matching ratatui-image's packed-row cursor contract.
-            let right = area
-                .right()
-                .saturating_sub(segment_left)
-                .saturating_sub(1);
+            let right = area.right().saturating_sub(segment_left).saturating_sub(1);
             let down = area.height.saturating_sub(1);
             write!(symbol, "\x1b[u\x1b[{right}C\x1b[{down}B").unwrap();
 
@@ -1168,11 +1159,8 @@ mod kitty_placeholder_tests {
 
     #[test]
     fn kitty_upload_uses_lossless_streaming_compression() {
-        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(
-            320,
-            200,
-            Rgba([245, 245, 245, 255]),
-        ));
+        let image =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(320, 200, Rgba([245, 245, 245, 255])));
         let upload = kitty_transmit(&image, 42);
         let raw = kitty_transmit_raw(image.as_bytes(), 42, 320, 200);
 
@@ -1257,14 +1245,16 @@ mod kitty_placeholder_tests {
         assert!(g.pages.keys().any(|(path, _, _, _, _)| path == &other));
         assert!(!g.page_counts.keys().any(|(path, _)| path == &closed));
         assert!(g.page_counts.keys().any(|(path, _)| path == &other));
-        assert!(!g
-            .page_count_in_flight
-            .iter()
-            .any(|(path, _)| path == &closed));
-        assert!(g
-            .page_count_in_flight
-            .iter()
-            .any(|(path, _)| path == &other));
+        assert!(
+            !g.page_count_in_flight
+                .iter()
+                .any(|(path, _)| path == &closed)
+        );
+        assert!(
+            g.page_count_in_flight
+                .iter()
+                .any(|(path, _)| path == &other)
+        );
         assert_eq!(g.document_generations.get(&closed), Some(&1));
         assert!(g.last_crop_key.is_none());
         assert!(g.last_encoded.is_none());
@@ -1274,8 +1264,7 @@ mod kitty_placeholder_tests {
         assert!(other_temp.exists());
         g.pages.retain(|(path, _, _, _, _), _| path != &other);
         g.page_counts.retain(|(path, _), _| path != &other);
-        g.page_count_in_flight
-            .retain(|(path, _)| path != &other);
+        g.page_count_in_flight.retain(|(path, _)| path != &other);
         g.pending_kitty_deletes.retain(|id| *id != 77);
         g.render_cancellations.remove(&active_key);
         g.document_generations.remove(&closed);

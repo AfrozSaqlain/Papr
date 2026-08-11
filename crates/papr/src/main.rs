@@ -4,44 +4,61 @@ mod state;
 pub use state::*;
 mod theme;
 pub use theme::*;
-mod terminal;
-mod ui;
 mod citation;
+mod editor;
 mod pdf_viewer;
 mod settings_modal;
+mod terminal;
+mod terminal_input;
+mod ui;
 
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsString,
     io::{BufRead, BufReader, BufWriter, Write},
     path::{Component, Path, PathBuf},
-    ffi::OsString,
     process::{Command as ProcessCommand, Stdio},
     sync::mpsc::{self as std_mpsc, TryRecvError},
-    sync::{Arc, atomic::{AtomicBool, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use anyhow::{Context, Result};
-use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
-use toml;
 use chrono::{Duration, Local, NaiveDate};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
+use editor::{
+    config_editor_line_end, config_editor_line_start, config_editor_wrap_rows,
+    cursor_from_visual_position, cursor_visual_position, expand_tabs_for_editor_view,
+    next_char_boundary, next_word_boundary, prev_char_boundary, prev_word_boundary,
+    project_editor_line_at,
+};
+use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use papr_core::{
-     terminal_path_candidates, terminal_home_directory, sort_terminal_candidates, sanitize_terminal_output, parse_command, 
-    select_dashboard_papers, shuffle_daily_bucket,
-
-    expand_tabs_for_editor_view, project_editor_line_at, prev_char_boundary, next_char_boundary, cursor_from_visual_position, cursor_visual_position, config_editor_wrap_rows, config_editor_line_start, config_editor_line_end, prev_word_boundary, next_word_boundary, parse_latex_diagnostics, move_pdf_file, validate_collection_name,
-
-    ArxivClient, CollectionDirectory, Config, Database,     DownloadEvent, DownloadManager, DownloadStatus, DownloadTask, ImportedPdf, LibraryIndexer,
-    LibraryWatcher, PaperNote, Paths, PluginHost, RemotePaper, Project,
-    CitationSource, CompletionSource, ProjectBuildDiagnostic, ProjectDiagnosticSeverity, ProjectManager,
-    TypstCompileResult, TypstCompiler, canonicalize_path,
+    ArxivClient, ArxivRetryPolicy, CitationSource, CollectionDirectory, CompletionSource, Config,
+    DashboardService, Database, DownloadEvent, DownloadManager, ImportedPdf, LatexBuildEvent,
+    LatexBuildProcess, LatexBuildSignal, LibraryIndexer, LibraryIngestionService, LibraryWatcher,
+    MetadataCandidate, MetadataEnrichmentOutcome, MetadataEnrichmentService, PaperNote, Paths,
+    PluginHost, Project, ProjectBuildDiagnostic, ProjectDiagnosticSeverity, ProjectManager,
+    RankedCandidatePageRequest, RemotePaper, TypstCompileResult, TypstCompiler, canonicalize_path,
+    move_pdf_file, parse_latex_diagnostics, validate_collection_name,
 };
 use serde::{Deserialize, Serialize};
+use terminal_input::{
+    parse_command, sanitize_terminal_output, sort_terminal_candidates, terminal_home_directory,
+    terminal_path_candidates,
+};
 
-use tokio::{sync::{mpsc, Semaphore}, task::JoinSet};
+use tokio::{
+    sync::{Semaphore, mpsc},
+    task::JoinSet,
+};
 
 use terminal::TerminalSession;
 
@@ -132,7 +149,8 @@ async fn run_app(cli: Cli) -> Result<()> {
         let mut roots = config.library_folders.clone();
         let download_inside = roots.iter().any(|root| {
             let root_canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-            let dl_canon = std::fs::canonicalize(&download_dir).unwrap_or_else(|_| download_dir.clone());
+            let dl_canon =
+                std::fs::canonicalize(&download_dir).unwrap_or_else(|_| download_dir.clone());
             dl_canon.starts_with(&root_canon)
         });
         if !download_inside {
@@ -151,10 +169,8 @@ async fn run_app(cli: Cli) -> Result<()> {
     let dashboard_feed_date = local_feed_date();
     let arxiv = ArxivClient::new().context("failed to initialize arXiv client")?;
     let (today_sender, today_receiver) = mpsc::unbounded_channel();
-    let initial_cached_papers = database.dashboard_feed_cache(
-        &dashboard_feed_date,
-        &dashboard_keyword_signature,
-    )?;
+    let initial_cached_papers =
+        database.dashboard_feed_cache(&dashboard_feed_date, &dashboard_keyword_signature)?;
     let initial_dashboard_fetch = if initial_cached_papers.is_none() {
         let key = DashboardFeedKey {
             feed_date: dashboard_feed_date.clone(),
@@ -171,7 +187,10 @@ async fn run_app(cli: Cli) -> Result<()> {
     } else {
         None
     };
-    let download_dir = config.download_path.clone().unwrap_or_else(|| paths.downloads_dir.clone());
+    let download_dir = config
+        .download_path
+        .clone()
+        .unwrap_or_else(|| paths.downloads_dir.clone());
     std::fs::create_dir_all(&download_dir).context("failed to create download directory")?;
     let download_dir = std::fs::canonicalize(&download_dir).unwrap_or(download_dir);
 
@@ -180,9 +199,9 @@ async fn run_app(cli: Cli) -> Result<()> {
         collection_roots.push(std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()));
     }
     let mut library_roots = collection_roots.clone();
-    let download_inside = collection_roots.iter().any(|root| {
-        download_dir.starts_with(root)
-    });
+    let download_inside = collection_roots
+        .iter()
+        .any(|root| download_dir.starts_with(root));
     if !download_inside {
         library_roots.push(download_dir.clone());
     }
@@ -247,9 +266,8 @@ async fn run_app(cli: Cli) -> Result<()> {
     let mut session = TerminalSession::start()?;
     let primary_library_root = library_roots[0].clone();
     let runtime = Runtime {
+        metadata_enrichment: MetadataEnrichmentService::new(arxiv.clone()),
         arxiv,
-        crossref: papr_core::api::crossref::CrossrefClient::new(),
-        openalex: papr_core::api::openalex::OpenAlexClient::new(),
         downloads,
         database,
         database_file: paths.database_file.clone(),
@@ -339,7 +357,10 @@ enum UiAction {
     OpenBrowser(String),
     Download(RemotePaper),
     Reindex,
-    OpenPdf { paper_id: i64, path: PathBuf },
+    OpenPdf {
+        paper_id: i64,
+        path: PathBuf,
+    },
     OpenNote(PaperTarget),
     SaveNote(PaperNote),
     Prompt(PaperTarget),
@@ -356,28 +377,54 @@ enum UiAction {
     InsertProjectCitation(papr_core::models::LibraryPaper),
     InsertProjectRemoteCitation(RemotePaper),
     SearchProjectCitationsOnline(String),
-    ConfirmDeletePaper { paper_id: i64, title: String, path: Option<PathBuf> },
-    ConfirmDeleteCollection { collection_id: i64, name: String, path: Option<PathBuf> },
-    DeletePaper { paper_id: i64, path: Option<PathBuf> },
-    DeleteCollection { collection_id: i64, path: Option<PathBuf> },
+    ConfirmDeletePaper {
+        paper_id: i64,
+        title: String,
+        path: Option<PathBuf>,
+    },
+    ConfirmDeleteCollection {
+        collection_id: i64,
+        name: String,
+        path: Option<PathBuf>,
+    },
+    DeletePaper {
+        paper_id: i64,
+        path: Option<PathBuf>,
+    },
+    DeleteCollection {
+        collection_id: i64,
+        path: Option<PathBuf>,
+    },
     AddToQueue(i64),
     RemoveFromQueue(i64),
     MoveQueueItemUp(i64),
     MoveQueueItemDown(i64),
     ClosePdf,
     CloseProject,
-    RetryDownload { id: String, paper: RemotePaper },
+    RetryDownload {
+        id: String,
+        paper: RemotePaper,
+    },
     RefreshProjects,
-    CreateProject { name: String, compiler: String },
+    CreateProject {
+        name: String,
+        compiler: String,
+    },
     CreateProjectFile(String),
     OpenProject(Project),
     OpenProjectFile(PathBuf),
     ConfirmDeleteProjectEntry(PathBuf),
     DeleteProjectEntry(PathBuf),
-    RenameProject { project: Project, name: String },
+    RenameProject {
+        project: Project,
+        name: String,
+    },
     ConfirmDeleteProject(Project),
     DeleteProject(Project),
-    RenameProjectEntry { path: PathBuf, name: String },
+    RenameProjectEntry {
+        path: PathBuf,
+        name: String,
+    },
 }
 
 enum KeyHandling {
@@ -400,11 +447,19 @@ struct SearchResponse {
 
 #[derive(Debug)]
 enum SearchUpdate {
-    Partial { papers: Vec<RemotePaper>, next_start: Option<u16> },
-    Retrying { attempt: u8, max_attempts: u8 },
+    Partial {
+        papers: Vec<RemotePaper>,
+        next_start: Option<u16>,
+    },
+    Retrying {
+        attempt: u8,
+        max_attempts: u8,
+    },
     Complete(Vec<RemotePaper>),
     InitialFailure(String),
-    PartialFailure { next_start: u16 },
+    PartialFailure {
+        next_start: u16,
+    },
 }
 
 const DISCOVERY_CANDIDATE_LIMIT: u16 = 250;
@@ -434,8 +489,7 @@ pub(crate) struct ConfigEditorView {
 
 struct Runtime {
     arxiv: ArxivClient,
-    crossref: papr_core::api::crossref::CrossrefClient,
-    openalex: papr_core::api::openalex::OpenAlexClient,
+    metadata_enrichment: MetadataEnrichmentService,
     downloads: DownloadManager,
     database: Database,
     database_file: PathBuf,
@@ -483,20 +537,26 @@ impl ConfigFilesystemWatcher {
             .parent()
             .ok_or_else(|| anyhow::anyhow!("configuration file has no parent directory"))?
             .to_path_buf();
-        let mut watcher = RecommendedWatcher::new(move |event: notify::Result<notify::Event>| {
-            if let Ok(event) = event
-                && !matches!(event.kind, notify::EventKind::Access(_))
-            {
-                // A non-recursive directory watch is intentional. Inotify
-                // reports an atomic rename as a directory event on some
-                // systems, so filtering for an exact `config.toml` path drops
-                // the very saves we need to handle. The reload path compares
-                // the parsed configuration before rebuilding any subsystem.
-                let _ = sender.send(event);
-            }
-        }, NotifyConfig::default())?;
+        let mut watcher = RecommendedWatcher::new(
+            move |event: notify::Result<notify::Event>| {
+                if let Ok(event) = event
+                    && !matches!(event.kind, notify::EventKind::Access(_))
+                {
+                    // A non-recursive directory watch is intentional. Inotify
+                    // reports an atomic rename as a directory event on some
+                    // systems, so filtering for an exact `config.toml` path drops
+                    // the very saves we need to handle. The reload path compares
+                    // the parsed configuration before rebuilding any subsystem.
+                    let _ = sender.send(event);
+                }
+            },
+            NotifyConfig::default(),
+        )?;
         watcher.watch(&watch_root, RecursiveMode::NonRecursive)?;
-        Ok(Self { events, _watcher: watcher })
+        Ok(Self {
+            events,
+            _watcher: watcher,
+        })
     }
 
     fn has_changes(&self) -> bool {
@@ -543,7 +603,10 @@ impl ProjectFilesystemWatcher {
         {
             watcher.watch(&project.path, RecursiveMode::Recursive)?;
         }
-        Ok(Self { events, _watcher: watcher })
+        Ok(Self {
+            events,
+            _watcher: watcher,
+        })
     }
 
     fn has_changes(&self) -> bool {
@@ -553,7 +616,8 @@ impl ProjectFilesystemWatcher {
             // than a user-visible filesystem change and must not trigger a
             // self-sustaining refresh loop.
             if event.paths.iter().any(|path| {
-                path.file_name().is_none_or(|name| name != ".papr-projects.toml")
+                path.file_name()
+                    .is_none_or(|name| name != ".papr-projects.toml")
             }) {
                 changed = true;
             }
@@ -567,26 +631,49 @@ impl CitationIndexer {
         let (sender, events) = std_mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let workers = Arc::new(std::sync::Mutex::new(Vec::new()));
-        refresh_citation_index(project.path.clone(), sender.clone(), cancelled.clone(), workers.clone());
+        refresh_citation_index(
+            project.path.clone(),
+            sender.clone(),
+            cancelled.clone(),
+            workers.clone(),
+        );
         let root = project.path.clone();
         let watch_cancelled = cancelled.clone();
         let watch_workers = workers.clone();
-        let mut watcher = RecommendedWatcher::new(move |event: notify::Result<notify::Event>| {
-            if let Ok(event) = event
-                && !watch_cancelled.load(Ordering::Acquire)
-                && event.paths.iter().any(|path| path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bib")))
-            {
-                refresh_citation_index(root.clone(), sender.clone(), watch_cancelled.clone(), watch_workers.clone());
-            }
-        }, NotifyConfig::default())?;
+        let mut watcher = RecommendedWatcher::new(
+            move |event: notify::Result<notify::Event>| {
+                if let Ok(event) = event
+                    && !watch_cancelled.load(Ordering::Acquire)
+                    && event.paths.iter().any(|path| {
+                        path.extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("bib"))
+                    })
+                {
+                    refresh_citation_index(
+                        root.clone(),
+                        sender.clone(),
+                        watch_cancelled.clone(),
+                        watch_workers.clone(),
+                    );
+                }
+            },
+            NotifyConfig::default(),
+        )?;
         watcher.watch(&project.path, RecursiveMode::Recursive)?;
-        Ok(Self { events, watcher: Some(watcher), cancelled, workers })
+        Ok(Self {
+            events,
+            watcher: Some(watcher),
+            cancelled,
+            workers,
+        })
     }
 
     fn drain(&self) -> Option<CitationSource> {
         reap_finished_citation_workers(&self.workers);
         let mut newest = None;
-        while let Ok(source) = self.events.try_recv() { newest = Some(source); }
+        while let Ok(source) = self.events.try_recv() {
+            newest = Some(source);
+        }
         newest
     }
 
@@ -622,11 +709,18 @@ fn refresh_citation_index(
     let worker_cancelled = cancelled.clone();
     let worker = std::thread::spawn(move || {
         let mut entries = Vec::new();
-        for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
             if cancelled.load(Ordering::Acquire) {
                 return;
             }
-            if !entry.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bib")) {
+            if !entry
+                .path()
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("bib"))
+            {
                 continue;
             }
             if let Ok(contents) = std::fs::read_to_string(entry.path()) {
@@ -648,7 +742,9 @@ fn refresh_citation_index(
 
 fn reap_finished_citation_workers(workers: &std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>) {
     let finished = {
-        let Ok(mut workers) = workers.lock() else { return; };
+        let Ok(mut workers) = workers.lock() else {
+            return;
+        };
         let mut pending = Vec::with_capacity(workers.len());
         let mut finished = Vec::new();
         for worker in workers.drain(..) {
@@ -667,16 +763,31 @@ fn reap_finished_citation_workers(workers: &std::sync::Mutex<Vec<std::thread::Jo
 }
 
 fn update_project_completions(app: &mut App, source: Option<&CitationSource>) {
-    let items = source.map_or_else(Vec::new, |source| source.complete(&app.project_editor_text, app.project_editor_cursor));
+    let items = source.map_or_else(Vec::new, |source| {
+        source.complete(&app.project_editor_text, app.project_editor_cursor)
+    });
     app.project_completions = items;
-    app.project_completion_selected = app.project_completion_selected.min(app.project_completions.len().saturating_sub(1));
+    app.project_completion_selected = app
+        .project_completion_selected
+        .min(app.project_completions.len().saturating_sub(1));
 }
 
 fn accept_project_completion(app: &mut App) -> bool {
-    let Some(item) = app.project_completions.get(app.project_completion_selected).cloned() else { return false; };
-    let Some(query) = papr_core::completions::citation_query(&app.project_editor_text, app.project_editor_cursor) else { return false; };
+    let Some(item) = app
+        .project_completions
+        .get(app.project_completion_selected)
+        .cloned()
+    else {
+        return false;
+    };
+    let Some(query) =
+        papr_core::completions::citation_query(&app.project_editor_text, app.project_editor_cursor)
+    else {
+        return false;
+    };
     let start = app.project_editor_cursor.saturating_sub(query.len());
-    app.project_editor_text.replace_range(start..app.project_editor_cursor, &item.insert_text);
+    app.project_editor_text
+        .replace_range(start..app.project_editor_cursor, &item.insert_text);
     app.project_editor_cursor = start + item.insert_text.len();
     app.project_editor_dirty = true;
     app.project_completions.clear();
@@ -698,8 +809,7 @@ struct ProjectCompiler {
 
 enum ProjectCompilerBackend {
     Latex {
-        child: std::process::Child,
-        readers: Vec<std::thread::JoinHandle<()>>,
+        process: LatexBuildProcess,
     },
     Typst {
         control: std_mpsc::Sender<TypstWorkerControl>,
@@ -904,9 +1014,9 @@ impl ProjectCompiler {
                 let response = match line {
                     Ok(line) => serde_json::from_str::<TypstWorkerResponse>(&line),
                     Err(error) => {
-                        let _ = event_sender.send(ProjectBuildEvent::TypstWorkerFailed(
-                            format!("could not read Typst worker output: {error}"),
-                        ));
+                        let _ = event_sender.send(ProjectBuildEvent::TypstWorkerFailed(format!(
+                            "could not read Typst worker output: {error}"
+                        )));
                         return;
                     }
                 };
@@ -965,8 +1075,14 @@ impl ProjectCompiler {
         let mut watcher = RecommendedWatcher::new(
             move |event: notify::Result<notify::Event>| {
                 if let Ok(event) = event
-                    && matches!(event.kind, notify::EventKind::Modify(_) | notify::EventKind::Create(_))
-                    && event.paths.iter().any(|path| path.file_name().is_some_and(|name| name == "main.pdf"))
+                    && matches!(
+                        event.kind,
+                        notify::EventKind::Modify(_) | notify::EventKind::Create(_)
+                    )
+                    && event
+                        .paths
+                        .iter()
+                        .any(|path| path.file_name().is_some_and(|name| name == "main.pdf"))
                 {
                     let _ = watch_sender.send(ProjectBuildEvent::PdfChanged);
                 }
@@ -975,36 +1091,23 @@ impl ProjectCompiler {
         )?;
         watcher.watch(&project.path, RecursiveMode::NonRecursive)?;
 
-        let mut command = ProcessCommand::new("latexmk");
-        command.args(["-pdf", "-pvc", "-view=none", "main.tex"]);
-
-        command
-            .current_dir(&project.path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-
-            // A dedicated group lets teardown include latexmk's active TeX
-            // subprocesses, which otherwise retain the captured output pipes.
-            command.process_group(0);
-        }
-        let mut child = command
-            .spawn()
-            .context("latexmk is not available; install a TeX distribution and latexmk")?;
-        let mut readers = Vec::with_capacity(2);
-        if let Some(stdout) = child.stdout.take() {
-            readers.push(spawn_latexmk_reader(stdout, sender.clone()));
-        }
-        if let Some(stderr) = child.stderr.take() {
-            readers.push(spawn_latexmk_reader(stderr, sender.clone()));
-        }
+        let event_sender = sender.clone();
+        let process = LatexBuildProcess::start(&project.path, move |event| {
+            let event = match event {
+                LatexBuildEvent::LogLine(line) => ProjectBuildEvent::LogLine(line),
+                LatexBuildEvent::Signal(LatexBuildSignal::Started) => ProjectBuildEvent::Started,
+                LatexBuildEvent::Signal(LatexBuildSignal::Succeeded) => {
+                    ProjectBuildEvent::Succeeded
+                }
+                LatexBuildEvent::Signal(LatexBuildSignal::Failed) => ProjectBuildEvent::Failed,
+            };
+            let _ = event_sender.send(event);
+        })
+        .context("latexmk is not available; install a TeX distribution and latexmk")?;
         let external_pdf_opened = project.path.join("main.pdf").is_file();
         Ok(Self {
             project,
-            backend: ProjectCompilerBackend::Latex { child, readers },
+            backend: ProjectCompilerBackend::Latex { process },
             events,
             _watcher: watcher,
             pdf_changed: false,
@@ -1025,23 +1128,7 @@ impl ProjectCompiler {
         self.stopped = true;
         let typst_temporary_pdf = self.project.path.join(".papr-main.pdf.tmp");
         match &mut self.backend {
-            ProjectCompilerBackend::Latex { child, readers } => {
-                #[cfg(unix)]
-                {
-                    let process_group = format!("-{}", child.id());
-                    let _ = ProcessCommand::new("kill")
-                        .args(["-KILL", "--", &process_group])
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .status();
-                }
-                let _ = child.kill();
-                let _ = child.wait();
-                for reader in readers.drain(..) {
-                    let _ = reader.join();
-                }
-            }
+            ProjectCompilerBackend::Latex { process } => process.stop(),
             ProjectCompilerBackend::Typst {
                 control,
                 child,
@@ -1100,8 +1187,11 @@ impl ProjectCompiler {
                         self.build_raw_log.remove(0);
                     }
                     self.build_raw_log.push(line);
-                    if app.project_build_status == "Build failed" || app.project_build_status == "Compiling…" {
-                        let new_diags = parse_latex_diagnostics(&self.build_raw_log, &self.project.path);
+                    if app.project_build_status == "Build failed"
+                        || app.project_build_status == "Compiling…"
+                    {
+                        let new_diags =
+                            parse_latex_diagnostics(&self.build_raw_log, &self.project.path);
                         if !new_diags.is_empty() || !app.project_build_diagnostics.is_empty() {
                             app.project_build_diagnostics = new_diags;
                             app.project_build_raw_log = self.build_raw_log.clone();
@@ -1115,7 +1205,8 @@ impl ProjectCompiler {
                     self.build_succeeded = false;
                     self.pdf_changed = false;
                     app.project_build_raw_log = self.build_raw_log.clone();
-                    app.project_build_diagnostics = parse_latex_diagnostics(&self.build_raw_log, &self.project.path);
+                    app.project_build_diagnostics =
+                        parse_latex_diagnostics(&self.build_raw_log, &self.project.path);
                     app.project_build_status = "Build failed".into();
                     app.project_build_selected = 0;
                     show_build_for_failed_compilation(app);
@@ -1192,7 +1283,9 @@ impl ProjectCompiler {
 
     fn activate_pdf(&mut self, app: &mut App) -> bool {
         let pdf = self.project.path.join("main.pdf");
-        if !pdf.exists() { return false; }
+        if !pdf.exists() {
+            return false;
+        }
         let page = app.pdf_viewer_page;
         if app.pdf_viewer_path.as_deref() == Some(pdf.as_path()) {
             pdf_viewer::invalidate_document(&pdf);
@@ -1223,44 +1316,7 @@ impl Drop for ProjectCompiler {
     }
 }
 
-fn spawn_latexmk_reader<R: std::io::Read + Send + 'static>(reader: R, sender: std_mpsc::Sender<ProjectBuildEvent>) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        for line in BufReader::new(reader).lines().map_while(Result::ok) {
-            let normalized = line.to_ascii_lowercase();
-            let _ = sender.send(ProjectBuildEvent::LogLine(line.clone()));
-            if normalized.contains("applying rule 'pdflatex'") || normalized.contains("compiling ...") {
-                let _ = sender.send(ProjectBuildEvent::Started);
-            } else if (normalized.contains("all targets") && normalized.contains("up-to-date")) || normalized.contains("compiled successfully") {
-                let _ = sender.send(ProjectBuildEvent::Succeeded);
-            } else if normalized.contains("errors, so i did not") || normalized.contains("compiled with errors") {
-                let _ = sender.send(ProjectBuildEvent::Failed);
-            }
-        }
-    })
-}
-
 /// Turn TeX's line-oriented output into diagnostics that can be displayed and navigated.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 fn open_project_workspace(app: &mut App, project: Project) {
     app.project_tree_dir = Some(project.path.clone());
@@ -1304,8 +1360,14 @@ fn open_project_workspace(app: &mut App, project: Project) {
             }
         }
     }
-    if let Some((main_index, main)) = app.project_files.iter().enumerate()
-        .find(|(_, path)| path.file_name().is_some_and(|name| name == "main.tex" || name == "main.typ"))
+    if let Some((main_index, main)) = app
+        .project_files
+        .iter()
+        .enumerate()
+        .find(|(_, path)| {
+            path.file_name()
+                .is_some_and(|name| name == "main.tex" || name == "main.typ")
+        })
         .map(|(index, path)| (index, path.clone()))
     {
         app.project_file_selected = main_index;
@@ -1318,8 +1380,12 @@ fn open_project_workspace(app: &mut App, project: Project) {
 }
 
 fn start_project_compiler(runtime: &mut Runtime, app: &mut App) {
-    if let Some(mut compiler) = runtime.project_compiler.take() { compiler.stop(); }
-    let Some(project) = app.active_project.clone() else { return; };
+    if let Some(mut compiler) = runtime.project_compiler.take() {
+        compiler.stop();
+    }
+    let Some(project) = app.active_project.clone() else {
+        return;
+    };
     match ProjectCompiler::start(project) {
         Ok(compiler) => runtime.project_compiler = Some(compiler),
         Err(error) => {
@@ -1340,7 +1406,10 @@ fn start_project_compiler(runtime: &mut Runtime, app: &mut App) {
 }
 
 fn start_citation_indexer(runtime: &mut Runtime, app: &mut App) {
-    runtime.citation_index = app.active_project.as_ref().and_then(|project| CitationIndexer::start(project).ok());
+    runtime.citation_index = app
+        .active_project
+        .as_ref()
+        .and_then(|project| CitationIndexer::start(project).ok());
     runtime.citation_source = CitationSource::default();
     app.project_completions.clear();
     app.project_completion_selected = 0;
@@ -1428,13 +1497,21 @@ fn close_project_workspace(runtime: &mut Runtime, app: &mut App) {
 }
 
 fn refresh_project_filesystem(runtime: &mut Runtime, app: &mut App) {
-    let selected_project = app.projects.get(app.projects_selected).map(|project| project.path.clone());
+    let selected_project = app
+        .projects
+        .get(app.projects_selected)
+        .map(|project| project.path.clone());
     app.projects = runtime.project_manager.list().unwrap_or_default();
     app.projects_selected = selected_project
         .and_then(|path| app.projects.iter().position(|project| project.path == path))
-        .unwrap_or_else(|| app.projects_selected.min(app.projects.len().saturating_sub(1)));
+        .unwrap_or_else(|| {
+            app.projects_selected
+                .min(app.projects.len().saturating_sub(1))
+        });
 
-    let Some(project) = app.active_project.as_ref().cloned() else { return; };
+    let Some(project) = app.active_project.as_ref().cloned() else {
+        return;
+    };
     if !project.path.is_dir() {
         close_project_workspace(runtime, app);
         app.toast = Some("The open project was removed from disk.".into());
@@ -1452,7 +1529,10 @@ fn refresh_project_filesystem(runtime: &mut Runtime, app: &mut App) {
     app.project_files = project_tree_entries(&tree_dir);
     app.project_file_selected = selected_entry
         .and_then(|path| app.project_files.iter().position(|entry| entry == &path))
-        .unwrap_or_else(|| app.project_file_selected.min(app.project_files.len().saturating_sub(1)));
+        .unwrap_or_else(|| {
+            app.project_file_selected
+                .min(app.project_files.len().saturating_sub(1))
+        });
 
     if let Some(editor_path) = app.project_editor_path.clone() {
         if !editor_path.is_file() {
@@ -1467,12 +1547,16 @@ fn refresh_project_filesystem(runtime: &mut Runtime, app: &mut App) {
             && text != app.project_editor_text
         {
             app.project_editor_text = text;
-            app.project_editor_cursor = app.project_editor_cursor.min(app.project_editor_text.len());
+            app.project_editor_cursor =
+                app.project_editor_cursor.min(app.project_editor_text.len());
         }
     }
 
     let pdf = project.path.join("main.pdf");
-    if app.pdf_viewer_path.as_ref().is_some_and(|path| !path.exists())
+    if app
+        .pdf_viewer_path
+        .as_ref()
+        .is_some_and(|path| !path.exists())
         && let Some(closed) = app.pdf_viewer_path.take()
     {
         pdf_viewer::release_document(&closed);
@@ -1487,7 +1571,9 @@ fn refresh_project_filesystem(runtime: &mut Runtime, app: &mut App) {
 }
 
 fn project_tree_entries(directory: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(directory) else { return Vec::new(); };
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
     let mut entries = entries
         .filter_map(Result::ok)
         .filter(|entry| entry.file_name() != ".git")
@@ -1497,13 +1583,21 @@ fn project_tree_entries(directory: &Path) -> Vec<PathBuf> {
         })
         .collect::<Vec<_>>();
     entries.sort_by(|left, right| {
-        right.is_dir().cmp(&left.is_dir()).then_with(|| left.file_name().cmp(&right.file_name()))
+        right
+            .is_dir()
+            .cmp(&left.is_dir())
+            .then_with(|| left.file_name().cmp(&right.file_name()))
     });
     entries
 }
 
 fn is_project_text_file(path: &Path) -> bool {
-    path.extension().is_some_and(|ext| matches!(ext.to_str(), Some("tex" | "bib" | "sty" | "cls" | "md" | "txt" | "typ")))
+    path.extension().is_some_and(|ext| {
+        matches!(
+            ext.to_str(),
+            Some("tex" | "bib" | "sty" | "cls" | "md" | "txt" | "typ")
+        )
+    })
 }
 
 fn is_project_tree_file(path: &Path) -> bool {
@@ -1517,14 +1611,18 @@ fn create_project_file(project_root: &Path, name: &str) -> Result<PathBuf, Strin
     if relative.as_os_str().is_empty()
         || relative.is_absolute()
         || relative.file_name().is_none()
-        || !relative.components().all(|component| matches!(component, Component::Normal(_)))
+        || !relative
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
     {
         return Err("enter a relative file path inside the project".into());
     }
 
     let canonical_root = canonicalize_path(project_root).map_err(|error| error.to_string())?;
     let path = canonical_root.join(relative);
-    let parent = path.parent().ok_or_else(|| "enter a relative file path inside the project".to_owned())?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "enter a relative file path inside the project".to_owned())?;
 
     // Check the nearest existing ancestor before creating anything. This
     // prevents an in-project symlink from redirecting creation outside the
@@ -1547,13 +1645,19 @@ fn create_project_file(project_root: &Path, name: &str) -> Result<PathBuf, Strin
     }
 
     if create_directory {
-        return std::fs::create_dir(&path)
-            .map(|()| path)
-            .map_err(|error| if error.kind() == std::io::ErrorKind::AlreadyExists {
+        return std::fs::create_dir(&path).map(|()| path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
                 "already exists".into()
-            } else { error.to_string() });
+            } else {
+                error.to_string()
+            }
+        });
     }
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
         Ok(_) => Ok(path),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             Err("a file with that name already exists".into())
@@ -1582,24 +1686,14 @@ fn open_project_file(app: &mut App, path: PathBuf) {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #[allow(dead_code)]
 fn move_config_editor_vertical(app: &mut App, row_delta: isize) {
     let wrap_width = app.config_editor_wrap_width.max(1);
-    let (row, col) = cursor_visual_position(&app.config_editor_text, app.config_editor_cursor, wrap_width);
+    let (row, col) = cursor_visual_position(
+        &app.config_editor_text,
+        app.config_editor_cursor,
+        wrap_width,
+    );
     let goal_col = app.config_editor_goal_column.unwrap_or(col);
     let total_rows = app
         .config_editor_text
@@ -1610,12 +1704,8 @@ fn move_config_editor_vertical(app: &mut App, row_delta: isize) {
     let target_row = row
         .saturating_add_signed(row_delta)
         .min(total_rows.saturating_sub(1));
-    app.config_editor_cursor = cursor_from_visual_position(
-        &app.config_editor_text,
-        target_row,
-        goal_col,
-        wrap_width,
-    );
+    app.config_editor_cursor =
+        cursor_from_visual_position(&app.config_editor_text, target_row, goal_col, wrap_width);
     app.config_editor_goal_column = Some(goal_col);
 }
 
@@ -1662,7 +1752,14 @@ pub(crate) fn build_config_editor_view(
     viewport_height: usize,
     scroll: &mut usize,
 ) -> ConfigEditorView {
-    build_config_editor_view_with_scroll_mode(text, cursor, wrap_width, viewport_height, scroll, true)
+    build_config_editor_view_with_scroll_mode(
+        text,
+        cursor,
+        wrap_width,
+        viewport_height,
+        scroll,
+        true,
+    )
 }
 
 pub(crate) fn build_config_editor_view_with_scroll_mode(
@@ -1675,7 +1772,8 @@ pub(crate) fn build_config_editor_view_with_scroll_mode(
 ) -> ConfigEditorView {
     let wrap_width = wrap_width.max(1);
     let (display_text, display_cursor) = expand_tabs_for_editor_view(text, cursor, 4);
-    let (cursor_row, cursor_col) = cursor_visual_position(&display_text, display_cursor, wrap_width);
+    let (cursor_row, cursor_col) =
+        cursor_visual_position(&display_text, display_cursor, wrap_width);
 
     if follow_cursor && cursor_row < *scroll {
         *scroll = cursor_row;
@@ -1721,22 +1819,17 @@ struct ActionSenders {
 }
 
 #[derive(Debug)]
-enum EnrichmentOutcome {
-    Success(RemotePaper),
-    Journal(String),
-    Failed,
-    Unavailable,
-}
-
-#[derive(Debug)]
 struct MetadataEnrichment {
     paper_id: i64,
-    outcome: EnrichmentOutcome,
+    outcome: MetadataEnrichmentOutcome,
 }
 
 #[derive(Debug)]
 enum AppEvent {
-    ReadingSessionCompleted { session_id: i64, duration_s: u64 },
+    ReadingSessionCompleted {
+        session_id: i64,
+        duration_s: u64,
+    },
     Toast(String),
     ProjectCitationReady {
         key: String,
@@ -1809,9 +1902,8 @@ async fn run(
         }
 
         if runtime.config_filesystem_watcher.has_changes() {
-            runtime.config_reload_deadline = Some(
-                std::time::Instant::now() + std::time::Duration::from_millis(150),
-            );
+            runtime.config_reload_deadline =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(150));
             runtime.config_reload_attempts = 0;
         }
         if let Some(deadline) = runtime.config_reload_deadline
@@ -1848,9 +1940,8 @@ async fn run(
                     // the replacement or final write is visible. Retry for a
                     // bounded period without ever applying invalid TOML.
                     runtime.config_reload_attempts += 1;
-                    runtime.config_reload_deadline = Some(
-                        std::time::Instant::now() + std::time::Duration::from_millis(100),
-                    );
+                    runtime.config_reload_deadline =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(100));
                 }
                 Err(error) => {
                     runtime.config_reload_deadline = None;
@@ -1861,16 +1952,26 @@ async fn run(
         }
 
         if let Some(compiler) = runtime.project_compiler.as_mut() {
-            let previous = (app.project_build_status.clone(), app.project_build_diagnostics.clone());
+            let previous = (
+                app.project_build_status.clone(),
+                app.project_build_diagnostics.clone(),
+            );
             let preview_changed = compiler.drain_events(app);
-            if preview_changed || previous.0 != app.project_build_status || previous.1 != app.project_build_diagnostics { state_changed = true; }
+            if preview_changed
+                || previous.0 != app.project_build_status
+                || previous.1 != app.project_build_diagnostics
+            {
+                state_changed = true;
+            }
         }
         if let Some(indexer) = runtime.citation_index.as_ref()
             && let Some(source) = indexer.drain()
         {
             runtime.citation_source = source;
             update_project_completions(app, Some(&runtime.citation_source));
-            app.project_bib_titles = runtime.citation_source.all_entries()
+            app.project_bib_titles = runtime
+                .citation_source
+                .all_entries()
                 .iter()
                 .map(|e| e.title.trim().to_lowercase())
                 .filter(|t| !t.is_empty())
@@ -1928,16 +2029,21 @@ async fn run(
         }
         while let Ok(response) = receiver.try_recv() {
             state_changed = true;
-            if response.query == app.discovery.query && response.request_id == app.discovery.request_id {
+            if response.query == app.discovery.query
+                && response.request_id == app.discovery.request_id
+            {
                 match response.update {
                     SearchUpdate::Partial { papers, next_start } => {
                         app.discovery.update_results(papers);
                         app.discovery.next_batch_start = next_start;
-                        app.discovery.progress_message = next_start
-                            .map(|_| "Loading more results...".to_owned());
+                        app.discovery.progress_message =
+                            next_start.map(|_| "Loading more results...".to_owned());
                         app.discovery.status = DiscoveryStatus::Loading;
                     }
-                    SearchUpdate::Retrying { attempt, max_attempts } => {
+                    SearchUpdate::Retrying {
+                        attempt,
+                        max_attempts,
+                    } => {
                         app.discovery.progress_message = Some(format!(
                             "Retrying more results ({attempt}/{max_attempts})..."
                         ));
@@ -1954,16 +2060,18 @@ async fn run(
                     }
                     SearchUpdate::PartialFailure { next_start } => {
                         app.discovery.next_batch_start = Some(next_start);
-                        app.discovery.progress_message = Some(
-                            "More results could not be loaded. Press r to retry.".to_owned(),
-                        );
+                        app.discovery.progress_message =
+                            Some("More results could not be loaded. Press r to retry.".to_owned());
                         app.discovery.status = DiscoveryStatus::Ready;
                     }
                 }
             }
         }
         let has_active_downloads = app.downloads.iter().any(|task| {
-            !matches!(task.status, DownloadStatus::Completed | DownloadStatus::Failed(_))
+            !matches!(
+                task.status,
+                DownloadStatus::Completed | DownloadStatus::Failed(_)
+            )
         });
         while runtime.watch_receiver.try_recv().is_ok() {
             state_changed = true;
@@ -1978,7 +2086,7 @@ async fn run(
         let mut any_enrichment_processed = false;
         while let Ok(MetadataEnrichment { paper_id, outcome }) = enrichment_receiver.try_recv() {
             match outcome {
-                EnrichmentOutcome::Success(ref p) => {
+                MetadataEnrichmentOutcome::Paper(ref p) => {
                     runtime.database.apply_arxiv_metadata(paper_id, p)?;
                     // Update in-memory today_papers
                     for paper in &mut app.today_papers {
@@ -1999,18 +2107,26 @@ async fn run(
                         &app.today_papers,
                     );
                 }
-                EnrichmentOutcome::Journal(ref journal) => {
+                MetadataEnrichmentOutcome::Journal(ref journal) => {
                     runtime.database.apply_journal_metadata(paper_id, journal)?;
                 }
-                EnrichmentOutcome::Failed => {
-                    runtime.database.update_enrichment_status(paper_id, "failed")?;
+                MetadataEnrichmentOutcome::Failed(_) => {
+                    runtime
+                        .database
+                        .update_enrichment_status(paper_id, "failed")?;
                 }
-                EnrichmentOutcome::Unavailable => {
-                    runtime.database.update_enrichment_status(paper_id, "unavailable")?;
+                MetadataEnrichmentOutcome::Unavailable => {
+                    runtime
+                        .database
+                        .update_enrichment_status(paper_id, "unavailable")?;
                 }
             }
             runtime.active_enrichments.remove(&paper_id);
-            if let Some(task) = app.downloads.iter_mut().find(|t| t.paper_id == Some(paper_id)) {
+            if let Some(task) = app
+                .downloads
+                .iter_mut()
+                .find(|t| t.paper_id == Some(paper_id))
+            {
                 task.status = DownloadStatus::Completed;
                 finalize_download_task(task);
             }
@@ -2029,13 +2145,8 @@ async fn run(
         }
         while let Ok(event) = download_receiver.try_recv() {
             state_changed = true;
-            apply_download_event(
-                event,
-                &mut pending_downloads,
-                &mut runtime,
-                app,
-                &senders,
-            ).await?;
+            apply_download_event(event, &mut pending_downloads, &mut runtime, app, &senders)
+                .await?;
         }
         while let Ok(event) = app_events_receiver.try_recv() {
             state_changed = true;
@@ -2052,11 +2163,20 @@ async fn run(
                 AppEvent::Toast(message) => {
                     app.toast = Some(message);
                 }
-                AppEvent::ProjectCitationReady { key, bibtex, title, bib_path } => {
+                AppEvent::ProjectCitationReady {
+                    key,
+                    bibtex,
+                    title,
+                    bib_path,
+                } => {
                     let existing = std::fs::read_to_string(&bib_path).unwrap_or_default();
                     if !existing.contains(&key) {
                         use std::io::Write;
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&bib_path) {
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&bib_path)
+                        {
                             let _ = writeln!(f, "\n{}", bibtex);
                             app.toast = Some(format!("Added citation {} to references.bib", key));
                             // Eagerly mark this title as added so the modal badge
@@ -2069,7 +2189,8 @@ async fn run(
                             app.toast = Some("Failed to write references.bib".into());
                         }
                     } else {
-                        app.toast = Some(format!("Citation {} already exists in references.bib", key));
+                        app.toast =
+                            Some(format!("Citation {} already exists in references.bib", key));
                     }
                 }
                 AppEvent::ProjectCitationSearchFinished { query, result } => {
@@ -2085,15 +2206,20 @@ async fn run(
                                 .into_iter()
                                 .map(ProjectCitationResult::Online)
                                 .collect();
-                            app.project_citation_search_status = Some(if app.project_citation_results.is_empty() {
-                                "No online papers found.".into()
-                            } else {
-                                format!("{} online papers found", app.project_citation_results.len())
-                            });
+                            app.project_citation_search_status =
+                                Some(if app.project_citation_results.is_empty() {
+                                    "No online papers found.".into()
+                                } else {
+                                    format!(
+                                        "{} online papers found",
+                                        app.project_citation_results.len()
+                                    )
+                                });
                         }
                         Err(error) => {
                             app.project_citation_results.clear();
-                            app.project_citation_search_status = Some(format!("Online search failed: {error}"));
+                            app.project_citation_search_status =
+                                Some(format!("Online search failed: {error}"));
                         }
                     }
                     app.project_citation_selected = 0;
@@ -2112,10 +2238,7 @@ async fn run(
                     }
                 }
             }
-            if matches!(
-                app.page,
-                Page::Dashboard | Page::History | Page::Statistics
-            ) {
+            if matches!(app.page, Page::Dashboard | Page::History | Page::Statistics) {
                 refresh_dashboard(&runtime, app)?;
             }
             // Auto-open the settings workspace whenever the user navigates to the
@@ -2165,7 +2288,9 @@ async fn run(
         });
         if app.downloads.len() != before_len {
             state_changed = true;
-            app.download_selected = app.download_selected.min(app.downloads.len().saturating_sub(1));
+            app.download_selected = app
+                .download_selected
+                .min(app.downloads.len().saturating_sub(1));
         }
 
         // ── FIXED EVENT ORDERING ─────────────────────────────────────────────
@@ -2182,7 +2307,7 @@ async fn run(
         let animating = preview_active && pdf_viewer::is_animating();
         let poll_timeout = if preview_active {
             if animating {
-                std::time::Duration::from_millis(8)  // ~120fps cap while animating
+                std::time::Duration::from_millis(8) // ~120fps cap while animating
             } else if pdf_viewer::is_current_page_cached(app) {
                 std::time::Duration::from_millis(250)
             } else {
@@ -2199,10 +2324,16 @@ async fn run(
             got_event = true;
             match event::read()? {
                 Event::Key(key)
-                    if key.kind == KeyEventKind::Press || (app.mode == AppMode::PdfView && key.kind == KeyEventKind::Repeat) =>
+                    if key.kind == KeyEventKind::Press
+                        || (app.mode == AppMode::PdfView && key.kind == KeyEventKind::Repeat) =>
                 {
-                    if app.page == Page::Settings && app.content_focused && app.mode == AppMode::Normal {
-                        if let Some(action) = handle_settings_modal_key(app, key, &mut runtime, &mut theme, &senders)? {
+                    if app.page == Page::Settings
+                        && app.content_focused
+                        && app.mode == AppMode::Normal
+                    {
+                        if let Some(action) =
+                            handle_settings_modal_key(app, key, &mut runtime, &mut theme, &senders)?
+                        {
                             apply_ui_action(
                                 action,
                                 &mut runtime,
@@ -2210,7 +2341,8 @@ async fn run(
                                 &mut pending_downloads,
                                 app,
                                 &mut theme,
-                            ).await?;
+                            )
+                            .await?;
                         }
                     } else if let Some(action) = handle_key(app, key) {
                         apply_ui_action(
@@ -2220,7 +2352,8 @@ async fn run(
                             &mut pending_downloads,
                             app,
                             &mut theme,
-                        ).await?;
+                        )
+                        .await?;
                     }
                 }
                 Event::Mouse(mouse) => {
@@ -2232,7 +2365,8 @@ async fn run(
                             &mut pending_downloads,
                             app,
                             &mut theme,
-                        ).await?;
+                        )
+                        .await?;
                     }
                 }
                 Event::Paste(text) => {
@@ -2247,10 +2381,16 @@ async fn run(
             got_event = true;
             match event::read()? {
                 Event::Key(key)
-                    if key.kind == KeyEventKind::Press || (app.mode == AppMode::PdfView && key.kind == KeyEventKind::Repeat) =>
+                    if key.kind == KeyEventKind::Press
+                        || (app.mode == AppMode::PdfView && key.kind == KeyEventKind::Repeat) =>
                 {
-                    if app.page == Page::Settings && app.content_focused && app.mode == AppMode::Normal {
-                        if let Some(action) = handle_settings_modal_key(app, key, &mut runtime, &mut theme, &senders)? {
+                    if app.page == Page::Settings
+                        && app.content_focused
+                        && app.mode == AppMode::Normal
+                    {
+                        if let Some(action) =
+                            handle_settings_modal_key(app, key, &mut runtime, &mut theme, &senders)?
+                        {
                             apply_ui_action(
                                 action,
                                 &mut runtime,
@@ -2258,7 +2398,8 @@ async fn run(
                                 &mut pending_downloads,
                                 app,
                                 &mut theme,
-                            ).await?;
+                            )
+                            .await?;
                         }
                     } else if let Some(action) = handle_key(app, key) {
                         apply_ui_action(
@@ -2268,7 +2409,8 @@ async fn run(
                             &mut pending_downloads,
                             app,
                             &mut theme,
-                        ).await?;
+                        )
+                        .await?;
                     }
                 }
                 Event::Mouse(mouse) => {
@@ -2280,7 +2422,8 @@ async fn run(
                             &mut pending_downloads,
                             app,
                             &mut theme,
-                        ).await?;
+                        )
+                        .await?;
                     }
                 }
                 Event::Paste(text) => {
@@ -2302,20 +2445,25 @@ async fn run(
         // Step 3: draw with the fully-updated state (key effects are visible
         // in THIS iteration, not the next one).
         if state_changed || force_redraw {
-            force_redraw = false;  // consumed here
+            force_redraw = false; // consumed here
             session.set_command_cursor_active(app.mode == AppMode::TerminalCommand)?;
             let draw_start = std::time::Instant::now();
             session
                 .terminal_mut()
                 .draw(|frame| ui::render(frame, app, &theme))?;
             if draw_start.elapsed() > std::time::Duration::from_millis(16) {
-                log_message(&runtime.database_file, &format!("Slow draw: {:?}", draw_start.elapsed()));
+                log_message(
+                    &runtime.database_file,
+                    &format!("Slow draw: {:?}", draw_start.elapsed()),
+                );
             }
         }
 
         tokio::task::yield_now().await;
     }
-    if let Some(mut compiler) = runtime.project_compiler.take() { compiler.stop(); }
+    if let Some(mut compiler) = runtime.project_compiler.take() {
+        compiler.stop();
+    }
     pdf_viewer::cleanup_temp_files();
     Ok(())
 }
@@ -2351,75 +2499,67 @@ async fn fetch_discovery_pages(
     response_sender: mpsc::UnboundedSender<SearchResponse>,
 ) {
     loop {
-        let mut page = None;
-        for retry in 0..=DISCOVERY_PAGE_RETRY_ATTEMPTS {
-            match client
-                .search_ranked_candidate_page(
-                    &query,
-                    &papers,
+        let retry_sender = response_sender.clone();
+        let retry_query = query.clone();
+        let page = match client
+            .search_ranked_candidate_page_with_retry(
+                RankedCandidatePageRequest {
+                    query: &query,
+                    existing: &papers,
                     start,
-                    DISCOVERY_CANDIDATE_LIMIT,
-                    DISCOVERY_FETCH_BATCH_SIZE,
-                )
-                .await
-            {
-                Ok(result) => {
-                    page = Some(result);
-                    break;
-                }
-                Err(error) if retry == DISCOVERY_PAGE_RETRY_ATTEMPTS => {
-                    let update = if papers.is_empty() {
-                        SearchUpdate::InitialFailure(error.to_string())
-                    } else {
-                        SearchUpdate::PartialFailure { next_start: start }
-                    };
-                    let _ = response_sender.send(SearchResponse {
-                        query,
-                        request_id,
-                        update,
-                    });
-                    return;
-                }
-                Err(_) => {
-                    let attempt = retry + 1;
-                    let _ = response_sender.send(SearchResponse {
-                        query: query.clone(),
+                    candidate_limit: DISCOVERY_CANDIDATE_LIMIT,
+                    batch_size: DISCOVERY_FETCH_BATCH_SIZE,
+                },
+                ArxivRetryPolicy {
+                    attempts: DISCOVERY_PAGE_RETRY_ATTEMPTS,
+                    base_delay: DISCOVERY_PAGE_RETRY_BASE_DELAY,
+                },
+                move |attempt, max_attempts| {
+                    let _ = retry_sender.send(SearchResponse {
+                        query: retry_query.clone(),
                         request_id,
                         update: SearchUpdate::Retrying {
                             attempt,
-                            max_attempts: DISCOVERY_PAGE_RETRY_ATTEMPTS,
+                            max_attempts,
                         },
                     });
-                    let multiplier = 1_u32 << u32::from(retry);
-                    tokio::time::sleep(DISCOVERY_PAGE_RETRY_BASE_DELAY * multiplier).await;
-                }
-            }
-        }
-
-        let Some(page) = page else {
-            return;
-        };
-        papers = page.papers;
-        match page.next_start {
-            Some(next_start) => {
-                let _ = response_sender.send(SearchResponse {
-                    query: query.clone(),
-                    request_id,
-                    update: SearchUpdate::Partial {
-                        papers: papers.clone(),
-                        next_start: Some(next_start),
-                    },
-                });
-                start = next_start;
-            }
-            None => {
+                },
+            )
+            .await
+        {
+            Ok(page) => page,
+            Err(error) => {
+                let update = if papers.is_empty() {
+                    SearchUpdate::InitialFailure(error.to_string())
+                } else {
+                    SearchUpdate::PartialFailure { next_start: start }
+                };
                 let _ = response_sender.send(SearchResponse {
                     query,
                     request_id,
-                    update: SearchUpdate::Complete(papers),
+                    update,
                 });
                 return;
             }
+        };
+        papers = page.papers;
+        if let Some(next_start) = page.next_start {
+            let _ = response_sender.send(SearchResponse {
+                query: query.clone(),
+                request_id,
+                update: SearchUpdate::Partial {
+                    papers: papers.clone(),
+                    next_start: Some(next_start),
+                },
+            });
+            start = next_start;
+        } else {
+            let _ = response_sender.send(SearchResponse {
+                query,
+                request_id,
+                update: SearchUpdate::Complete(papers),
+            });
+            return;
         }
     }
 }
@@ -2433,36 +2573,32 @@ async fn fetch_project_citation_online(
     let mut papers = Vec::new();
     let mut start = 0;
     loop {
-        let mut page = None;
-        for retry in 0..=DISCOVERY_PAGE_RETRY_ATTEMPTS {
-            match client
-                .search_ranked_candidate_page(
-                    &query,
-                    &papers,
+        let page = match client
+            .search_ranked_candidate_page_with_retry(
+                RankedCandidatePageRequest {
+                    query: &query,
+                    existing: &papers,
                     start,
-                    DISCOVERY_CANDIDATE_LIMIT,
-                    DISCOVERY_FETCH_BATCH_SIZE,
-                )
-                .await
-            {
-                Ok(result) => {
-                    page = Some(result);
-                    break;
-                }
-                Err(error) if retry == DISCOVERY_PAGE_RETRY_ATTEMPTS => {
-                    let _ = sender.send(AppEvent::ProjectCitationSearchFinished {
-                        query,
-                        result: Err(error.to_string()),
-                    });
-                    return;
-                }
-                Err(_) => {
-                    let multiplier = 1_u32 << u32::from(retry);
-                    tokio::time::sleep(DISCOVERY_PAGE_RETRY_BASE_DELAY * multiplier).await;
-                }
+                    candidate_limit: DISCOVERY_CANDIDATE_LIMIT,
+                    batch_size: DISCOVERY_FETCH_BATCH_SIZE,
+                },
+                ArxivRetryPolicy {
+                    attempts: DISCOVERY_PAGE_RETRY_ATTEMPTS,
+                    base_delay: DISCOVERY_PAGE_RETRY_BASE_DELAY,
+                },
+                |_, _| {},
+            )
+            .await
+        {
+            Ok(page) => page,
+            Err(error) => {
+                let _ = sender.send(AppEvent::ProjectCitationSearchFinished {
+                    query,
+                    result: Err(error.to_string()),
+                });
+                return;
             }
-        }
-        let Some(page) = page else { return; };
+        };
         papers = page.papers;
         if let Some(next_start) = page.next_start {
             start = next_start;
@@ -2494,7 +2630,8 @@ async fn apply_ui_action(
             let client = runtime.arxiv.clone();
             let response_sender = senders.search.clone();
             tokio::spawn(async move {
-                fetch_discovery_pages(client, query, request_id, Vec::new(), 0, response_sender).await;
+                fetch_discovery_pages(client, query, request_id, Vec::new(), 0, response_sender)
+                    .await;
             });
         }
         UiAction::RetryDiscoverMore => {
@@ -2509,12 +2646,15 @@ async fn apply_ui_action(
             let request_id = app.discovery.request_id;
             let papers = app.discovery.results.clone();
             tokio::spawn(async move {
-                fetch_discovery_pages(client, query, request_id, papers, start, response_sender).await;
+                fetch_discovery_pages(client, query, request_id, papers, start, response_sender)
+                    .await;
             });
         }
         UiAction::OpenPaper(paper) => {
             let paper_id = runtime.database.ensure_remote_paper(&paper)?;
-            runtime.database.record_activity("paper_browsed", Some(paper_id), None)?;
+            runtime
+                .database
+                .record_activity("paper_browsed", Some(paper_id), None)?;
             dispatch_plugin_events(runtime, app, &["paper_opened"], paper_id).await?;
             refresh_dashboard(runtime, app)?;
             app.mode = AppMode::PaperDetail;
@@ -2545,7 +2685,9 @@ async fn apply_ui_action(
                 task.total = None;
                 task.status = DownloadStatus::Starting;
                 task.failed_at = None;
-                let destination = task.pdf_path.as_ref()
+                let destination = task
+                    .pdf_path
+                    .as_ref()
                     .map(std::path::PathBuf::from)
                     .unwrap_or_else(|| runtime.download_dir.join(format!("{}.pdf", id)));
                 pending_downloads.insert(id.clone(), paper.clone());
@@ -2553,7 +2695,15 @@ async fn apply_ui_action(
                 let manager = runtime.downloads.clone();
                 let events = senders.download.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = manager.download(&id, &paper.pdf_url.clone().unwrap_or_default(), &destination, &events).await {
+                    if let Err(error) = manager
+                        .download(
+                            &id,
+                            &paper.pdf_url.clone().unwrap_or_default(),
+                            &destination,
+                            &events,
+                        )
+                        .await
+                    {
                         let _ = events.send(DownloadEvent::Failed {
                             id,
                             error: error.to_string(),
@@ -2564,8 +2714,13 @@ async fn apply_ui_action(
         }
         UiAction::Reindex => start_runtime_scan(runtime, senders, app),
         UiAction::RefreshProjects => {
-            app.projects = runtime.project_manager.list().map_err(|e| anyhow::anyhow!(e))?;
-            app.projects_selected = app.projects_selected.min(app.projects.len().saturating_sub(1));
+            app.projects = runtime
+                .project_manager
+                .list()
+                .map_err(|e| anyhow::anyhow!(e))?;
+            app.projects_selected = app
+                .projects_selected
+                .min(app.projects.len().saturating_sub(1));
         }
         UiAction::CreateProject { name, compiler } => {
             let name = name.trim();
@@ -2576,8 +2731,12 @@ async fn apply_ui_action(
                     return Ok(());
                 }
             };
-            runtime.database.record_project_activity("project_created", &project.name)?;
-            runtime.database.record_project_activity("project_opened", &project.name)?;
+            runtime
+                .database
+                .record_project_activity("project_created", &project.name)?;
+            runtime
+                .database
+                .record_project_activity("project_opened", &project.name)?;
             refresh_dashboard(runtime, app)?;
             open_project_workspace(app, project.clone());
             start_project_compiler(runtime, app);
@@ -2596,7 +2755,10 @@ async fn apply_ui_action(
                 app.toast = Some("Could not create file: no project is open.".into());
                 return Ok(());
             };
-            let tree_dir = app.project_tree_dir.clone().unwrap_or_else(|| project.path.clone());
+            let tree_dir = app
+                .project_tree_dir
+                .clone()
+                .unwrap_or_else(|| project.path.clone());
             let path = match create_project_file(&tree_dir, &name) {
                 Ok(path) => path,
                 Err(error) => {
@@ -2605,16 +2767,32 @@ async fn apply_ui_action(
                 }
             };
             app.project_files = project_tree_entries(&tree_dir);
-            app.project_file_selected = app.project_files.iter().position(|candidate| candidate == &path).unwrap_or(0);
+            app.project_file_selected = app
+                .project_files
+                .iter()
+                .position(|candidate| candidate == &path)
+                .unwrap_or(0);
             app.project_pane = ProjectPane::FileTree;
             if path.is_file() && is_project_text_file(&path) {
                 open_project_file(app, path);
             }
-            app.toast = Some(if name.trim().ends_with('/') { "Created folder" } else { "Created file" }.into());
+            app.toast = Some(
+                if name.trim().ends_with('/') {
+                    "Created folder"
+                } else {
+                    "Created file"
+                }
+                .into(),
+            );
         }
         UiAction::OpenProject(project) => {
-            let project = runtime.project_manager.open(project.path).map_err(|e| anyhow::anyhow!(e))?;
-            runtime.database.record_project_activity("project_opened", &project.name)?;
+            let project = runtime
+                .project_manager
+                .open(project.path)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            runtime
+                .database
+                .record_project_activity("project_opened", &project.name)?;
             refresh_dashboard(runtime, app)?;
             open_project_workspace(app, project);
             start_project_compiler(runtime, app);
@@ -2635,7 +2813,8 @@ async fn apply_ui_action(
             let project_root = project.path.clone();
             let name = name.trim();
             if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
-                app.toast = Some("Could not rename entry: enter a single file or folder name.".into());
+                app.toast =
+                    Some("Could not rename entry: enter a single file or folder name.".into());
                 return Ok(());
             }
             let Some(parent) = path.parent() else {
@@ -2660,11 +2839,19 @@ async fn apply_ui_action(
             }
             let tree_dir = app.project_tree_dir.clone().unwrap_or(project_root);
             app.project_files = project_tree_entries(&tree_dir);
-            app.project_file_selected = app.project_files.iter().position(|entry| entry == &renamed).unwrap_or(0);
+            app.project_file_selected = app
+                .project_files
+                .iter()
+                .position(|entry| entry == &renamed)
+                .unwrap_or(0);
             app.toast = Some("Renamed".into());
         }
         UiAction::ConfirmDeleteProjectEntry(path) => {
-            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("entry").to_owned();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("entry")
+                .to_owned();
             app.delete_confirmation = Some(DeletionTarget::ProjectEntry {
                 is_directory: path.is_dir(),
                 path,
@@ -2681,14 +2868,23 @@ async fn apply_ui_action(
                 app.toast = Some("Could not delete entry outside the project.".into());
                 return Ok(());
             }
-            let result = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+            let result = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
             if let Err(error) = result {
                 app.toast = Some(format!("Could not delete entry: {error}"));
                 return Ok(());
             }
-            let tree_dir = app.project_tree_dir.clone().unwrap_or_else(|| project.path.clone());
+            let tree_dir = app
+                .project_tree_dir
+                .clone()
+                .unwrap_or_else(|| project.path.clone());
             app.project_files = project_tree_entries(&tree_dir);
-            app.project_file_selected = app.project_file_selected.min(app.project_files.len().saturating_sub(1));
+            app.project_file_selected = app
+                .project_file_selected
+                .min(app.project_files.len().saturating_sub(1));
             if app.project_editor_path.as_ref() == Some(&path) {
                 app.project_editor_path = None;
                 app.project_editor_text.clear();
@@ -2701,9 +2897,16 @@ async fn apply_ui_action(
         UiAction::RenameProject { project, name } => {
             match runtime.project_manager.rename(&project, &name) {
                 Ok(renamed) => {
-                    runtime.database.record_project_activity("project_renamed", &format!("{} -> {}", project.name, renamed.name))?;
+                    runtime.database.record_project_activity(
+                        "project_renamed",
+                        &format!("{} -> {}", project.name, renamed.name),
+                    )?;
                     refresh_dashboard(runtime, app)?;
-                    if app.active_project.as_ref().is_some_and(|active| active.path == project.path) {
+                    if app
+                        .active_project
+                        .as_ref()
+                        .is_some_and(|active| active.path == project.path)
+                    {
                         let old_root = project.path;
                         let old_editor = app.project_editor_path.clone();
                         open_project_workspace(app, renamed.clone());
@@ -2722,7 +2925,11 @@ async fn apply_ui_action(
                         restart_project_filesystem_watcher(runtime, app);
                     }
                     app.projects = runtime.project_manager.list().unwrap_or_default();
-                    app.projects_selected = app.projects.iter().position(|p| p.path == renamed.path).unwrap_or(0);
+                    app.projects_selected = app
+                        .projects
+                        .iter()
+                        .position(|p| p.path == renamed.path)
+                        .unwrap_or(0);
                     app.toast = Some(format!("Renamed project to {}", renamed.name));
                 }
                 Err(error) => app.toast = Some(format!("Could not rename project: {error}")),
@@ -2741,14 +2948,18 @@ async fn apply_ui_action(
                 app.toast = Some(format!("Could not delete project: {error}"));
                 return Ok(());
             }
-            runtime.database.record_project_activity("project_deleted", &project.name)?;
+            runtime
+                .database
+                .record_project_activity("project_deleted", &project.name)?;
             refresh_dashboard(runtime, app)?;
             if was_active {
                 close_project_workspace(runtime, app);
             }
             app.project_pane = ProjectPane::ProjectList;
             app.projects = runtime.project_manager.list().unwrap_or_default();
-            app.projects_selected = app.projects_selected.min(app.projects.len().saturating_sub(1));
+            app.projects_selected = app
+                .projects_selected
+                .min(app.projects.len().saturating_sub(1));
             app.toast = Some(format!("Deleted project {}", project.name));
         }
         UiAction::OpenPdf { paper_id, path } => {
@@ -2857,9 +3068,13 @@ async fn apply_ui_action(
                 .min(app.reading_queue_papers.len().saturating_sub(1));
         }
         UiAction::ClosePdf => {
-            if let (Some(session_id), Some(start)) = (app.active_pdf_session_id, app.active_pdf_session_start) {
+            if let (Some(session_id), Some(start)) =
+                (app.active_pdf_session_id, app.active_pdf_session_start)
+            {
                 let duration_s = start.elapsed().as_secs();
-                runtime.database.record_reading_duration(session_id, duration_s)?;
+                runtime
+                    .database
+                    .record_reading_duration(session_id, duration_s)?;
                 refresh_dashboard(runtime, app)?;
             }
             app.active_pdf_session_id = None;
@@ -2901,7 +3116,9 @@ async fn apply_ui_action(
                 }
             }
             let path = path.unwrap_or_else(|| runtime.download_dir.join(format!("{id}.pdf")));
-            let session_id = paper_id.map(|paper_id| runtime.database.record_open(paper_id, true)).transpose()?;
+            let session_id = paper_id
+                .map(|paper_id| runtime.database.record_open(paper_id, true))
+                .transpose()?;
             open_pdf(
                 &runtime.pdf_viewer,
                 &path,
@@ -2926,7 +3143,13 @@ async fn apply_ui_action(
                     authors: paper.authors.join(" and "),
                     doi: paper.doi.clone(),
                     arxiv_id: Some(paper.id.clone()),
-                    year: Some(paper.published.with_timezone(&chrono::Local).format("%Y").to_string()),
+                    year: Some(
+                        paper
+                            .published
+                            .with_timezone(&chrono::Local)
+                            .format("%Y")
+                            .to_string(),
+                    ),
                     journal_ref: paper.journal_ref.clone(),
                 }),
             };
@@ -2962,7 +3185,13 @@ async fn apply_ui_action(
                     authors: paper.authors.join(" and "),
                     doi: paper.doi,
                     arxiv_id: Some(paper.id),
-                    year: Some(paper.published.with_timezone(&chrono::Local).format("%Y").to_string()),
+                    year: Some(
+                        paper
+                            .published
+                            .with_timezone(&chrono::Local)
+                            .format("%Y")
+                            .to_string(),
+                    ),
                     journal_ref: paper.journal_ref,
                 };
                 app.toast = Some("Fetching citation...".into());
@@ -2980,7 +3209,11 @@ async fn apply_ui_action(
                 senders.app_events.clone(),
             ));
         }
-        UiAction::ConfirmDeletePaper { paper_id, title, path } => {
+        UiAction::ConfirmDeletePaper {
+            paper_id,
+            title,
+            path,
+        } => {
             app.delete_confirmation = Some(DeletionTarget::Paper {
                 id: paper_id,
                 title,
@@ -2988,7 +3221,11 @@ async fn apply_ui_action(
             });
             app.mode = AppMode::ConfirmDelete;
         }
-        UiAction::ConfirmDeleteCollection { collection_id, name, path } => {
+        UiAction::ConfirmDeleteCollection {
+            collection_id,
+            name,
+            path,
+        } => {
             app.delete_confirmation = Some(DeletionTarget::Collection {
                 id: collection_id,
                 name,
@@ -3021,7 +3258,10 @@ async fn apply_ui_action(
             refresh_downloads(runtime, app);
             app.toast = Some("PDF permanently deleted".into());
         }
-        UiAction::DeleteCollection { collection_id, path } => {
+        UiAction::DeleteCollection {
+            collection_id,
+            path,
+        } => {
             let papers = runtime.database.papers_for_collection(collection_id)?;
             for paper in papers {
                 if let Some(ref path_str) = paper.pdf_path {
@@ -3102,12 +3342,20 @@ fn apply_collection_prompt(
             if destination.exists() {
                 anyhow::bail!("a file with this name already exists");
             }
-            if let Some(task) = app.downloads.iter_mut().find(|t| t.paper_id == Some(paper_id)) {
+            if let Some(task) = app
+                .downloads
+                .iter_mut()
+                .find(|t| t.paper_id == Some(paper_id))
+            {
                 task.status = DownloadStatus::Renaming;
             }
             move_pdf_file(&source, &destination)?;
             runtime.database.rename_pdf(paper_id, &destination)?;
-            if let Some(task) = app.downloads.iter_mut().find(|t| t.paper_id == Some(paper_id)) {
+            if let Some(task) = app
+                .downloads
+                .iter_mut()
+                .find(|t| t.paper_id == Some(paper_id))
+            {
                 task.pdf_path = Some(destination.to_string_lossy().into_owned());
                 task.status = DownloadStatus::Completed;
             }
@@ -3149,7 +3397,12 @@ fn apply_collection_prompt(
         runtime
             .database
             .reconcile_collections(&runtime.collection_roots, &directories)?;
-        refresh_renamed_collection(&runtime.database, &runtime.library_roots, app, collection_id)?;
+        refresh_renamed_collection(
+            &runtime.database,
+            &runtime.library_roots,
+            app,
+            collection_id,
+        )?;
         return Ok(());
     }
     if prompt.paper_id.is_none() {
@@ -3168,9 +3421,7 @@ fn apply_collection_prompt(
         }
         return Ok(());
     }
-    let paper_id = prompt
-        .paper_id
-        .context("group assignment has no paper")?;
+    let paper_id = prompt.paper_id.context("group assignment has no paper")?;
     let paper = app
         .library
         .papers
@@ -3235,10 +3486,6 @@ fn refresh_renamed_collection(
     Ok(())
 }
 
-
-
-
-
 fn open_collection(database: &Database, app: &mut App, collection_id: i64) -> Result<()> {
     let restore_selection = app.last_opened_collection_id == Some(collection_id);
     app.active_collection = app
@@ -3257,7 +3504,12 @@ fn open_collection(database: &Database, app: &mut App, collection_id: i64) -> Re
     Ok(())
 }
 
-fn open_author(database: &Database, library_roots: &[PathBuf], app: &mut App, author_id: i64) -> Result<()> {
+fn open_author(
+    database: &Database,
+    library_roots: &[PathBuf],
+    app: &mut App,
+    author_id: i64,
+) -> Result<()> {
     let restore_selection = app.last_opened_author_id == Some(author_id);
     app.active_author = app
         .authors
@@ -3313,16 +3565,14 @@ fn add_paper_to_collection_with_disk(
     };
 
     let current_collection_name = runtime.database.paper_collection_name(paper_id)?;
-    let already_in_collection = current_collection_name.as_deref().map_or(false, |c| c.eq_ignore_ascii_case(name));
+    let already_in_collection = current_collection_name
+        .as_deref()
+        .map_or(false, |c| c.eq_ignore_ascii_case(name));
 
     if let Some(pdf_path_str) = &paper.pdf_path {
         let source = PathBuf::from(pdf_path_str);
         if source.exists() {
-            let destination = folder.join(
-                source
-                    .file_name()
-                    .context("PDF path has no filename")?,
-            );
+            let destination = folder.join(source.file_name().context("PDF path has no filename")?);
             let mut moved = false;
             if source != destination {
                 if !destination.exists() {
@@ -3337,7 +3587,9 @@ fn add_paper_to_collection_with_disk(
             for directory in &directories {
                 let _ = runtime.database.sync_collection_directory(directory);
             }
-            let _ = runtime.database.reconcile_collections(&runtime.collection_roots, &directories);
+            let _ = runtime
+                .database
+                .reconcile_collections(&runtime.collection_roots, &directories);
             return Ok(!already_in_collection || moved);
         }
     }
@@ -3347,7 +3599,9 @@ fn add_paper_to_collection_with_disk(
     for directory in &directories {
         let _ = runtime.database.sync_collection_directory(directory);
     }
-    let _ = runtime.database.reconcile_collections(&runtime.collection_roots, &directories);
+    let _ = runtime
+        .database
+        .reconcile_collections(&runtime.collection_roots, &directories);
     Ok(!already_in_collection)
 }
 
@@ -3398,18 +3652,22 @@ async fn dispatch_plugin_events(
                 Ok(response) => {
                     for action in response.actions {
                         match action {
-                            papr_core::PluginAction::Notify { message } => {
+                            papr_core::PluginAction::Message { message } => {
                                 last_notify = Some(message);
                             }
                             papr_core::PluginAction::AddToCollection { name } => {
-                                match add_paper_to_collection_with_disk(runtime, app, paper.id, &name) {
+                                match add_paper_to_collection_with_disk(
+                                    runtime, app, paper.id, &name,
+                                ) {
                                     Ok(changed) => {
                                         if changed {
                                             organization_dirty = true;
                                         }
                                     }
                                     Err(err) => {
-                                        eprintln!("Failed to add paper to collection '{name}': {err}");
+                                        eprintln!(
+                                            "Failed to add paper to collection '{name}': {err}"
+                                        );
                                     }
                                 }
                             }
@@ -3441,7 +3699,11 @@ fn resolve_target(target: PaperTarget, database: &mut Database) -> Result<i64> {
     }
 }
 
-fn refresh_organization(database: &Database, library_roots: &[PathBuf], app: &mut App) -> Result<()> {
+fn refresh_organization(
+    database: &Database,
+    library_roots: &[PathBuf],
+    app: &mut App,
+) -> Result<()> {
     app.collections = database.collections()?;
     app.collection_papers_map = database.collection_papers_map().unwrap_or_default();
     app.collection_selected = app
@@ -3531,7 +3793,8 @@ fn start_dashboard_fetch(
     sender: mpsc::UnboundedSender<TodayResponse>,
 ) {
     tokio::spawn(async move {
-        let result = dashboard_papers(client, keywords, excluded_paper_ids, &key.feed_date)
+        let result = DashboardService::new(DASHBOARD_CANDIDATE_LIMIT, DASHBOARD_DISPLAY_LIMIT)
+            .fetch(client, keywords, excluded_paper_ids, &key.feed_date)
             .await
             .map_err(|error| error.to_string());
         let _ = sender.send(TodayResponse { key, result });
@@ -3546,105 +3809,7 @@ fn dashboard_keyword_signature(keywords: &[String]) -> String {
     format!("{DASHBOARD_FEED_ALGORITHM_VERSION}:{}", keywords.join(","))
 }
 
-async fn dashboard_papers(
-    client: ArxivClient,
-    keywords: Vec<String>,
-    excluded_paper_ids: HashSet<String>,
-    feed_date: &str,
-) -> Result<Vec<RemotePaper>> {
-    if keywords.is_empty() {
-        let mut papers = dashboard_candidate_page(&client, None, &excluded_paper_ids).await?;
-        shuffle_daily_bucket(&mut papers, feed_date, "");
-        papers.truncate(DASHBOARD_DISPLAY_LIMIT);
-        return Ok(papers);
-    }
-
-    let mut buckets = (0..keywords.len())
-        .map(|_| None)
-        .collect::<Vec<Option<(String, Vec<RemotePaper>)>>>();
-    let mut last_error: Option<anyhow::Error> = None;
-    let mut requests = JoinSet::new();
-    for (index, keyword) in keywords.into_iter().enumerate() {
-        let client = client.clone();
-        let excluded_paper_ids = excluded_paper_ids.clone();
-        requests.spawn(async move {
-            let result = dashboard_candidate_page(
-                &client,
-                Some(&keyword),
-                &excluded_paper_ids,
-            )
-            .await;
-            (index, keyword, result)
-        });
-    }
-    while let Some(result) = requests.join_next().await {
-        match result {
-            Ok((index, keyword, Ok(mut papers))) => {
-                shuffle_daily_bucket(&mut papers, feed_date, &keyword);
-                buckets[index] = Some((keyword, papers));
-            }
-            Ok((_, _, Err(error))) => last_error = Some(error.into()),
-            Err(error) => last_error = Some(anyhow::anyhow!(
-                "dashboard keyword fetch task failed: {error}"
-            )),
-        }
-    }
-    let buckets = buckets.into_iter().flatten().collect::<Vec<_>>();
-    if buckets.is_empty() {
-        if let Some(error) = last_error {
-            return Err(error);
-        }
-        return Ok(Vec::new());
-    }
-    Ok(select_dashboard_papers(
-        buckets,
-        DASHBOARD_DISPLAY_LIMIT,
-        feed_date,
-    ))
-}
-
-/// Load up to 30 unseen candidates, requesting more arXiv pages when recently
-/// displayed papers fill the newest result page.
-async fn dashboard_candidate_page(
-    client: &ArxivClient,
-    keyword: Option<&str>,
-    excluded_paper_ids: &HashSet<String>,
-) -> Result<Vec<RemotePaper>> {
-    let mut candidates = Vec::with_capacity(usize::from(DASHBOARD_CANDIDATE_LIMIT));
-    let mut start = 0_u16;
-
-    loop {
-        let papers = match keyword {
-            Some(keyword) => client
-                .search_latest_page(keyword, start, DASHBOARD_CANDIDATE_LIMIT)
-                .await?,
-            None => client
-                .latest_page(start, DASHBOARD_CANDIDATE_LIMIT)
-                .await?,
-        };
-        let received = u16::try_from(papers.len()).unwrap_or(u16::MAX);
-        candidates.extend(
-            papers
-                .into_iter()
-                .filter(|paper| !excluded_paper_ids.contains(&paper.id)),
-        );
-
-        if candidates.len() >= usize::from(DASHBOARD_CANDIDATE_LIMIT)
-            || received < DASHBOARD_CANDIDATE_LIMIT
-        {
-            break;
-        }
-        start = start.saturating_add(received);
-    }
-
-    candidates.truncate(usize::from(DASHBOARD_CANDIDATE_LIMIT));
-    Ok(candidates)
-}
-
-fn dashboard_recent_paper_ids(
-    database: &Database,
-    feed_date: &str,
-) -> Result<HashSet<String>> {
+fn dashboard_recent_paper_ids(database: &Database, feed_date: &str) -> Result<HashSet<String>> {
     let feed_date = NaiveDate::parse_from_str(feed_date, "%Y-%m-%d")
         .unwrap_or_else(|_| Local::now().date_naive());
     let cutoff = feed_date - Duration::days(DASHBOARD_REPEAT_EXCLUSION_DAYS);
@@ -3684,11 +3849,7 @@ fn refresh_dashboard(runtime: &Runtime, app: &mut App) -> Result<()> {
     Ok(())
 }
 
-fn refresh_downloads_from_dir(
-    app: &mut App,
-    download_dir: &Path,
-    database: &Database,
-) {
+fn refresh_downloads_from_dir(app: &mut App, download_dir: &Path, database: &Database) {
     let previous_selected_path = app
         .filtered_downloads()
         .get(app.download_selected)
@@ -3738,7 +3899,6 @@ fn default_pdf_viewer() -> String {
     }
 }
 
-
 /// Scroll the PDF viewer by `delta` rows.
 fn pdf_scroll(app: &mut App, delta: i64) {
     pdf_viewer::scroll_by_rows(app, delta);
@@ -3772,7 +3932,11 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) -> Option<UiAction> {
 }
 
 fn scroll_project_editor(app: &mut App, delta: isize) {
-    let code = if delta < 0 { KeyCode::Up } else { KeyCode::Down };
+    let code = if delta < 0 {
+        KeyCode::Up
+    } else {
+        KeyCode::Down
+    };
     for _ in 0..delta.unsigned_abs() {
         let _ = edit_text(
             &mut app.project_editor_text,
@@ -3782,8 +3946,6 @@ fn scroll_project_editor(app: &mut App, delta: isize) {
     }
     app.project_editor_manual_scroll = false;
 }
-
-
 
 fn open_pdf(
     viewer: &str,
@@ -3822,8 +3984,6 @@ fn open_pdf(
         return Ok(());
     }
 
-
-
     let (program, argv) = pdf_viewer_invocation(viewer, path)?;
     let mut command = tokio::process::Command::new(&program);
     command.args(argv);
@@ -3833,11 +3993,24 @@ fn open_pdf(
 
     match command.spawn() {
         Ok(mut child) => {
-            let basename = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let basename = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             let display_name = if basename.chars().count() > 100 {
-                let extension = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
-                let ext_len = if extension.is_empty() { 0 } else { extension.chars().count() + 1 };
-                let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                let extension = path
+                    .extension()
+                    .map(|e| e.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let ext_len = if extension.is_empty() {
+                    0
+                } else {
+                    extension.chars().count() + 1
+                };
+                let stem = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 let take_len = 100_usize.saturating_sub(ext_len).saturating_sub(1);
                 let truncated_stem: String = stem.chars().take(take_len).collect();
                 if extension.is_empty() {
@@ -3927,7 +4100,6 @@ fn open_browser(url: &str, app: &mut App) {
     });
 }
 
-
 fn start_scan(
     pdf_roots: &[PathBuf],
     collection_roots: &[PathBuf],
@@ -3973,11 +4145,11 @@ fn log_message(database_file: &Path, message: &str) {
 /// Database enrichment deliberately retains the stored abstract when a provider
 /// has none. The UI must apply that same merge before it persists the dashboard
 /// cache; replacing the object wholesale would otherwise make a valid abstract
-/// disappear from the UI even though it remains in SQLite.
+/// disappear from the UI even though it remains in `SQLite`.
 fn merge_enriched_remote_paper(current: &RemotePaper, enriched: &RemotePaper) -> RemotePaper {
     let mut merged = enriched.clone();
     if merged.abstract_text.trim().is_empty() {
-        merged.abstract_text = current.abstract_text.clone();
+        merged.abstract_text.clone_from(&current.abstract_text);
     }
     merged
 }
@@ -4009,7 +4181,9 @@ fn spawn_enrichment_if_needed(
         .collect();
     for task in &mut app.downloads {
         if task.status == DownloadStatus::ExtractingMetadata {
-            let needs_enrichment = papers.iter().any(|(pid, _, _, _)| Some(*pid) == task.paper_id);
+            let needs_enrichment = papers
+                .iter()
+                .any(|(pid, _, _, _)| Some(*pid) == task.paper_id);
             if !needs_enrichment {
                 task.status = DownloadStatus::Completed;
                 finalize_download_task(task);
@@ -4019,13 +4193,15 @@ fn spawn_enrichment_if_needed(
     if !papers.is_empty() {
         for (paper_id, _, _, _) in &papers {
             runtime.active_enrichments.insert(*paper_id);
-            if let Some(task) = app.downloads.iter_mut().find(|t| t.paper_id == Some(*paper_id)) {
+            if let Some(task) = app
+                .downloads
+                .iter_mut()
+                .find(|t| t.paper_id == Some(*paper_id))
+            {
                 task.status = DownloadStatus::Enriching;
             }
         }
-        let arxiv_client = runtime.arxiv.clone();
-        let crossref_client = runtime.crossref.clone();
-        let openalex_client = runtime.openalex.clone();
+        let metadata_enrichment = runtime.metadata_enrichment.clone();
         let enrichment_tx = senders.enrichment.clone();
         app.enrichment_pending = true;
         let db_file_log = runtime.database_file.clone();
@@ -4034,120 +4210,44 @@ fn spawn_enrichment_if_needed(
         let concurrency = Arc::new(Semaphore::new(METADATA_ENRICHMENT_CONCURRENCY));
         tokio::spawn(async move {
             let mut jobs = JoinSet::new();
-            for (paper_id, mut candidate_arxiv, mut candidate_doi, pdf_path) in papers {
-                let arxiv_client = arxiv_client.clone();
-                let crossref_client = crossref_client.clone();
-                let openalex_client = openalex_client.clone();
+            for (paper_id, candidate_arxiv, candidate_doi, pdf_path) in papers {
+                let metadata_enrichment = metadata_enrichment.clone();
                 let enrichment_tx = enrichment_tx.clone();
                 let db_file_log = db_file_log.clone();
                 let permit = concurrency.clone();
                 jobs.spawn(async move {
-                let _permit = permit.acquire_owned().await.expect("enrichment semaphore closed");
-                if let Some(path) = pdf_path {
-                    if let Ok(output) = tokio::process::Command::new("pdftotext")
-                        .args(["-l", "2", &path, "-"])
-                        .output()
-                        .await
-                    {
-                        if output.status.success() {
-                            let text = String::from_utf8_lossy(&output.stdout);
-                            let lower_text = text.to_lowercase();
-
-                            if candidate_arxiv.is_none() {
-                                if let Some(idx) = lower_text.find("arxiv:") {
-                                    let substr = &text[idx + 6..];
-                                    let end = substr
-                                        .find(|c: char| !c.is_ascii_digit() && c != '.')
-                                        .unwrap_or(substr.len());
-                                    let id = &substr[..end];
-                                    if id.len() >= 7 {
-                                        candidate_arxiv = Some(id.to_string());
-                                    }
-                                }
-                            }
-                            if candidate_doi.is_none() {
-                                if let Some(idx) = lower_text.find("10.") {
-                                    let substr = &text[idx..];
-                                    let end = substr
-                                        .find(|c: char| c.is_whitespace() || c == '\n')
-                                        .unwrap_or(substr.len());
-                                    let id = substr[..end].trim_end_matches(['.', ',', ';', ')']);
-                                    if id.len() >= 5 {
-                                        candidate_doi = Some(id.to_string());
-                                    }
-                                }
-                            }
+                    let permit_guard = match permit.acquire_owned().await {
+                        Ok(permit_guard) => permit_guard,
+                        Err(error) => {
+                            let message = format!("metadata enrichment queue closed: {error}");
+                            log_message(&db_file_log, &message);
+                            let _ = enrichment_tx.send(MetadataEnrichment {
+                                paper_id,
+                                outcome: MetadataEnrichmentOutcome::Failed(message),
+                            });
+                            return;
                         }
+                    };
+                    let outcome = metadata_enrichment
+                        .enrich(MetadataCandidate {
+                            arxiv_id: candidate_arxiv,
+                            doi: candidate_doi,
+                            pdf_path: pdf_path.map(PathBuf::from),
+                        })
+                        .await;
+                    if let MetadataEnrichmentOutcome::Failed(error) = &outcome {
+                        log_message(&db_file_log, error);
                     }
-                }
-
-                let outcome;
-                if let Some(doi) = candidate_doi {
-                    match crossref_client.get_by_doi(&doi).await {
-                        Ok(Some(mut paper)) => {
-                            if paper.journal_ref.is_none() {
-                                if let Ok(Some(journal)) = openalex_client.journal_by_doi(&doi).await {
-                                    paper.journal_ref = Some(journal);
-                                }
-                            }
-                            outcome = EnrichmentOutcome::Success(paper);
-                        }
-                        Ok(None) => {
-                            if let Ok(Some(journal)) = openalex_client.journal_by_doi(&doi).await {
-                                outcome = EnrichmentOutcome::Journal(journal);
-                            } else if let Some(arxiv_id) = candidate_arxiv {
-                                match arxiv_client.get_by_id(&arxiv_id).await {
-                                    Ok(Some(paper)) => {
-                                        outcome = EnrichmentOutcome::Success(paper);
-                                    }
-                                    Ok(None) => outcome = EnrichmentOutcome::Unavailable,
-                                    Err(e) => {
-                                        log_message(
-                                            &db_file_log,
-                                            &format!("arXiv enrichment failed for {arxiv_id}: {e}"),
-                                        );
-                                        outcome = EnrichmentOutcome::Failed;
-                                    }
-                                }
-                            } else {
-                                outcome = EnrichmentOutcome::Unavailable;
-                            }
-                        }
-                        Err(e) => {
-                            let err_msg = format!("Crossref enrichment failed for {doi}: {e}");
-                            log_message(&db_file_log, &err_msg);
-                            outcome = match openalex_client.journal_by_doi(&doi).await {
-                                Ok(Some(journal)) => EnrichmentOutcome::Journal(journal),
-                                _ => EnrichmentOutcome::Failed,
-                            };
-                        }
-                    }
-                } else if let Some(arxiv_id) = candidate_arxiv {
-                    match arxiv_client.get_by_id(&arxiv_id).await {
-                        Ok(Some(paper)) => {
-                            outcome = EnrichmentOutcome::Success(paper);
-                        }
-                        Ok(None) => {
-                            outcome = EnrichmentOutcome::Unavailable;
-                        }
-                        Err(e) => {
-                            let err_msg = format!("arXiv enrichment failed for {arxiv_id}: {e}");
-                            log_message(&db_file_log, &err_msg);
-                            outcome = EnrichmentOutcome::Failed;
-                        }
-                    }
-                } else {
-                    outcome = EnrichmentOutcome::Unavailable;
-                }
-                let _ = enrichment_tx.send(MetadataEnrichment {
-                    paper_id,
-                    outcome,
-                });
+                    let _ = enrichment_tx.send(MetadataEnrichment { paper_id, outcome });
+                    drop(permit_guard);
                 });
             }
             while let Some(result) = jobs.join_next().await {
                 if let Err(error) = result {
-                    log_message(&db_file_log, &format!("Metadata enrichment task failed: {error}"));
+                    log_message(
+                        &db_file_log,
+                        &format!("Metadata enrichment task failed: {error}"),
+                    );
                 }
             }
         });
@@ -4187,88 +4287,52 @@ async fn apply_index_response(
 ) -> Result<()> {
     match response {
         IndexResponse::Scan { pdfs, directories } => {
-            let found = pdfs.len();
-            let mut imported = 0_usize;
-            for directory in &directories {
-                runtime.database.sync_collection_directory(directory)?;
-            }
-            for pdf in &pdfs {
-                let was_newly_imported = runtime.database.import_pdf(pdf)?;
-                imported += usize::from(was_newly_imported);
-                if let Some(paper_id) = runtime.database.paper_id_for_pdf(pdf)? {
-                    sync_pdf_collection_membership(
-                        &runtime.database,
-                        paper_id,
-                        pdf,
-                        &runtime.collection_roots,
-                    )?;
-                    if was_newly_imported {
-                        dispatch_plugin_events(runtime, app, &["paper_imported"], paper_id).await?;
-                    }
+            let result = LibraryIngestionService::new(&runtime.database, &runtime.collection_roots)
+                .ingest_scan(pdfs, &directories)?;
+            let imported = result
+                .papers
+                .iter()
+                .filter(|paper| paper.newly_imported)
+                .count();
+            for paper in result.papers {
+                if paper.newly_imported
+                    && let Some(paper_id) = paper.paper_id
+                {
+                    dispatch_plugin_events(runtime, app, &["paper_imported"], paper_id).await?;
                 }
             }
-            runtime
-                .database
-                .reconcile_collections(&runtime.collection_roots, &directories)?;
             app.library.indexing = false;
-            app.library.message = Some(library_index_summary(found, imported));
+            app.library.message = Some(library_index_summary(result.found, imported));
 
             spawn_enrichment_if_needed(runtime, senders, app)?;
         }
         IndexResponse::File(Ok(pdf)) => {
-            let imported = runtime.database.import_pdf(&pdf)?;
-            if let Some(paper_id) = runtime.database.paper_id_for_pdf(&pdf)? {
-                sync_pdf_collection_membership(
-                    &runtime.database,
-                    paper_id,
-                    &pdf,
-                    &runtime.collection_roots,
-                )?;
-                if imported {
+            let ingested =
+                LibraryIngestionService::new(&runtime.database, &runtime.collection_roots)
+                    .ingest_pdf(pdf)?;
+            if let Some(paper_id) = ingested.paper_id {
+                if ingested.newly_imported {
                     dispatch_plugin_events(runtime, app, &["paper_imported"], paper_id).await?;
                 }
             }
-            app.library.message = Some(if imported {
-                format!("Imported {}", pdf.title)
+            app.library.message = Some(if ingested.newly_imported {
+                format!("Imported {}", ingested.pdf.title)
             } else {
                 "Ignored duplicate PDF".into()
             });
             spawn_enrichment_if_needed(runtime, senders, app)?;
         }
         IndexResponse::File(Err(error)) => {
-            log_message(&runtime.database_file, &format!("Library indexing error: {error}"));
+            log_message(
+                &runtime.database_file,
+                &format!("Library indexing error: {error}"),
+            );
         }
     }
     refresh_library(runtime, app)?;
     refresh_organization(&runtime.database, &runtime.library_roots, app)?;
     refresh_dashboard(runtime, app)?;
     refresh_downloads(runtime, app);
-    Ok(())
-}
-
-fn sync_pdf_collection_membership(
-    database: &Database,
-    paper_id: i64,
-    pdf: &ImportedPdf,
-    roots: &[PathBuf],
-) -> Result<()> {
-    let Some(root) = roots
-        .iter()
-        .filter(|root| pdf.path.starts_with(root))
-        .max_by_key(|root| root.components().count())
-    else {
-        database.clear_collection_membership(paper_id)?;
-        return Ok(());
-    };
-    let mut classified = pdf.clone();
-    classified.library_root = Some(root.clone());
-    classified.relative_directory = pdf
-        .path
-        .parent()
-        .and_then(|parent| parent.strip_prefix(root).ok())
-        .filter(|relative| !relative.as_os_str().is_empty())
-        .map(Path::to_path_buf);
-    database.sync_pdf_collection(paper_id, &classified)?;
     Ok(())
 }
 
@@ -4294,10 +4358,12 @@ fn discover_local_downloads(
             let title = entry.file_name().to_string_lossy().into_owned();
             let id = title.strip_suffix(".pdf").unwrap_or(&title).to_owned();
             let pdf_path = entry.path().to_string_lossy().into_owned();
-            
-            if app.downloads.iter().any(|task| {
-                task.pdf_path.as_deref() == Some(&pdf_path) || task.id == id
-            }) {
+
+            if app
+                .downloads
+                .iter()
+                .any(|task| task.pdf_path.as_deref() == Some(&pdf_path) || task.id == id)
+            {
                 continue;
             }
 
@@ -4308,7 +4374,6 @@ fn discover_local_downloads(
             let content_hash = {
                 let mut hash_ok = None;
                 if let Ok(mut file) = std::fs::File::open(&pdf_path) {
-                    
                     let mut hasher = Sha256::new();
                     if std::io::copy(&mut file, &mut hasher).is_ok() {
                         hash_ok = Some(format!("{:x}", hasher.finalize()));
@@ -4446,9 +4511,11 @@ async fn apply_download_event(
             task.status = DownloadStatus::ExtractingMetadata;
             let final_path = path.with_extension("");
             if path.exists() {
-                std::fs::rename(&path, &final_path).context("failed to promote temporary download path")?;
+                std::fs::rename(&path, &final_path)
+                    .context("failed to promote temporary download path")?;
             }
-            let pdf = LibraryIndexer::inspect(&final_path).context("failed to index downloaded PDF")?;
+            let pdf =
+                LibraryIndexer::inspect(&final_path).context("failed to index downloaded PDF")?;
             if let Some(paper) = pending.remove(&id) {
                 let paper_id = runtime.database.attach_download(&paper, &pdf)?;
                 downloaded_paper_was_already_indexed = app
@@ -4466,13 +4533,15 @@ async fn apply_download_event(
             task.total = Some(pdf.file_size);
 
             if let Some(paper_id) = task.paper_id {
-                sync_pdf_collection_membership(
-                    &runtime.database,
+                LibraryIngestionService::new(&runtime.database, &runtime.collection_roots)
+                    .reconcile_paper(paper_id, &pdf)?;
+                dispatch_plugin_events(
+                    runtime,
+                    app,
+                    &["paper_downloaded", "paper_opened"],
                     paper_id,
-                    &pdf,
-                    &runtime.collection_roots,
-                )?;
-                dispatch_plugin_events(runtime, app, &["paper_downloaded", "paper_opened"], paper_id).await?;
+                )
+                .await?;
             }
 
             // Project the completed download into every workspace before the next
@@ -4495,7 +4564,8 @@ async fn apply_download_event(
         }
     }
     if is_completed {
-        app.downloads.retain(|t| t.id != id || !matches!(t.status, DownloadStatus::Failed(_)));
+        app.downloads
+            .retain(|t| t.id != id || !matches!(t.status, DownloadStatus::Failed(_)));
     }
     Ok(())
 }
@@ -4518,10 +4588,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         }
         // Accept both Press and Repeat so held-key scrolling is driven by
         // the OS key-repeat rate rather than by the 16 ms poll timeout.
-        let is_scroll_event = matches!(
-            key.kind,
-            KeyEventKind::Press | KeyEventKind::Repeat
-        );
+        let is_scroll_event = matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat);
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') if key.kind == KeyEventKind::Press => {
                 return Some(UiAction::ClosePdf);
@@ -4547,13 +4614,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         app.terminal_command.clear();
         app.terminal_command_cursor = 0;
         app.terminal_command_output.clear();
-        app.terminal_command_directory = if app.page == Page::Projects
-            && app.project_pane != ProjectPane::ProjectList
-        {
-            app.active_project.as_ref().map(|project| project.path.clone())
-        } else {
-            terminal_home_directory()
-        };
+        app.terminal_command_directory =
+            if app.page == Page::Projects && app.project_pane != ProjectPane::ProjectList {
+                app.active_project
+                    .as_ref()
+                    .map(|project| project.path.clone())
+            } else {
+                terminal_home_directory()
+            };
         reset_terminal_completion(app);
         return None;
     }
@@ -4604,7 +4672,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                         .take()
                         .map(|path| UiAction::RenameProjectEntry { path, name });
                 }
-                let project = app.active_project.clone().or_else(|| app.projects.get(app.projects_selected).cloned());
+                let project = app
+                    .active_project
+                    .clone()
+                    .or_else(|| app.projects.get(app.projects_selected).cloned());
                 return project.map(|project| UiAction::RenameProject { project, name });
             }
             KeyCode::Tab | KeyCode::BackTab if app.mode == AppMode::ProjectCreate => {
@@ -4652,11 +4723,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             }
             _ => {
                 let old_query = app.palette_query.clone();
-                if edit_text(
-                    &mut app.palette_query,
-                    &mut app.palette_query_cursor,
-                    key,
-                ) {
+                if edit_text(&mut app.palette_query, &mut app.palette_query_cursor, key) {
                     if app.palette_query != old_query {
                         app.palette_selected = 0;
                     }
@@ -4676,7 +4743,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                     run_terminal_command(app);
                 }
             }
-            KeyCode::Tab => complete_terminal_command(app, key.modifiers.contains(KeyModifiers::SHIFT)),
+            KeyCode::Tab => {
+                complete_terminal_command(app, key.modifiers.contains(KeyModifiers::SHIFT))
+            }
             KeyCode::BackTab => complete_terminal_command(app, true),
             _ => {
                 reset_terminal_completion(app);
@@ -4759,9 +4828,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
     // Projects owns its raw key events. In particular, do not normalize arrow
     // keys into h/j/k/l before the currently focused pane sees them.
-    if app.page == Page::Projects
-        && app.content_focused
-    {
+    if app.page == Page::Projects && app.content_focused {
         return handle_projects_key(app, key);
     }
     if app.page == Page::Discover
@@ -4785,7 +4852,12 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
 
     if !app.content_focused {
-        if app.page == Page::Settings && matches!(key.code, KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter) {
+        if app.page == Page::Settings
+            && matches!(
+                key.code,
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter
+            )
+        {
             // Opening the settings modal is handled by the sidebar navigation
             // path; just focus content so UI is consistent.
             app.content_focused = true;
@@ -4825,7 +4897,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if matches!(app.page, Page::Dashboard | Page::Discover) {
         match key.code {
             KeyCode::Char('c') => return selected_remote_target(app).map(UiAction::CopyCitation),
-            KeyCode::Char('d') => return selected_remote_paper(app).cloned().map(UiAction::Download),
+            KeyCode::Char('d') => {
+                return selected_remote_paper(app).cloned().map(UiAction::Download);
+            }
             _ => {}
         }
     }
@@ -4987,7 +5061,10 @@ fn run_terminal_command(app: &mut App) {
             } else {
                 format!(
                     "[exit {}]\n{text}",
-                    output.status.code().map_or_else(|| "signal".to_owned(), |code| code.to_string())
+                    output
+                        .status
+                        .code()
+                        .map_or_else(|| "signal".to_owned(), |code| code.to_string())
                 )
             }
         }
@@ -5031,9 +5108,15 @@ fn complete_terminal_command(app: &mut App, backwards: bool) {
 
 fn cycle_terminal_completion(app: &mut App, backwards: bool) {
     let count = app.terminal_completions.len();
-    let Some(selected) = app.terminal_completion_selected else { return; };
+    let Some(selected) = app.terminal_completion_selected else {
+        return;
+    };
     let next = if !app.terminal_completion_applied {
-        if backwards { count.saturating_sub(1) } else { selected }
+        if backwards {
+            count.saturating_sub(1)
+        } else {
+            selected
+        }
     } else if backwards {
         selected.checked_sub(1).unwrap_or(count.saturating_sub(1))
     } else {
@@ -5044,8 +5127,12 @@ fn cycle_terminal_completion(app: &mut App, backwards: bool) {
 }
 
 fn apply_selected_terminal_completion(app: &mut App) {
-    let Some(selected) = app.terminal_completion_selected else { return; };
-    let Some(candidate) = app.terminal_completions.get(selected).cloned() else { return; };
+    let Some(selected) = app.terminal_completion_selected else {
+        return;
+    };
+    let Some(candidate) = app.terminal_completions.get(selected).cloned() else {
+        return;
+    };
     let start = app.terminal_completion_token_start;
     let end = app.terminal_command_cursor.min(app.terminal_command.len());
     if start > end {
@@ -5073,7 +5160,9 @@ fn terminal_command_candidates(prefix: &str) -> Vec<String> {
         .collect::<Vec<_>>();
     if let Some(path) = std::env::var_os("PATH") {
         for directory in std::env::split_paths(&path) {
-            let Ok(entries) = std::fs::read_dir(directory) else { continue; };
+            let Ok(entries) = std::fs::read_dir(directory) else {
+                continue;
+            };
             candidates.extend(entries.filter_map(Result::ok).filter_map(|entry| {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 name.to_lowercase()
@@ -5086,10 +5175,6 @@ fn terminal_command_candidates(prefix: &str) -> Vec<String> {
     candidates.dedup();
     candidates
 }
-
-
-
-
 
 fn change_terminal_directory(app: &mut App, path: &str) {
     let base = app
@@ -5117,7 +5202,8 @@ fn append_terminal_output(app: &mut App, command: &str, output: &str) {
     app.terminal_command_output.push_str("$ ");
     app.terminal_command_output.push_str(command);
     app.terminal_command_output.push('\n');
-    app.terminal_command_output.push_str(&sanitize_terminal_output(output));
+    app.terminal_command_output
+        .push_str(&sanitize_terminal_output(output));
     const MAX_SCROLLBACK_BYTES: usize = 64 * 1024;
     if app.terminal_command_output.len() > MAX_SCROLLBACK_BYTES {
         let start = app.terminal_command_output.len() - MAX_SCROLLBACK_BYTES;
@@ -5125,7 +5211,6 @@ fn append_terminal_output(app: &mut App, command: &str, output: &str) {
         app.terminal_command_output.drain(..start);
     }
 }
-
 
 fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if handle_project_pane_shortcut(app, key) {
@@ -5138,11 +5223,12 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             KeyCode::Char('n') => {
                 app.project_rename_input.clear();
                 app.project_rename_cursor = 0;
-                app.project_create_compiler = if !app.settings_modal.default_project_compiler.is_empty() {
-                    app.settings_modal.default_project_compiler.clone()
-                } else {
-                    "latex".to_owned()
-                };
+                app.project_create_compiler =
+                    if !app.settings_modal.default_project_compiler.is_empty() {
+                        app.settings_modal.default_project_compiler.clone()
+                    } else {
+                        "latex".to_owned()
+                    };
                 app.mode = AppMode::ProjectCreate;
             }
             KeyCode::Char('r') => return Some(UiAction::RefreshProjects),
@@ -5160,9 +5246,20 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                     .cloned()
                     .map(UiAction::ConfirmDeleteProject);
             }
-            KeyCode::Up | KeyCode::Char('k') => app.projects_selected = app.projects_selected.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => app.projects_selected = (app.projects_selected + 1).min(app.projects.len().saturating_sub(1)),
-            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => return app.projects.get(app.projects_selected).cloned().map(UiAction::OpenProject),
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.projects_selected = app.projects_selected.saturating_sub(1)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.projects_selected =
+                    (app.projects_selected + 1).min(app.projects.len().saturating_sub(1))
+            }
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                return app
+                    .projects
+                    .get(app.projects_selected)
+                    .cloned()
+                    .map(UiAction::OpenProject);
+            }
             _ => {}
         }
         return None;
@@ -5229,15 +5326,19 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
         if !app.project_completions.is_empty() {
             match key.code {
                 KeyCode::Up => {
-                    app.project_completion_selected = app.project_completion_selected.saturating_sub(1);
+                    app.project_completion_selected =
+                        app.project_completion_selected.saturating_sub(1);
                     return None;
                 }
                 KeyCode::Down => {
-                    app.project_completion_selected = (app.project_completion_selected + 1).min(app.project_completions.len().saturating_sub(1));
+                    app.project_completion_selected = (app.project_completion_selected + 1)
+                        .min(app.project_completions.len().saturating_sub(1));
                     return None;
                 }
                 KeyCode::Tab | KeyCode::Enter => {
-                    if accept_project_completion(app) { return None; }
+                    if accept_project_completion(app) {
+                        return None;
+                    }
                 }
                 KeyCode::Esc => {
                     app.project_completions.clear();
@@ -5300,8 +5401,8 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 app.project_file_selected = app.project_file_selected.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                app.project_file_selected = (app.project_file_selected + 1)
-                    .min(app.project_files.len().saturating_sub(1));
+                app.project_file_selected =
+                    (app.project_file_selected + 1).min(app.project_files.len().saturating_sub(1));
             }
             KeyCode::Enter | KeyCode::Right => {
                 if let Some(path) = app.project_files.get(app.project_file_selected).cloned() {
@@ -5314,11 +5415,13 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                     }
                 }
             }
-            KeyCode::Char('x') => return app
-                .project_files
-                .get(app.project_file_selected)
-                .cloned()
-                .map(UiAction::ConfirmDeleteProjectEntry),
+            KeyCode::Char('x') => {
+                return app
+                    .project_files
+                    .get(app.project_file_selected)
+                    .cloned()
+                    .map(UiAction::ConfirmDeleteProjectEntry);
+            }
             _ => {}
         },
         ProjectPane::Build => handle_project_build_key(app, key),
@@ -5364,16 +5467,20 @@ fn handle_project_pane_shortcut(app: &mut App, key: KeyEvent) -> bool {
             ProjectPane::FileTree | ProjectPane::Editor | ProjectPane::ProjectList => {}
         }
     } else {
-        app.toast = Some(match pane {
-            ProjectPane::Editor => "Open a source file before focusing the editor.",
-            ProjectPane::Preview => {
-                if app.pdf_viewer != "internal" {
-                    "PDF preview is disabled when using an external viewer."
-                } else { "Open a project before focusing this pane." }
+        app.toast = Some(
+            match pane {
+                ProjectPane::Editor => "Open a source file before focusing the editor.",
+                ProjectPane::Preview => {
+                    if app.pdf_viewer != "internal" {
+                        "PDF preview is disabled when using an external viewer."
+                    } else {
+                        "Open a project before focusing this pane."
+                    }
+                }
+                _ => "Open a project before focusing this pane.",
             }
-            _ => "Open a project before focusing this pane.",
-        }
-        .into());
+            .into(),
+        );
     }
     true
 }
@@ -5388,7 +5495,8 @@ fn handle_project_build_key(app: &mut App, key: KeyEvent) {
         app.project_build_raw_log.len()
     } else {
         app.project_build_diagnostics.len()
-    }.max(1);
+    }
+    .max(1);
     let max_scroll = line_count.saturating_sub(app.project_build_viewport_height.max(1));
     match key.code {
         KeyCode::Tab => {
@@ -5423,7 +5531,7 @@ fn handle_project_build_key(app: &mut App, key: KeyEvent) {
         KeyCode::PageDown => {
             app.project_build_scroll = (app.project_build_scroll
                 + app.project_build_viewport_height.max(1))
-                .min(max_scroll);
+            .min(max_scroll);
         }
         KeyCode::Home => app.project_build_scroll = 0,
         KeyCode::End => app.project_build_scroll = max_scroll,
@@ -5432,11 +5540,22 @@ fn handle_project_build_key(app: &mut App, key: KeyEvent) {
 }
 
 fn jump_to_project_diagnostic(app: &mut App) {
-    let Some(diagnostic) = app.project_build_diagnostics.get(app.project_build_selected) else { return; };
-    let (Some(file), Some(line)) = (&diagnostic.file, diagnostic.line) else { return; };
-    let Some(project) = app.active_project.as_ref() else { return; };
+    let Some(diagnostic) = app
+        .project_build_diagnostics
+        .get(app.project_build_selected)
+    else {
+        return;
+    };
+    let (Some(file), Some(line)) = (&diagnostic.file, diagnostic.line) else {
+        return;
+    };
+    let Some(project) = app.active_project.as_ref() else {
+        return;
+    };
     let path = project.path.join(file);
-    let Ok(contents) = std::fs::read_to_string(&path) else { return; };
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return;
+    };
     let cursor = contents
         .lines()
         .take(line.saturating_sub(1))
@@ -5486,16 +5605,14 @@ fn move_project_editor_page(app: &mut App, direction: isize) {
     let target = row
         .saturating_add_signed(direction * app.project_editor_viewport_height.max(1) as isize)
         .min(total_rows.saturating_sub(1));
-    app.project_editor_cursor = cursor_from_visual_position(
-        &app.project_editor_text,
-        target,
-        column,
-        wrap_width,
-    );
+    app.project_editor_cursor =
+        cursor_from_visual_position(&app.project_editor_text, target, column, wrap_width);
 }
 
 fn save_project_editor(app: &mut App) -> bool {
-    let Some(path) = app.project_editor_path.as_ref() else { return true; };
+    let Some(path) = app.project_editor_path.as_ref() else {
+        return true;
+    };
     match std::fs::write(path, &app.project_editor_text) {
         Ok(()) => {
             app.project_editor_dirty = false;
@@ -5548,13 +5665,19 @@ fn return_to_project_file_tree(app: &mut App) {
 }
 
 fn move_project_tree_to_parent(app: &mut App) -> bool {
-    let Some(project) = app.active_project.as_ref() else { return false; };
+    let Some(project) = app.active_project.as_ref() else {
+        return false;
+    };
     let root = &project.path;
-    let Some(current) = app.project_tree_dir.as_ref() else { return false; };
+    let Some(current) = app.project_tree_dir.as_ref() else {
+        return false;
+    };
     if current == root {
         return false;
     }
-    let Some(parent) = current.parent() else { return false; };
+    let Some(parent) = current.parent() else {
+        return false;
+    };
     if !parent.starts_with(root) {
         return false;
     }
@@ -5575,17 +5698,15 @@ fn is_text_paste_shortcut(key: KeyEvent) -> bool {
     // Ctrl+V. Crossterm correctly reports that as Ctrl+V, but there is no
     // Shift modifier left to inspect unless the terminal supports enhanced
     // keyboard reporting. Accept both encodings.
-    key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char('v' | 'V'))
+    key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('v' | 'V'))
 }
 
 /// Paste clipboard text into whichever editable control currently owns focus.
 /// This is kept ahead of workspace command handling so Ctrl+Shift+V cannot be
 /// mistaken for a navigation or single-key action.
 fn paste_clipboard_into_active_input(app: &mut App) -> bool {
-    let settings_field_active = app.page == Page::Settings
-        && app.content_focused
-        && app.mode == AppMode::Normal;
+    let settings_field_active =
+        app.page == Page::Settings && app.content_focused && app.mode == AppMode::Normal;
     if !settings_field_active && !has_active_text_input(app) && !is_project_editor_active(app) {
         return false;
     }
@@ -5624,7 +5745,10 @@ fn paste_text_into_active_input(app: &mut App, text: &str) -> bool {
         AppMode::ProjectRename
         | AppMode::ProjectCreate
         | AppMode::ProjectFileCreate
-        | AppMode::ProjectEntryRename => (&mut app.project_rename_input, &mut app.project_rename_cursor),
+        | AppMode::ProjectEntryRename => (
+            &mut app.project_rename_input,
+            &mut app.project_rename_cursor,
+        ),
         AppMode::CommandPalette => (&mut app.palette_query, &mut app.palette_query_cursor),
         AppMode::TerminalCommand => (&mut app.terminal_command, &mut app.terminal_command_cursor),
         AppMode::Search => (&mut app.discovery.query, &mut app.discovery.query_cursor),
@@ -5639,9 +5763,9 @@ fn paste_text_into_active_input(app: &mut App, text: &str) -> bool {
             None => return false,
         },
         _ if is_project_editor_active(app) && app.project_editor_insert_mode => {
-                insert_project_bibtex_text(app, &text);
-                return true;
-            }
+            insert_project_bibtex_text(app, &text);
+            return true;
+        }
         _ => return false,
     };
     target.insert_str(*cursor, &text);
@@ -5660,18 +5784,15 @@ fn paste_text_into_active_input(app: &mut App, text: &str) -> bool {
 }
 
 fn is_project_editor_active(app: &App) -> bool {
-    app.page == Page::Projects
-        && app.content_focused
-        && app.project_pane == ProjectPane::Editor
+    app.page == Page::Projects && app.content_focused && app.project_pane == ProjectPane::Editor
 }
 
 fn is_project_exact_paste_editor(app: &App) -> bool {
     is_project_editor_active(app)
         && app.project_editor_path.as_ref().is_some_and(|path| {
-            path.extension()
-                .is_some_and(|extension| {
-                    extension.eq_ignore_ascii_case("bib") || extension.eq_ignore_ascii_case("tex")
-                })
+            path.extension().is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("bib") || extension.eq_ignore_ascii_case("tex")
+            })
         })
 }
 
@@ -5704,7 +5825,10 @@ fn insert_project_bibtex_text(app: &mut App, text: &str) {
 }
 
 fn record_project_editor_change(app: &mut App) {
-    record_project_editor_snapshot(app, (app.project_editor_text.clone(), app.project_editor_cursor));
+    record_project_editor_snapshot(
+        app,
+        (app.project_editor_text.clone(), app.project_editor_cursor),
+    );
 }
 
 fn record_project_editor_snapshot(app: &mut App, snapshot: (String, usize)) {
@@ -5718,7 +5842,9 @@ fn record_project_editor_snapshot(app: &mut App, snapshot: (String, usize)) {
 }
 
 fn undo_project_editor_change(app: &mut App) {
-    let Some(snapshot) = app.project_editor_undo.pop() else { return; };
+    let Some(snapshot) = app.project_editor_undo.pop() else {
+        return;
+    };
     app.project_editor_redo
         .push((app.project_editor_text.clone(), app.project_editor_cursor));
     (app.project_editor_text, app.project_editor_cursor) = snapshot;
@@ -5727,7 +5853,9 @@ fn undo_project_editor_change(app: &mut App) {
 }
 
 fn redo_project_editor_change(app: &mut App) {
-    let Some(snapshot) = app.project_editor_redo.pop() else { return; };
+    let Some(snapshot) = app.project_editor_redo.pop() else {
+        return;
+    };
     app.project_editor_undo
         .push((app.project_editor_text.clone(), app.project_editor_cursor));
     (app.project_editor_text, app.project_editor_cursor) = snapshot;
@@ -5778,7 +5906,11 @@ fn handle_project_editor_normal_key(app: &mut App, key: KeyEvent) {
         app.project_editor_manual_scroll = false;
         let mut movement_key = KeyEvent::new(code, key.modifiers);
         movement_key.kind = key.kind;
-        let _ = edit_text(&mut app.project_editor_text, &mut app.project_editor_cursor, movement_key);
+        let _ = edit_text(
+            &mut app.project_editor_text,
+            &mut app.project_editor_cursor,
+            movement_key,
+        );
         return;
     }
     if handle_project_editor_motion(app, key) {
@@ -5821,15 +5953,28 @@ fn handle_project_editor_normal_key(app: &mut App, key: KeyEvent) {
             ));
         }
         KeyCode::Char('u') => undo_project_editor_change(app),
-        KeyCode::Char('w') => app.project_editor_cursor = next_word_boundary(&app.project_editor_text, app.project_editor_cursor),
-        KeyCode::Char('b') => app.project_editor_cursor = prev_word_boundary(&app.project_editor_text, app.project_editor_cursor),
-        KeyCode::Char('0') | KeyCode::Home => app.project_editor_cursor = config_editor_line_start(&app.project_editor_text, app.project_editor_cursor),
-        KeyCode::Char('$') | KeyCode::End => app.project_editor_cursor = config_editor_line_end(&app.project_editor_text, app.project_editor_cursor),
+        KeyCode::Char('w') => {
+            app.project_editor_cursor =
+                next_word_boundary(&app.project_editor_text, app.project_editor_cursor)
+        }
+        KeyCode::Char('b') => {
+            app.project_editor_cursor =
+                prev_word_boundary(&app.project_editor_text, app.project_editor_cursor)
+        }
+        KeyCode::Char('0') | KeyCode::Home => {
+            app.project_editor_cursor =
+                config_editor_line_start(&app.project_editor_text, app.project_editor_cursor)
+        }
+        KeyCode::Char('$') | KeyCode::End => {
+            app.project_editor_cursor =
+                config_editor_line_end(&app.project_editor_text, app.project_editor_cursor)
+        }
         KeyCode::Backspace if key.modifiers.contains(KeyModifiers::CONTROL) => {
             let previous = prev_word_boundary(&app.project_editor_text, app.project_editor_cursor);
             if previous != app.project_editor_cursor {
                 record_project_editor_change(app);
-                app.project_editor_text.drain(previous..app.project_editor_cursor);
+                app.project_editor_text
+                    .drain(previous..app.project_editor_cursor);
                 app.project_editor_cursor = previous;
                 app.project_editor_dirty = true;
             }
@@ -5838,23 +5983,19 @@ fn handle_project_editor_normal_key(app: &mut App, key: KeyEvent) {
             let next = next_word_boundary(&app.project_editor_text, app.project_editor_cursor);
             if next != app.project_editor_cursor {
                 record_project_editor_change(app);
-                app.project_editor_text.drain(app.project_editor_cursor..next);
+                app.project_editor_text
+                    .drain(app.project_editor_cursor..next);
                 app.project_editor_dirty = true;
             }
         }
         KeyCode::Backspace => {
-            app.project_editor_cursor = prev_char_boundary(
-                &app.project_editor_text,
-                app.project_editor_cursor,
-            );
+            app.project_editor_cursor =
+                prev_char_boundary(&app.project_editor_text, app.project_editor_cursor);
         }
         KeyCode::Delete | KeyCode::Char('x') => {
             if app.project_editor_cursor < app.project_editor_text.len() {
                 record_project_editor_change(app);
-                let next = next_char_boundary(
-                    &app.project_editor_text,
-                    app.project_editor_cursor,
-                );
+                let next = next_char_boundary(&app.project_editor_text, app.project_editor_cursor);
                 app.project_editor_text
                     .drain(app.project_editor_cursor..next);
                 app.project_editor_dirty = true;
@@ -5867,12 +6008,16 @@ fn handle_project_editor_normal_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-const PROJECT_EDITOR_PENDING_SEQUENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+const PROJECT_EDITOR_PENDING_SEQUENCE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(1);
 
 /// Return a supported first key only when it is valid in the current editor
 /// mode. Add future multi-key commands here and their second-key action below.
 fn project_editor_sequence_starter(app: &App, key: KeyEvent) -> Option<char> {
-    if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
         return None;
     }
     match key.code {
@@ -5964,13 +6109,14 @@ fn handle_project_editor_motion(app: &mut App, key: KeyEvent) -> bool {
             &app.project_editor_text,
             app.project_editor_cursor,
         )),
-        KeyCode::Char('%') => project_editor_matching_delimiter(
-            &app.project_editor_text,
-            app.project_editor_cursor,
-        ),
+        KeyCode::Char('%') => {
+            project_editor_matching_delimiter(&app.project_editor_text, app.project_editor_cursor)
+        }
         _ => None,
     };
-    let Some(target) = target else { return false; };
+    let Some(target) = target else {
+        return false;
+    };
     app.project_editor_cursor = target;
     app.project_editor_manual_scroll = false;
     true
@@ -5983,7 +6129,11 @@ fn project_editor_previous_paragraph(text: &str, cursor: usize) -> usize {
     while line > 0 && lines.get(line).is_some_and(|line| line.trim().is_empty()) {
         line -= 1;
     }
-    while line > 0 && lines.get(line - 1).is_some_and(|line| !line.trim().is_empty()) {
+    while line > 0
+        && lines
+            .get(line - 1)
+            .is_some_and(|line| !line.trim().is_empty())
+    {
         line -= 1;
     }
     project_editor_line_start_at(text, line)
@@ -6047,7 +6197,6 @@ fn project_editor_matching_delimiter(text: &str, cursor: usize) -> Option<usize>
     None
 }
 
-
 fn project_editor_visual_byte_range(app: &App, anchor: usize) -> (usize, usize) {
     let current = project_editor_line_at(&app.project_editor_text, app.project_editor_cursor);
     let first = anchor.min(current);
@@ -6068,7 +6217,6 @@ fn project_editor_visual_byte_range(app: &App, anchor: usize) -> (usize, usize) 
     (start, end)
 }
 
-
 fn normalize_panel_navigation(mut key: KeyEvent) -> KeyEvent {
     key.code = match key.code {
         KeyCode::Left => KeyCode::Char('h'),
@@ -6087,9 +6235,11 @@ fn handle_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 app.discovery.selected = 0;
             }
         }
-        KeyCode::Right if !key.modifiers.contains(KeyModifiers::CONTROL)
-            && app.discovery.query_cursor == app.discovery.query.len()
-            && !app.discovery.results.is_empty() => {
+        KeyCode::Right
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && app.discovery.query_cursor == app.discovery.query.len()
+                && !app.discovery.results.is_empty() =>
+        {
             app.mode = AppMode::DiscoverFilter;
             app.discovery.filter_cursor = app.discovery.filter.len();
         }
@@ -6139,18 +6289,30 @@ fn handle_discover_filter_key(app: &mut App, key: KeyEvent) -> Option<UiAction> 
         }
         KeyCode::Down | KeyCode::Enter => {
             app.mode = AppMode::Normal;
-            app.discovery.selected = app.discovery.selected.min(app.discovery.visible_page_len().saturating_sub(1));
+            app.discovery.selected = app
+                .discovery
+                .selected
+                .min(app.discovery.visible_page_len().saturating_sub(1));
         }
-        KeyCode::Left if !key.modifiers.contains(KeyModifiers::CONTROL) && app.discovery.filter_cursor == 0 => {
+        KeyCode::Left
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && app.discovery.filter_cursor == 0 =>
+        {
             app.mode = AppMode::Search;
             app.discovery.query_cursor = app.discovery.query.len();
         }
-        KeyCode::Right if !key.modifiers.contains(KeyModifiers::CONTROL)
-            && app.discovery.filter_cursor == app.discovery.filter.len() => {
+        KeyCode::Right
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && app.discovery.filter_cursor == app.discovery.filter.len() =>
+        {
             app.mode = AppMode::Normal;
         }
         _ => {
-            if edit_text(&mut app.discovery.filter, &mut app.discovery.filter_cursor, key) {
+            if edit_text(
+                &mut app.discovery.filter,
+                &mut app.discovery.filter_cursor,
+                key,
+            ) {
                 app.discovery.rebuild_filter();
             }
         }
@@ -6229,16 +6391,23 @@ fn handle_project_citation_search_key(app: &mut App, key: KeyEvent) -> Option<Ui
                 .min(app.project_citation_results.len().saturating_sub(1));
         }
         KeyCode::Enter => {
-            if let Some(result) = app.project_citation_results.get(app.project_citation_selected).cloned() {
+            if let Some(result) = app
+                .project_citation_results
+                .get(app.project_citation_selected)
+                .cloned()
+            {
                 return Some(match result {
                     ProjectCitationResult::Local(paper) => UiAction::InsertProjectCitation(paper),
-                    ProjectCitationResult::Online(paper) => UiAction::InsertProjectRemoteCitation(paper),
+                    ProjectCitationResult::Online(paper) => {
+                        UiAction::InsertProjectRemoteCitation(paper)
+                    }
                 });
             }
             if app.project_citation_search_mode == ProjectCitationSearchMode::Online {
                 let query = app.project_citation_query.trim().to_owned();
                 if query.is_empty() {
-                    app.project_citation_search_status = Some("Enter keywords before searching online.".into());
+                    app.project_citation_search_status =
+                        Some("Enter keywords before searching online.".into());
                 } else {
                     app.project_citation_search_status = Some("Searching online…".into());
                     return Some(UiAction::SearchProjectCitationsOnline(query));
@@ -6259,7 +6428,8 @@ fn handle_project_citation_search_key(app: &mut App, key: KeyEvent) -> Option<Ui
                     if app.project_citation_search_mode == ProjectCitationSearchMode::Local {
                         update_project_local_citation_results(app);
                     } else {
-                        app.project_citation_search_status = Some("Press Enter to search online.".into());
+                        app.project_citation_search_status =
+                            Some("Press Enter to search online.".into());
                     }
                 }
             }
@@ -6344,9 +6514,10 @@ fn handle_confirm_delete_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                 DeletionTarget::Paper { id, path, .. } => {
                     Some(UiAction::DeletePaper { paper_id: id, path })
                 }
-                DeletionTarget::Collection { id, path, .. } => {
-                    Some(UiAction::DeleteCollection { collection_id: id, path })
-                }
+                DeletionTarget::Collection { id, path, .. } => Some(UiAction::DeleteCollection {
+                    collection_id: id,
+                    path,
+                }),
                 DeletionTarget::ProjectEntry { path, .. } => {
                     Some(UiAction::DeleteProjectEntry(path))
                 }
@@ -6368,7 +6539,9 @@ fn bookmark_action(app: &App, key: KeyEvent) -> Option<UiAction> {
     let bookmark = *app.filtered_bookmarks().get(app.bookmark_selected)?;
     match key.code {
         KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(bookmark.paper_id))),
-        KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(bookmark.paper_id))),
+        KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(
+            bookmark.paper_id,
+        ))),
         KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => Some(UiAction::OpenPdf {
             paper_id: bookmark.paper_id,
             path: PathBuf::from(&bookmark.pdf_path),
@@ -6430,22 +6603,30 @@ fn handle_reading_queue_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.page != Page::ReadingQueue {
         return None;
     }
-    
+
     // Check for moving items up/down in the queue
     if key.code == KeyCode::Up
-        && (key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::CONTROL))
+        && (key.modifiers.contains(KeyModifiers::SHIFT)
+            || key.modifiers.contains(KeyModifiers::CONTROL))
     {
-        let paper = *app.filtered_reading_queue_papers().get(app.reading_queue_selected)?;
+        let paper = *app
+            .filtered_reading_queue_papers()
+            .get(app.reading_queue_selected)?;
         return Some(UiAction::MoveQueueItemUp(paper.id));
     }
     if key.code == KeyCode::Down
-        && (key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::CONTROL))
+        && (key.modifiers.contains(KeyModifiers::SHIFT)
+            || key.modifiers.contains(KeyModifiers::CONTROL))
     {
-        let paper = *app.filtered_reading_queue_papers().get(app.reading_queue_selected)?;
+        let paper = *app
+            .filtered_reading_queue_papers()
+            .get(app.reading_queue_selected)?;
         return Some(UiAction::MoveQueueItemDown(paper.id));
     }
 
-    let paper = *app.filtered_reading_queue_papers().get(app.reading_queue_selected)?;
+    let paper = *app
+        .filtered_reading_queue_papers()
+        .get(app.reading_queue_selected)?;
     match key.code {
         KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
             let path = paper.pdf_path.clone().map(PathBuf::from)?;
@@ -6496,9 +6677,19 @@ fn handle_downloads_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     }
     if matches!(
         key.code,
-        KeyCode::Char('R') | KeyCode::Char('g') | KeyCode::Char('n') | KeyCode::Char('c') | KeyCode::Char('x')
-    ) || key.code == KeyCode::Char('B') {
-        if let Some(task) = app.filtered_downloads().get(app.download_selected).cloned().cloned() {
+        KeyCode::Char('R')
+            | KeyCode::Char('g')
+            | KeyCode::Char('n')
+            | KeyCode::Char('c')
+            | KeyCode::Char('x')
+    ) || key.code == KeyCode::Char('B')
+    {
+        if let Some(task) = app
+            .filtered_downloads()
+            .get(app.download_selected)
+            .cloned()
+            .cloned()
+        {
             if matches!(task.status, DownloadStatus::Completed) {
                 let paper_id = task.paper_id.or_else(|| {
                     task.pdf_path.as_ref().and_then(|pdf_path| {
@@ -6513,7 +6704,8 @@ fn handle_downloads_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                                         let c_paper = std::fs::canonicalize(&paper_path).ok()?;
                                         let c_task = std::fs::canonicalize(&task_path).ok()?;
                                         Some(c_paper == c_task)
-                                    })().unwrap_or(false)
+                                    })()
+                                    .unwrap_or(false)
                             })
                             .map(|paper| paper.id)
                     })
@@ -6523,9 +6715,15 @@ fn handle_downloads_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
                     return match key.code {
                         KeyCode::Char('R') => Some(UiAction::RenamePdf(paper_id)),
                         KeyCode::Char('g') => Some(UiAction::Prompt(PaperTarget::Local(paper_id))),
-                        KeyCode::Char('B') => Some(UiAction::Bookmark(PaperTarget::Local(paper_id))),
-                        KeyCode::Char('c') => Some(UiAction::CopyCitation(PaperTarget::Local(paper_id))),
-                        KeyCode::Char('n') => Some(UiAction::OpenNote(PaperTarget::Local(paper_id))),
+                        KeyCode::Char('B') => {
+                            Some(UiAction::Bookmark(PaperTarget::Local(paper_id)))
+                        }
+                        KeyCode::Char('c') => {
+                            Some(UiAction::CopyCitation(PaperTarget::Local(paper_id)))
+                        }
+                        KeyCode::Char('n') => {
+                            Some(UiAction::OpenNote(PaperTarget::Local(paper_id)))
+                        }
                         KeyCode::Char('x') => Some(UiAction::ConfirmDeletePaper {
                             paper_id,
                             title: task.title.clone(),
@@ -6544,7 +6742,10 @@ fn library_action(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     if app.page != Page::Library {
         return None;
     }
-    if matches!(key.code, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) {
+    if matches!(
+        key.code,
+        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
+    ) {
         return selected_library_pdf(app)
             .map(|(paper_id, path)| UiAction::OpenPdf { paper_id, path });
     }
@@ -6587,7 +6788,10 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
                 return (true, None);
             }
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
-                let Some(&paper) = app.filtered_collection_papers().get(app.collection_paper_selected) else {
+                let Some(&paper) = app
+                    .filtered_collection_papers()
+                    .get(app.collection_paper_selected)
+                else {
                     return (true, None);
                 };
                 let Some(path) = &paper.pdf_path else {
@@ -6661,7 +6865,10 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
         use CollectionSearchItem;
         match item {
             CollectionSearchItem::Collection(collection) => {
-                if matches!(key.code, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) {
+                if matches!(
+                    key.code,
+                    KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
+                ) {
                     return (true, Some(UiAction::OpenCollection(collection.id)));
                 }
                 if key.code == KeyCode::Char('R') {
@@ -6679,7 +6886,10 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
                 }
             }
             CollectionSearchItem::Paper(paper, _collection) => {
-                if matches!(key.code, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) {
+                if matches!(
+                    key.code,
+                    KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
+                ) {
                     if let Some(path) = &paper.pdf_path {
                         return (
                             true,
@@ -6697,7 +6907,10 @@ fn handle_collection_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction
                     return (true, Some(UiAction::Bookmark(PaperTarget::Local(paper.id))));
                 }
                 if key.code == KeyCode::Char('c') {
-                    return (true, Some(UiAction::CopyCitation(PaperTarget::Local(paper.id))));
+                    return (
+                        true,
+                        Some(UiAction::CopyCitation(PaperTarget::Local(paper.id))),
+                    );
                 }
                 if key.code == KeyCode::Char('R') {
                     return (true, Some(UiAction::RenamePdf(paper.id)));
@@ -6736,7 +6949,8 @@ fn handle_author_key(app: &mut App, key: KeyEvent) -> (bool, Option<UiAction>) {
                 return (true, None);
             }
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
-                let Some(&paper) = app.filtered_author_papers().get(app.author_paper_selected) else {
+                let Some(&paper) = app.filtered_author_papers().get(app.author_paper_selected)
+                else {
                     return (true, None);
                 };
                 let Some(path) = &paper.pdf_path else {
@@ -6824,9 +7038,7 @@ fn navigation_command(key: KeyEvent) -> Option<Command> {
         (KeyCode::Char('b'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
             Some(Command::TogglePalette)
         }
-        (KeyCode::Char('>'), _) => {
-            Some(Command::ToggleWorkspaceSearch)
-        }
+        (KeyCode::Char('>'), _) => Some(Command::ToggleWorkspaceSearch),
         (KeyCode::Char('j') | KeyCode::Down, _) => Some(Command::MoveDown),
         (KeyCode::Char('k') | KeyCode::Up, _) => Some(Command::MoveUp),
         (KeyCode::Enter | KeyCode::Right | KeyCode::Char('l'), _) => Some(Command::Open),
@@ -6899,11 +7111,13 @@ fn edit_text(text: &mut String, cursor: &mut usize, key: KeyEvent) -> bool {
         }
         KeyCode::Up => {
             if *cursor > 0 {
-                let current_line_start = text[..*cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                let current_line_start =
+                    text[..*cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
                 let col = *cursor - current_line_start;
                 if current_line_start > 0 {
                     let prev_line_search = &text[..current_line_start - 1];
-                    let prev_line_start = prev_line_search.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                    let prev_line_start =
+                        prev_line_search.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
                     let prev_line_len = (current_line_start - 1) - prev_line_start;
                     let mut target = prev_line_start + col.min(prev_line_len);
                     while target > prev_line_start && !text.is_char_boundary(target) {
@@ -6915,12 +7129,17 @@ fn edit_text(text: &mut String, cursor: &mut usize, key: KeyEvent) -> bool {
         }
         KeyCode::Down => {
             if *cursor < text.len() {
-                let current_line_start = text[..*cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                let current_line_start =
+                    text[..*cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
                 let col = *cursor - current_line_start;
-                if let Some(current_line_end) = text[*cursor..].find('\n').map(|idx| *cursor + idx) {
+                if let Some(current_line_end) = text[*cursor..].find('\n').map(|idx| *cursor + idx)
+                {
                     let next_line_start = current_line_end + 1;
                     if next_line_start <= text.len() {
-                        let next_line_end = text[next_line_start..].find('\n').map(|idx| next_line_start + idx).unwrap_or(text.len());
+                        let next_line_end = text[next_line_start..]
+                            .find('\n')
+                            .map(|idx| next_line_start + idx)
+                            .unwrap_or(text.len());
                         let next_line_len = next_line_end - next_line_start;
                         let mut target = next_line_start + col.min(next_line_len);
                         while target > next_line_start && !text.is_char_boundary(target) {
@@ -6961,7 +7180,11 @@ enum EditorInsertResult {
 }
 
 /// Shared Insert-mode input engine for every embedded Papr editor.
-fn apply_editor_insert_key(text: &mut String, cursor: &mut usize, key: KeyEvent) -> EditorInsertResult {
+fn apply_editor_insert_key(
+    text: &mut String,
+    cursor: &mut usize,
+    key: KeyEvent,
+) -> EditorInsertResult {
     match key.code {
         KeyCode::Esc => EditorInsertResult::ExitInsert,
         KeyCode::Enter => {
@@ -7000,12 +7223,19 @@ fn apply_editor_insert_key(text: &mut String, cursor: &mut usize, key: KeyEvent)
             text.drain(*cursor..next);
             EditorInsertResult::Changed
         }
-        KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End => {
+        KeyCode::Left
+        | KeyCode::Right
+        | KeyCode::Up
+        | KeyCode::Down
+        | KeyCode::Home
+        | KeyCode::End => {
             let _ = edit_text(text, cursor, key);
             EditorInsertResult::Moved
         }
         KeyCode::Char(_)
-            if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
             let Some(character) = text_input_char(key) else {
                 return EditorInsertResult::Ignored;
@@ -7131,7 +7361,10 @@ fn handle_paper_detail_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             return selected_remote_target(app).map(UiAction::CopyCitation);
         }
         KeyCode::Char('o') => {
-            return open_arxiv_page(app, selected_remote_paper(app).map(|paper| paper.id.clone()));
+            return open_arxiv_page(
+                app,
+                selected_remote_paper(app).map(|paper| paper.id.clone()),
+            );
         }
         KeyCode::Enter => {
             let remote = selected_remote_paper(app)?;
@@ -7242,11 +7475,7 @@ fn selected_paper_arxiv_reference(app: &App) -> Option<Option<String>> {
                 .find(|paper| paper.id == id)
                 .and_then(|paper| paper.arxiv_id.clone())
         }),
-        Page::Projects
-        | Page::History
-        | Page::Statistics
-        | Page::Settings
-        | Page::Credits => None,
+        Page::Projects | Page::History | Page::Statistics | Page::Settings | Page::Credits => None,
     }
 }
 
@@ -7268,18 +7497,27 @@ fn arxiv_page_url(reference: &str) -> Option<String> {
         .unwrap_or(reference)
         .trim_end_matches(".pdf");
     let (base, version) = match id.rsplit_once('v') {
-        Some((base, version)) if !version.is_empty() && version.chars().all(|character| character.is_ascii_digit()) => (base, Some(version)),
+        Some((base, version))
+            if !version.is_empty()
+                && version.chars().all(|character| character.is_ascii_digit()) =>
+        {
+            (base, Some(version))
+        }
         _ => (id, None),
     };
     let modern = base.split_once('.').is_some_and(|(year_month, number)| {
         year_month.len() == 4
-            && year_month.chars().all(|character| character.is_ascii_digit())
+            && year_month
+                .chars()
+                .all(|character| character.is_ascii_digit())
             && matches!(number.len(), 4 | 5)
             && number.chars().all(|character| character.is_ascii_digit())
     });
     let legacy = base.split_once('/').is_some_and(|(category, number)| {
         !category.is_empty()
-            && category.chars().all(|character| character.is_ascii_alphabetic() || matches!(character, '-' | '.'))
+            && category
+                .chars()
+                .all(|character| character.is_ascii_alphabetic() || matches!(character, '-' | '.'))
             && number.len() == 7
             && number.chars().all(|character| character.is_ascii_digit())
     });
@@ -7312,7 +7550,8 @@ fn selected_local_paper_id(app: &App) -> Option<i64> {
                                         let c_paper = std::fs::canonicalize(&paper_path).ok()?;
                                         let c_task = std::fs::canonicalize(&task_path).ok()?;
                                         Some(c_paper == c_task)
-                                    })().unwrap_or(false)
+                                    })()
+                                    .unwrap_or(false)
                             })
                             .map(|paper| paper.id)
                     })
@@ -7364,9 +7603,13 @@ fn selected_local_paper_id(app: &App) -> Option<i64> {
 }
 
 fn record_config_history(app: &mut App) {
-    if app.config_editor_history.is_empty() || app.config_editor_history[app.config_editor_history_idx] != app.config_editor_text {
-        app.config_editor_history.truncate(app.config_editor_history_idx + 1);
-        app.config_editor_history.push(app.config_editor_text.clone());
+    if app.config_editor_history.is_empty()
+        || app.config_editor_history[app.config_editor_history_idx] != app.config_editor_text
+    {
+        app.config_editor_history
+            .truncate(app.config_editor_history_idx + 1);
+        app.config_editor_history
+            .push(app.config_editor_text.clone());
         if app.config_editor_history.len() > 50 {
             app.config_editor_history.remove(0);
         }
@@ -7381,7 +7624,7 @@ fn handle_settings_modal_key(
     theme: &mut Theme,
     senders: &ActionSenders,
 ) -> Result<Option<UiAction>> {
-    use settings_modal::{handle_settings_key, SettingsKeyResult, staged_config};
+    use settings_modal::{SettingsKeyResult, handle_settings_key, staged_config};
 
     if is_text_paste_shortcut(key)
         && settings_modal::paste_into_active_field(app, read_clipboard_text().as_deref())
@@ -7394,7 +7637,8 @@ fn handle_settings_modal_key(
 
         SettingsKeyResult::Apply => {
             let base_config = Config::load_or_create(&Paths::discover()?).unwrap_or_default();
-            let new_config = staged_config(&app.settings_modal, &app.startup_page_options, &base_config);
+            let new_config =
+                staged_config(&app.settings_modal, &app.startup_page_options, &base_config);
             let toml_str = match toml::to_string_pretty(&new_config) {
                 Ok(s) => s,
                 Err(e) => {
@@ -7464,7 +7708,8 @@ fn apply_config_update(
 ) -> Result<()> {
     let previous = runtime.config.clone();
     if config.theme != previous.theme {
-        let new_theme = Theme::load(&config.theme).map_err(|e| anyhow::anyhow!("Theme load failed: {e}"))?;
+        let new_theme =
+            Theme::load(&config.theme).map_err(|e| anyhow::anyhow!("Theme load failed: {e}"))?;
         *theme = new_theme;
     }
 
@@ -7483,23 +7728,33 @@ fn apply_config_update(
         runtime.project_manager = ProjectManager::new(projects_directory)
             .map_err(|e| anyhow::anyhow!("projects directory: {e}"))?;
         app.projects = runtime.project_manager.list().unwrap_or_default();
-        app.projects_selected = app.projects_selected.min(app.projects.len().saturating_sub(1));
+        app.projects_selected = app
+            .projects_selected
+            .min(app.projects.len().saturating_sub(1));
     }
 
     let paths_changed = config.download_path != previous.download_path
         || config.library_folders != previous.library_folders;
     if paths_changed {
-        let download_dir = config.download_path.clone().unwrap_or_else(|| runtime.default_downloads_dir.clone());
+        let download_dir = config
+            .download_path
+            .clone()
+            .unwrap_or_else(|| runtime.default_downloads_dir.clone());
         let _ = std::fs::create_dir_all(&download_dir);
         let download_dir = std::fs::canonicalize(&download_dir).unwrap_or(download_dir);
         runtime.download_dir = download_dir.clone();
 
-        let collection_roots: Vec<_> = config.library_folders.iter()
+        let collection_roots: Vec<_> = config
+            .library_folders
+            .iter()
             .map(|root| std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
             .collect();
         runtime.collection_roots = collection_roots.clone();
         let mut library_roots = collection_roots.clone();
-        if !collection_roots.iter().any(|root| download_dir.starts_with(root)) {
+        if !collection_roots
+            .iter()
+            .any(|root| download_dir.starts_with(root))
+        {
             library_roots.push(download_dir.clone());
         }
         if let Some(root) = library_roots.first() {
@@ -7573,7 +7828,8 @@ fn handle_config_editor_key(
                             let canonical_toml = match toml::to_string_pretty(&new_config) {
                                 Ok(toml) => toml,
                                 Err(e) => {
-                                    app.config_editor_error = Some(format!("Serialization failed: {e}"));
+                                    app.config_editor_error =
+                                        Some(format!("Serialization failed: {e}"));
                                     return None;
                                 }
                             };
@@ -7583,7 +7839,9 @@ fn handle_config_editor_key(
                                 reset_config_editor_buffer(app, canonical_toml);
                                 app.config_editor_error = None;
                                 app.toast = Some("Configuration saved and applied.".to_owned());
-                                if let Err(e) = apply_config_update(runtime, app, &new_config, theme, senders) {
+                                if let Err(e) =
+                                    apply_config_update(runtime, app, &new_config, theme, senders)
+                                {
                                     app.config_editor_error = Some(format!("Apply failed: {e}"));
                                 } else {
                                     action_to_return = Some(UiAction::Reindex);
@@ -7634,7 +7892,8 @@ fn handle_config_editor_key(
         }
         KeyCode::Left | KeyCode::Char('h') => {
             if key.modifiers.contains(KeyModifiers::CONTROL) {
-                app.config_editor_cursor = prev_word_boundary(&app.config_editor_text, app.config_editor_cursor);
+                app.config_editor_cursor =
+                    prev_word_boundary(&app.config_editor_text, app.config_editor_cursor);
             } else if app.config_editor_cursor > 0 {
                 let mut prev = app.config_editor_cursor - 1;
                 while prev > 0 && !app.config_editor_text.is_char_boundary(prev) {
@@ -7648,32 +7907,42 @@ fn handle_config_editor_key(
         }
         KeyCode::Right | KeyCode::Char('l') => {
             if key.modifiers.contains(KeyModifiers::CONTROL) {
-                app.config_editor_cursor = next_word_boundary(&app.config_editor_text, app.config_editor_cursor);
+                app.config_editor_cursor =
+                    next_word_boundary(&app.config_editor_text, app.config_editor_cursor);
             } else if app.config_editor_cursor < app.config_editor_text.len() {
                 let next = next_char_boundary(&app.config_editor_text, app.config_editor_cursor);
-                if app.config_editor_text.as_bytes().get(app.config_editor_cursor) != Some(&b'\n') {
+                if app
+                    .config_editor_text
+                    .as_bytes()
+                    .get(app.config_editor_cursor)
+                    != Some(&b'\n')
+                {
                     app.config_editor_cursor = next.min(app.config_editor_text.len());
                 }
             }
             reset_config_editor_goal_column(app);
         }
         KeyCode::Home => {
-            app.config_editor_cursor = config_editor_line_start(&app.config_editor_text, app.config_editor_cursor);
+            app.config_editor_cursor =
+                config_editor_line_start(&app.config_editor_text, app.config_editor_cursor);
             reset_config_editor_goal_column(app);
         }
         KeyCode::End => {
-            app.config_editor_cursor = config_editor_line_end(&app.config_editor_text, app.config_editor_cursor);
+            app.config_editor_cursor =
+                config_editor_line_end(&app.config_editor_text, app.config_editor_cursor);
             reset_config_editor_goal_column(app);
         }
         KeyCode::Up | KeyCode::Char('k') => {
             let text = &app.config_editor_text;
             let cursor = &mut app.config_editor_cursor;
             if *cursor > 0 {
-                let current_line_start = text[..*cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                let current_line_start =
+                    text[..*cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
                 let col = *cursor - current_line_start;
                 if current_line_start > 0 {
                     let prev_line_search = &text[..current_line_start - 1];
-                    let prev_line_start = prev_line_search.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                    let prev_line_start =
+                        prev_line_search.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
                     let prev_line_len = (current_line_start - 1) - prev_line_start;
                     let mut target = prev_line_start + col.min(prev_line_len);
                     while target > prev_line_start && !text.is_char_boundary(target) {
@@ -7688,12 +7957,17 @@ fn handle_config_editor_key(
             let text = &app.config_editor_text;
             let cursor = &mut app.config_editor_cursor;
             if *cursor < text.len() {
-                let current_line_start = text[..*cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+                let current_line_start =
+                    text[..*cursor].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
                 let col = *cursor - current_line_start;
-                if let Some(current_line_end) = text[*cursor..].find('\n').map(|idx| *cursor + idx) {
+                if let Some(current_line_end) = text[*cursor..].find('\n').map(|idx| *cursor + idx)
+                {
                     let next_line_start = current_line_end + 1;
                     if next_line_start <= text.len() {
-                        let next_line_end = text[next_line_start..].find('\n').map(|idx| next_line_start + idx).unwrap_or(text.len());
+                        let next_line_end = text[next_line_start..]
+                            .find('\n')
+                            .map(|idx| next_line_start + idx)
+                            .unwrap_or(text.len());
                         let next_line_len = next_line_end - next_line_start;
                         let mut target = next_line_start + col.min(next_line_len);
                         while target > next_line_start && !text.is_char_boundary(target) {
@@ -7717,16 +7991,20 @@ fn handle_config_editor_key(
         KeyCode::Char('u') => {
             if app.config_editor_history_idx > 0 {
                 app.config_editor_history_idx -= 1;
-                app.config_editor_text = app.config_editor_history[app.config_editor_history_idx].clone();
-                app.config_editor_cursor = app.config_editor_cursor.min(app.config_editor_text.len());
+                app.config_editor_text =
+                    app.config_editor_history[app.config_editor_history_idx].clone();
+                app.config_editor_cursor =
+                    app.config_editor_cursor.min(app.config_editor_text.len());
             }
             reset_config_editor_goal_column(app);
         }
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if app.config_editor_history_idx + 1 < app.config_editor_history.len() {
                 app.config_editor_history_idx += 1;
-                app.config_editor_text = app.config_editor_history[app.config_editor_history_idx].clone();
-                app.config_editor_cursor = app.config_editor_cursor.min(app.config_editor_text.len());
+                app.config_editor_text =
+                    app.config_editor_history[app.config_editor_history_idx].clone();
+                app.config_editor_cursor =
+                    app.config_editor_cursor.min(app.config_editor_text.len());
             }
             reset_config_editor_goal_column(app);
         }
@@ -7760,8 +8038,10 @@ fn handle_config_editor_insert_key(app: &mut App, key: KeyEvent) {
         }
         _ => {}
     }
-    if matches!(key.code, KeyCode::Backspace | KeyCode::Delete | KeyCode::Enter | KeyCode::Tab)
-        || matches!(key.code, KeyCode::Char(_))
+    if matches!(
+        key.code,
+        KeyCode::Backspace | KeyCode::Delete | KeyCode::Enter | KeyCode::Tab
+    ) || matches!(key.code, KeyCode::Char(_))
     {
         record_config_history(app);
     }
@@ -7801,34 +8081,32 @@ mod tests {
     use crate::state::*;
     use std::{ffi::OsString, fs, thread, time::Duration};
 
+    use crate::editor::cursor_visual_position;
+    use crate::terminal_input::{parse_command, sanitize_terminal_output};
     use chrono::{TimeZone, Utc};
     use clap::Parser;
     use crossterm::event::{
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
     };
-    use papr_core::{
-        sanitize_terminal_output, parse_command,
-        cursor_visual_position, parse_latex_diagnostics,
-        BookmarkSummary, CollectionSummary, Database, DownloadStatus,
-        CitationEntry, CitationSource, Config, DownloadTask, LibraryPaper, PaperNote, Project, RemotePaper,
-    };
     use papr_core::models::AuthorSummary;
+    use papr_core::{
+        BookmarkSummary, CitationEntry, CitationSource, CollectionSummary, Config, Database,
+        LibraryPaper, MetadataEnrichmentService, PaperNote, Project, RemotePaper,
+        parse_latex_diagnostics,
+    };
 
     use super::{
-        UiAction, build_config_editor_view,
-        handle_config_editor_insert_key, handle_downloads_key, handle_key, handle_mouse, handle_paper_detail_key, 
-         move_config_editor_page, refresh_downloads_from_dir,
-        accept_project_completion, create_project_file, is_project_text_file, project_tree_entries,
-        handle_project_exact_paste, insert_project_bibtex_text,
-        reload_config_editor_buffer, 
-        update_project_completions, merge_enriched_remote_paper, run_terminal_command,
-         PaperTarget,
-        handle_project_citation_search_key,
-        show_build_for_failed_compilation, show_preview_after_successful_compilation,
-        complete_terminal_command, ConfigFilesystemWatcher, pdf_viewer_invocation,
-        expire_project_editor_pending_sequence, is_text_paste_shortcut, paste_text_into_active_input, should_open_generated_pdf,
-        Cli, CliCommand, TypstWorkerRequest, TypstWorkerResponse,
-        PROJECT_EDITOR_PENDING_SEQUENCE_TIMEOUT,
+        Cli, CliCommand, ConfigFilesystemWatcher, PROJECT_EDITOR_PENDING_SEQUENCE_TIMEOUT,
+        PaperTarget, TypstWorkerRequest, TypstWorkerResponse, UiAction, accept_project_completion,
+        build_config_editor_view, complete_terminal_command, create_project_file,
+        expire_project_editor_pending_sequence, handle_config_editor_insert_key,
+        handle_downloads_key, handle_key, handle_mouse, handle_paper_detail_key,
+        handle_project_citation_search_key, handle_project_exact_paste, insert_project_bibtex_text,
+        is_project_text_file, is_text_paste_shortcut, merge_enriched_remote_paper,
+        move_config_editor_page, paste_text_into_active_input, pdf_viewer_invocation,
+        project_tree_entries, refresh_downloads_from_dir, reload_config_editor_buffer,
+        run_terminal_command, should_open_generated_pdf, show_build_for_failed_compilation,
+        show_preview_after_successful_compilation, update_project_completions,
     };
 
     #[test]
@@ -7840,13 +8118,21 @@ mod tests {
             ..App::default()
         };
 
-        assert!(handle_project_citation_search_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
-        )
-        .is_none());
-        assert_eq!(app.project_citation_search_mode, ProjectCitationSearchMode::Online);
-        assert_eq!(app.project_citation_search_status.as_deref(), Some("Press Enter to search online."));
+        assert!(
+            handle_project_citation_search_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            )
+            .is_none()
+        );
+        assert_eq!(
+            app.project_citation_search_mode,
+            ProjectCitationSearchMode::Online
+        );
+        assert_eq!(
+            app.project_citation_search_status.as_deref(),
+            Some("Press Enter to search online.")
+        );
 
         assert!(matches!(
             handle_project_citation_search_key(
@@ -7923,7 +8209,9 @@ mod tests {
         let temp_dir = std::env::temp_dir().join(format!(
             "papr-config-watch-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
         ));
         fs::create_dir_all(&temp_dir)?;
         let config_file = temp_dir.join("config.toml");
@@ -7954,35 +8242,51 @@ mod tests {
 
     #[test]
     fn test_word_wise_and_line_editing_navigation() {
-        use super::{edit_text, prev_word_boundary, next_word_boundary};
-        
+        use super::{edit_text, next_word_boundary, prev_word_boundary};
+
         let text = "hello world  rust_programming  123";
         // Test word boundaries
         assert_eq!(next_word_boundary(text, 0), 6); // start of "world"
         assert_eq!(next_word_boundary(text, 6), 13); // start of "rust_programming"
         assert_eq!(next_word_boundary(text, 13), 31); // start of "123"
-        
+
         assert_eq!(prev_word_boundary(text, 34), 31); // start of "123"
         assert_eq!(prev_word_boundary(text, 31), 13); // start of "rust_programming"
         assert_eq!(prev_word_boundary(text, 13), 6); // start of "world"
-        
+
         let mut buffer = "first second\nthird fourth".to_owned();
         let mut cursor = 6;
-        
+
         // Test Home
-        edit_text(&mut buffer, &mut cursor, KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        edit_text(
+            &mut buffer,
+            &mut cursor,
+            KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+        );
         assert_eq!(cursor, 0);
-        
+
         // Test End
-        edit_text(&mut buffer, &mut cursor, KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        edit_text(
+            &mut buffer,
+            &mut cursor,
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+        );
         assert_eq!(cursor, 12); // end of "first second"
-        
+
         // Test Ctrl + Left
-        edit_text(&mut buffer, &mut cursor, KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL));
+        edit_text(
+            &mut buffer,
+            &mut cursor,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL),
+        );
         assert_eq!(cursor, 6); // start of "second"
-        
+
         // Test Ctrl + Right
-        edit_text(&mut buffer, &mut cursor, KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL));
+        edit_text(
+            &mut buffer,
+            &mut cursor,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL),
+        );
         assert_eq!(cursor, 13);
     }
 
@@ -8024,12 +8328,17 @@ mod tests {
             &mut app,
             KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
         );
-        assert!(matches!(res, crate::settings_modal::SettingsKeyResult::Handled));
+        assert!(matches!(
+            res,
+            crate::settings_modal::SettingsKeyResult::Handled
+        ));
         assert_eq!(app.mode, AppMode::CommandPalette);
 
         // When app.mode == AppMode::CommandPalette, event loop condition
         // (app.page == Page::Settings && app.content_focused && app.mode == AppMode::Normal) is false.
-        assert!(!(app.page == Page::Settings && app.content_focused && app.mode == AppMode::Normal));
+        assert!(
+            !(app.page == Page::Settings && app.content_focused && app.mode == AppMode::Normal)
+        );
 
         // Subsequent keys go to handle_key for CommandPalette
         let _ = handle_key(
@@ -8039,10 +8348,7 @@ mod tests {
         assert_eq!(app.palette_query, "d");
 
         // Esc closes CommandPalette and restores normal focus in Settings workspace
-        let _ = handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-        );
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.mode, AppMode::Normal);
         assert_eq!(app.page, Page::Settings);
         assert!(app.content_focused);
@@ -8062,17 +8368,19 @@ mod tests {
             &mut app,
             KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
         );
-        assert!(matches!(res, crate::settings_modal::SettingsKeyResult::Handled));
+        assert!(matches!(
+            res,
+            crate::settings_modal::SettingsKeyResult::Handled
+        ));
         assert_eq!(app.mode, AppMode::Help);
 
         // While app.mode == AppMode::Help, key routing condition for settings workspace is false
-        assert!(!(app.page == Page::Settings && app.content_focused && app.mode == AppMode::Normal));
+        assert!(
+            !(app.page == Page::Settings && app.content_focused && app.mode == AppMode::Normal)
+        );
 
         // Subsequent keys go to handle_key for Help mode (scrolling)
-        let _ = handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-        );
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.help_scroll, 1);
 
         // Pressing '?' or Esc closes Help mode and restores normal focus in Settings workspace
@@ -8112,14 +8420,8 @@ mod tests {
             mode: AppMode::CommandPalette,
             ..App::default()
         };
-        let _ = handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-        );
-        let _ = handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-        );
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.palette_selected, 2);
     }
 
@@ -8140,15 +8442,9 @@ mod tests {
         assert!(items.contains(&Page::Library));
 
         // Down arrow should move selection
-        let _ = handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-        );
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         // Press Enter to activate
-        let action = handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        );
+        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(action.is_none());
         assert_eq!(app.mode, AppMode::Normal);
     }
@@ -8191,9 +8487,15 @@ mod tests {
                 page,
                 content_focused: true,
                 mode: AppMode::PaperDetail,
-                today_papers: vec![remote_paper("https://arxiv.org/abs/dashboard", "Dashboard paper")],
+                today_papers: vec![remote_paper(
+                    "https://arxiv.org/abs/dashboard",
+                    "Dashboard paper",
+                )],
                 discovery: DiscoveryState {
-                    results: vec![remote_paper("https://arxiv.org/abs/discover", "Discover paper")],
+                    results: vec![remote_paper(
+                        "https://arxiv.org/abs/discover",
+                        "Discover paper",
+                    )],
                     ..DiscoveryState::default()
                 },
                 ..App::default()
@@ -8347,9 +8649,16 @@ mod tests {
         for from_filter in [false, true] {
             let mut app = App {
                 page: Page::Discover,
-                sidebar_index: Page::ALL.iter().position(|&page| page == Page::Discover).unwrap(),
+                sidebar_index: Page::ALL
+                    .iter()
+                    .position(|&page| page == Page::Discover)
+                    .unwrap(),
                 content_focused: true,
-                mode: if from_filter { AppMode::DiscoverFilter } else { AppMode::Search },
+                mode: if from_filter {
+                    AppMode::DiscoverFilter
+                } else {
+                    AppMode::Search
+                },
                 discovery: DiscoveryState {
                     query: "quantum search".into(),
                     query_cursor: 14,
@@ -8368,13 +8677,17 @@ mod tests {
             app.discovery.rebuild_filter();
 
             // Both inputs move into the same results pane.
-            assert!(handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).is_none());
+            assert!(
+                handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).is_none()
+            );
             assert_eq!(app.mode, AppMode::Normal);
             assert_eq!(app.discovery.selected, 0);
             app.discovery.scroll = 1;
 
             // Left leaves the results pane for navigation without entering either input.
-            assert!(handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)).is_none());
+            assert!(
+                handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)).is_none()
+            );
             assert!(!app.content_focused);
             assert_eq!(app.mode, AppMode::Normal);
             assert_eq!(app.discovery.query, "quantum search");
@@ -8414,10 +8727,22 @@ mod tests {
                 .collect(),
         );
 
-        assert!(handle_key(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL)).is_none());
+        assert!(
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL)
+            )
+            .is_none()
+        );
         assert_eq!(app.discovery.page, 1);
         assert_eq!(app.discovery.current_page_results()[0].title, "Paper 50");
-        assert!(handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL)).is_none());
+        assert!(
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL)
+            )
+            .is_none()
+        );
         assert_eq!(app.discovery.page, 0);
         assert_eq!(app.discovery.current_page_results()[0].title, "Paper 0");
     }
@@ -8466,14 +8791,20 @@ mod tests {
             });
 
             // 1. When workspace has focus, pressing '>' should return focus to search bar
-            let action = handle_key(&mut app, KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE));
+            let action = handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE),
+            );
             assert!(action.is_none());
             assert!(app.content_focused);
             assert_eq!(app.mode, AppMode::WorkspaceSearch);
             assert!(app.active_search_workspaces.contains(&page));
 
             // 2. Pressing '>' again in search mode should return focus to workspace
-            let action = handle_key(&mut app, KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE));
+            let action = handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE),
+            );
             assert!(action.is_none());
             assert!(app.content_focused);
             assert_eq!(app.mode, AppMode::Normal);
@@ -8481,7 +8812,10 @@ mod tests {
             assert!(!app.active_search_workspaces.contains(&page));
 
             // 3. Enter search mode again and test Down Arrow
-            handle_key(&mut app, KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE));
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE),
+            );
             assert_eq!(app.mode, AppMode::WorkspaceSearch);
 
             // Pressing Down Arrow should move focus to first visible paper in filtered list (index 0)
@@ -8503,7 +8837,10 @@ mod tests {
             }
 
             // 4. Enter search mode and test Esc
-            handle_key(&mut app, KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE));
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE),
+            );
             assert_eq!(app.mode, AppMode::WorkspaceSearch);
 
             let action = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -8641,7 +8978,10 @@ mod tests {
             ..App::default()
         };
 
-        handle_config_editor_insert_key(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        handle_config_editor_insert_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        );
         assert!(app.config_editor_insert_mode);
         assert_eq!(app.config_editor_cursor, 2);
 
@@ -8681,8 +9021,10 @@ mod tests {
     fn citation_completion_replaces_only_the_current_key() {
         let mut app = project_editor_app("\\cite{newton1687, eins}", 22);
         let source = CitationSource::new(vec![CitationEntry {
-            key: "einstein1905".into(), author: "Albert Einstein".into(),
-            title: "Moving Bodies".into(), year: "1905".into(),
+            key: "einstein1905".into(),
+            author: "Albert Einstein".into(),
+            title: "Moving Bodies".into(),
+            year: "1905".into(),
         }]);
         update_project_completions(&mut app, Some(&source));
         assert!(accept_project_completion(&mut app));
@@ -8771,13 +9113,20 @@ mod tests {
         assert_eq!(app.mode, AppMode::TerminalCommand);
         assert!(app.terminal_command.is_empty());
         assert!(app.terminal_command_output.is_empty());
-        assert_eq!(app.terminal_command_directory, super::terminal_home_directory());
+        assert_eq!(
+            app.terminal_command_directory,
+            super::terminal_home_directory()
+        );
     }
 
     #[test]
     fn ctrl_t_uses_the_project_root_only_inside_an_open_project() {
         let root = std::env::temp_dir().join(format!("papr-terminal-root-{}", std::process::id()));
-        let project = Project { name: "terminal".into(), path: root.clone(), opened_at: 0 };
+        let project = Project {
+            name: "terminal".into(),
+            path: root.clone(),
+            opened_at: 0,
+        };
         let mut app = App {
             page: Page::Projects,
             active_project: Some(project),
@@ -8785,7 +9134,10 @@ mod tests {
             ..App::default()
         };
 
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+        );
 
         assert_eq!(app.terminal_command_directory, Some(root));
     }
@@ -8797,14 +9149,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let mut app = project_editor_app("", 0);
-        app.active_project = Some(Project { name: "terminal".into(), path: root.clone(), opened_at: 0 });
+        app.active_project = Some(Project {
+            name: "terminal".into(),
+            path: root.clone(),
+            opened_at: 0,
+        });
         app.terminal_command_directory = Some(root.clone());
         app.terminal_command = "pwd".into();
         app.terminal_command_cursor = app.terminal_command.len();
 
         run_terminal_command(&mut app);
 
-        assert!(app.terminal_command_output.contains(root.to_string_lossy().as_ref()));
+        assert!(
+            app.terminal_command_output
+                .contains(root.to_string_lossy().as_ref())
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -8896,7 +9255,10 @@ mod tests {
 
         complete_terminal_command(&mut app, false);
         assert_eq!(app.terminal_command, "cp Documents/");
-        assert_eq!(app.terminal_completions, vec!["Documents/Alpha.tex", "Documents/Beta.tex"]);
+        assert_eq!(
+            app.terminal_completions,
+            vec!["Documents/Alpha.tex", "Documents/Beta.tex"]
+        );
         complete_terminal_command(&mut app, false);
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -9093,31 +9455,58 @@ mod tests {
     fn project_editor_visual_line_delete_undo_redo_and_word_deletion_work() {
         let mut app = project_editor_app("one\ntwo\nthree", 0);
         app.project_editor_insert_mode = false;
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT));
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT),
+        );
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+        );
         assert_eq!(app.project_editor_visual_line_anchor, Some(0));
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
         assert_eq!(app.project_editor_text, "three");
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE),
+        );
         assert_eq!(app.project_editor_text, "one\ntwo\nthree");
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        );
         assert_eq!(app.project_editor_text, "three");
 
         app.project_editor_text = "alpha beta".into();
         app.project_editor_cursor = app.project_editor_text.len();
         app.project_editor_insert_mode = true;
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL),
+        );
         assert_eq!(app.project_editor_text, "alpha ");
         app.project_editor_cursor = 0;
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL),
+        );
         assert_eq!(app.project_editor_text, "");
 
         app.project_editor_text = "alpha, beta".into();
         app.project_editor_cursor = app.project_editor_text.len();
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL),
+        );
         assert_eq!(app.project_editor_text, "alpha, ");
         app.project_editor_cursor = 0;
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL),
+        );
         assert_eq!(app.project_editor_text, ", ");
     }
 
@@ -9146,53 +9535,104 @@ mod tests {
 
         let _ = handle_mouse(
             &mut app,
-            MouseEvent { kind: MouseEventKind::ScrollDown, column: 0, row: 0, modifiers: KeyModifiers::NONE },
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            },
         );
         assert_eq!(app.project_editor_cursor, "one\ntwo\nthree\n".len() + 1);
         assert!(!app.project_editor_manual_scroll);
 
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
-        assert_eq!(app.project_editor_pending_sequence.map(|sequence| sequence.first_key), Some('g'));
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            app.project_editor_pending_sequence
+                .map(|sequence| sequence.first_key),
+            Some('g')
+        );
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+        );
         assert_eq!(app.project_editor_cursor, 0);
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
+        );
         assert_eq!(app.project_editor_cursor, "one\ntwo\nthree\n".len());
 
         // An invalid second key cancels `g` and is then handled normally.
         app.project_editor_cursor += 2;
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+        );
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE),
+        );
         assert!(app.project_editor_pending_sequence.is_none());
         assert_eq!(app.project_editor_cursor, "one\ntwo\nthree\n".len());
     }
 
     #[test]
     fn project_editor_visual_line_motions_extend_the_selection() {
-        let mut app = project_editor_app("first\n\nsecond\n\n(third)\nlast", "first\n\nsecond\n".len());
+        let mut app = project_editor_app(
+            "first\n\nsecond\n\n(third)\nlast",
+            "first\n\nsecond\n".len(),
+        );
         app.project_editor_insert_mode = false;
 
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT),
+        );
         assert_eq!(app.project_editor_visual_line_anchor, Some(3));
 
         // `gg` and `G` are motions while Visual Line mode is active; neither
         // should leave the mode or reset its anchor.
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+        );
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+        );
         assert_eq!(app.project_editor_cursor, 0);
         assert_eq!(app.project_editor_visual_line_anchor, Some(3));
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT));
-        assert_eq!(app.project_editor_cursor, "first\n\nsecond\n\n(third)\n".len());
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
+        );
+        assert_eq!(
+            app.project_editor_cursor,
+            "first\n\nsecond\n\n(third)\n".len()
+        );
         assert_eq!(app.project_editor_visual_line_anchor, Some(3));
 
         // Paragraph and delimiter motions use the same cursor path in Visual
         // Line and Normal mode, so they also extend the selection.
         app.project_editor_cursor = "first\n\nsecond\n".len();
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('}'), KeyModifiers::SHIFT));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('}'), KeyModifiers::SHIFT),
+        );
         assert_eq!(app.project_editor_cursor, "first\n\nsecond\n\n".len());
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('{'), KeyModifiers::SHIFT));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('{'), KeyModifiers::SHIFT),
+        );
         assert_eq!(app.project_editor_cursor, "first\n\n".len());
         app.project_editor_cursor = "first\n\nsecond\n\n".len();
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('%'), KeyModifiers::SHIFT));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('%'), KeyModifiers::SHIFT),
+        );
         assert_eq!(app.project_editor_cursor, "first\n\nsecond\n\n(third".len());
         assert_eq!(app.project_editor_visual_line_anchor, Some(3));
     }
@@ -9202,10 +9642,20 @@ mod tests {
         let mut app = project_editor_app("one\ntwo\nthree", "one\n".len());
         app.project_editor_insert_mode = false;
 
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
-        assert_eq!(app.project_editor_pending_sequence.map(|sequence| sequence.first_key), Some('d'));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            app.project_editor_pending_sequence
+                .map(|sequence| sequence.first_key),
+            Some('d')
+        );
         assert_eq!(app.project_editor_text, "one\ntwo\nthree");
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
         assert_eq!(app.project_editor_text, "one\nthree");
         assert_eq!(app.project_editor_cursor, "one\n".len());
         assert!(app.project_editor_pending_sequence.is_none());
@@ -9213,12 +9663,21 @@ mod tests {
 
         // A non-`d` second key cancels the operator and retains that key's
         // ordinary Normal-mode behavior.
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
         assert_eq!(app.project_editor_text, "one\nhree");
         assert!(app.project_editor_pending_sequence.is_none());
 
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.project_editor_pending_sequence.is_none());
 
@@ -9234,19 +9693,25 @@ mod tests {
     fn project_editor_dd_removes_a_final_trailing_newline_line() {
         let mut app = project_editor_app("one\n", 4);
         app.project_editor_insert_mode = false;
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
         assert_eq!(app.project_editor_text, "one");
         assert_eq!(app.project_editor_cursor, 3);
     }
-
 
     #[test]
     fn project_alt_number_shortcuts_select_available_panes_directly() {
         let mut app = project_editor_app("unchanged", 4);
         app.project_editor_path = Some(std::path::PathBuf::from("keyboard-test/main.tex"));
         app.project_editor_insert_mode = false;
-        app.pdf_viewer_path = Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"));
+        app.pdf_viewer_path =
+            Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"));
 
         for (number, expected) in [
             ('1', ProjectPane::FileTree),
@@ -9285,7 +9750,11 @@ mod tests {
             KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT),
         );
         assert_eq!(app.project_pane, ProjectPane::ProjectList);
-        assert!(app.toast.as_deref().is_some_and(|message| message.contains("Open a project")));
+        assert!(
+            app.toast
+                .as_deref()
+                .is_some_and(|message| message.contains("Open a project"))
+        );
     }
 
     #[test]
@@ -9311,11 +9780,17 @@ mod tests {
         app.project_build_visible = true;
         app.project_pane = ProjectPane::Build;
 
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT),
+        );
         assert_eq!(app.project_pane, ProjectPane::FileTree);
         assert!(app.project_build_visible);
 
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT),
+        );
         assert_eq!(app.project_pane, ProjectPane::Editor);
         assert!(app.project_build_visible);
     }
@@ -9348,8 +9823,13 @@ mod tests {
         let action = handle_key(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         assert!(matches!(action, Some(UiAction::OpenProject(opened)) if opened == project));
 
-        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
-        assert!(matches!(action, Some(UiAction::ConfirmDeleteProject(selected)) if selected == project));
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        assert!(
+            matches!(action, Some(UiAction::ConfirmDeleteProject(selected)) if selected == project)
+        );
     }
 
     #[test]
@@ -9361,7 +9841,10 @@ mod tests {
             ..App::default()
         };
 
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+        );
         assert_eq!(app.mode, AppMode::ProjectCreate);
         for character in ['p', 'a', 'p', 'r'] {
             let _ = handle_key(
@@ -9388,7 +9871,10 @@ mod tests {
         };
         app.settings_modal.default_project_compiler = "typst".to_string();
 
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+        );
         assert_eq!(app.mode, AppMode::ProjectCreate);
         assert_eq!(app.project_create_compiler, "typst");
     }
@@ -9406,24 +9892,45 @@ mod tests {
             content_focused: true,
             ..App::default()
         };
-        app.discovery.set_results(vec![author_match, abstract_match, title_match]);
+        app.discovery
+            .set_results(vec![author_match, abstract_match, title_match]);
 
-        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE));
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE),
+        );
         assert!(action.is_none());
         assert_eq!(app.mode, AppMode::DiscoverFilter);
         for character in "genome".chars() {
-            assert!(handle_key(&mut app, KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)).is_none());
+            assert!(
+                handle_key(
+                    &mut app,
+                    KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)
+                )
+                .is_none()
+            );
         }
         assert_eq!(app.discovery.filtered_result_count(), 3);
-        assert_eq!(app.discovery.selected_paper().map(|paper| paper.id.as_str()), Some("author"));
+        assert_eq!(
+            app.discovery
+                .selected_paper()
+                .map(|paper| paper.id.as_str()),
+            Some("author")
+        );
 
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.mode, AppMode::Normal);
         assert_eq!(app.discovery.filter, "genome");
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE),
+        );
         assert_eq!(app.mode, AppMode::DiscoverFilter);
         for _ in 0.."genome".len() {
-            let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+            let _ = handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            );
         }
         assert!(app.discovery.filter.is_empty());
         assert_eq!(app.discovery.filtered_result_count(), 3);
@@ -9434,10 +9941,16 @@ mod tests {
         let mut app = project_editor_app("", 0);
         app.project_pane = ProjectPane::FileTree;
 
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+        );
         assert_eq!(app.mode, AppMode::ProjectFileCreate);
         for character in ['n', 'o', 't', 'e', 's', '.', 'm', 'd'] {
-            let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+            let _ = handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
         }
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
@@ -9466,7 +9979,11 @@ mod tests {
         let image = root.join("figure.webp");
         std::fs::write(&image, []).unwrap();
         assert!(project_tree_entries(&root).contains(&image));
-        assert!(create_project_file(&root, "chapters/introduction.tex").unwrap_err().contains("already exists"));
+        assert!(
+            create_project_file(&root, "chapters/introduction.tex")
+                .unwrap_err()
+                .contains("already exists")
+        );
         assert!(create_project_file(&root, "../outside.tex").is_err());
         assert!(create_project_file(&root, "/tmp/outside.tex").is_err());
 
@@ -9478,14 +9995,9 @@ mod tests {
     fn project_file_creation_rejects_symlinked_parents_outside_the_project() {
         use std::os::unix::fs::symlink;
 
-        let root = std::env::temp_dir().join(format!(
-            "papr-file-symlink-{}",
-            std::process::id()
-        ));
-        let outside = std::env::temp_dir().join(format!(
-            "papr-file-outside-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("papr-file-symlink-{}", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("papr-file-outside-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&outside);
         std::fs::create_dir_all(&root).unwrap();
@@ -9508,7 +10020,11 @@ mod tests {
         std::fs::write(folder.join("logo.tex"), "logo").unwrap();
 
         let mut app = project_editor_app("", 0);
-        app.active_project = Some(Project { name: "tree".into(), path: root.clone(), opened_at: 0 });
+        app.active_project = Some(Project {
+            name: "tree".into(),
+            path: root.clone(),
+            opened_at: 0,
+        });
         app.project_pane = ProjectPane::FileTree;
         app.project_tree_dir = Some(root.clone());
         app.project_files = project_tree_entries(&root);
@@ -9532,9 +10048,14 @@ mod tests {
         app.project_pane = ProjectPane::FileTree;
         app.project_files = vec![folder.clone()];
 
-        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
 
-        assert!(matches!(action, Some(UiAction::ConfirmDeleteProjectEntry(path)) if path == folder));
+        assert!(
+            matches!(action, Some(UiAction::ConfirmDeleteProjectEntry(path)) if path == folder)
+        );
     }
 
     #[test]
@@ -9544,7 +10065,10 @@ mod tests {
         app.project_pane = ProjectPane::FileTree;
         app.project_files = vec![folder.clone()];
 
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE),
+        );
 
         assert_eq!(app.mode, AppMode::ProjectEntryRename);
         assert_eq!(app.project_rename_input, "assets");
@@ -9556,7 +10080,11 @@ mod tests {
         let mut app = project_editor_app("", 0);
         let active = app.active_project.clone().unwrap();
         app.projects = vec![
-            Project { name: "other".into(), path: "other".into(), opened_at: 0 },
+            Project {
+                name: "other".into(),
+                path: "other".into(),
+                opened_at: 0,
+            },
             active,
         ];
         app.projects_selected = 0;
@@ -9574,7 +10102,11 @@ mod tests {
         let mut app = project_editor_app("abc", 1);
         let active = app.active_project.clone().unwrap();
         app.projects = vec![
-            Project { name: "other".into(), path: "other".into(), opened_at: 0 },
+            Project {
+                name: "other".into(),
+                path: "other".into(),
+                opened_at: 0,
+            },
             active,
         ];
         app.projects_selected = 0;
@@ -9654,7 +10186,10 @@ mod tests {
 
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.project_build_scroll, 1);
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+        );
         assert_eq!(app.project_build_scroll, 3);
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
         assert_eq!(app.project_build_scroll, 0);
@@ -9666,7 +10201,10 @@ mod tests {
         assert_eq!(app.pdf_viewer_page, 2);
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(app.pdf_viewer_page, 3);
-        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+        );
         assert_eq!(app.pdf_viewer_page, 4);
         let _ = handle_key(&mut app, KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
         assert_eq!(app.pdf_viewer_page, 3);
@@ -9763,9 +10301,16 @@ mod tests {
             }],
             ..App::default()
         };
-        let action = handle_downloads_key(&mut app, KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        let action = handle_downloads_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+        );
         assert!(action.is_some());
-        if let Some(UiAction::RetryDownload { id, paper: retry_paper }) = action {
+        if let Some(UiAction::RetryDownload {
+            id,
+            paper: retry_paper,
+        }) = action
+        {
             assert_eq!(id, "retry_id");
             assert_eq!(retry_paper.title, "Retry Paper");
         } else {
@@ -9924,7 +10469,8 @@ mod tests {
         assert!(
             app.downloads
                 .iter()
-                .any(|task| task.pdf_path.as_deref() == Some(incoming_path.to_string_lossy().as_ref()))
+                .any(|task| task.pdf_path.as_deref()
+                    == Some(incoming_path.to_string_lossy().as_ref()))
         );
         assert!(
             !app.downloads
@@ -9961,7 +10507,10 @@ mod tests {
             ..App::default()
         };
         assert!(matches!(
-            handle_key(&mut library_app, KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)),
+            handle_key(
+                &mut library_app,
+                KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)
+            ),
             Some(UiAction::MarkUnread(11))
         ));
 
@@ -10064,7 +10613,10 @@ mod tests {
             ..App::default()
         };
         assert!(matches!(
-            handle_key(&mut notes_app, KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)),
+            handle_key(
+                &mut notes_app,
+                KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)
+            ),
             Some(UiAction::MarkUnread(11))
         ));
     }
@@ -10156,17 +10708,26 @@ mod tests {
                     .into_iter()
                     .collect(),
                 discovery: DiscoveryState {
-                    results: (page == Page::Discover).then_some(paper).into_iter().collect(),
+                    results: (page == Page::Discover)
+                        .then_some(paper)
+                        .into_iter()
+                        .collect(),
                     ..DiscoveryState::default()
                 },
                 ..App::default()
             };
             assert!(matches!(
-                handle_key(&mut app, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+                handle_key(
+                    &mut app,
+                    KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)
+                ),
                 Some(UiAction::CopyCitation(PaperTarget::Remote(_)))
             ));
             assert!(matches!(
-                handle_key(&mut app, KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)),
+                handle_key(
+                    &mut app,
+                    KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)
+                ),
                 Some(UiAction::Download(_))
             ));
         }
@@ -10200,7 +10761,13 @@ mod tests {
         ));
 
         app.library.papers[0].arxiv_id = None;
-        assert!(handle_key(&mut app, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)).is_none());
+        assert!(
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)
+            )
+            .is_none()
+        );
         assert_eq!(
             app.toast.as_deref(),
             Some("No valid arXiv page is available for this paper")
@@ -10226,9 +10793,15 @@ mod tests {
                 page,
                 content_focused: true,
                 mode: AppMode::PaperDetail,
-                today_papers: (page == Page::Dashboard).then_some(remote.clone()).into_iter().collect(),
+                today_papers: (page == Page::Dashboard)
+                    .then_some(remote.clone())
+                    .into_iter()
+                    .collect(),
                 discovery: DiscoveryState {
-                    results: (page == Page::Discover).then_some(remote).into_iter().collect(),
+                    results: (page == Page::Discover)
+                        .then_some(remote)
+                        .into_iter()
+                        .collect(),
                     ..DiscoveryState::default()
                 },
                 library: LibraryState {
@@ -10255,7 +10828,10 @@ mod tests {
                     if path == pdf_path
             ));
 
-            let browser = handle_key(&mut app, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+            let browser = handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+            );
             assert!(matches!(
                 browser,
                 Some(UiAction::OpenBrowser(url)) if url.ends_with("/downloaded")
@@ -10365,7 +10941,8 @@ mod tests {
     }
 
     #[test]
-    fn external_pdf_viewers_receive_the_pdf_as_one_native_argument() -> Result<(), Box<dyn std::error::Error>> {
+    fn external_pdf_viewers_receive_the_pdf_as_one_native_argument()
+    -> Result<(), Box<dyn std::error::Error>> {
         let path = std::path::PathBuf::from("/tmp/Papr Papers/first build.pdf");
         let (program, args) = pdf_viewer_invocation("xdg-open", &path)?;
         assert_eq!(program, "xdg-open");
@@ -10373,7 +10950,10 @@ mod tests {
 
         let (program, args) = pdf_viewer_invocation("viewer --open={path}", &path)?;
         assert_eq!(program, "viewer");
-        assert_eq!(args, vec![OsString::from(format!("--open={}", path.display()))]);
+        assert_eq!(
+            args,
+            vec![OsString::from(format!("--open={}", path.display()))]
+        );
         Ok(())
     }
 
@@ -10386,10 +10966,7 @@ mod tests {
 
     #[test]
     fn control_s_is_consumed_before_editor_text_handling() {
-        let root = std::env::temp_dir().join(format!(
-            "papr-save-shortcut-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("papr-save-shortcut-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let source = root.join("main.tex");
@@ -10528,16 +11105,6 @@ mod tests {
         ));
     }
 
-
-
-
-
-
-
-
-
-
-
     fn remote_paper(id: &str, title: &str) -> RemotePaper {
         let timestamp = Utc
             .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
@@ -10581,14 +11148,20 @@ mod tests {
             },
             ..App::default()
         };
-        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        );
         assert!(matches!(action, Some(UiAction::AddToQueue(42))));
 
         // Case 2: Toggle Remove from queue from ReadingQueue page
         app.page = Page::ReadingQueue;
         app.reading_queue_papers = vec![paper];
         app.reading_queue_selected = 0;
-        let action = handle_key(&mut app, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        );
         assert!(matches!(action, Some(UiAction::RemoveFromQueue(42))));
 
         // Case 3: Move Up and Move Down in queue
@@ -10616,14 +11189,16 @@ mod tests {
 
         // Enter key should trigger UiAction::OpenBrowser(url)
         let action = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(action, Some(UiAction::OpenBrowser(ref url)) if url == "https://github.com/AfrozSaqlain/Papr"));
+        assert!(
+            matches!(action, Some(UiAction::OpenBrowser(ref url)) if url == "https://github.com/AfrozSaqlain/Papr")
+        );
     }
 
     #[tokio::test]
     async fn test_pdf_rename_flow_full() -> Result<(), Box<dyn std::error::Error>> {
+        use super::{ActionSenders, Runtime, apply_collection_prompt};
         use std::collections::HashSet;
         use tokio::sync::mpsc;
-        use super::{Runtime, apply_collection_prompt, ActionSenders};
 
         let temp_dir = std::env::temp_dir().join(format!(
             "papr-rename-flow-{}-{}",
@@ -10644,8 +11219,9 @@ mod tests {
 
         let mut runtime = Runtime {
             arxiv: papr_core::api::arxiv::ArxivClient::new().unwrap(),
-            crossref: papr_core::api::crossref::CrossrefClient::new(),
-            openalex: papr_core::api::openalex::OpenAlexClient::new(),
+            metadata_enrichment: MetadataEnrichmentService::new(
+                papr_core::api::arxiv::ArxivClient::new().unwrap(),
+            ),
             downloads: papr_core::downloads::DownloadManager::new().unwrap(),
             database,
             database_file,
@@ -10716,7 +11292,15 @@ mod tests {
         apply_collection_prompt(&mut runtime, &mut app, &prompt)?;
 
         assert_eq!(app.library.papers[0].title, "my old paper");
-        assert_eq!(app.library.papers[0].pdf_path, Some(temp_dir.join("my_new_paper.pdf").to_string_lossy().into_owned()));
+        assert_eq!(
+            app.library.papers[0].pdf_path,
+            Some(
+                temp_dir
+                    .join("my_new_paper.pdf")
+                    .to_string_lossy()
+                    .into_owned()
+            )
+        );
 
         let index_res = papr_core::library::LibraryIndexer::scan(&[temp_dir.clone()]);
         let response = crate::IndexResponse::Scan {
@@ -10748,10 +11332,11 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_plugin_event_dispatch_and_auto_tagger_action() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_plugin_event_dispatch_and_auto_tagger_action()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::{Runtime, dispatch_plugin_events};
         use std::os::unix::fs::PermissionsExt;
         use tokio::sync::mpsc;
-        use super::{Runtime, dispatch_plugin_events};
 
         let temp_dir = std::env::temp_dir().join(format!(
             "papr-plugin-dispatch-{}-{}",
@@ -10796,7 +11381,8 @@ print(json.dumps({"actions": actions}))
         perms.set_mode(0o755);
         std::fs::set_permissions(&script_path, perms)?;
 
-        let plugin_host = papr_core::PluginHost::discover(&plugins_dir, &["auto-tagger".to_string()])?;
+        let plugin_host =
+            papr_core::PluginHost::discover(&plugins_dir, &["auto-tagger".to_string()])?;
         let database_file = temp_dir.join("papr.db");
         let database = Database::open(&database_file)?;
 
@@ -10805,8 +11391,9 @@ print(json.dumps({"actions": actions}))
 
         let runtime = Runtime {
             arxiv: papr_core::api::arxiv::ArxivClient::new().unwrap(),
-            crossref: papr_core::api::crossref::CrossrefClient::new(),
-            openalex: papr_core::api::openalex::OpenAlexClient::new(),
+            metadata_enrichment: MetadataEnrichmentService::new(
+                papr_core::api::arxiv::ArxivClient::new().unwrap(),
+            ),
             downloads: papr_core::downloads::DownloadManager::new().unwrap(),
             database,
             database_file,
@@ -10841,7 +11428,8 @@ print(json.dumps({"actions": actions}))
 
         let pdf_path = temp_dir.join("neural_networks.pdf");
         std::fs::write(&pdf_path, "%PDF-1.4 test")?;
-        let pdf = papr_core::library::LibraryIndexer::inspect_in_roots(&pdf_path, &[temp_dir.clone()])?;
+        let pdf =
+            papr_core::library::LibraryIndexer::inspect_in_roots(&pdf_path, &[temp_dir.clone()])?;
         runtime.database.import_pdf(&pdf)?;
 
         let papers = runtime.database.library_papers()?;
@@ -10855,13 +11443,22 @@ print(json.dumps({"actions": actions}))
         assert!(collections.iter().any(|c| c.name == "Machine Learning"));
         assert_eq!(app.toast, Some("Tagged paper!".to_string()));
 
-        let moved_pdf = temp_dir.join("Machine Learning").join("neural_networks.pdf");
+        let moved_pdf = temp_dir
+            .join("Machine Learning")
+            .join("neural_networks.pdf");
         assert!(moved_pdf.exists());
 
-        let directories = papr_core::LibraryIndexer::collection_directories(&runtime.collection_roots);
-        runtime.database.reconcile_collections(&runtime.collection_roots, &directories)?;
+        let directories =
+            papr_core::LibraryIndexer::collection_directories(&runtime.collection_roots);
+        runtime
+            .database
+            .reconcile_collections(&runtime.collection_roots, &directories)?;
         let collections_after = runtime.database.collections()?;
-        assert!(collections_after.iter().any(|c| c.name == "Machine Learning"));
+        assert!(
+            collections_after
+                .iter()
+                .any(|c| c.name == "Machine Learning")
+        );
 
         std::fs::remove_dir_all(&temp_dir)?;
         Ok(())

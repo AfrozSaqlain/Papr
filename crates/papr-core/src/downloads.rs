@@ -1,6 +1,4 @@
 //! Streaming PDF download manager.
-use crate::RemotePaper;
-
 use std::path::{Path, PathBuf};
 
 use futures_util::StreamExt;
@@ -117,59 +115,5 @@ impl DownloadManager {
             path: temp_destination,
         });
         Ok(())
-    }
-}
-
-/// State of one visible background transfer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DownloadStatus {
-    /// Waiting to receive response bytes.
-    Starting,
-    /// Bytes are actively streaming.
-    Running,
-    /// Extracting metadata from PDF (inspection, etc.)
-    ExtractingMetadata,
-    /// Fetching paper metadata from online API (arXiv/Crossref)
-    Enriching,
-    /// Renaming target PDF file based on title/metadata
-    Renaming,
-    /// PDF has been finalized and indexed.
-    Completed,
-    /// Transfer or indexing failed.
-    Failed(String),
-}
-
-/// Download progress shown in the Downloads page and status bar.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DownloadTask {
-    /// arXiv identifier.
-    pub id: String,
-    /// Paper title.
-    pub title: String,
-    /// Persisted bytes.
-    pub downloaded: u64,
-    /// Expected response size when supplied by the server.
-    pub total: Option<u64>,
-    /// Associated database paper ID, if attached.
-    pub paper_id: Option<i64>,
-    /// Final or current PDF path on disk.
-    pub pdf_path: Option<String>,
-    /// Current transfer state.
-    pub status: DownloadStatus,
-    /// Remote paper metadata preserved for retries.
-    pub remote_paper: Option<RemotePaper>,
-    /// When the task failed (used to auto-cleanup older failures).
-    pub failed_at: Option<std::time::Instant>,
-}
-
-impl DownloadTask {
-    /// Display filename without the PDF extension, falling back to the remote paper title.
-    #[must_use]
-    pub fn display_name(&self) -> &str {
-        self.pdf_path
-            .as_deref()
-            .and_then(|path| std::path::Path::new(path).file_stem())
-            .and_then(|name| name.to_str())
-            .unwrap_or_else(|| self.title.strip_suffix(".pdf").unwrap_or(&self.title))
     }
 }

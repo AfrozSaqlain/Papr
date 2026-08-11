@@ -6,9 +6,7 @@ use std::sync::OnceLock;
 
 use crate::build_config_editor_view_with_scroll_mode;
 use crate::settings_modal;
-use papr_core::{
-    DownloadStatus, ProjectDiagnosticSeverity,
-    RemotePaper, };
+use papr_core::{ProjectDiagnosticSeverity, RemotePaper};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::{
     Frame,
@@ -97,9 +95,8 @@ fn focus_block_with_right_title<'a>(
     } else {
         Style::default().fg(theme.muted)
     };
-    focus_block(left_title, focused, theme).title_top(
-        Line::styled(right_title, right_style).alignment(Alignment::Right),
-    )
+    focus_block(left_title, focused, theme)
+        .title_top(Line::styled(right_title, right_style).alignment(Alignment::Right))
 }
 
 /// Return a list selection only while the Workspace owns keyboard focus.
@@ -141,7 +138,10 @@ pub fn resolve_timezone_display(local: &chrono::DateTime<chrono::Local>) -> Stri
     format!("({})", local.format("%:z"))
 }
 
-fn iana_to_abbreviation(iana: &str, local: &chrono::DateTime<chrono::Local>) -> Option<&'static str> {
+fn iana_to_abbreviation(
+    iana: &str,
+    local: &chrono::DateTime<chrono::Local>,
+) -> Option<&'static str> {
     use chrono::Offset;
     let offset_secs = local.offset().fix().local_minus_utc();
 
@@ -154,7 +154,9 @@ fn iana_to_abbreviation(iana: &str, local: &chrono::DateTime<chrono::Local>) -> 
         "Asia/Seoul" => Some("KST"),
 
         // China, Hong Kong, Singapore, Taiwan, Philippines, Malaysia
-        "Asia/Shanghai" | "Asia/Chongqing" | "Asia/Harbin" | "Asia/Urumqi" | "Asia/Taipei" => Some("CST"),
+        "Asia/Shanghai" | "Asia/Chongqing" | "Asia/Harbin" | "Asia/Urumqi" | "Asia/Taipei" => {
+            Some("CST")
+        }
         "Asia/Hong_Kong" => Some("HKT"),
         "Asia/Singapore" => Some("SGT"),
         "Asia/Manila" => Some("PST"),
@@ -162,51 +164,91 @@ fn iana_to_abbreviation(iana: &str, local: &chrono::DateTime<chrono::Local>) -> 
 
         // Australia
         "Australia/Sydney" | "Australia/Melbourne" | "Australia/Canberra" | "Australia/Hobart" => {
-            if offset_secs == 11 * 3600 { Some("AEDT") } else { Some("AEST") }
+            if offset_secs == 11 * 3600 {
+                Some("AEDT")
+            } else {
+                Some("AEST")
+            }
         }
         "Australia/Brisbane" => Some("AEST"),
         "Australia/Adelaide" => {
-            if offset_secs == 10 * 3600 + 1800 { Some("ACDT") } else { Some("ACST") }
+            if offset_secs == 10 * 3600 + 1800 {
+                Some("ACDT")
+            } else {
+                Some("ACST")
+            }
         }
         "Australia/Darwin" => Some("ACST"),
         "Australia/Perth" => Some("AWST"),
 
         // New Zealand
         "Pacific/Auckland" | "NZ" => {
-            if offset_secs == 13 * 3600 { Some("NZDT") } else { Some("NZST") }
+            if offset_secs == 13 * 3600 {
+                Some("NZDT")
+            } else {
+                Some("NZST")
+            }
         }
 
         // US & Canada Eastern
-        "America/New_York" | "America/Detroit" | "America/Toronto" | "America/Montreal"
-        | "America/Indiana/Indianapolis" | "US/Eastern" => {
-            if offset_secs == -4 * 3600 { Some("EDT") } else { Some("EST") }
+        "America/New_York"
+        | "America/Detroit"
+        | "America/Toronto"
+        | "America/Montreal"
+        | "America/Indiana/Indianapolis"
+        | "US/Eastern" => {
+            if offset_secs == -4 * 3600 {
+                Some("EDT")
+            } else {
+                Some("EST")
+            }
         }
 
         // US & Canada Central
         "America/Chicago" | "America/Winnipeg" | "America/Mexico_City" | "US/Central" => {
-            if offset_secs == -5 * 3600 { Some("CDT") } else { Some("CST") }
+            if offset_secs == -5 * 3600 {
+                Some("CDT")
+            } else {
+                Some("CST")
+            }
         }
 
         // US & Canada Mountain
         "America/Denver" | "America/Edmonton" | "America/Boise" | "US/Mountain" => {
-            if offset_secs == -6 * 3600 { Some("MDT") } else { Some("MST") }
+            if offset_secs == -6 * 3600 {
+                Some("MDT")
+            } else {
+                Some("MST")
+            }
         }
         "America/Phoenix" => Some("MST"),
 
         // US & Canada Pacific
         "America/Los_Angeles" | "America/Vancouver" | "America/Tijuana" | "US/Pacific" => {
-            if offset_secs == -7 * 3600 { Some("PDT") } else { Some("PST") }
+            if offset_secs == -7 * 3600 {
+                Some("PDT")
+            } else {
+                Some("PST")
+            }
         }
 
         // Alaska & Hawaii
         "America/Anchorage" => {
-            if offset_secs == -8 * 3600 { Some("AKDT") } else { Some("AKST") }
+            if offset_secs == -8 * 3600 {
+                Some("AKDT")
+            } else {
+                Some("AKST")
+            }
         }
         "Pacific/Honolulu" => Some("HST"),
 
         // UK & Ireland
         "Europe/London" | "Europe/Belfast" | "Europe/Dublin" => {
-            if offset_secs == 1 * 3600 { Some("BST") } else { Some("GMT") }
+            if offset_secs == 1 * 3600 {
+                Some("BST")
+            } else {
+                Some("GMT")
+            }
         }
 
         // Central Europe
@@ -214,13 +256,21 @@ fn iana_to_abbreviation(iana: &str, local: &chrono::DateTime<chrono::Local>) -> 
         | "Europe/Brussels" | "Europe/Vienna" | "Europe/Zurich" | "Europe/Stockholm"
         | "Europe/Oslo" | "Europe/Copenhagen" | "Europe/Prague" | "Europe/Warsaw"
         | "Europe/Budapest" | "Europe/Belgrade" => {
-            if offset_secs == 2 * 3600 { Some("CEST") } else { Some("CET") }
+            if offset_secs == 2 * 3600 {
+                Some("CEST")
+            } else {
+                Some("CET")
+            }
         }
 
         // Eastern Europe
         "Europe/Athens" | "Europe/Helsinki" | "Europe/Bucharest" | "Europe/Kiev"
         | "Europe/Sofia" | "Europe/Tallinn" | "Europe/Riga" | "Europe/Vilnius" => {
-            if offset_secs == 3 * 3600 { Some("EEST") } else { Some("EET") }
+            if offset_secs == 3 * 3600 {
+                Some("EEST")
+            } else {
+                Some("EET")
+            }
         }
 
         // Moscow / Turkey / Gulf
@@ -297,9 +347,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         AppMode::ProjectRename
         | AppMode::ProjectCreate
         | AppMode::ProjectFileCreate
-        | AppMode::ProjectEntryRename => {
-            render_project_name_prompt(frame, app, theme)
-        }
+        | AppMode::ProjectEntryRename => render_project_name_prompt(frame, app, theme),
         AppMode::ProjectCitationSearch => render_project_citation_search(frame, app, theme),
         AppMode::Normal
         | AppMode::Search
@@ -313,26 +361,24 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         && app.mode == AppMode::Normal
         && app.content_focused
         && app.project_pane == ProjectPane::Editor;
-    let config_editor_focused = app.page == Page::Settings
-        && app.mode == AppMode::Normal
-        && app.config_editor_focused;
-    let cursor_style =
-        if config_editor_focused || project_editor_focused {
-            if project_editor_focused && app.project_editor_pending_sequence.is_some() {
-                crossterm::cursor::SetCursorStyle::SteadyUnderScore
-            } else if app.config_editor_insert_mode
-                || (project_editor_focused && app.project_editor_insert_mode)
-            {
-                crossterm::cursor::SetCursorStyle::BlinkingBar
-            } else {
-                crossterm::cursor::SetCursorStyle::BlinkingBlock
-            }
-        } else if app.mode == AppMode::SettingsModal {
-            // The settings modal manages cursor visibility itself.
+    let config_editor_focused =
+        app.page == Page::Settings && app.mode == AppMode::Normal && app.config_editor_focused;
+    let cursor_style = if config_editor_focused || project_editor_focused {
+        if project_editor_focused && app.project_editor_pending_sequence.is_some() {
+            crossterm::cursor::SetCursorStyle::SteadyUnderScore
+        } else if app.config_editor_insert_mode
+            || (project_editor_focused && app.project_editor_insert_mode)
+        {
             crossterm::cursor::SetCursorStyle::BlinkingBar
         } else {
-            crossterm::cursor::SetCursorStyle::BlinkingBar
-        };
+            crossterm::cursor::SetCursorStyle::BlinkingBlock
+        }
+    } else if app.mode == AppMode::SettingsModal {
+        // The settings modal manages cursor visibility itself.
+        crossterm::cursor::SetCursorStyle::BlinkingBar
+    } else {
+        crossterm::cursor::SetCursorStyle::BlinkingBar
+    };
     crate::pdf_viewer::render_pending_kitty_cleanup(frame);
     let _ = crossterm::execute!(std::io::stdout(), cursor_style);
 }
@@ -343,7 +389,9 @@ fn render_project_name_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let area = frame.area();
     let popup = Rect::new(
         area.x + area.width / 4,
-        area.y.saturating_add(area.height / 2).saturating_sub(height / 2),
+        area.y
+            .saturating_add(area.height / 2)
+            .saturating_sub(height / 2),
         area.width / 2,
         height,
     );
@@ -355,13 +403,16 @@ fn render_project_name_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         _ => unreachable!("project prompt rendered outside a project prompt mode"),
     };
     frame.render_widget(Clear, popup);
-    frame.render_widget(Block::default().style(Style::default().bg(theme.surface)), popup);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.surface)),
+        popup,
+    );
 
     if is_create {
         let chunks = Layout::vertical([Constraint::Length(3), Constraint::Length(3)])
             .margin(1)
             .split(popup);
-        
+
         frame.render_widget(
             Paragraph::new(app.project_rename_input.as_str())
                 .block(focus_block(title, true, theme)),
@@ -374,12 +425,8 @@ fn render_project_name_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         };
         let compiler_text = format!(" ◄  {}  ► ", compiler_label);
         frame.render_widget(
-            Paragraph::new(Line::styled(
-                compiler_text,
-                Style::default()
-                    .fg(theme.text)
-            ))
-            .block(focus_block(" Compiler (Tab to cycle) ", false, theme)),
+            Paragraph::new(Line::styled(compiler_text, Style::default().fg(theme.text)))
+                .block(focus_block(" Compiler (Tab to cycle) ", false, theme)),
             chunks[1],
         );
 
@@ -388,7 +435,10 @@ fn render_project_name_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
             .min(app.project_rename_input.len())]
             .chars()
             .count() as u16;
-        frame.set_cursor_position((chunks[0].x.saturating_add(1 + cursor_columns), chunks[0].y + 1));
+        frame.set_cursor_position((
+            chunks[0].x.saturating_add(1 + cursor_columns),
+            chunks[0].y + 1,
+        ));
     } else {
         frame.render_widget(
             Paragraph::new(app.project_rename_input.as_str())
@@ -564,7 +614,9 @@ fn render_projects(
         .active_project
         .as_ref()
         .expect("active project checked above");
-    let (file_tree_area, editor_area, right_area) = if app.pdf_viewer == "internal" || app.project_build_visible {
+    let (file_tree_area, editor_area, right_area) = if app.pdf_viewer == "internal"
+        || app.project_build_visible
+    {
         let panes = Layout::horizontal([
             Constraint::Length(22),
             Constraint::Ratio(1, 2),
@@ -593,7 +645,9 @@ fn render_projects(
         Line::styled(
             " n new · ↵/→ open ",
             if file_tree_focused {
-                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.muted)
             },
@@ -624,7 +678,8 @@ fn render_projects(
         !app.project_editor_manual_scroll,
     );
     let visual_lines = app.project_editor_visual_line_anchor.map(|anchor| {
-        let current = app.project_editor_text[..app.project_editor_cursor.min(app.project_editor_text.len())]
+        let current = app.project_editor_text
+            [..app.project_editor_cursor.min(app.project_editor_text.len())]
             .bytes()
             .filter(|byte| *byte == b'\n')
             .count();
@@ -646,9 +701,8 @@ fn render_projects(
             if let Ok(line_number) = prefix.trim().parse::<usize>() {
                 rendered_source_line = line_number.saturating_sub(1);
             }
-            let selected = visual_lines.is_some_and(|(first, last)| {
-                (first..=last).contains(&rendered_source_line)
-            });
+            let selected = visual_lines
+                .is_some_and(|(first, last)| (first..=last).contains(&rendered_source_line));
             let line_style = if selected {
                 Style::default().bg(theme.surface).fg(theme.accent)
             } else {
@@ -657,7 +711,11 @@ fn render_projects(
             Line::from(vec![
                 Span::styled(
                     prefix.to_owned(),
-                    if selected { line_style } else { Style::default().fg(theme.muted) },
+                    if selected {
+                        line_style
+                    } else {
+                        Style::default().fg(theme.muted)
+                    },
                 ),
                 Span::styled(content.to_owned(), line_style),
             ])
@@ -669,7 +727,11 @@ fn render_projects(
             .block(focus_block(
                 &format!(
                     " EDITOR [ALT+2]{} — {editor_title}{} ",
-                    if visual_lines.is_some() { " [VISUAL LINE]" } else { "" },
+                    if visual_lines.is_some() {
+                        " [VISUAL LINE]"
+                    } else {
+                        ""
+                    },
                     if app.project_editor_dirty { " •" } else { "" },
                 ),
                 app.content_focused && app.project_pane == ProjectPane::Editor,
@@ -783,7 +845,8 @@ fn render_projects(
                 );
                 lines.extend(header_lines);
 
-                if !diagnostic.description.is_empty() && diagnostic.description != diagnostic.title {
+                if !diagnostic.description.is_empty() && diagnostic.description != diagnostic.title
+                {
                     let desc_lines = wrap_text_to_spans(
                         "   ",
                         &diagnostic.description,
@@ -838,15 +901,17 @@ fn render_projects(
             let empty = app.project_build_diagnostics.is_empty();
             if empty {
                 frame.render_widget(
-                    Paragraph::new("No compiler diagnostics.\n\nThe latest build completed cleanly.")
-                        .alignment(Alignment::Center)
-                        .style(Style::default().fg(theme.muted))
-                        .block(focus_block_with_right_title(
-                            " BUILD [Alt+4 · Tab PREVIEW] ",
-                            build_right_title,
-                            app.content_focused && app.project_pane == ProjectPane::Build,
-                            theme,
-                        )),
+                    Paragraph::new(
+                        "No compiler diagnostics.\n\nThe latest build completed cleanly.",
+                    )
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(theme.muted))
+                    .block(focus_block_with_right_title(
+                        " BUILD [Alt+4 · Tab PREVIEW] ",
+                        build_right_title,
+                        app.content_focused && app.project_pane == ProjectPane::Build,
+                        theme,
+                    )),
                     build_area,
                 );
             } else {
@@ -858,7 +923,8 @@ fn render_projects(
                         theme,
                     ))
                     .highlight_style(Style::default().bg(theme.surface).fg(theme.accent));
-                let mut state = ListState::default().with_selected(Some(app.project_build_selected));
+                let mut state =
+                    ListState::default().with_selected(Some(app.project_build_selected));
                 frame.render_stateful_widget(list, build_area, &mut state);
             }
         }
@@ -873,12 +939,7 @@ fn render_projects(
             );
             let p_area = preview_block.inner(preview_area);
             frame.render_widget(preview_block, preview_area);
-            crate::pdf_viewer::draw_pdf_viewer_in_with_occlusion(
-                frame,
-                app,
-                p_area,
-                pdf_occlusion,
-            );
+            crate::pdf_viewer::draw_pdf_viewer_in_with_occlusion(frame, app, p_area, pdf_occlusion);
         } else {
             frame.render_widget(
                 Paragraph::new("Live PDF preview\nWaiting for the first successful build…")
@@ -2604,9 +2665,7 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
             name.as_str(),
         ),
         DeletionTarget::ProjectEntry {
-            name,
-            is_directory,
-            ..
+            name, is_directory, ..
         } => (
             if *is_directory {
                 " CONFIRM DELETE FOLDER "
@@ -3610,37 +3669,43 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme
         && app.project_pane == ProjectPane::FileTree
     {
         Line::from(vec![
-            Span::styled(" n ", Style::default().fg(theme.background).bg(theme.accent)),
+            Span::styled(
+                " n ",
+                Style::default().fg(theme.background).bg(theme.accent),
+            ),
             Span::styled(" new  ", Style::default().fg(theme.muted)),
             Span::styled(
                 " enter/right ",
                 Style::default().fg(theme.background).bg(theme.secondary),
             ),
             Span::styled(" open  ", Style::default().fg(theme.muted)),
-            Span::styled(" esc ", Style::default().fg(theme.background).bg(theme.warning)),
+            Span::styled(
+                " esc ",
+                Style::default().fg(theme.background).bg(theme.warning),
+            ),
             Span::styled(" projects  ", Style::default().fg(theme.muted)),
             Span::styled(" x ", Style::default().fg(theme.background).bg(theme.error)),
             Span::styled(" delete", Style::default().fg(theme.muted)),
         ])
     } else {
         Line::from(vec![
-        Span::styled(
-            " j/k ",
-            Style::default().fg(theme.background).bg(theme.accent),
-        ),
-        Span::styled(" navigate  ", Style::default().fg(theme.muted)),
-        Span::styled(
-            " enter ",
-            Style::default().fg(theme.background).bg(theme.secondary),
-        ),
-        Span::styled(" open  ", Style::default().fg(theme.muted)),
-        Span::styled(
-            " ? ",
-            Style::default().fg(theme.background).bg(theme.warning),
-        ),
-        Span::styled(" help  ", Style::default().fg(theme.muted)),
-        Span::styled(" q ", Style::default().fg(theme.background).bg(theme.error)),
-        Span::styled(" quit", Style::default().fg(theme.muted)),
+            Span::styled(
+                " j/k ",
+                Style::default().fg(theme.background).bg(theme.accent),
+            ),
+            Span::styled(" navigate  ", Style::default().fg(theme.muted)),
+            Span::styled(
+                " enter ",
+                Style::default().fg(theme.background).bg(theme.secondary),
+            ),
+            Span::styled(" open  ", Style::default().fg(theme.muted)),
+            Span::styled(
+                " ? ",
+                Style::default().fg(theme.background).bg(theme.warning),
+            ),
+            Span::styled(" help  ", Style::default().fg(theme.muted)),
+            Span::styled(" q ", Style::default().fg(theme.background).bg(theme.error)),
+            Span::styled(" quit", Style::default().fg(theme.muted)),
         ])
     };
     frame.render_widget(Paragraph::new(line), area);
@@ -3673,17 +3738,29 @@ fn render_terminal_command(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
             format!("Completions ({})", app.terminal_completions.len()),
             Style::default().fg(theme.muted),
         ));
-        output_lines.extend(app.terminal_completions.iter().enumerate().map(|(index, candidate)| {
-            let style = if app.terminal_completion_selected == Some(index) {
-                Style::default()
-                    .bg(theme.surface)
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.text)
-            };
-            Line::styled(format!("{} {candidate}", if app.terminal_completion_selected == Some(index) { "›" } else { " " }), style)
-        }));
+        output_lines.extend(app.terminal_completions.iter().enumerate().map(
+            |(index, candidate)| {
+                let style = if app.terminal_completion_selected == Some(index) {
+                    Style::default()
+                        .bg(theme.surface)
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.text)
+                };
+                Line::styled(
+                    format!(
+                        "{} {candidate}",
+                        if app.terminal_completion_selected == Some(index) {
+                            "›"
+                        } else {
+                            " "
+                        }
+                    ),
+                    style,
+                )
+            },
+        ));
         output_lines.push(Line::raw(""));
     }
     output_lines.extend(output.lines().map(|line| Line::raw(line.to_owned())));
@@ -3708,18 +3785,17 @@ fn render_terminal_command(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     frame.render_widget(
         Paragraph::new(app.terminal_command.as_str())
             .style(Style::default().bg(theme.surface))
-            .block(focus_block(" TERMINAL — ENTER RUN  ESC CLOSE ", true, theme)),
+            .block(focus_block(
+                " TERMINAL — ENTER RUN  ESC CLOSE ",
+                true,
+                theme,
+            )),
         sections[2],
     );
-    let cursor = app.terminal_command[..app
-        .terminal_command_cursor
-        .min(app.terminal_command.len())]
+    let cursor = app.terminal_command[..app.terminal_command_cursor.min(app.terminal_command.len())]
         .chars()
         .count() as u16;
-    frame.set_cursor_position((
-        sections[2].x.saturating_add(1 + cursor),
-        sections[2].y + 1,
-    ));
+    frame.set_cursor_position((sections[2].x.saturating_add(1 + cursor), sections[2].y + 1));
 }
 
 fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
@@ -3730,8 +3806,12 @@ fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &
 
     // ── Search bar ────────────────────────────────────────────────────────
     let mode_hint = match app.project_citation_search_mode {
-        ProjectCitationSearchMode::Local => " LOCAL SEARCH  [ Tab: Online Search ]  [ Enter: Add ] ",
-        ProjectCitationSearchMode::Online => " ONLINE SEARCH  [ Tab: Local Search ]  [ Enter: Search / Add ] ",
+        ProjectCitationSearchMode::Local => {
+            " LOCAL SEARCH  [ Tab: Online Search ]  [ Enter: Add ] "
+        }
+        ProjectCitationSearchMode::Online => {
+            " ONLINE SEARCH  [ Tab: Local Search ]  [ Enter: Search / Add ] "
+        }
     };
     let search_block = Block::default()
         .borders(Borders::ALL)
@@ -3774,48 +3854,64 @@ fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &
     // Layout: each row has a fixed right slot for the "(Added)" badge.
     // Borders (2) + highlight symbol "> " (2) + right border (1) = 5 overhead.
     const BADGE: &str = " (Added)";
-    const BADGE_WIDTH: usize = BADGE.len();    // 8 chars
+    const BADGE_WIDTH: usize = BADGE.len(); // 8 chars
     let list_inner_width = (chunks[1].width as usize).saturating_sub(5);
     let max_title_width = list_inner_width.saturating_sub(BADGE_WIDTH + 1).max(4);
     let max_authors_width = max_title_width + BADGE_WIDTH + 1;
 
-    let items: Vec<ListItem> = app.project_citation_results.iter().map(|paper| {
-        // (Added) detection: compare by lowercased title against the set of
-        // BibTeX titles already indexed from the project's .bib files.
-        let is_added = !paper.title().is_empty()
-            && app.project_bib_titles.contains(&paper.title().trim().to_lowercase());
+    let items: Vec<ListItem> = app
+        .project_citation_results
+        .iter()
+        .map(|paper| {
+            // (Added) detection: compare by lowercased title against the set of
+            // BibTeX titles already indexed from the project's .bib files.
+            let is_added = !paper.title().is_empty()
+                && app
+                    .project_bib_titles
+                    .contains(&paper.title().trim().to_lowercase());
 
-        let raw_title = if paper.title().is_empty() { "[untitled]" } else { paper.title() };
-        // Truncate title so badge always fits.
-        let title_text = safe_truncate(raw_title, max_title_width);
-        // Pad to a fixed width so the badge column is always at the same offset.
-        let padded_title = format!("{:<width$}", title_text, width = max_title_width);
+            let raw_title = if paper.title().is_empty() {
+                "[untitled]"
+            } else {
+                paper.title()
+            };
+            // Truncate title so badge always fits.
+            let title_text = safe_truncate(raw_title, max_title_width);
+            // Pad to a fixed width so the badge column is always at the same offset.
+            let padded_title = format!("{:<width$}", title_text, width = max_title_width);
 
-        let badge_span = if is_added {
-            Span::styled(BADGE, Style::default().fg(theme.success).add_modifier(Modifier::BOLD))
-        } else {
-            // Reserve the column with blank space so unselected rows don't shift.
-            Span::styled(" ".repeat(BADGE_WIDTH), Style::default())
-        };
+            let badge_span = if is_added {
+                Span::styled(
+                    BADGE,
+                    Style::default()
+                        .fg(theme.success)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                // Reserve the column with blank space so unselected rows don't shift.
+                Span::styled(" ".repeat(BADGE_WIDTH), Style::default())
+            };
 
-        let title_line = Line::from(vec![
-            Span::styled(padded_title, Style::default().fg(theme.text)),
-            badge_span,
-        ]);
+            let title_line = Line::from(vec![
+                Span::styled(padded_title, Style::default().fg(theme.text)),
+                badge_span,
+            ]);
 
-        let authors = paper.authors();
-        let raw_authors = if authors.trim().is_empty() {
-            "Unknown authors"
-        } else {
-            authors.trim()
-        };
-        let authors_text = safe_truncate(raw_authors, max_authors_width);
-        let authors_line = Line::from(vec![
-            Span::styled(authors_text, Style::default().fg(theme.muted)),
-        ]);
+            let authors = paper.authors();
+            let raw_authors = if authors.trim().is_empty() {
+                "Unknown authors"
+            } else {
+                authors.trim()
+            };
+            let authors_text = safe_truncate(raw_authors, max_authors_width);
+            let authors_line = Line::from(vec![Span::styled(
+                authors_text,
+                Style::default().fg(theme.muted),
+            )]);
 
-        workspace_list_item(vec![title_line, authors_line])
-    }).collect();
+            workspace_list_item(vec![title_line, authors_line])
+        })
+        .collect();
 
     let results_title = app.project_citation_search_status.as_deref().map_or_else(
         || " RESULTS  ↑↓ navigate  Enter add  Esc close ".to_owned(),
@@ -4017,18 +4113,24 @@ fn section_group_height(group: &[HelpSection], col_width: u16) -> usize {
     height
 }
 
-fn help_column_groups(sections: Vec<HelpSection>, columns: usize, width: u16) -> Vec<Vec<HelpSection>> {
+fn help_column_groups(
+    sections: Vec<HelpSection>,
+    columns: usize,
+    width: u16,
+) -> Vec<Vec<HelpSection>> {
     if columns <= 1 || sections.is_empty() {
         return vec![sections];
     }
     let columns = columns.min(sections.len());
-    let column_width = width
-        .saturating_sub((columns.saturating_sub(1) as u16) * 2)
-        / columns as u16;
+    let column_width =
+        width.saturating_sub((columns.saturating_sub(1) as u16) * 2) / columns as u16;
     let mut units = help_section_units(sections);
     let global_unit = units
         .iter()
-        .position(|unit| unit.first().is_some_and(|section| section.title == "GLOBAL & NAVIGATION"))
+        .position(|unit| {
+            unit.first()
+                .is_some_and(|section| section.title == "GLOBAL & NAVIGATION")
+        })
         .map(|index| units.remove(index));
     units.sort_by_key(|unit| std::cmp::Reverse(section_group_height(unit, column_width)));
 
@@ -4058,12 +4160,16 @@ fn help_section_units(sections: Vec<HelpSection>) -> Vec<Vec<HelpSection>> {
     let mut index = 0;
     while index < sections.len() {
         if sections[index].title == "NOTES & PDF VIEWER"
-            && sections.get(index + 1).is_some_and(|section| section.title == "INTERNAL PDF VIEWER")
+            && sections
+                .get(index + 1)
+                .is_some_and(|section| section.title == "INTERNAL PDF VIEWER")
         {
             units.push(vec![sections[index].clone(), sections[index + 1].clone()]);
             index += 2;
         } else if sections[index].title == "DOWNLOADS"
-            && sections.get(index + 1).is_some_and(|section| section.title == "PROJECT LIST")
+            && sections
+                .get(index + 1)
+                .is_some_and(|section| section.title == "PROJECT LIST")
         {
             units.push(vec![sections[index].clone(), sections[index + 1].clone()]);
             index += 2;
@@ -4145,7 +4251,11 @@ fn help_columns_widths(area_width: u16, groups: &[Vec<HelpSection>]) -> Vec<u16>
             .zip(min_widths.iter())
             .map(|(&ideal, &min)| ideal.saturating_sub(min))
             .collect();
-        let total_needed_extra: u32 = needed_extra.iter().map(|&x| u32::from(x)).sum::<u32>().max(1);
+        let total_needed_extra: u32 = needed_extra
+            .iter()
+            .map(|&x| u32::from(x))
+            .sum::<u32>()
+            .max(1);
 
         let mut allocated = 0u16;
         for i in 0..count {
@@ -4166,7 +4276,14 @@ fn help_columns_widths(area_width: u16, groups: &[Vec<HelpSection>]) -> Vec<u16>
         let mut rem = extra % (count as u16);
 
         for i in 0..count {
-            widths[i] = ideal_widths[i] + base_add + if rem > 0 { rem -= 1; 1 } else { 0 };
+            widths[i] = ideal_widths[i]
+                + base_add
+                + if rem > 0 {
+                    rem -= 1;
+                    1
+                } else {
+                    0
+                };
         }
     }
 
@@ -4330,9 +4447,7 @@ fn keyboard_reference() -> Vec<HelpSection> {
         HelpSection {
             title: "INTERNAL PDF VIEWER",
             scope: &[],
-            entries: &[
-                ("Esc / q", "close internal viewer"),
-            ],
+            entries: &[("Esc / q", "close internal viewer")],
         },
         HelpSection {
             title: "CREDITS",
@@ -4374,9 +4489,7 @@ fn keyboard_reference() -> Vec<HelpSection> {
         HelpSection {
             title: "DOWNLOADS",
             scope: &[],
-            entries: &[
-                ("r", "retry failed download"),
-            ],
+            entries: &[("r", "retry failed download")],
         },
         HelpSection {
             title: "PROJECT LIST",
@@ -4674,9 +4787,7 @@ fn wrap_text_to_spans(
             } else {
                 indent.clone()
             };
-            result_lines.push(Line::from(vec![
-                Span::styled(prefix, label_style),
-            ]));
+            result_lines.push(Line::from(vec![Span::styled(prefix, label_style)]));
             is_first_line_of_section = false;
             continue;
         }
@@ -4761,9 +4872,10 @@ fn wrap_text_to_spans(
     }
 
     if result_lines.is_empty() {
-        result_lines.push(Line::from(vec![
-            Span::styled(label_prefix.to_string(), label_style),
-        ]));
+        result_lines.push(Line::from(vec![Span::styled(
+            label_prefix.to_string(),
+            label_style,
+        )]));
     }
 
     result_lines
@@ -4952,8 +5064,7 @@ mod tests {
     use crate::theme::*;
     use chrono::{TimeZone, Utc};
     use papr_core::models::AuthorSummary;
-    use papr_core::{
-        ActivityItem, BookmarkSummary, CollectionSummary,         DownloadStatus, DownloadTask, LibraryPaper, RemotePaper,     };
+    use papr_core::{ActivityItem, BookmarkSummary, CollectionSummary, LibraryPaper, RemotePaper};
     use ratatui::{
         Terminal, backend::TestBackend, buffer::Buffer, layout::Rect, style::Style, widgets::Widget,
     };
@@ -4964,15 +5075,18 @@ mod tests {
     };
 
     #[test]
-    fn keyboard_reference_reflows_without_exceeding_each_column() -> Result<(), Box<dyn std::error::Error>> {
+    fn keyboard_reference_reflows_without_exceeding_each_column()
+    -> Result<(), Box<dyn std::error::Error>> {
         let theme = Theme::load("nord")?;
         for (width, count) in [(54, 1), (76, 2), (130, 3)] {
             let groups = help_column_groups(keyboard_reference(), count, width);
             let columns = help_columns(Rect::new(0, 0, width, 30), &groups);
             for (group, column) in groups.iter().zip(columns) {
-                assert!(format_help_column(group, column.width, &theme)
-                    .iter()
-                    .all(|line| line.width() <= usize::from(column.width)));
+                assert!(
+                    format_help_column(group, column.width, &theme)
+                        .iter()
+                        .all(|line| line.width() <= usize::from(column.width))
+                );
             }
         }
         Ok(())
@@ -4994,8 +5108,16 @@ mod tests {
         let max_h3 = *heights_3col.iter().max().unwrap();
         let min_h3 = *heights_3col.iter().min().unwrap();
         // Heights should be well balanced: max height should be <= 42 lines and diff <= 10 lines
-        assert!(max_h3 <= 42, "Max height in 3-col layout should be <= 42, got {}", max_h3);
-        assert!(max_h3 - min_h3 <= 10, "Height diff in 3-col layout should be <= 10, got {}", max_h3 - min_h3);
+        assert!(
+            max_h3 <= 42,
+            "Max height in 3-col layout should be <= 42, got {}",
+            max_h3
+        );
+        assert!(
+            max_h3 - min_h3 <= 10,
+            "Height diff in 3-col layout should be <= 10, got {}",
+            max_h3 - min_h3
+        );
 
         // Check 2-column layout on medium screen
         let groups_2col = help_column_groups(keyboard_reference(), 2, 86);
@@ -5008,7 +5130,11 @@ mod tests {
             .collect();
         let max_h2 = *heights_2col.iter().max().unwrap();
         let min_h2 = *heights_2col.iter().min().unwrap();
-        assert!(max_h2 - min_h2 <= 10, "Height diff in 2-col layout should be <= 10, got {}", max_h2 - min_h2);
+        assert!(
+            max_h2 - min_h2 <= 10,
+            "Height diff in 2-col layout should be <= 10, got {}",
+            max_h2 - min_h2
+        );
     }
 
     #[test]
@@ -5666,11 +5792,18 @@ Image: ![plot](plot.png)[^1]
             panic!("Bare numeric offset found without parentheses: {}", tz);
         }
         if tz.contains(':') {
-            assert!(tz.starts_with('(') && tz.ends_with(')'), "Offset must be enclosed in parentheses: {}", tz);
+            assert!(
+                tz.starts_with('(') && tz.ends_with(')'),
+                "Offset must be enclosed in parentheses: {}",
+                tz
+            );
         }
 
         // Verify IANA mappings
-        assert_eq!(super::iana_to_abbreviation("Asia/Kolkata", &now), Some("IST"));
+        assert_eq!(
+            super::iana_to_abbreviation("Asia/Kolkata", &now),
+            Some("IST")
+        );
         assert_eq!(super::iana_to_abbreviation("Asia/Tokyo", &now), Some("JST"));
         assert_eq!(super::iana_to_abbreviation("UTC", &now), Some("UTC"));
 

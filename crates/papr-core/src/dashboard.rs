@@ -1,7 +1,129 @@
 #![allow(missing_docs)]
-use std::collections::HashMap;
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
+use thiserror::Error;
+use tokio::task::JoinSet;
+
+use crate::api::arxiv::{ArxivClient, ArxivError};
 use crate::models::RemotePaper;
+
+/// Errors produced while assembling a remote Dashboard feed.
+#[derive(Debug, Error)]
+pub enum DashboardFeedError {
+    #[error(transparent)]
+    Arxiv(#[from] ArxivError),
+    #[error("dashboard keyword fetch task failed: {0}")]
+    Task(String),
+}
+
+/// Reusable Dashboard recommendation workflow, independent of any frontend.
+#[derive(Debug, Clone, Copy)]
+pub struct DashboardService {
+    candidate_limit: u16,
+    display_limit: usize,
+}
+
+impl DashboardService {
+    #[must_use]
+    pub const fn new(candidate_limit: u16, display_limit: usize) -> Self {
+        Self {
+            candidate_limit,
+            display_limit,
+        }
+    }
+
+    /// Fetch, de-duplicate, balance, and daily-rank unseen Dashboard papers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when every applicable arXiv request fails or a keyword
+    /// fetch task cannot complete.
+    pub async fn fetch(
+        self,
+        client: ArxivClient,
+        keywords: Vec<String>,
+        excluded_paper_ids: HashSet<String>,
+        feed_date: &str,
+    ) -> Result<Vec<RemotePaper>, DashboardFeedError> {
+        if keywords.is_empty() {
+            let mut papers = self
+                .candidate_page(&client, None, &excluded_paper_ids)
+                .await?;
+            shuffle_daily_bucket(&mut papers, feed_date, "");
+            papers.truncate(self.display_limit);
+            return Ok(papers);
+        }
+
+        let mut buckets = (0..keywords.len())
+            .map(|_| None)
+            .collect::<Vec<Option<(String, Vec<RemotePaper>)>>>();
+        let mut last_error = None;
+        let mut requests = JoinSet::new();
+        for (index, keyword) in keywords.into_iter().enumerate() {
+            let client = client.clone();
+            let excluded_paper_ids = excluded_paper_ids.clone();
+            requests.spawn(async move {
+                let result = self
+                    .candidate_page(&client, Some(&keyword), &excluded_paper_ids)
+                    .await;
+                (index, keyword, result)
+            });
+        }
+        while let Some(result) = requests.join_next().await {
+            match result {
+                Ok((index, keyword, Ok(mut papers))) => {
+                    shuffle_daily_bucket(&mut papers, feed_date, &keyword);
+                    buckets[index] = Some((keyword, papers));
+                }
+                Ok((_, _, Err(error))) => last_error = Some(error),
+                Err(error) => last_error = Some(DashboardFeedError::Task(error.to_string())),
+            }
+        }
+        let buckets = buckets.into_iter().flatten().collect::<Vec<_>>();
+        if buckets.is_empty() {
+            return last_error.map_or_else(|| Ok(Vec::new()), Err);
+        }
+        Ok(select_dashboard_papers(
+            buckets,
+            self.display_limit,
+            feed_date,
+        ))
+    }
+
+    async fn candidate_page(
+        self,
+        client: &ArxivClient,
+        keyword: Option<&str>,
+        excluded_paper_ids: &HashSet<String>,
+    ) -> Result<Vec<RemotePaper>, DashboardFeedError> {
+        let mut candidates = Vec::with_capacity(usize::from(self.candidate_limit));
+        let mut start = 0_u16;
+        loop {
+            let papers = match keyword {
+                Some(keyword) => {
+                    client
+                        .search_latest_page(keyword, start, self.candidate_limit)
+                        .await?
+                }
+                None => client.latest_page(start, self.candidate_limit).await?,
+            };
+            let received = u16::try_from(papers.len()).unwrap_or(u16::MAX);
+            candidates.extend(
+                papers
+                    .into_iter()
+                    .filter(|paper| !excluded_paper_ids.contains(&paper.id)),
+            );
+            if candidates.len() >= usize::from(self.candidate_limit)
+                || received < self.candidate_limit
+            {
+                break;
+            }
+            start = start.saturating_add(received);
+        }
+        candidates.truncate(usize::from(self.candidate_limit));
+        Ok(candidates)
+    }
+}
 
 /// A SHA-256 rank gives every paper an equal chance of every position and
 /// includes the date, so the selection changes each day. This avoids any
@@ -9,7 +131,12 @@ use crate::models::RemotePaper;
 /// RNG state. The paper ID only resolves the cryptographically negligible case
 /// of two equal ranks.
 pub fn shuffle_daily_bucket(papers: &mut [RemotePaper], feed_date: &str, keyword: &str) {
-    papers.sort_by_cached_key(|paper| (daily_paper_rank(feed_date, keyword, &paper.id), paper.id.clone()));
+    papers.sort_by_cached_key(|paper| {
+        (
+            daily_paper_rank(feed_date, keyword, &paper.id),
+            paper.id.clone(),
+        )
+    });
 }
 
 pub fn keyword_terms(keyword: &str) -> Vec<String> {
@@ -20,9 +147,13 @@ pub fn keyword_terms(keyword: &str) -> Vec<String> {
         .collect()
 }
 
+#[must_use]
 pub fn title_match_strength(title: &str, terms: &[String]) -> usize {
     let title = title.to_lowercase();
-    terms.iter().filter(|term| title.contains(term.as_str())).count()
+    terms
+        .iter()
+        .filter(|term| title.contains(term.as_str()))
+        .count()
 }
 
 #[derive(Debug)]
@@ -47,16 +178,17 @@ pub struct KeywordMatch {
 /// every keyword it matches, so cross-keyword papers are boosted rather than
 /// attributed to whichever bucket happened to be visited first. Title matches
 /// remain a tie-breaker after daily rotation.
+#[must_use]
 pub fn select_dashboard_papers(
     buckets: Vec<(String, Vec<RemotePaper>)>,
     limit: usize,
     feed_date: &str,
 ) -> Vec<RemotePaper> {
-    let keywords: Vec<_> = buckets
+    let keywords: Vec<_> = buckets.iter().map(|(keyword, _)| keyword.clone()).collect();
+    let terms: Vec<_> = keywords
         .iter()
-        .map(|(keyword, _)| keyword.clone())
+        .map(|keyword| keyword_terms(keyword))
         .collect();
-    let terms: Vec<_> = keywords.iter().map(|keyword| keyword_terms(keyword)).collect();
     let mut candidates = Vec::<DashboardCandidate>::new();
     let mut candidate_indexes = HashMap::<String, usize>::new();
     let mut available_by_keyword = vec![0_usize; buckets.len()];
@@ -93,7 +225,8 @@ pub fn select_dashboard_papers(
         }
     }
 
-    let targets = keyword_representation_targets(&available_by_keyword, &keywords, limit, feed_date);
+    let targets =
+        keyword_representation_targets(&available_by_keyword, &keywords, limit, feed_date);
     let keyword_weights = keyword_priority_weights(&available_by_keyword);
     let mut represented = vec![0_usize; targets.len()];
     let mut selected = Vec::with_capacity(limit.min(candidates.len()));
@@ -106,7 +239,9 @@ pub fn select_dashboard_papers(
                 let coverage_keywords = candidate
                     .matches
                     .iter()
-                    .filter(|matched| represented[matched.keyword_index] < targets[matched.keyword_index])
+                    .filter(|matched| {
+                        represented[matched.keyword_index] < targets[matched.keyword_index]
+                    })
                     .count();
                 let weighted_coverage = candidate
                     .matches
@@ -150,8 +285,12 @@ pub fn select_dashboard_papers(
     selected
 }
 
+#[must_use]
 pub fn keyword_priority_weights(available_by_keyword: &[usize]) -> Vec<usize> {
-    let active = available_by_keyword.iter().filter(|&&count| count > 0).count();
+    let active = available_by_keyword
+        .iter()
+        .filter(|&&count| count > 0)
+        .count();
     let mut active_rank = 0_usize;
     available_by_keyword
         .iter()
@@ -169,6 +308,7 @@ pub fn keyword_priority_weights(available_by_keyword: &[usize]) -> Vec<usize> {
         .collect()
 }
 
+#[must_use]
 pub fn keyword_representation_targets(
     available_by_keyword: &[usize],
     keywords: &[String],
@@ -189,11 +329,11 @@ pub fn keyword_representation_targets(
                 let rank = daily_paper_rank(feed_date, "keyword-window", &keywords[index]);
                 let mut bytes = [0_u8; 8];
                 bytes.copy_from_slice(&rank[..8]);
-                let uniform = (u64::from_be_bytes(bytes) as f64 / u64::MAX as f64)
-                    .max(f64::MIN_POSITIVE);
+                let uniform = u64_as_unit_f64(u64::from_be_bytes(bytes));
                 // Efraimidis-Spirakis weighted sampling: higher-priority
                 // keywords have a slightly better daily chance of appearing.
-                (uniform.powf(1.0 / weights[index] as f64), index)
+                let weight = u32::try_from(weights[index]).unwrap_or(u32::MAX);
+                (uniform.powf(1.0 / f64::from(weight)), index)
             })
             .collect();
         weighted_window.sort_by(|left, right| right.0.total_cmp(&left.0));
@@ -221,11 +361,13 @@ pub fn keyword_representation_targets(
         assigned_extra += allocation;
         remainders.push((numerator % weight_total, index));
     }
-    remainders.sort_by(|(left_remainder, left_index), (right_remainder, right_index)| {
-        right_remainder
-            .cmp(left_remainder)
-            .then_with(|| left_index.cmp(right_index))
-    });
+    remainders.sort_by(
+        |(left_remainder, left_index), (right_remainder, right_index)| {
+            right_remainder
+                .cmp(left_remainder)
+                .then_with(|| left_index.cmp(right_index))
+        },
+    );
     for (_, index) in remainders
         .into_iter()
         .take(remaining.saturating_sub(assigned_extra))
@@ -235,6 +377,7 @@ pub fn keyword_representation_targets(
     targets
 }
 
+#[must_use]
 pub fn daily_paper_rank(feed_date: &str, keyword: &str, paper_id: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"papr-dashboard-feed-v1\0");
@@ -243,6 +386,15 @@ pub fn daily_paper_rank(feed_date: &str, keyword: &str, paper_id: &str) -> [u8; 
         hasher.update(value.as_bytes());
     }
     hasher.finalize().into()
+}
+
+fn u64_as_unit_f64(value: u64) -> f64 {
+    const TWO_TO_32: f64 = 4_294_967_296.0;
+    const U64_MAX_AS_F64: f64 = 18_446_744_073_709_551_616.0;
+
+    let high = u32::try_from(value >> 32).unwrap_or(u32::MAX);
+    let low = u32::try_from(value & u64::from(u32::MAX)).unwrap_or(u32::MAX);
+    ((f64::from(high) * TWO_TO_32 + f64::from(low)) / U64_MAX_AS_F64).max(f64::MIN_POSITIVE)
 }
 
 #[cfg(test)]
@@ -285,8 +437,16 @@ mod tests {
         let mut next_day = papers;
         shuffle_daily_bucket(&mut next_day, "2026-07-20", "quantum gravity");
         assert_ne!(
-            same_day.iter().take(10).map(|paper| &paper.id).collect::<Vec<_>>(),
-            next_day.iter().take(10).map(|paper| &paper.id).collect::<Vec<_>>(),
+            same_day
+                .iter()
+                .take(10)
+                .map(|paper| &paper.id)
+                .collect::<Vec<_>>(),
+            next_day
+                .iter()
+                .take(10)
+                .map(|paper| &paper.id)
+                .collect::<Vec<_>>(),
         );
     }
     #[test]
@@ -295,16 +455,9 @@ mod tests {
             .map(|index| remote_paper(&format!("https://arxiv.org/abs/{index}"), "Quantum result"))
             .collect::<Vec<_>>();
 
-        let first_day = select_dashboard_papers(
-            vec![("quantum".into(), papers.clone())],
-            10,
-            "2026-07-19",
-        );
-        let next_day = select_dashboard_papers(
-            vec![("quantum".into(), papers)],
-            10,
-            "2026-07-20",
-        );
+        let first_day =
+            select_dashboard_papers(vec![("quantum".into(), papers.clone())], 10, "2026-07-19");
+        let next_day = select_dashboard_papers(vec![("quantum".into(), papers)], 10, "2026-07-20");
 
         assert_ne!(
             first_day.iter().map(|paper| &paper.id).collect::<Vec<_>>(),
@@ -315,15 +468,18 @@ mod tests {
     fn dashboard_prioritizes_papers_with_all_keyword_terms_in_the_title() {
         let papers = vec![
             remote_paper("https://arxiv.org/abs/abstract", "A related result"),
-            remote_paper("https://arxiv.org/abs/title-one", "Quantum gravity constraints"),
-            remote_paper("https://arxiv.org/abs/title-two", "Gravity in quantum systems"),
+            remote_paper(
+                "https://arxiv.org/abs/title-one",
+                "Quantum gravity constraints",
+            ),
+            remote_paper(
+                "https://arxiv.org/abs/title-two",
+                "Gravity in quantum systems",
+            ),
         ];
 
-        let selected = select_dashboard_papers(
-            vec![("quantum gravity".into(), papers)],
-            10,
-            "2026-07-19",
-        );
+        let selected =
+            select_dashboard_papers(vec![("quantum gravity".into(), papers)], 10, "2026-07-19");
 
         assert!(selected[0].title.to_lowercase().contains("quantum"));
         assert!(selected[0].title.to_lowercase().contains("gravity"));
@@ -337,7 +493,10 @@ mod tests {
             vec![
                 (
                     "neural networks".into(),
-                    vec![remote_paper("https://arxiv.org/abs/abstract", "A related result")],
+                    vec![remote_paper(
+                        "https://arxiv.org/abs/abstract",
+                        "A related result",
+                    )],
                 ),
                 (
                     "quantum gravity".into(),
@@ -352,10 +511,16 @@ mod tests {
         );
 
         assert_eq!(selected.len(), 2);
-        assert!(selected.iter().any(|paper| paper.id == "https://arxiv.org/abs/title"));
-        assert!(selected
-            .iter()
-            .any(|paper| paper.id == "https://arxiv.org/abs/abstract"));
+        assert!(
+            selected
+                .iter()
+                .any(|paper| paper.id == "https://arxiv.org/abs/title")
+        );
+        assert!(
+            selected
+                .iter()
+                .any(|paper| paper.id == "https://arxiv.org/abs/abstract")
+        );
     }
     #[test]
     fn dashboard_balances_keyword_targets_before_title_quality() {
@@ -363,10 +528,18 @@ mod tests {
             .map(|index| remote_paper(&format!("https://arxiv.org/abs/alpha-{index}"), "Alpha"))
             .collect();
         let second_keyword: Vec<_> = (0..10)
-            .map(|index| remote_paper(&format!("https://arxiv.org/abs/beta-{index}"), "Related work"))
+            .map(|index| {
+                remote_paper(
+                    &format!("https://arxiv.org/abs/beta-{index}"),
+                    "Related work",
+                )
+            })
             .collect();
         let selected = select_dashboard_papers(
-            vec![("alpha".into(), first_keyword), ("beta".into(), second_keyword)],
+            vec![
+                ("alpha".into(), first_keyword),
+                ("beta".into(), second_keyword),
+            ],
             10,
             "2026-07-19",
         );
@@ -380,7 +553,11 @@ mod tests {
     }
     #[test]
     fn dashboard_keyword_targets_are_balanced_with_a_gentle_earlier_preference() {
-        let keywords = |count| (0..count).map(|index| format!("keyword {index}")).collect::<Vec<_>>();
+        let keywords = |count| {
+            (0..count)
+                .map(|index| format!("keyword {index}"))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
             keyword_representation_targets(&[50, 50], &keywords(2), 10, "2026-07-19"),
             vec![5, 5]
@@ -440,10 +617,7 @@ mod tests {
         let bucket = |keyword: &str, count: usize| {
             (0..count)
                 .map(|index| {
-                    remote_paper(
-                        &format!("https://arxiv.org/abs/{keyword}-{index}"),
-                        keyword,
-                    )
+                    remote_paper(&format!("https://arxiv.org/abs/{keyword}-{index}"), keyword)
                 })
                 .collect::<Vec<_>>()
         };
@@ -465,8 +639,20 @@ mod tests {
         );
 
         assert_eq!(selected[0].id, "https://arxiv.org/abs/shared");
-        assert!(selected.iter().filter(|paper| paper.id.contains("beta-")).count() >= 2);
-        assert!(selected.iter().filter(|paper| paper.id.contains("gamma-")).count() >= 2);
+        assert!(
+            selected
+                .iter()
+                .filter(|paper| paper.id.contains("beta-"))
+                .count()
+                >= 2
+        );
+        assert!(
+            selected
+                .iter()
+                .filter(|paper| paper.id.contains("gamma-"))
+                .count()
+                >= 2
+        );
     }
     #[test]
     fn dashboard_boosts_and_deduplicates_multi_keyword_matches() {
@@ -475,11 +661,17 @@ mod tests {
             vec![
                 (
                     "alpha".into(),
-                    vec![remote_paper("https://arxiv.org/abs/alpha", "Alpha result"), shared.clone()],
+                    vec![
+                        remote_paper("https://arxiv.org/abs/alpha", "Alpha result"),
+                        shared.clone(),
+                    ],
                 ),
                 (
                     "beta".into(),
-                    vec![remote_paper("https://arxiv.org/abs/beta", "Beta result"), shared],
+                    vec![
+                        remote_paper("https://arxiv.org/abs/beta", "Beta result"),
+                        shared,
+                    ],
                 ),
             ],
             2,

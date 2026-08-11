@@ -1,13 +1,66 @@
 //! Application state machine and navigation commands.
 
-use papr_core::projects::ProjectBuildDiagnostic;
-use papr_core::downloads::DownloadTask;
 use papr_core::models::{
     AuthorSummary, BookmarkSummary, CollectionSummary, DashboardStats, LibraryPaper, PaperNote,
     RemotePaper, ResearchDashboard,
 };
 use papr_core::plugins::PluginInfo;
 use papr_core::projects::Project;
+use papr_core::projects::ProjectBuildDiagnostic;
+
+/// Presentation state for one background transfer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DownloadStatus {
+    /// Waiting for the downloader to start.
+    Starting,
+    /// Receiving bytes from the remote server.
+    Running,
+    /// Inspecting the completed PDF.
+    ExtractingMetadata,
+    /// Resolving bibliographic metadata.
+    Enriching,
+    /// Renaming the completed file.
+    Renaming,
+    /// Transfer and post-processing completed.
+    Completed,
+    /// Transfer or post-processing failed.
+    Failed(String),
+}
+
+/// Download progress shown in the Downloads page and status bar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadTask {
+    /// Remote paper identifier.
+    pub id: String,
+    /// Display title.
+    pub title: String,
+    /// Bytes downloaded so far.
+    pub downloaded: u64,
+    /// Expected transfer size when known.
+    pub total: Option<u64>,
+    /// Associated local database paper.
+    pub paper_id: Option<i64>,
+    /// Current or final PDF path.
+    pub pdf_path: Option<String>,
+    /// Current presentation state.
+    pub status: DownloadStatus,
+    /// Metadata retained for retries and completion.
+    pub remote_paper: Option<RemotePaper>,
+    /// Time of failure, used for UI cleanup.
+    pub failed_at: Option<std::time::Instant>,
+}
+
+impl DownloadTask {
+    /// Display filename without the PDF extension, falling back to the title.
+    #[must_use]
+    pub fn display_name(&self) -> &str {
+        self.pdf_path
+            .as_deref()
+            .and_then(|path| std::path::Path::new(path).file_stem())
+            .and_then(|name| name.to_str())
+            .unwrap_or_else(|| self.title.strip_suffix(".pdf").unwrap_or(&self.title))
+    }
+}
 
 /// Top-level application pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -299,7 +352,11 @@ impl PathEntryState {
     /// Create a new entry from an existing path string.
     #[must_use]
     pub fn new(text: String) -> Self {
-        Self { text, cursor: 0, error: None }
+        Self {
+            text,
+            cursor: 0,
+            error: None,
+        }
     }
 }
 
@@ -452,8 +509,6 @@ pub enum ProjectPane {
     Preview,
 }
 
-
-
 /// Target to delete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeletionTarget {
@@ -575,7 +630,10 @@ impl DiscoveryState {
     /// Results belonging to the currently visible page.
     #[must_use]
     pub fn current_page_results(&self) -> &[RemotePaper] {
-        let start = self.page.saturating_mul(Self::PAGE_SIZE).min(self.results.len());
+        let start = self
+            .page
+            .saturating_mul(Self::PAGE_SIZE)
+            .min(self.results.len());
         let end = (start + Self::PAGE_SIZE).min(self.results.len());
         &self.results[start..end]
     }
@@ -585,7 +643,11 @@ impl DiscoveryState {
         if self.uses_unfiltered_fallback() {
             Box::new(self.current_page_results().iter())
         } else {
-            Box::new(self.current_page_indices().iter().filter_map(|&index| self.results.get(index)))
+            Box::new(
+                self.current_page_indices()
+                    .iter()
+                    .filter_map(|&index| self.results.get(index)),
+            )
         }
     }
 
@@ -650,9 +712,7 @@ impl DiscoveryState {
         self.page_scrolls.resize(page_count, 0);
 
         self.page = self.page.min(page_count.saturating_sub(1));
-        self.selected = self
-            .selected
-            .min(self.visible_page_len().saturating_sub(1));
+        self.selected = self.selected.min(self.visible_page_len().saturating_sub(1));
     }
 
     /// Move to the next cached page, preserving the current page view state.
@@ -722,7 +782,10 @@ impl DiscoveryState {
         self.selected = 0;
         self.scroll = 0;
         if let Some(selected_id) = selected_id
-            && let Some(index) = self.filtered_indices.iter().position(|&index| self.results[index].id == selected_id)
+            && let Some(index) = self
+                .filtered_indices
+                .iter()
+                .position(|&index| self.results[index].id == selected_id)
         {
             self.page = index / Self::PAGE_SIZE;
             self.selected = index % Self::PAGE_SIZE;
@@ -730,13 +793,20 @@ impl DiscoveryState {
     }
 
     fn current_page_indices(&self) -> &[usize] {
-        let start = self.page.saturating_mul(Self::PAGE_SIZE).min(self.filtered_indices.len());
+        let start = self
+            .page
+            .saturating_mul(Self::PAGE_SIZE)
+            .min(self.filtered_indices.len());
         let end = (start + Self::PAGE_SIZE).min(self.filtered_indices.len());
         &self.filtered_indices[start..end]
     }
 
     fn visible_result_count(&self) -> usize {
-        if self.uses_unfiltered_fallback() { self.results.len() } else { self.filtered_indices.len() }
+        if self.uses_unfiltered_fallback() {
+            self.results.len()
+        } else {
+            self.filtered_indices.len()
+        }
     }
 
     fn uses_unfiltered_fallback(&self) -> bool {
@@ -767,10 +837,6 @@ pub struct LibraryState {
     /// Last indexing summary or failure.
     pub message: Option<String>,
 }
-
-
-
-
 
 /// Commands available to keybindings and Browse Papr.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1281,16 +1347,19 @@ impl App {
     pub fn get_dependencies(&self) -> Vec<(String, String)> {
         let mut workspace_versions = std::collections::HashMap::new();
         if let Ok(root_val) = toml::from_str::<toml::Value>(include_str!("../../../Cargo.toml")) {
-            if let Some(ws_deps) = root_val.get("workspace").and_then(|w| w.get("dependencies")).and_then(|d| d.as_table()) {
+            if let Some(ws_deps) = root_val
+                .get("workspace")
+                .and_then(|w| w.get("dependencies"))
+                .and_then(|d| d.as_table())
+            {
                 for (k, v) in ws_deps {
                     let version = match v {
                         toml::Value::String(s) => s.clone(),
-                        toml::Value::Table(t) => {
-                            t.get("version")
-                                .and_then(|ver| ver.as_str())
-                                .unwrap_or("")
-                                .to_string()
-                        }
+                        toml::Value::Table(t) => t
+                            .get("version")
+                            .and_then(|ver| ver.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                         _ => String::new(),
                     };
                     if !version.is_empty() {
@@ -1309,18 +1378,19 @@ impl App {
 
         for manifest in manifests {
             if let Ok(value) = toml::from_str::<toml::Value>(manifest) {
-                let deps_node = value.get("dependencies").or_else(|| value.get("workspace").and_then(|w| w.get("dependencies")));
+                let deps_node = value
+                    .get("dependencies")
+                    .or_else(|| value.get("workspace").and_then(|w| w.get("dependencies")));
                 if let Some(dependencies) = deps_node {
                     if let Some(table) = dependencies.as_table() {
                         for (k, v) in table {
                             let mut version = match v {
                                 toml::Value::String(s) => s.clone(),
-                                toml::Value::Table(t) => {
-                                    t.get("version")
-                                        .and_then(|ver| ver.as_str())
-                                        .unwrap_or("")
-                                        .to_string()
-                                }
+                                toml::Value::Table(t) => t
+                                    .get("version")
+                                    .and_then(|ver| ver.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
                                 _ => String::new(),
                             };
                             if version.is_empty() {
@@ -1353,7 +1423,8 @@ impl App {
             },
             InteractiveCreditItem {
                 label: "Crossref REST API".to_string(),
-                url: "https://www.crossref.org/documentation/retrieve-metadata/rest-api/".to_string(),
+                url: "https://www.crossref.org/documentation/retrieve-metadata/rest-api/"
+                    .to_string(),
             },
             InteractiveCreditItem {
                 label: "OpenAlex API".to_string(),
@@ -1432,7 +1503,15 @@ impl App {
         self.library
             .papers
             .iter()
-            .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors, p.doi.as_deref(), p.arxiv_id.as_deref()))
+            .filter(|p| {
+                Self::matches_query(
+                    &self.workspace_query,
+                    &p.title,
+                    &p.authors,
+                    p.doi.as_deref(),
+                    p.arxiv_id.as_deref(),
+                )
+            })
             .collect()
     }
 
@@ -1440,7 +1519,15 @@ impl App {
     pub fn filtered_reading_queue_papers(&self) -> Vec<&LibraryPaper> {
         self.reading_queue_papers
             .iter()
-            .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors, p.doi.as_deref(), p.arxiv_id.as_deref()))
+            .filter(|p| {
+                Self::matches_query(
+                    &self.workspace_query,
+                    &p.title,
+                    &p.authors,
+                    p.doi.as_deref(),
+                    p.arxiv_id.as_deref(),
+                )
+            })
             .collect()
     }
 
@@ -1452,12 +1539,21 @@ impl App {
                 let paper = if let Some(paper_id) = d.paper_id {
                     self.library.papers.iter().find(|p| p.id == paper_id)
                 } else if let Some(pdf_path) = &d.pdf_path {
-                    self.library.papers.iter().find(|p| p.pdf_path.as_ref() == Some(pdf_path))
+                    self.library
+                        .papers
+                        .iter()
+                        .find(|p| p.pdf_path.as_ref() == Some(pdf_path))
                 } else {
                     None
                 };
                 if let Some(p) = paper {
-                    Self::matches_query(&self.workspace_query, &p.title, &p.authors, p.doi.as_deref(), p.arxiv_id.as_deref())
+                    Self::matches_query(
+                        &self.workspace_query,
+                        &p.title,
+                        &p.authors,
+                        p.doi.as_deref(),
+                        p.arxiv_id.as_deref(),
+                    )
                 } else {
                     let raw_arxiv = d.id.strip_prefix("arxiv:").unwrap_or(&d.id);
                     Self::matches_query(&self.workspace_query, &d.title, "", None, Some(raw_arxiv))
@@ -1481,7 +1577,13 @@ impl App {
                 let mut matching_papers = Vec::new();
                 for &pid in paper_ids {
                     if let Some(p) = self.library.papers.iter().find(|p| p.id == pid) {
-                        if Self::matches_query(&self.workspace_query, &p.title, &p.authors, p.doi.as_deref(), p.arxiv_id.as_deref()) {
+                        if Self::matches_query(
+                            &self.workspace_query,
+                            &p.title,
+                            &p.authors,
+                            p.doi.as_deref(),
+                            p.arxiv_id.as_deref(),
+                        ) {
                             matching_papers.push(p);
                         }
                     }
@@ -1501,7 +1603,15 @@ impl App {
     pub fn filtered_collection_papers(&self) -> Vec<&LibraryPaper> {
         self.collection_papers
             .iter()
-            .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors, p.doi.as_deref(), p.arxiv_id.as_deref()))
+            .filter(|p| {
+                Self::matches_query(
+                    &self.workspace_query,
+                    &p.title,
+                    &p.authors,
+                    p.doi.as_deref(),
+                    p.arxiv_id.as_deref(),
+                )
+            })
             .collect()
     }
 
@@ -1517,7 +1627,15 @@ impl App {
     pub fn filtered_author_papers(&self) -> Vec<&LibraryPaper> {
         self.author_papers
             .iter()
-            .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors, p.doi.as_deref(), p.arxiv_id.as_deref()))
+            .filter(|p| {
+                Self::matches_query(
+                    &self.workspace_query,
+                    &p.title,
+                    &p.authors,
+                    p.doi.as_deref(),
+                    p.arxiv_id.as_deref(),
+                )
+            })
             .collect()
     }
 
@@ -1529,7 +1647,13 @@ impl App {
                 let lib_paper = self.library.papers.iter().find(|p| p.id == b.paper_id);
                 let paper_doi = lib_paper.and_then(|p| p.doi.as_deref());
                 let paper_arxiv = lib_paper.and_then(|p| p.arxiv_id.as_deref());
-                Self::matches_query(&self.workspace_query, &b.paper_title, &b.authors, paper_doi, paper_arxiv)
+                Self::matches_query(
+                    &self.workspace_query,
+                    &b.paper_title,
+                    &b.authors,
+                    paper_doi,
+                    paper_arxiv,
+                )
             })
             .collect()
     }
@@ -1538,7 +1662,15 @@ impl App {
     pub fn filtered_notes_papers(&self) -> Vec<&LibraryPaper> {
         self.notes_papers
             .iter()
-            .filter(|p| Self::matches_query(&self.workspace_query, &p.title, &p.authors, p.doi.as_deref(), p.arxiv_id.as_deref()))
+            .filter(|p| {
+                Self::matches_query(
+                    &self.workspace_query,
+                    &p.title,
+                    &p.authors,
+                    p.doi.as_deref(),
+                    p.arxiv_id.as_deref(),
+                )
+            })
             .collect()
     }
     /// Get Browse Papr destinations filtered by the query.
@@ -1630,9 +1762,9 @@ impl App {
             }
             Command::MoveDown => {
                 if !self.content_focused {
-                     self.sidebar_index =
+                    self.sidebar_index =
                         (self.sidebar_index + 1).min(Page::ALL.len().saturating_sub(1));
-                     self.page = Page::ALL[self.sidebar_index];
+                    self.page = Page::ALL[self.sidebar_index];
                 } else if self.page == Page::Dashboard && !self.today_papers.is_empty() {
                     self.today_selected =
                         (self.today_selected + 1).min(self.today_papers.len().saturating_sub(1));
@@ -1644,8 +1776,8 @@ impl App {
                     self.library.selected = (self.library.selected + 1)
                         .min(self.filtered_library_papers().len().saturating_sub(1));
                 } else if self.page == Page::Downloads {
-                    self.download_selected =
-                        (self.download_selected + 1).min(self.filtered_downloads().len().saturating_sub(1));
+                    self.download_selected = (self.download_selected + 1)
+                        .min(self.filtered_downloads().len().saturating_sub(1));
                 } else if self.page == Page::Collections {
                     if self.active_collection.is_some() {
                         self.collection_paper_selected = (self.collection_paper_selected + 1)
@@ -1659,15 +1791,15 @@ impl App {
                         self.author_paper_selected = (self.author_paper_selected + 1)
                             .min(self.filtered_author_papers().len().saturating_sub(1));
                     } else {
-                        self.author_selected =
-                            (self.author_selected + 1).min(self.filtered_authors().len().saturating_sub(1));
+                        self.author_selected = (self.author_selected + 1)
+                            .min(self.filtered_authors().len().saturating_sub(1));
                     }
                 } else if self.page == Page::Bookmarks {
-                    self.bookmark_selected =
-                        (self.bookmark_selected + 1).min(self.filtered_bookmarks().len().saturating_sub(1));
+                    self.bookmark_selected = (self.bookmark_selected + 1)
+                        .min(self.filtered_bookmarks().len().saturating_sub(1));
                 } else if self.page == Page::Notes {
-                    self.notes_selected =
-                        (self.notes_selected + 1).min(self.filtered_notes_papers().len().saturating_sub(1));
+                    self.notes_selected = (self.notes_selected + 1)
+                        .min(self.filtered_notes_papers().len().saturating_sub(1));
                 } else if self.page == Page::ReadingQueue {
                     self.reading_queue_selected = (self.reading_queue_selected + 1)
                         .min(self.filtered_reading_queue_papers().len().saturating_sub(1));
@@ -1781,8 +1913,10 @@ fn parse_arxiv_id(s: &str) -> Option<String> {
         if parts.len() == 2 {
             let yymm = parts[0];
             let nnnn = parts[1];
-            if yymm.len() == 4 && yymm.chars().all(|c| c.is_ascii_digit())
-                && (nnnn.len() == 4 || nnnn.len() == 5) && nnnn.chars().all(|c| c.is_ascii_digit())
+            if yymm.len() == 4
+                && yymm.chars().all(|c| c.is_ascii_digit())
+                && (nnnn.len() == 4 || nnnn.len() == 5)
+                && nnnn.chars().all(|c| c.is_ascii_digit())
             {
                 let mut normalized = base.to_string();
                 if let Some(v) = version {
@@ -1798,7 +1932,11 @@ fn parse_arxiv_id(s: &str) -> Option<String> {
         let (cat, num) = base.split_at(slash_idx);
         let num = &num[1..];
         if num.len() == 7 && num.chars().all(|c| c.is_ascii_digit()) {
-            if !cat.is_empty() && cat.chars().all(|c| c.is_ascii_alphabetic() || c == '-' || c == '.') {
+            if !cat.is_empty()
+                && cat
+                    .chars()
+                    .all(|c| c.is_ascii_alphabetic() || c == '-' || c == '.')
+            {
                 let mut normalized = base.to_string();
                 if let Some(v) = version {
                     normalized.push_str(&v);
@@ -1864,9 +2002,15 @@ mod tests {
         discovery.selected = 4;
         discovery.scroll = 2;
         assert!(discovery.previous_page());
-        assert_eq!((discovery.page, discovery.selected, discovery.scroll), (0, 17, 9));
+        assert_eq!(
+            (discovery.page, discovery.selected, discovery.scroll),
+            (0, 17, 9)
+        );
         assert!(discovery.next_page());
-        assert_eq!((discovery.page, discovery.selected, discovery.scroll), (1, 4, 2));
+        assert_eq!(
+            (discovery.page, discovery.selected, discovery.scroll),
+            (1, 4, 2)
+        );
         assert_eq!(discovery.results.len(), 101);
     }
 
@@ -1891,23 +2035,89 @@ mod tests {
     #[test]
     fn test_arxiv_id_search_matching() {
         // Modern ID match (with and without version)
-        assert!(App::matches_query("1402.4146v2", "Title", "Authors", None, Some("http://arxiv.org/abs/1402.4146v2")));
-        assert!(App::matches_query("1402.4146", "Title", "Authors", None, Some("http://arxiv.org/abs/1402.4146v2")));
-        assert!(App::matches_query("1402.4146v2", "Title", "Authors", None, Some("1402.4146")));
-        assert!(App::matches_query("1402.4146", "Title", "Authors", None, Some("1402.4146")));
-        assert!(App::matches_query("1402.4146v1", "Title", "Authors", None, Some("1402.4146v3")));
+        assert!(App::matches_query(
+            "1402.4146v2",
+            "Title",
+            "Authors",
+            None,
+            Some("http://arxiv.org/abs/1402.4146v2")
+        ));
+        assert!(App::matches_query(
+            "1402.4146",
+            "Title",
+            "Authors",
+            None,
+            Some("http://arxiv.org/abs/1402.4146v2")
+        ));
+        assert!(App::matches_query(
+            "1402.4146v2",
+            "Title",
+            "Authors",
+            None,
+            Some("1402.4146")
+        ));
+        assert!(App::matches_query(
+            "1402.4146",
+            "Title",
+            "Authors",
+            None,
+            Some("1402.4146")
+        ));
+        assert!(App::matches_query(
+            "1402.4146v1",
+            "Title",
+            "Authors",
+            None,
+            Some("1402.4146v3")
+        ));
 
         // Legacy ID match (with and without version)
-        assert!(App::matches_query("hep-th/0309012v1", "Title", "Authors", None, Some("https://arxiv.org/abs/hep-th/0309012")));
-        assert!(App::matches_query("hep-th/0309012", "Title", "Authors", None, Some("https://arxiv.org/abs/hep-th/0309012v3")));
-        assert!(App::matches_query("math.GT/0309012", "Title", "Authors", None, Some("math.gt/0309012")));
+        assert!(App::matches_query(
+            "hep-th/0309012v1",
+            "Title",
+            "Authors",
+            None,
+            Some("https://arxiv.org/abs/hep-th/0309012")
+        ));
+        assert!(App::matches_query(
+            "hep-th/0309012",
+            "Title",
+            "Authors",
+            None,
+            Some("https://arxiv.org/abs/hep-th/0309012v3")
+        ));
+        assert!(App::matches_query(
+            "math.GT/0309012",
+            "Title",
+            "Authors",
+            None,
+            Some("math.gt/0309012")
+        ));
 
         // Case insensitivity
-        assert!(App::matches_query("HeP-Th/0309012", "Title", "Authors", None, Some("hep-th/0309012")));
+        assert!(App::matches_query(
+            "HeP-Th/0309012",
+            "Title",
+            "Authors",
+            None,
+            Some("hep-th/0309012")
+        ));
 
         // Non-matching
-        assert!(!App::matches_query("1402.4146", "Title", "Authors", None, Some("1502.4146")));
-        assert!(!App::matches_query("hep-th/0309012", "Title", "Authors", None, Some("hep-th/0309013")));
+        assert!(!App::matches_query(
+            "1402.4146",
+            "Title",
+            "Authors",
+            None,
+            Some("1502.4146")
+        ));
+        assert!(!App::matches_query(
+            "hep-th/0309012",
+            "Title",
+            "Authors",
+            None,
+            Some("hep-th/0309013")
+        ));
     }
 
     #[test]
@@ -1915,13 +2125,37 @@ mod tests {
         // Exact title match
         assert!(App::matches_query("rust", "Rust", "Authors", None, None));
         // Substring title match
-        assert!(App::matches_query("rust", "The Rust compiler", "Authors", None, None));
+        assert!(App::matches_query(
+            "rust",
+            "The Rust compiler",
+            "Authors",
+            None,
+            None
+        ));
         // Author match
-        assert!(App::matches_query("smith", "Title", "John Smith, Jane Doe", None, None));
+        assert!(App::matches_query(
+            "smith",
+            "Title",
+            "John Smith, Jane Doe",
+            None,
+            None
+        ));
         // Case insensitivity
-        assert!(App::matches_query("RuSt", "rust compiler", "Authors", None, None));
+        assert!(App::matches_query(
+            "RuSt",
+            "rust compiler",
+            "Authors",
+            None,
+            None
+        ));
         // Non-matching
-        assert!(!App::matches_query("rust", "C++ compiler", "John Smith", None, None));
+        assert!(!App::matches_query(
+            "rust",
+            "C++ compiler",
+            "John Smith",
+            None,
+            None
+        ));
     }
 
     #[test]
@@ -1948,10 +2182,19 @@ mod tests {
         assert_eq!(Page::from_config_str("dashboard"), Some(Page::Dashboard));
         assert_eq!(Page::from_config_str("discover"), Some(Page::Discover));
         assert_eq!(Page::from_config_str("library"), Some(Page::Library));
-        assert_eq!(Page::from_config_str("reading_queue"), Some(Page::ReadingQueue));
-        assert_eq!(Page::from_config_str("reading-queue"), Some(Page::ReadingQueue));
+        assert_eq!(
+            Page::from_config_str("reading_queue"),
+            Some(Page::ReadingQueue)
+        );
+        assert_eq!(
+            Page::from_config_str("reading-queue"),
+            Some(Page::ReadingQueue)
+        );
         assert_eq!(Page::from_config_str("projects"), Some(Page::Projects));
-        assert_eq!(Page::from_config_str("collections"), Some(Page::Collections));
+        assert_eq!(
+            Page::from_config_str("collections"),
+            Some(Page::Collections)
+        );
         assert_eq!(Page::from_config_str("groups"), Some(Page::Collections));
         assert_eq!(Page::from_config_str("bookmarks"), Some(Page::Bookmarks));
         assert_eq!(Page::from_config_str("authors"), Some(Page::Authors));
@@ -1969,10 +2212,16 @@ mod tests {
 
         app.set_page(Page::Projects);
         assert_eq!(app.page, Page::Projects);
-        assert_eq!(app.sidebar_index, Page::ALL.iter().position(|&p| p == Page::Projects).unwrap());
+        assert_eq!(
+            app.sidebar_index,
+            Page::ALL.iter().position(|&p| p == Page::Projects).unwrap()
+        );
 
         app.set_page(Page::Discover);
         assert_eq!(app.page, Page::Discover);
-        assert_eq!(app.sidebar_index, Page::ALL.iter().position(|&p| p == Page::Discover).unwrap());
+        assert_eq!(
+            app.sidebar_index,
+            Page::ALL.iter().position(|&p| p == Page::Discover).unwrap()
+        );
     }
 }
