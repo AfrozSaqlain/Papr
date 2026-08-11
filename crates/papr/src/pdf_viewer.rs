@@ -1893,20 +1893,26 @@ mod kitty_placeholder_tests {
         assert!(upload.len() < raw.len());
     }
 
-    #[test]
-    fn releasing_a_document_removes_only_its_cache_and_invalidates_jobs() -> anyhow::Result<()> {
+    struct ReleaseFixture {
+        cache: Arc<Mutex<PageCache>>,
+        closed: PathBuf,
+        other: PathBuf,
+        closed_temp: PathBuf,
+        other_temp: PathBuf,
+        active_key: PageKey,
+        active_cancelled: Arc<AtomicBool>,
+    }
+
+    fn release_fixture() -> anyhow::Result<ReleaseFixture> {
         let closed = PathBuf::from("/tmp/papr-closed-document.pdf");
         let other = PathBuf::from("/tmp/papr-other-document.pdf");
-        let closed_temp = std::env::temp_dir().join(format!(
-            "papr-closed-raster-{}-{}.png",
+        let suffix = format!(
+            "{}-{}",
             std::process::id(),
             std::thread::current().name().unwrap_or("test")
-        ));
-        let other_temp = std::env::temp_dir().join(format!(
-            "papr-other-raster-{}-{}.png",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        );
+        let closed_temp = std::env::temp_dir().join(format!("papr-closed-raster-{suffix}.png"));
+        let other_temp = std::env::temp_dir().join(format!("papr-other-raster-{suffix}.png"));
         std::fs::write(&closed_temp, [])?;
         std::fs::write(&other_temp, [])?;
         let page = RenderedPage {
@@ -1916,99 +1922,139 @@ mod kitty_placeholder_tests {
         let active_key = (closed.clone(), 0, 2, DPI, 1);
         let active_cancelled = Arc::new(AtomicBool::new(false));
         let cache = get_cache();
-        {
-            let mut g = cache
-                .lock()
-                .map_err(|_| anyhow::anyhow!("PDF cache lock poisoned"))?;
-            g.pages.insert((closed.clone(), 0, 1, DPI, 1), page.clone());
-            g.pages.insert((other.clone(), 0, 1, DPI, 1), page);
-            g.page_counts.insert((closed.clone(), 0), 3);
-            g.page_counts.insert((other.clone(), 0), 4);
-            g.page_count_in_flight.insert((closed.clone(), 0));
-            g.page_count_in_flight.insert((other.clone(), 0));
-            g.in_flight.insert(active_key.clone());
-            g.render_cancellations
-                .insert(active_key.clone(), active_cancelled.clone());
-            g.render_queue.push_back(RenderJob {
-                key: (closed.clone(), 0, 3, DPI, 1),
-                pdf_path: closed.clone(),
-                generation: 0,
-                page: 3,
-                dpi: DPI,
-                pixel_w: 1,
-                priority: false,
-                cancelled: Arc::new(AtomicBool::new(false)),
-            });
-            g.temp_files.push((closed.clone(), closed_temp.clone()));
-            g.temp_files.push((other.clone(), other_temp.clone()));
-            g.last_crop_key = Some(CropKey {
-                path_fp: path_fingerprint(&closed),
-                page: 1,
-                dpi: DPI,
-                pixel_w: 1,
-                crop_y: 0,
-                crop_h: 1,
-                page_fit: false,
-            });
-            g.last_encoded = Some(EncodedFrame {
-                transmit_seq: String::new(),
-                image_id: 77,
-                cols: 1,
-                rows: 1,
-                id_color: String::new(),
-                retire_image_id: None,
-            });
-            g.resident_kitty_image = Some((path_fingerprint(&closed), 77));
-        }
-
-        release_document(&closed);
-
-        let mut g = cache
+        let mut state = cache
             .lock()
             .map_err(|_| anyhow::anyhow!("PDF cache lock poisoned"))?;
-        assert!(!g.pages.keys().any(|(path, _, _, _, _)| path == &closed));
-        assert!(!g.in_flight.iter().any(|(path, _, _, _, _)| path == &closed));
-        assert!(!g.render_queue.iter().any(|job| job.pdf_path == closed));
-        assert!(active_cancelled.load(Ordering::Acquire));
-        assert!(g.pages.keys().any(|(path, _, _, _, _)| path == &other));
-        assert!(!g.page_counts.keys().any(|(path, _)| path == &closed));
-        assert!(g.page_counts.keys().any(|(path, _)| path == &other));
-        assert!(
-            !g.page_count_in_flight
-                .iter()
-                .any(|(path, _)| path == &closed)
-        );
-        assert!(
-            g.page_count_in_flight
-                .iter()
-                .any(|(path, _)| path == &other)
-        );
-        assert_eq!(g.document_generations.get(&closed), Some(&1));
-        assert!(g.last_crop_key.is_none());
-        assert!(g.last_encoded.is_none());
-        assert!(g.pending_kitty_deletes.contains(&77));
-        assert!(g.resident_kitty_image.is_none());
-        assert!(!closed_temp.exists());
-        assert!(other_temp.exists());
-        g.pages.retain(|(path, _, _, _, _), _| path != &other);
-        g.page_counts.retain(|(path, _), _| path != &other);
-        g.page_count_in_flight.retain(|(path, _)| path != &other);
-        g.pending_kitty_deletes.retain(|id| *id != 77);
-        g.render_cancellations.remove(&active_key);
-        g.document_generations.remove(&closed);
-        g.temp_files.retain(|(_, file)| file != &other_temp);
-        let _ = std::fs::remove_file(other_temp);
-        drop(g);
+        state
+            .pages
+            .insert((closed.clone(), 0, 1, DPI, 1), page.clone());
+        state.pages.insert((other.clone(), 0, 1, DPI, 1), page);
+        state.page_counts.insert((closed.clone(), 0), 3);
+        state.page_counts.insert((other.clone(), 0), 4);
+        state.page_count_in_flight.insert((closed.clone(), 0));
+        state.page_count_in_flight.insert((other.clone(), 0));
+        state.in_flight.insert(active_key.clone());
+        state
+            .render_cancellations
+            .insert(active_key.clone(), Arc::clone(&active_cancelled));
+        state.render_queue.push_back(RenderJob {
+            key: (closed.clone(), 0, 3, DPI, 1),
+            pdf_path: closed.clone(),
+            generation: 0,
+            page: 3,
+            dpi: DPI,
+            pixel_w: 1,
+            priority: false,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        });
+        state.temp_files.push((closed.clone(), closed_temp.clone()));
+        state.temp_files.push((other.clone(), other_temp.clone()));
+        state.last_crop_key = Some(CropKey {
+            path_fp: path_fingerprint(&closed),
+            page: 1,
+            dpi: DPI,
+            pixel_w: 1,
+            crop_y: 0,
+            crop_h: 1,
+            page_fit: false,
+        });
+        state.last_encoded = Some(EncodedFrame {
+            transmit_seq: String::new(),
+            image_id: 77,
+            cols: 1,
+            rows: 1,
+            id_color: String::new(),
+            retire_image_id: None,
+        });
+        state.resident_kitty_image = Some((path_fingerprint(&closed), 77));
+        drop(state);
+        Ok(ReleaseFixture {
+            cache,
+            closed,
+            other,
+            closed_temp,
+            other_temp,
+            active_key,
+            active_cancelled,
+        })
+    }
 
-        // A live rebuild must not delete the old terminal image before the
-        // replacement is ready; closing it afterwards must still free it.
+    fn assert_document_released(fixture: &ReleaseFixture) -> anyhow::Result<()> {
+        let mut state = fixture
+            .cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("PDF cache lock poisoned"))?;
+        assert!(
+            !state
+                .pages
+                .keys()
+                .any(|(path, _, _, _, _)| path == &fixture.closed)
+        );
+        assert!(
+            !state
+                .in_flight
+                .iter()
+                .any(|(path, _, _, _, _)| path == &fixture.closed)
+        );
+        assert!(
+            !state
+                .render_queue
+                .iter()
+                .any(|job| job.pdf_path == fixture.closed)
+        );
+        assert!(fixture.active_cancelled.load(Ordering::Acquire));
+        assert!(
+            state
+                .pages
+                .keys()
+                .any(|(path, _, _, _, _)| path == &fixture.other)
+        );
+        assert!(!state.page_counts.contains_key(&(fixture.closed.clone(), 0)));
+        assert!(state.page_counts.contains_key(&(fixture.other.clone(), 0)));
+        assert!(
+            !state
+                .page_count_in_flight
+                .contains(&(fixture.closed.clone(), 0))
+        );
+        assert!(
+            state
+                .page_count_in_flight
+                .contains(&(fixture.other.clone(), 0))
+        );
+        assert_eq!(state.document_generations.get(&fixture.closed), Some(&1));
+        assert!(state.last_crop_key.is_none());
+        assert!(state.last_encoded.is_none());
+        assert!(state.pending_kitty_deletes.contains(&77));
+        assert!(state.resident_kitty_image.is_none());
+        assert!(!fixture.closed_temp.exists());
+        assert!(fixture.other_temp.exists());
+        state
+            .pages
+            .retain(|(path, _, _, _, _), _| path != &fixture.other);
+        state
+            .page_counts
+            .retain(|(path, _), _| path != &fixture.other);
+        state
+            .page_count_in_flight
+            .retain(|(path, _)| path != &fixture.other);
+        state.pending_kitty_deletes.retain(|id| *id != 77);
+        state.render_cancellations.remove(&fixture.active_key);
+        state.document_generations.remove(&fixture.closed);
+        state
+            .temp_files
+            .retain(|(_, file)| file != &fixture.other_temp);
+        let _ = std::fs::remove_file(&fixture.other_temp);
+        Ok(())
+    }
+
+    fn assert_rebuild_lifecycle(cache: &Arc<Mutex<PageCache>>) -> anyhow::Result<()> {
         let rebuilt = PathBuf::from("/tmp/papr-rebuilt-document.pdf");
         {
-            let mut g = cache
+            let mut state = cache
                 .lock()
                 .map_err(|_| anyhow::anyhow!("PDF cache lock poisoned"))?;
-            g.resident_kitty_image = Some((path_fingerprint(&rebuilt), 88));
-            g.last_crop_key = Some(CropKey {
+            state.resident_kitty_image = Some((path_fingerprint(&rebuilt), 88));
+            state.last_crop_key = Some(CropKey {
                 path_fp: path_fingerprint(&rebuilt),
                 page: 1,
                 dpi: DPI,
@@ -2017,7 +2063,7 @@ mod kitty_placeholder_tests {
                 crop_h: 1,
                 page_fit: true,
             });
-            g.last_encoded = Some(EncodedFrame {
+            state.last_encoded = Some(EncodedFrame {
                 transmit_seq: "old upload".into(),
                 image_id: 88,
                 cols: 1,
@@ -2028,22 +2074,30 @@ mod kitty_placeholder_tests {
         }
         invalidate_document(&rebuilt);
         {
-            let g = cache
+            let state = cache
                 .lock()
                 .map_err(|_| anyhow::anyhow!("PDF cache lock poisoned"))?;
             assert_eq!(
-                g.resident_kitty_image,
+                state.resident_kitty_image,
                 Some((path_fingerprint(&rebuilt), 88))
             );
-            assert!(!g.pending_kitty_deletes.contains(&88));
-            assert!(g.last_encoded.is_none());
+            assert!(!state.pending_kitty_deletes.contains(&88));
+            assert!(state.last_encoded.is_none());
         }
         release_document(&rebuilt);
-        let mut g = cache
+        let mut state = cache
             .lock()
             .map_err(|_| anyhow::anyhow!("PDF cache lock poisoned"))?;
-        assert!(g.pending_kitty_deletes.contains(&88));
-        g.pending_kitty_deletes.retain(|id| *id != 88);
+        assert!(state.pending_kitty_deletes.contains(&88));
+        state.pending_kitty_deletes.retain(|id| *id != 88);
         Ok(())
+    }
+
+    #[test]
+    fn releasing_a_document_removes_only_its_cache_and_invalidates_jobs() -> anyhow::Result<()> {
+        let fixture = release_fixture()?;
+        release_document(&fixture.closed);
+        assert_document_released(&fixture)?;
+        assert_rebuild_lifecycle(&fixture.cache)
     }
 }

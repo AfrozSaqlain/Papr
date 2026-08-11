@@ -388,6 +388,26 @@ pub enum GeneralTabFocus {
     EnabledPlugins,
 }
 
+/// Editing state for text fields on the General settings tab.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GeneralSettingsEditing {
+    /// Whether the PDF viewer command is being edited.
+    pub pdf_viewer: bool,
+    /// Whether a dashboard keyword is being edited.
+    pub keyword: bool,
+}
+
+/// Editing state for text fields on the Paths settings tab.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PathSettingsEditing {
+    /// Whether a library folder is being edited.
+    pub library: bool,
+    /// Whether the download path is being edited.
+    pub download_path: bool,
+    /// Whether the projects directory is being edited.
+    pub projects_directory: bool,
+}
+
 /// Staged (in-memory) settings being edited in the modal.
 #[derive(Debug, Clone)]
 pub struct SettingsModalState {
@@ -408,14 +428,12 @@ pub struct SettingsModalState {
     pub pdf_viewer: String,
     /// Byte cursor in `pdf_viewer` text field.
     pub pdf_viewer_cursor: usize,
-    /// Whether the `pdf_viewer` field is being edited.
-    pub pdf_viewer_editing: bool,
+    /// Editing state for fields on the General tab.
+    pub general_editing: GeneralSettingsEditing,
     /// Staged `dashboard_keywords` as editable entries.
     pub keyword_entries: Vec<PathEntryState>,
     /// Selected entry index in `keyword_entries`.
     pub keyword_selected: usize,
-    /// Whether the selected keyword entry is actively being edited.
-    pub keyword_editing: bool,
     /// Staged `enabled_plugins` list.
     pub enabled_plugins: Vec<String>,
     /// Staged `default_project_compiler` value.
@@ -427,22 +445,18 @@ pub struct SettingsModalState {
     pub library_entries: Vec<PathEntryState>,
     /// Selected entry index in `library_entries`.
     pub library_selected: usize,
-    /// Whether the selected library entry is actively being edited.
-    pub library_editing: bool,
+    /// Editing state for fields on the Paths tab.
+    pub paths_editing: PathSettingsEditing,
     /// Staged `download_path` value.
     pub download_path: String,
     /// Byte cursor in `download_path` text field.
     pub download_path_cursor: usize,
-    /// Whether `download_path` is actively being edited.
-    pub download_path_editing: bool,
     /// Validation error for `download_path`.
     pub download_path_error: Option<String>,
     /// Staged `projects_directory` value.
     pub projects_directory: String,
     /// Byte cursor in `projects_directory` text field.
     pub projects_directory_cursor: usize,
-    /// Whether `projects_directory` is actively being edited.
-    pub projects_directory_editing: bool,
     /// Validation error for `projects_directory`.
     pub projects_directory_error: Option<String>,
     /// Focus within the Paths tab.
@@ -467,23 +481,20 @@ impl Default for SettingsModalState {
             startup_page_selected: 0,
             pdf_viewer: String::new(),
             pdf_viewer_cursor: 0,
-            pdf_viewer_editing: false,
+            general_editing: GeneralSettingsEditing::default(),
             keyword_entries: Vec::new(),
             keyword_selected: 0,
-            keyword_editing: false,
             enabled_plugins: Vec::new(),
             default_project_compiler: String::new(),
             general_focus: GeneralTabFocus::default(),
             library_entries: Vec::new(),
             library_selected: 0,
-            library_editing: false,
+            paths_editing: PathSettingsEditing::default(),
             download_path: String::new(),
             download_path_cursor: 0,
-            download_path_editing: false,
             download_path_error: None,
             projects_directory: String::new(),
             projects_directory_cursor: 0,
-            projects_directory_editing: false,
             projects_directory_error: None,
             paths_focus: PathsTabFocus::default(),
             plugins_selected: 0,
@@ -860,6 +871,39 @@ pub enum Command {
     Quit,
 }
 
+/// Infrequent session-level signals owned by the application event loop.
+#[derive(Debug, Default)]
+pub struct AppSessionFlags {
+    /// Whether the event loop should stop.
+    pub should_quit: bool,
+    /// Whether the selected terminal completion has been inserted into input.
+    pub terminal_completion_applied: bool,
+    /// Whether background arXiv metadata enrichment is in progress.
+    pub enrichment_pending: bool,
+}
+
+/// Presentation options for the Projects workspace.
+#[derive(Debug, Default)]
+pub struct ProjectViewFlags {
+    /// Whether mouse-wheel scrolling is temporarily controlling the editor viewport.
+    pub editor_manual_scroll: bool,
+    /// Whether the Build pane is showing raw compiler output.
+    pub build_show_raw: bool,
+    /// Whether the right-hand workspace pane is showing compiler output instead of the PDF.
+    pub build_visible: bool,
+}
+
+/// State switches for note and configuration editor overlays.
+#[derive(Debug, Default)]
+pub struct OverlayFlags {
+    /// Whether the note overlay shows rendered Markdown instead of source.
+    pub note_preview: bool,
+    /// Whether the configuration editor currently has keyboard focus.
+    pub config_editor_focused: bool,
+    /// Whether the configuration editor is in insert mode.
+    pub config_editor_insert_mode: bool,
+}
+
 /// Complete UI state independent of terminal rendering.
 #[derive(Debug)]
 pub struct App {
@@ -877,8 +921,8 @@ pub struct App {
     pub help_scroll: usize,
     /// Mode to restore after dismissing the keyboard reference.
     pub help_return_mode: AppMode,
-    /// Whether the event loop should stop.
-    pub should_quit: bool,
+    /// Session-level signals consumed by the event loop.
+    pub session_flags: AppSessionFlags,
     /// Summary metrics loaded from persistence.
     pub stats: DashboardStats,
     /// Complete local dashboard snapshot.
@@ -913,8 +957,6 @@ pub struct App {
     pub terminal_completion_selected: Option<usize>,
     /// Start of the token being completed in the terminal input.
     pub terminal_completion_token_start: usize,
-    /// Whether the selected terminal completion has been inserted into input.
-    pub terminal_completion_applied: bool,
     /// Selected credits item row.
     pub credits_selected: usize,
     /// Vertical list scroll offset for credits list.
@@ -959,8 +1001,8 @@ pub struct App {
     pub project_editor_wrap_width: usize,
     /// Cached height of the project editor viewport.
     pub project_editor_viewport_height: usize,
-    /// Whether mouse-wheel scrolling is temporarily controlling the editor viewport.
-    pub project_editor_manual_scroll: bool,
+    /// Presentation options for the Projects workspace.
+    pub project_view_flags: ProjectViewFlags,
     /// Pending first key of a multi-key Normal-mode editor command.
     pub project_editor_pending_sequence: Option<ProjectEditorPendingSequence>,
     /// Items currently offered by the editor completion engine.
@@ -973,8 +1015,6 @@ pub struct App {
     pub project_build_diagnostics: Vec<ProjectBuildDiagnostic>,
     /// Raw output from the latest compiler invocation.
     pub project_build_raw_log: Vec<String>,
-    /// Whether the Build pane is showing raw compiler output.
-    pub project_build_show_raw: bool,
     /// Selected structured diagnostic in the Build pane.
     pub project_build_selected: usize,
     /// First visible compiler-output line in the Projects build pane.
@@ -983,8 +1023,6 @@ pub struct App {
     pub project_build_viewport_height: usize,
     /// Current logical Projects workspace focus.
     pub project_pane: ProjectPane,
-    /// Whether the right-hand workspace pane is showing compiler output instead of the PDF.
-    pub project_build_visible: bool,
     /// Pending project name while the rename prompt is open.
     pub project_rename_input: String,
     /// Selected compiler for project creation.
@@ -1030,8 +1068,8 @@ pub struct App {
     pub download_scroll: usize,
     /// Currently edited note.
     pub note_editor: Option<PaperNote>,
-    /// Whether the note overlay shows rendered Markdown instead of source.
-    pub note_preview: bool,
+    /// State switches for note and configuration editor overlays.
+    pub overlay_flags: OverlayFlags,
     /// Vertical scroll offset shared by the note source and preview panes.
     pub note_scroll: u16,
     /// Active collection prompt.
@@ -1088,8 +1126,6 @@ pub struct App {
     pub plugins: Vec<PluginInfo>,
     /// Number of invalid plugin bundles found at startup.
     pub plugin_diagnostics: usize,
-    /// Whether background arXiv metadata enrichment is in progress.
-    pub enrichment_pending: bool,
     /// Papers with associated notes.
     pub notes_papers: Vec<LibraryPaper>,
     /// Selected paper with notes.
@@ -1100,10 +1136,6 @@ pub struct App {
     pub config_editor_text: String,
     /// Byte cursor position in `config_editor_text`.
     pub config_editor_cursor: usize,
-    /// Whether the configuration editor currently has keyboard focus.
-    pub config_editor_focused: bool,
-    /// Whether the editor is in insert mode (otherwise normal mode).
-    pub config_editor_insert_mode: bool,
     /// Validation error message if the saved configuration is invalid.
     pub config_editor_error: Option<String>,
     /// Vertical scroll offset of the editor.
@@ -1156,7 +1188,7 @@ impl Default for App {
             mode: AppMode::Normal,
             help_scroll: 0,
             help_return_mode: AppMode::Normal,
-            should_quit: false,
+            session_flags: AppSessionFlags::default(),
             stats: DashboardStats::default(),
             dashboard: ResearchDashboard::default(),
             today_papers: Vec::new(),
@@ -1174,7 +1206,6 @@ impl Default for App {
             terminal_completions: Vec::new(),
             terminal_completion_selected: None,
             terminal_completion_token_start: 0,
-            terminal_completion_applied: false,
             credits_selected: 0,
             credits_scroll: 0,
             workspace_query: String::new(),
@@ -1197,19 +1228,17 @@ impl Default for App {
             project_editor_scroll: 0,
             project_editor_wrap_width: 1,
             project_editor_viewport_height: 0,
-            project_editor_manual_scroll: false,
+            project_view_flags: ProjectViewFlags::default(),
             project_editor_pending_sequence: None,
             project_completions: Vec::new(),
             project_completion_selected: 0,
             project_build_status: "Idle".into(),
             project_build_diagnostics: Vec::new(),
             project_build_raw_log: Vec::new(),
-            project_build_show_raw: false,
             project_build_selected: 0,
             project_build_scroll: 0,
             project_build_viewport_height: 0,
             project_pane: ProjectPane::ProjectList,
-            project_build_visible: false,
             project_rename_input: String::new(),
             project_create_compiler: "latex".to_owned(),
             project_rename_cursor: 0,
@@ -1232,7 +1261,7 @@ impl Default for App {
             download_selected: 0,
             download_scroll: 0,
             note_editor: None,
-            note_preview: false,
+            overlay_flags: OverlayFlags::default(),
             note_scroll: 0,
             metadata_prompt: None,
             collections: Vec::new(),
@@ -1261,14 +1290,11 @@ impl Default for App {
             modal_return: AppMode::Normal,
             plugins: Vec::new(),
             plugin_diagnostics: 0,
-            enrichment_pending: false,
             notes_papers: Vec::new(),
             notes_selected: 0,
             notes_scroll: 0,
             config_editor_text: String::new(),
             config_editor_cursor: 0,
-            config_editor_focused: false,
-            config_editor_insert_mode: false,
             config_editor_error: None,
             config_editor_scroll: 0,
             config_editor_history: Vec::new(),
@@ -1875,7 +1901,7 @@ impl App {
                     }
                 }
             }
-            Command::Quit => self.should_quit = true,
+            Command::Quit => self.session_flags.should_quit = true,
         }
     }
 }

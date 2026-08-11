@@ -70,14 +70,14 @@ pub fn open_settings_modal(app: &mut App, config: &Config, current_theme_name: &
         .unwrap_or(0);
     modal.pdf_viewer = config.pdf_viewer.clone().unwrap_or_default();
     modal.pdf_viewer_cursor = modal.pdf_viewer.len();
-    modal.pdf_viewer_editing = false;
+    modal.general_editing.pdf_viewer = false;
     modal.keyword_entries = config
         .dashboard_keyword_list()
         .into_iter()
         .map(PathEntryState::new)
         .collect();
     modal.keyword_selected = 0;
-    modal.keyword_editing = false;
+    modal.general_editing.keyword = false;
     modal.enabled_plugins.clone_from(&config.enabled_plugins);
     modal
         .default_project_compiler
@@ -91,14 +91,14 @@ pub fn open_settings_modal(app: &mut App, config: &Config, current_theme_name: &
         .map(|p| PathEntryState::new(p.display().to_string()))
         .collect();
     modal.library_selected = 0;
-    modal.library_editing = false;
+    modal.paths_editing.library = false;
     modal.download_path = config
         .download_path
         .as_ref()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     modal.download_path_cursor = modal.download_path.len();
-    modal.download_path_editing = false;
+    modal.paths_editing.download_path = false;
     modal.download_path_error = None;
     modal.projects_directory = config
         .projects_directory
@@ -106,7 +106,7 @@ pub fn open_settings_modal(app: &mut App, config: &Config, current_theme_name: &
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     modal.projects_directory_cursor = modal.projects_directory.len();
-    modal.projects_directory_editing = false;
+    modal.paths_editing.projects_directory = false;
     modal.projects_directory_error = None;
     modal.paths_focus = PathsTabFocus::LibraryFolders;
 
@@ -220,22 +220,22 @@ pub fn paste_into_active_field(app: &mut App, text: Option<&str>) -> bool {
         *cursor += text.len();
     };
     let modal = &mut app.settings_modal;
-    if modal.pdf_viewer_editing {
+    if modal.general_editing.pdf_viewer {
         insert(&mut modal.pdf_viewer, &mut modal.pdf_viewer_cursor);
-    } else if modal.keyword_editing {
+    } else if modal.general_editing.keyword {
         if let Some(entry) = modal.keyword_entries.get_mut(modal.keyword_selected) {
             insert(&mut entry.text, &mut entry.cursor);
             entry.error = None;
         }
-    } else if modal.library_editing {
+    } else if modal.paths_editing.library {
         if let Some(entry) = modal.library_entries.get_mut(modal.library_selected) {
             insert(&mut entry.text, &mut entry.cursor);
             entry.error = None;
         }
-    } else if modal.download_path_editing {
+    } else if modal.paths_editing.download_path {
         insert(&mut modal.download_path, &mut modal.download_path_cursor);
         modal.download_path_error = None;
-    } else if modal.projects_directory_editing {
+    } else if modal.paths_editing.projects_directory {
         insert(
             &mut modal.projects_directory,
             &mut modal.projects_directory_cursor,
@@ -248,48 +248,8 @@ pub fn paste_into_active_field(app: &mut App, text: Option<&str>) -> bool {
 /// Handle a key event while focus is inside the settings workspace.
 pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
     let is_editing = any_field_editing(app);
-
-    // Esc key handling: if currently editing a text field, cancel text edit mode.
-    // Otherwise, return focus to sidebar navigation panel!
-    if key.code == KeyCode::Esc {
-        if is_editing {
-            clear_edit_state(app);
-            return SettingsKeyResult::Handled;
-        }
-        return SettingsKeyResult::ReturnToSidebar;
-    }
-
-    // Global q key handling: if not in text editing mode, quit application cleanly.
-    if key.code == KeyCode::Char('q') && !is_editing {
-        return SettingsKeyResult::Quit;
-    }
-
-    // Global Ctrl+B shortcut handling: toggle command palette/navigator when not in text editing mode.
-    if key.modifiers.contains(KeyModifiers::CONTROL)
-        && key.code == KeyCode::Char('b')
-        && !is_editing
-    {
-        app.dispatch(Command::TogglePalette);
-        return SettingsKeyResult::Handled;
-    }
-
-    // Global ? shortcut handling: toggle keyboard reference overlay when not in text editing mode.
-    if key.code == KeyCode::Char('?') && !is_editing {
-        app.dispatch(Command::ToggleHelp);
-        return SettingsKeyResult::Handled;
-    }
-
-    // Match the application's global Discover shortcut while leaving `/`
-    // available as normal text in an actively edited settings field.
-    if key.code == KeyCode::Char('/') && !is_editing {
-        app.page = Page::Discover;
-        if let Some(index) = Page::ALL.iter().position(|&page| page == Page::Discover) {
-            app.sidebar_index = index;
-        }
-        app.content_focused = true;
-        app.mode = AppMode::Search;
-        app.discovery.query_cursor = app.discovery.query.len();
-        return SettingsKeyResult::Handled;
+    if let Some(result) = handle_settings_shortcut(app, key, is_editing) {
+        return result;
     }
 
     // Check if current context requires Left/Right for its own control-specific functionality:
@@ -391,6 +351,45 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
     }
 }
 
+fn handle_settings_shortcut(
+    app: &mut App,
+    key: KeyEvent,
+    is_editing: bool,
+) -> Option<SettingsKeyResult> {
+    if key.code == KeyCode::Esc {
+        if is_editing {
+            clear_edit_state(app);
+            return Some(SettingsKeyResult::Handled);
+        }
+        return Some(SettingsKeyResult::ReturnToSidebar);
+    }
+    if key.code == KeyCode::Char('q') && !is_editing {
+        return Some(SettingsKeyResult::Quit);
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.code == KeyCode::Char('b')
+        && !is_editing
+    {
+        app.dispatch(Command::TogglePalette);
+        return Some(SettingsKeyResult::Handled);
+    }
+    if key.code == KeyCode::Char('?') && !is_editing {
+        app.dispatch(Command::ToggleHelp);
+        return Some(SettingsKeyResult::Handled);
+    }
+    if key.code == KeyCode::Char('/') && !is_editing {
+        app.page = Page::Discover;
+        if let Some(index) = Page::ALL.iter().position(|&page| page == Page::Discover) {
+            app.sidebar_index = index;
+        }
+        app.content_focused = true;
+        app.mode = AppMode::Search;
+        app.discovery.query_cursor = app.discovery.query.len();
+        return Some(SettingsKeyResult::Handled);
+    }
+    None
+}
+
 /// Text input receives the terminal's layout-resolved Unicode character.
 fn text_input_char(character: char) -> char {
     character
@@ -398,20 +397,20 @@ fn text_input_char(character: char) -> char {
 
 fn any_field_editing(app: &App) -> bool {
     let m = &app.settings_modal;
-    m.pdf_viewer_editing
-        || m.keyword_editing
-        || m.library_editing
-        || m.download_path_editing
-        || m.projects_directory_editing
+    m.general_editing.pdf_viewer
+        || m.general_editing.keyword
+        || m.paths_editing.library
+        || m.paths_editing.download_path
+        || m.paths_editing.projects_directory
 }
 
 fn clear_edit_state(app: &mut App) {
     let m = &mut app.settings_modal;
-    m.pdf_viewer_editing = false;
-    m.keyword_editing = false;
-    m.library_editing = false;
-    m.download_path_editing = false;
-    m.projects_directory_editing = false;
+    m.general_editing.pdf_viewer = false;
+    m.general_editing.keyword = false;
+    m.paths_editing.library = false;
+    m.paths_editing.download_path = false;
+    m.paths_editing.projects_directory = false;
 }
 
 // --- Theme tab ---
@@ -466,165 +465,183 @@ fn preview_selected_theme(app: &App) -> SettingsKeyResult {
 fn handle_general_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
     let focus = app.settings_modal.general_focus;
 
-    if app.settings_modal.pdf_viewer_editing {
+    if app.settings_modal.general_editing.pdf_viewer {
         return handle_pdf_viewer_edit(app, key);
     }
-    if app.settings_modal.keyword_editing {
+    if app.settings_modal.general_editing.keyword {
         return handle_keyword_entry_edit(app, key);
     }
 
     match focus {
-        GeneralTabFocus::StartupPage => match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                app.settings_modal.tab_bar_focused = true;
+        GeneralTabFocus::StartupPage => handle_startup_page_key(app, key),
+        GeneralTabFocus::PdfViewer => handle_pdf_viewer_selector_key(app, key),
+        GeneralTabFocus::DashboardKeywords => handle_dashboard_keywords_key(app, key),
+        GeneralTabFocus::DefaultProjectCompiler => handle_default_compiler_key(app, key),
+        GeneralTabFocus::EnabledPlugins => handle_enabled_plugins_key(app, key),
+    }
+}
+
+fn handle_startup_page_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.settings_modal.tab_bar_focused = true;
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.settings_modal.general_focus = GeneralTabFocus::PdfViewer;
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            let opts_len = app.startup_page_options.len();
+            if opts_len > 0 {
+                app.settings_modal.startup_page_selected =
+                    (app.settings_modal.startup_page_selected + opts_len - 1) % opts_len;
+                app.settings_modal.startup_page = app
+                    .startup_page_options
+                    .get(app.settings_modal.startup_page_selected)
+                    .cloned()
+                    .unwrap_or_default();
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            let opts_len = app.startup_page_options.len();
+            if opts_len > 0 {
+                app.settings_modal.startup_page_selected =
+                    (app.settings_modal.startup_page_selected + 1) % opts_len;
+                app.settings_modal.startup_page = app
+                    .startup_page_options
+                    .get(app.settings_modal.startup_page_selected)
+                    .cloned()
+                    .unwrap_or_default();
+            }
+        }
+        KeyCode::Enter => return SettingsKeyResult::Apply,
+        _ => {}
+    }
+    SettingsKeyResult::Handled
+}
+
+fn handle_pdf_viewer_selector_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.settings_modal.general_focus = GeneralTabFocus::StartupPage;
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.settings_modal.general_focus = GeneralTabFocus::DashboardKeywords;
+            if !app.settings_modal.keyword_entries.is_empty() {
+                app.settings_modal.keyword_selected = 0;
+            }
+        }
+        KeyCode::Enter => {
+            app.settings_modal.general_editing.pdf_viewer = true;
+        }
+        _ => {}
+    }
+    SettingsKeyResult::Handled
+}
+
+fn handle_dashboard_keywords_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.settings_modal.keyword_selected > 0 {
+                app.settings_modal.keyword_selected -= 1;
+            } else {
                 app.settings_modal.general_focus = GeneralTabFocus::PdfViewer;
             }
-            KeyCode::Left | KeyCode::Char('h') => {
-                let opts_len = app.startup_page_options.len();
-                if opts_len > 0 {
-                    app.settings_modal.startup_page_selected =
-                        (app.settings_modal.startup_page_selected + opts_len - 1) % opts_len;
-                    app.settings_modal.startup_page = app
-                        .startup_page_options
-                        .get(app.settings_modal.startup_page_selected)
-                        .cloned()
-                        .unwrap_or_default();
-                }
-            }
-            KeyCode::Right | KeyCode::Char('l') => {
-                let opts_len = app.startup_page_options.len();
-                if opts_len > 0 {
-                    app.settings_modal.startup_page_selected =
-                        (app.settings_modal.startup_page_selected + 1) % opts_len;
-                    app.settings_modal.startup_page = app
-                        .startup_page_options
-                        .get(app.settings_modal.startup_page_selected)
-                        .cloned()
-                        .unwrap_or_default();
-                }
-            }
-            KeyCode::Enter => return SettingsKeyResult::Apply,
-            _ => {}
-        },
-
-        GeneralTabFocus::PdfViewer => match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                app.settings_modal.general_focus = GeneralTabFocus::StartupPage;
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                app.settings_modal.general_focus = GeneralTabFocus::DashboardKeywords;
-                if !app.settings_modal.keyword_entries.is_empty() {
-                    app.settings_modal.keyword_selected = 0;
-                }
-            }
-            KeyCode::Enter => {
-                app.settings_modal.pdf_viewer_editing = true;
-            }
-            _ => {}
-        },
-
-        GeneralTabFocus::DashboardKeywords => match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                if app.settings_modal.keyword_selected > 0 {
-                    app.settings_modal.keyword_selected -= 1;
-                } else {
-                    app.settings_modal.general_focus = GeneralTabFocus::PdfViewer;
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                let len = app.settings_modal.keyword_entries.len();
-                if len > 0 && app.settings_modal.keyword_selected + 1 < len {
-                    app.settings_modal.keyword_selected += 1;
-                } else {
-                    app.settings_modal.general_focus = GeneralTabFocus::DefaultProjectCompiler;
-                }
-            }
-            KeyCode::Enter => {
-                if !app.settings_modal.keyword_entries.is_empty() {
-                    app.settings_modal.keyword_editing = true;
-                }
-            }
-            KeyCode::Char('a') => {
-                app.settings_modal
-                    .keyword_entries
-                    .push(PathEntryState::new(String::new()));
-                app.settings_modal.keyword_selected = app.settings_modal.keyword_entries.len() - 1;
-                app.settings_modal.keyword_editing = true;
-            }
-            KeyCode::Char('d') | KeyCode::Delete => {
-                let idx = app.settings_modal.keyword_selected;
-                if !app.settings_modal.keyword_entries.is_empty() {
-                    app.settings_modal.keyword_entries.remove(idx);
-                    if app.settings_modal.keyword_selected
-                        >= app.settings_modal.keyword_entries.len()
-                        && app.settings_modal.keyword_selected > 0
-                    {
-                        app.settings_modal.keyword_selected -= 1;
-                    }
-                    return SettingsKeyResult::Apply;
-                }
-            }
-            KeyCode::Char('K') => {
-                let idx = app.settings_modal.keyword_selected;
-                if idx > 0 {
-                    app.settings_modal.keyword_entries.swap(idx, idx - 1);
-                    app.settings_modal.keyword_selected -= 1;
-                    return SettingsKeyResult::Apply;
-                }
-            }
-            KeyCode::Char('J') => {
-                let idx = app.settings_modal.keyword_selected;
-                let len = app.settings_modal.keyword_entries.len();
-                if len > 0 && idx + 1 < len {
-                    app.settings_modal.keyword_entries.swap(idx, idx + 1);
-                    app.settings_modal.keyword_selected += 1;
-                    return SettingsKeyResult::Apply;
-                }
-            }
-            _ => {}
-        },
-
-        GeneralTabFocus::DefaultProjectCompiler => match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                app.settings_modal.general_focus = GeneralTabFocus::DashboardKeywords;
-                if !app.settings_modal.keyword_entries.is_empty() {
-                    app.settings_modal.keyword_selected =
-                        app.settings_modal.keyword_entries.len() - 1;
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                app.settings_modal.general_focus = GeneralTabFocus::EnabledPlugins;
-            }
-            KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l') => {
-                if app.settings_modal.default_project_compiler == "typst" {
-                    "latex".clone_into(&mut app.settings_modal.default_project_compiler);
-                } else {
-                    "typst".clone_into(&mut app.settings_modal.default_project_compiler);
-                }
-            }
-            KeyCode::Enter => return SettingsKeyResult::Apply,
-            _ => {}
-        },
-
-        GeneralTabFocus::EnabledPlugins => match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let len = app.settings_modal.keyword_entries.len();
+            if len > 0 && app.settings_modal.keyword_selected + 1 < len {
+                app.settings_modal.keyword_selected += 1;
+            } else {
                 app.settings_modal.general_focus = GeneralTabFocus::DefaultProjectCompiler;
             }
-            KeyCode::Char(' ') => {
-                if let Some(plugin) = app.plugins.get(app.settings_modal.plugins_selected) {
-                    let id = plugin.id.clone();
-                    if app.settings_modal.enabled_plugins.contains(&id) {
-                        app.settings_modal.enabled_plugins.retain(|p| p != &id);
-                    } else {
-                        app.settings_modal.enabled_plugins.push(id);
-                    }
-                    return SettingsKeyResult::Apply;
-                }
+        }
+        KeyCode::Enter => {
+            if !app.settings_modal.keyword_entries.is_empty() {
+                app.settings_modal.general_editing.keyword = true;
             }
-            _ => {}
-        },
+        }
+        KeyCode::Char('a') => {
+            app.settings_modal
+                .keyword_entries
+                .push(PathEntryState::new(String::new()));
+            app.settings_modal.keyword_selected = app.settings_modal.keyword_entries.len() - 1;
+            app.settings_modal.general_editing.keyword = true;
+        }
+        KeyCode::Char('d') | KeyCode::Delete => {
+            let idx = app.settings_modal.keyword_selected;
+            if !app.settings_modal.keyword_entries.is_empty() {
+                app.settings_modal.keyword_entries.remove(idx);
+                if app.settings_modal.keyword_selected >= app.settings_modal.keyword_entries.len()
+                    && app.settings_modal.keyword_selected > 0
+                {
+                    app.settings_modal.keyword_selected -= 1;
+                }
+                return SettingsKeyResult::Apply;
+            }
+        }
+        KeyCode::Char('K') => {
+            let idx = app.settings_modal.keyword_selected;
+            if idx > 0 {
+                app.settings_modal.keyword_entries.swap(idx, idx - 1);
+                app.settings_modal.keyword_selected -= 1;
+                return SettingsKeyResult::Apply;
+            }
+        }
+        KeyCode::Char('J') => {
+            let idx = app.settings_modal.keyword_selected;
+            let len = app.settings_modal.keyword_entries.len();
+            if len > 0 && idx + 1 < len {
+                app.settings_modal.keyword_entries.swap(idx, idx + 1);
+                app.settings_modal.keyword_selected += 1;
+                return SettingsKeyResult::Apply;
+            }
+        }
+        _ => {}
+    }
+    SettingsKeyResult::Handled
+}
+
+fn handle_default_compiler_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.settings_modal.general_focus = GeneralTabFocus::DashboardKeywords;
+            if !app.settings_modal.keyword_entries.is_empty() {
+                app.settings_modal.keyword_selected = app.settings_modal.keyword_entries.len() - 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.settings_modal.general_focus = GeneralTabFocus::EnabledPlugins;
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l') => {
+            if app.settings_modal.default_project_compiler == "typst" {
+                "latex".clone_into(&mut app.settings_modal.default_project_compiler);
+            } else {
+                "typst".clone_into(&mut app.settings_modal.default_project_compiler);
+            }
+        }
+        KeyCode::Enter => return SettingsKeyResult::Apply,
+        _ => {}
+    }
+    SettingsKeyResult::Handled
+}
+
+fn handle_enabled_plugins_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.settings_modal.general_focus = GeneralTabFocus::DefaultProjectCompiler;
+        }
+        KeyCode::Char(' ') => {
+            if let Some(plugin) = app.plugins.get(app.settings_modal.plugins_selected) {
+                let id = plugin.id.clone();
+                if app.settings_modal.enabled_plugins.contains(&id) {
+                    app.settings_modal.enabled_plugins.retain(|p| p != &id);
+                } else {
+                    app.settings_modal.enabled_plugins.push(id);
+                }
+                return SettingsKeyResult::Apply;
+            }
+        }
+        _ => {}
     }
     SettingsKeyResult::Handled
 }
@@ -632,11 +649,11 @@ fn handle_general_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
 fn handle_pdf_viewer_edit(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
     match key.code {
         KeyCode::Enter => {
-            app.settings_modal.pdf_viewer_editing = false;
+            app.settings_modal.general_editing.pdf_viewer = false;
             return SettingsKeyResult::Apply;
         }
         KeyCode::Esc => {
-            app.settings_modal.pdf_viewer_editing = false;
+            app.settings_modal.general_editing.pdf_viewer = false;
             return SettingsKeyResult::Handled;
         }
         KeyCode::Char(c) => {
@@ -706,110 +723,122 @@ fn handle_paths_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
     let focus = app.settings_modal.paths_focus;
 
     // Route active text edits
-    if app.settings_modal.library_editing && focus == PathsTabFocus::LibraryFolders {
+    if app.settings_modal.paths_editing.library && focus == PathsTabFocus::LibraryFolders {
         return handle_library_entry_edit(app, key);
     }
-    if app.settings_modal.download_path_editing && focus == PathsTabFocus::DownloadPath {
+    if app.settings_modal.paths_editing.download_path && focus == PathsTabFocus::DownloadPath {
         return handle_single_path_edit(app, PathsTabFocus::DownloadPath, key);
     }
-    if app.settings_modal.projects_directory_editing && focus == PathsTabFocus::ProjectsDirectory {
+    if app.settings_modal.paths_editing.projects_directory
+        && focus == PathsTabFocus::ProjectsDirectory
+    {
         return handle_single_path_edit(app, PathsTabFocus::ProjectsDirectory, key);
     }
 
     match focus {
-        PathsTabFocus::LibraryFolders => match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                if app.settings_modal.library_selected > 0 {
-                    app.settings_modal.library_selected -= 1;
-                } else {
-                    app.settings_modal.tab_bar_focused = true;
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                let len = app.settings_modal.library_entries.len();
-                if len > 0 && app.settings_modal.library_selected + 1 < len {
-                    app.settings_modal.library_selected += 1;
-                } else {
-                    app.settings_modal.paths_focus = PathsTabFocus::DownloadPath;
-                }
-            }
-            KeyCode::Enter => {
-                if !app.settings_modal.library_entries.is_empty() {
-                    app.settings_modal.library_editing = true;
-                }
-            }
-            KeyCode::Char('a') => {
-                app.settings_modal
-                    .library_entries
-                    .push(PathEntryState::new(String::new()));
-                app.settings_modal.library_selected = app.settings_modal.library_entries.len() - 1;
-                app.settings_modal.library_editing = true;
-            }
-            KeyCode::Char('d') | KeyCode::Delete => {
-                let idx = app.settings_modal.library_selected;
-                if !app.settings_modal.library_entries.is_empty() {
-                    app.settings_modal.library_entries.remove(idx);
-                    if app.settings_modal.library_selected
-                        >= app.settings_modal.library_entries.len()
-                        && app.settings_modal.library_selected > 0
-                    {
-                        app.settings_modal.library_selected -= 1;
-                    }
-                    return SettingsKeyResult::Apply;
-                }
-            }
-            KeyCode::Char('K') => {
-                let idx = app.settings_modal.library_selected;
-                if idx > 0 {
-                    app.settings_modal.library_entries.swap(idx, idx - 1);
-                    app.settings_modal.library_selected -= 1;
-                    return SettingsKeyResult::Apply;
-                }
-            }
-            KeyCode::Char('J') => {
-                let idx = app.settings_modal.library_selected;
-                let len = app.settings_modal.library_entries.len();
-                if len > 0 && idx + 1 < len {
-                    app.settings_modal.library_entries.swap(idx, idx + 1);
-                    app.settings_modal.library_selected += 1;
-                    return SettingsKeyResult::Apply;
-                }
-            }
-            KeyCode::Tab => {
-                app.settings_modal.paths_focus = PathsTabFocus::DownloadPath;
-            }
-            KeyCode::BackTab => {
+        PathsTabFocus::LibraryFolders => handle_library_paths_key(app, key),
+        PathsTabFocus::DownloadPath => handle_download_path_key(app, key),
+        PathsTabFocus::ProjectsDirectory => handle_projects_path_key(app, key),
+    }
+}
+
+fn handle_library_paths_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.settings_modal.library_selected > 0 {
+                app.settings_modal.library_selected -= 1;
+            } else {
                 app.settings_modal.tab_bar_focused = true;
             }
-            _ => {}
-        },
-
-        PathsTabFocus::DownloadPath => match key.code {
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
-                app.settings_modal.paths_focus = PathsTabFocus::LibraryFolders;
-                if !app.settings_modal.library_entries.is_empty() {
-                    app.settings_modal.library_selected =
-                        app.settings_modal.library_entries.len() - 1;
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
-                app.settings_modal.paths_focus = PathsTabFocus::ProjectsDirectory;
-            }
-            KeyCode::Enter => {
-                app.settings_modal.download_path_editing = true;
-            }
-            _ => {}
-        },
-
-        PathsTabFocus::ProjectsDirectory => match key.code {
-            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let len = app.settings_modal.library_entries.len();
+            if len > 0 && app.settings_modal.library_selected + 1 < len {
+                app.settings_modal.library_selected += 1;
+            } else {
                 app.settings_modal.paths_focus = PathsTabFocus::DownloadPath;
             }
-            KeyCode::Enter => {
-                app.settings_modal.projects_directory_editing = true;
+        }
+        KeyCode::Enter => {
+            if !app.settings_modal.library_entries.is_empty() {
+                app.settings_modal.paths_editing.library = true;
             }
-            _ => {}
-        },
+        }
+        KeyCode::Char('a') => {
+            app.settings_modal
+                .library_entries
+                .push(PathEntryState::new(String::new()));
+            app.settings_modal.library_selected = app.settings_modal.library_entries.len() - 1;
+            app.settings_modal.paths_editing.library = true;
+        }
+        KeyCode::Char('d') | KeyCode::Delete => {
+            let idx = app.settings_modal.library_selected;
+            if !app.settings_modal.library_entries.is_empty() {
+                app.settings_modal.library_entries.remove(idx);
+                if app.settings_modal.library_selected >= app.settings_modal.library_entries.len()
+                    && app.settings_modal.library_selected > 0
+                {
+                    app.settings_modal.library_selected -= 1;
+                }
+                return SettingsKeyResult::Apply;
+            }
+        }
+        KeyCode::Char('K') => {
+            let idx = app.settings_modal.library_selected;
+            if idx > 0 {
+                app.settings_modal.library_entries.swap(idx, idx - 1);
+                app.settings_modal.library_selected -= 1;
+                return SettingsKeyResult::Apply;
+            }
+        }
+        KeyCode::Char('J') => {
+            let idx = app.settings_modal.library_selected;
+            let len = app.settings_modal.library_entries.len();
+            if len > 0 && idx + 1 < len {
+                app.settings_modal.library_entries.swap(idx, idx + 1);
+                app.settings_modal.library_selected += 1;
+                return SettingsKeyResult::Apply;
+            }
+        }
+        KeyCode::Tab => {
+            app.settings_modal.paths_focus = PathsTabFocus::DownloadPath;
+        }
+        KeyCode::BackTab => {
+            app.settings_modal.tab_bar_focused = true;
+        }
+        _ => {}
+    }
+    SettingsKeyResult::Handled
+}
+
+fn handle_download_path_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+            app.settings_modal.paths_focus = PathsTabFocus::LibraryFolders;
+            if !app.settings_modal.library_entries.is_empty() {
+                app.settings_modal.library_selected = app.settings_modal.library_entries.len() - 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+            app.settings_modal.paths_focus = PathsTabFocus::ProjectsDirectory;
+        }
+        KeyCode::Enter => {
+            app.settings_modal.paths_editing.download_path = true;
+        }
+        _ => {}
+    }
+    SettingsKeyResult::Handled
+}
+
+fn handle_projects_path_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+            app.settings_modal.paths_focus = PathsTabFocus::DownloadPath;
+        }
+        KeyCode::Enter => {
+            app.settings_modal.paths_editing.projects_directory = true;
+        }
+        _ => {}
     }
     SettingsKeyResult::Handled
 }
@@ -821,16 +850,16 @@ fn handle_library_entry_edit(app: &mut App, key: KeyEvent) -> SettingsKeyResult 
             if let Some(entry) = app.settings_modal.library_entries.get_mut(idx) {
                 let err = validate_path(&entry.text);
                 entry.error.clone_from(&err);
-                app.settings_modal.library_editing = false;
+                app.settings_modal.paths_editing.library = false;
                 if err.is_none() {
                     return SettingsKeyResult::Apply;
                 }
             } else {
-                app.settings_modal.library_editing = false;
+                app.settings_modal.paths_editing.library = false;
             }
         }
         KeyCode::Esc => {
-            app.settings_modal.library_editing = false;
+            app.settings_modal.paths_editing.library = false;
         }
         KeyCode::Char(c) => {
             let c = text_input_char(c);
@@ -911,63 +940,24 @@ fn handle_single_path_edit(
     focus: PathsTabFocus,
     key: KeyEvent,
 ) -> SettingsKeyResult {
+    if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
+        return finish_single_path_edit(app, focus, key.code == KeyCode::Enter);
+    }
     match key.code {
-        KeyCode::Enter => match focus {
-            PathsTabFocus::DownloadPath => {
-                let err = validate_path(&app.settings_modal.download_path);
-                app.settings_modal.download_path_error.clone_from(&err);
-                app.settings_modal.download_path_editing = false;
-                if err.is_none() {
-                    return SettingsKeyResult::Apply;
-                }
-            }
-            PathsTabFocus::ProjectsDirectory => {
-                let err = validate_path(&app.settings_modal.projects_directory);
-                app.settings_modal.projects_directory_error.clone_from(&err);
-                app.settings_modal.projects_directory_editing = false;
-                if err.is_none() {
-                    return SettingsKeyResult::Apply;
-                }
-            }
-            PathsTabFocus::LibraryFolders => {}
-        },
-        KeyCode::Esc => match focus {
-            PathsTabFocus::DownloadPath => {
-                app.settings_modal.download_path_editing = false;
-            }
-            PathsTabFocus::ProjectsDirectory => {
-                app.settings_modal.projects_directory_editing = false;
-            }
-            PathsTabFocus::LibraryFolders => {}
-        },
         KeyCode::Char(c) => {
             let c = text_input_char(c);
-            let (text, cursor): (&mut String, &mut usize) = match focus {
-                PathsTabFocus::DownloadPath => (
-                    &mut app.settings_modal.download_path,
-                    &mut app.settings_modal.download_path_cursor,
-                ),
-                PathsTabFocus::ProjectsDirectory => (
-                    &mut app.settings_modal.projects_directory,
-                    &mut app.settings_modal.projects_directory_cursor,
-                ),
-                PathsTabFocus::LibraryFolders => return SettingsKeyResult::Handled,
+            let Some((text, cursor)) = single_path_text_and_cursor(&mut app.settings_modal, focus)
+            else {
+                return SettingsKeyResult::Handled;
             };
             let cur = *cursor;
             text.insert(cur, c);
             *cursor = cur + c.len_utf8();
         }
         KeyCode::Backspace => {
-            let (text, cursor): (&mut String, &mut usize) = match focus {
-                PathsTabFocus::DownloadPath => (
-                    &mut app.settings_modal.download_path,
-                    &mut app.settings_modal.download_path_cursor,
-                ),
-                PathsTabFocus::ProjectsDirectory => (
-                    &mut app.settings_modal.projects_directory,
-                    &mut app.settings_modal.projects_directory_cursor,
-                ),
-                PathsTabFocus::LibraryFolders => return SettingsKeyResult::Handled,
+            let Some((text, cursor)) = single_path_text_and_cursor(&mut app.settings_modal, focus)
+            else {
+                return SettingsKeyResult::Handled;
             };
             let cur = *cursor;
             if cur > 0 {
@@ -981,16 +971,9 @@ fn handle_single_path_edit(
             }
         }
         KeyCode::Delete => {
-            let (text, cursor): (&mut String, &mut usize) = match focus {
-                PathsTabFocus::DownloadPath => (
-                    &mut app.settings_modal.download_path,
-                    &mut app.settings_modal.download_path_cursor,
-                ),
-                PathsTabFocus::ProjectsDirectory => (
-                    &mut app.settings_modal.projects_directory,
-                    &mut app.settings_modal.projects_directory_cursor,
-                ),
-                PathsTabFocus::LibraryFolders => return SettingsKeyResult::Handled,
+            let Some((text, cursor)) = single_path_text_and_cursor(&mut app.settings_modal, focus)
+            else {
+                return SettingsKeyResult::Handled;
             };
             let cur = *cursor;
             if cur < text.len() {
@@ -1003,16 +986,9 @@ fn handle_single_path_edit(
             }
         }
         KeyCode::Left => {
-            let (text, cursor): (&mut String, &mut usize) = match focus {
-                PathsTabFocus::DownloadPath => (
-                    &mut app.settings_modal.download_path,
-                    &mut app.settings_modal.download_path_cursor,
-                ),
-                PathsTabFocus::ProjectsDirectory => (
-                    &mut app.settings_modal.projects_directory,
-                    &mut app.settings_modal.projects_directory_cursor,
-                ),
-                PathsTabFocus::LibraryFolders => return SettingsKeyResult::Handled,
+            let Some((text, cursor)) = single_path_text_and_cursor(&mut app.settings_modal, focus)
+            else {
+                return SettingsKeyResult::Handled;
             };
             let cur = *cursor;
             if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1022,16 +998,9 @@ fn handle_single_path_edit(
             }
         }
         KeyCode::Right => {
-            let (text, cursor): (&mut String, &mut usize) = match focus {
-                PathsTabFocus::DownloadPath => (
-                    &mut app.settings_modal.download_path,
-                    &mut app.settings_modal.download_path_cursor,
-                ),
-                PathsTabFocus::ProjectsDirectory => (
-                    &mut app.settings_modal.projects_directory,
-                    &mut app.settings_modal.projects_directory_cursor,
-                ),
-                PathsTabFocus::LibraryFolders => return SettingsKeyResult::Handled,
+            let Some((text, cursor)) = single_path_text_and_cursor(&mut app.settings_modal, focus)
+            else {
+                return SettingsKeyResult::Handled;
             };
             let cur = *cursor;
             let len = text.len();
@@ -1042,32 +1011,75 @@ fn handle_single_path_edit(
             }
         }
         KeyCode::Home => {
-            let cursor = match focus {
-                PathsTabFocus::DownloadPath => &mut app.settings_modal.download_path_cursor,
-                PathsTabFocus::ProjectsDirectory => {
-                    &mut app.settings_modal.projects_directory_cursor
-                }
-                PathsTabFocus::LibraryFolders => return SettingsKeyResult::Handled,
+            let Some((_, cursor)) = single_path_text_and_cursor(&mut app.settings_modal, focus)
+            else {
+                return SettingsKeyResult::Handled;
             };
             *cursor = 0;
         }
         KeyCode::End => {
-            let (text, cursor): (&mut String, &mut usize) = match focus {
-                PathsTabFocus::DownloadPath => (
-                    &mut app.settings_modal.download_path,
-                    &mut app.settings_modal.download_path_cursor,
-                ),
-                PathsTabFocus::ProjectsDirectory => (
-                    &mut app.settings_modal.projects_directory,
-                    &mut app.settings_modal.projects_directory_cursor,
-                ),
-                PathsTabFocus::LibraryFolders => return SettingsKeyResult::Handled,
+            let Some((text, cursor)) = single_path_text_and_cursor(&mut app.settings_modal, focus)
+            else {
+                return SettingsKeyResult::Handled;
             };
             *cursor = text.len();
         }
         _ => {}
     }
     SettingsKeyResult::Handled
+}
+
+fn finish_single_path_edit(
+    app: &mut App,
+    focus: PathsTabFocus,
+    validate: bool,
+) -> SettingsKeyResult {
+    if !validate {
+        match focus {
+            PathsTabFocus::DownloadPath => app.settings_modal.paths_editing.download_path = false,
+            PathsTabFocus::ProjectsDirectory => {
+                app.settings_modal.paths_editing.projects_directory = false;
+            }
+            PathsTabFocus::LibraryFolders => {}
+        }
+        return SettingsKeyResult::Handled;
+    }
+    match focus {
+        PathsTabFocus::DownloadPath => {
+            let err = validate_path(&app.settings_modal.download_path);
+            app.settings_modal.download_path_error.clone_from(&err);
+            app.settings_modal.paths_editing.download_path = false;
+            if err.is_none() {
+                return SettingsKeyResult::Apply;
+            }
+        }
+        PathsTabFocus::ProjectsDirectory => {
+            let err = validate_path(&app.settings_modal.projects_directory);
+            app.settings_modal.projects_directory_error.clone_from(&err);
+            app.settings_modal.paths_editing.projects_directory = false;
+            if err.is_none() {
+                return SettingsKeyResult::Apply;
+            }
+        }
+        PathsTabFocus::LibraryFolders => {}
+    }
+    SettingsKeyResult::Handled
+}
+
+fn single_path_text_and_cursor(
+    modal: &mut SettingsModalState,
+    focus: PathsTabFocus,
+) -> Option<(&mut String, &mut usize)> {
+    match focus {
+        PathsTabFocus::DownloadPath => {
+            Some((&mut modal.download_path, &mut modal.download_path_cursor))
+        }
+        PathsTabFocus::ProjectsDirectory => Some((
+            &mut modal.projects_directory,
+            &mut modal.projects_directory_cursor,
+        )),
+        PathsTabFocus::LibraryFolders => None,
+    }
 }
 
 // --- Plugins tab ---
@@ -1410,13 +1422,13 @@ fn handle_keyword_entry_edit(app: &mut App, key: KeyEvent) -> SettingsKeyResult 
                 }
                 entry.text = trimmed.to_string();
                 entry.error = None;
-                app.settings_modal.keyword_editing = false;
+                app.settings_modal.general_editing.keyword = false;
                 return SettingsKeyResult::Apply;
             }
-            app.settings_modal.keyword_editing = false;
+            app.settings_modal.general_editing.keyword = false;
         }
         KeyCode::Esc => {
-            app.settings_modal.keyword_editing = false;
+            app.settings_modal.general_editing.keyword = false;
         }
         KeyCode::Char(c) => {
             let c = text_input_char(c);
@@ -1512,70 +1524,12 @@ fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
     .split(area);
 
     let is_body_active = app.content_focused && !app.settings_modal.tab_bar_focused;
-
-    // startup_page
     let startup_focused =
         is_body_active && app.settings_modal.general_focus == GeneralTabFocus::StartupPage;
-    let startup_block = focused_block(" Startup Page (◄/► to cycle) ", startup_focused, theme);
-    let current_label = STARTUP_PAGE_LABELS
-        .get(app.settings_modal.startup_page_selected)
-        .copied()
-        .unwrap_or("Dashboard");
-    let total = STARTUP_PAGE_LABELS.len();
-    let startup_text = format!(
-        " ◄  {}  ►   ({}/{}) ",
-        current_label,
-        app.settings_modal.startup_page_selected + 1,
-        total
-    );
-    frame.render_widget(
-        Paragraph::new(Line::styled(
-            startup_text,
-            Style::default()
-                .fg(if startup_focused {
-                    theme.text
-                } else {
-                    theme.muted
-                })
-                .add_modifier(if startup_focused {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
-        ))
-        .block(startup_block),
-        chunks[0],
-    );
-
-    // pdf_viewer
+    render_startup_page_setting(frame, chunks[0], app, startup_focused, theme);
     let viewer_focused =
         is_body_active && app.settings_modal.general_focus == GeneralTabFocus::PdfViewer;
-    let viewer_editing = app.settings_modal.pdf_viewer_editing;
-    let viewer_title = if viewer_editing {
-        " PDF Viewer Command [editing — Enter commit, Esc cancel] "
-    } else {
-        " PDF Viewer Command (Enter to edit) "
-    };
-    let viewer_block = focused_block(viewer_title, viewer_focused, theme);
-    let viewer_style = if viewer_editing {
-        Style::default().fg(theme.text)
-    } else {
-        setting_value_style(viewer_focused, theme)
-    };
-    frame.render_widget(
-        Paragraph::new(Line::styled(&app.settings_modal.pdf_viewer, viewer_style))
-            .block(viewer_block),
-        chunks[1],
-    );
-
-    if viewer_editing {
-        let visible_cols = saturating_u16(
-            app.settings_modal.pdf_viewer[..app.settings_modal.pdf_viewer_cursor]
-                .chars()
-                .count(),
-        );
-        frame.set_cursor_position((chunks[1].x + 1 + visible_cols, chunks[1].y + 1));
-    }
+    render_pdf_viewer_setting(frame, chunks[1], app, viewer_focused, theme);
 
     // dashboard_keywords
     let keywords_focused =
@@ -1641,6 +1595,73 @@ fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
     );
 }
 
+fn render_startup_page_setting(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    focused: bool,
+    theme: &Theme,
+) {
+    let current_label = STARTUP_PAGE_LABELS
+        .get(app.settings_modal.startup_page_selected)
+        .copied()
+        .unwrap_or("Dashboard");
+    let startup_text = format!(
+        " ◄  {}  ►   ({}/{}) ",
+        current_label,
+        app.settings_modal.startup_page_selected + 1,
+        STARTUP_PAGE_LABELS.len()
+    );
+    let style = Style::default()
+        .fg(if focused { theme.text } else { theme.muted })
+        .add_modifier(if focused {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        });
+    frame.render_widget(
+        Paragraph::new(Line::styled(startup_text, style)).block(focused_block(
+            " Startup Page (◄/► to cycle) ",
+            focused,
+            theme,
+        )),
+        area,
+    );
+}
+
+fn render_pdf_viewer_setting(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    focused: bool,
+    theme: &Theme,
+) {
+    let editing = app.settings_modal.general_editing.pdf_viewer;
+    let title = if editing {
+        " PDF Viewer Command [editing — Enter commit, Esc cancel] "
+    } else {
+        " PDF Viewer Command (Enter to edit) "
+    };
+    let style = if editing {
+        Style::default().fg(theme.text)
+    } else {
+        setting_value_style(focused, theme)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::styled(&app.settings_modal.pdf_viewer, style))
+            .block(focused_block(title, focused, theme)),
+        area,
+    );
+    if editing {
+        let visible_cols = saturating_u16(
+            app.settings_modal.pdf_viewer[..app.settings_modal.pdf_viewer_cursor]
+                .chars()
+                .count(),
+        );
+        frame.set_cursor_position((area.x + 1 + visible_cols, area.y + 1));
+    }
+}
+
 fn render_dashboard_keywords(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1648,7 +1669,7 @@ fn render_dashboard_keywords(
     focused: bool,
     theme: &Theme,
 ) {
-    let editing = app.settings_modal.keyword_editing;
+    let editing = app.settings_modal.general_editing.keyword;
     let title = if editing {
         " Dashboard Search Keywords [editing — Enter commit, Esc cancel] "
     } else {
@@ -1762,7 +1783,7 @@ fn render_paths_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
         " Download Path (Enter to edit) ",
         &app.settings_modal.download_path,
         app.settings_modal.download_path_cursor,
-        app.settings_modal.download_path_editing,
+        app.settings_modal.paths_editing.download_path,
         download_focused,
         app.settings_modal.download_path_error.as_deref(),
         theme,
@@ -1774,20 +1795,20 @@ fn render_paths_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
         " Projects Directory (Enter to edit) ",
         &app.settings_modal.projects_directory,
         app.settings_modal.projects_directory_cursor,
-        app.settings_modal.projects_directory_editing,
+        app.settings_modal.paths_editing.projects_directory,
         projects_focused,
         app.settings_modal.projects_directory_error.as_deref(),
         theme,
     );
 
-    if app.settings_modal.download_path_editing && download_focused {
+    if app.settings_modal.paths_editing.download_path && download_focused {
         let cur = saturating_u16(
             app.settings_modal.download_path[..app.settings_modal.download_path_cursor]
                 .chars()
                 .count(),
         );
         frame.set_cursor_position((chunks[1].x + 1 + cur, chunks[1].y + 1));
-    } else if app.settings_modal.projects_directory_editing && projects_focused {
+    } else if app.settings_modal.paths_editing.projects_directory && projects_focused {
         let cur = saturating_u16(
             app.settings_modal.projects_directory[..app.settings_modal.projects_directory_cursor]
                 .chars()
@@ -1804,7 +1825,7 @@ fn render_library_folders(
     focused: bool,
     theme: &Theme,
 ) {
-    let editing = app.settings_modal.library_editing;
+    let editing = app.settings_modal.paths_editing.library;
     let title = if editing {
         " Library Folders [editing — Enter commit, Esc cancel] "
     } else {
@@ -2137,7 +2158,7 @@ mod tests {
         app.settings_modal.tab = SettingsTab::General;
         app.settings_modal.tab_bar_focused = false;
         app.settings_modal.general_focus = GeneralTabFocus::PdfViewer;
-        app.settings_modal.pdf_viewer_editing = true;
+        app.settings_modal.general_editing.pdf_viewer = true;
 
         for character in ['A', '!', '?', '_'] {
             let result = handle_settings_key(
@@ -2226,14 +2247,14 @@ mod tests {
         app.settings_modal.tab = SettingsTab::General;
         app.settings_modal.tab_bar_focused = false;
         app.settings_modal.general_focus = GeneralTabFocus::PdfViewer;
-        app.settings_modal.pdf_viewer_editing = true;
+        app.settings_modal.general_editing.pdf_viewer = true;
         app.settings_modal.pdf_viewer = String::new();
         app.settings_modal.pdf_viewer_cursor = 0;
 
         let res_edit = handle_settings_key(&mut app, key_q);
         assert!(matches!(res_edit, SettingsKeyResult::Handled));
         assert_eq!(app.settings_modal.pdf_viewer, "q");
-        assert!(app.settings_modal.pdf_viewer_editing);
+        assert!(app.settings_modal.general_editing.pdf_viewer);
     }
 
     #[test]
@@ -2242,7 +2263,7 @@ mod tests {
         app.settings_modal.tab = SettingsTab::General;
         app.settings_modal.tab_bar_focused = false;
         app.settings_modal.general_focus = GeneralTabFocus::PdfViewer;
-        app.settings_modal.pdf_viewer_editing = true;
+        app.settings_modal.general_editing.pdf_viewer = true;
         app.settings_modal.pdf_viewer = "alpha, beta".into();
         app.settings_modal.pdf_viewer_cursor = app.settings_modal.pdf_viewer.len();
 
@@ -2283,7 +2304,7 @@ mod tests {
         app.settings_modal.tab = SettingsTab::General;
         app.settings_modal.tab_bar_focused = false;
         app.settings_modal.general_focus = GeneralTabFocus::PdfViewer;
-        app.settings_modal.pdf_viewer_editing = true;
+        app.settings_modal.general_editing.pdf_viewer = true;
         app.settings_modal.pdf_viewer.clear();
         app.settings_modal.pdf_viewer_cursor = 0;
 
@@ -2341,7 +2362,7 @@ mod tests {
         app.settings_modal.tab = SettingsTab::Paths;
         app.settings_modal.tab_bar_focused = false;
         app.settings_modal.paths_focus = PathsTabFocus::DownloadPath;
-        app.settings_modal.download_path_editing = true;
+        app.settings_modal.paths_editing.download_path = true;
 
         // 1. Valid absolute path edit -> returns SettingsKeyResult::Apply immediately
         app.settings_modal.download_path = "/valid/download/dir".into();
@@ -2349,10 +2370,10 @@ mod tests {
         let res_valid = handle_settings_key(&mut app, key_enter);
         assert!(matches!(res_valid, SettingsKeyResult::Apply));
         assert_eq!(app.settings_modal.download_path_error, None);
-        assert!(!app.settings_modal.download_path_editing);
+        assert!(!app.settings_modal.paths_editing.download_path);
 
         // 2. Invalid relative path edit -> returns SettingsKeyResult::Handled, sets inline error
-        app.settings_modal.download_path_editing = true;
+        app.settings_modal.paths_editing.download_path = true;
         app.settings_modal.download_path = "relative/download/dir".into();
         let res_invalid = handle_settings_key(&mut app, key_enter);
         assert!(matches!(res_invalid, SettingsKeyResult::Handled));
@@ -2452,14 +2473,14 @@ mod tests {
         let key_a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
         let _ = handle_settings_key(&mut app, key_a);
         assert_eq!(app.settings_modal.keyword_entries.len(), 3);
-        assert!(app.settings_modal.keyword_editing);
+        assert!(app.settings_modal.general_editing.keyword);
         assert_eq!(app.settings_modal.keyword_selected, 2);
 
         // 3. Submitting empty string -> returns Handled, shows error, stays editing
         let key_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         let res_empty = handle_settings_key(&mut app, key_enter);
         assert!(matches!(res_empty, SettingsKeyResult::Handled));
-        assert!(app.settings_modal.keyword_editing);
+        assert!(app.settings_modal.general_editing.keyword);
         assert_eq!(
             app.settings_modal.keyword_entries[2].error,
             Some("Keyword cannot be empty".to_string())
@@ -2470,7 +2491,7 @@ mod tests {
         let _ = handle_settings_key(&mut app, key_g);
         let res_valid = handle_settings_key(&mut app, key_enter);
         assert!(matches!(res_valid, SettingsKeyResult::Apply));
-        assert!(!app.settings_modal.keyword_editing);
+        assert!(!app.settings_modal.general_editing.keyword);
         assert_eq!(app.settings_modal.keyword_entries[2].text, "g");
 
         // 5. Delete 'd' -> removes entry and returns Apply
@@ -2496,11 +2517,11 @@ mod tests {
         // Inside text edit mode -> does not interrupt text edit mode
         app.settings_modal.tab = SettingsTab::General;
         app.settings_modal.general_focus = GeneralTabFocus::PdfViewer;
-        app.settings_modal.pdf_viewer_editing = true;
+        app.settings_modal.general_editing.pdf_viewer = true;
 
         let _ = handle_settings_key(&mut app, key_ctrl_b);
         assert_ne!(app.mode, AppMode::CommandPalette);
-        assert!(app.settings_modal.pdf_viewer_editing);
+        assert!(app.settings_modal.general_editing.pdf_viewer);
     }
 
     #[test]
@@ -2520,13 +2541,13 @@ mod tests {
         app.settings_modal.tab = SettingsTab::General;
         app.settings_modal.tab_bar_focused = false;
         app.settings_modal.general_focus = GeneralTabFocus::PdfViewer;
-        app.settings_modal.pdf_viewer_editing = true;
+        app.settings_modal.general_editing.pdf_viewer = true;
         app.settings_modal.pdf_viewer = "zathura".to_string();
         app.settings_modal.pdf_viewer_cursor = 7;
 
         let _ = handle_settings_key(&mut app, key_question);
         assert_ne!(app.mode, AppMode::Help);
-        assert!(app.settings_modal.pdf_viewer_editing);
+        assert!(app.settings_modal.general_editing.pdf_viewer);
         assert_eq!(app.settings_modal.pdf_viewer, "zathura?");
     }
 

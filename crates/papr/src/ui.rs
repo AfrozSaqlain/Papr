@@ -1,8 +1,8 @@
 //! Ratatui rendering for the application shell.
 
 use crate::state::{
-    App, AppMode, CollectionSearchItem, DeletionTarget, DiscoveryStatus, DownloadStatus, Page,
-    ProjectCitationSearchMode, ProjectPane,
+    App, AppMode, CollectionSearchItem, DeletionTarget, DiscoveryStatus, DownloadStatus,
+    DownloadTask, Page, ProjectCitationSearchMode, ProjectPane,
 };
 use crate::theme::Theme;
 use std::{fmt::Write as _, sync::OnceLock};
@@ -154,15 +154,16 @@ fn iana_to_abbreviation(
     use chrono::Offset;
     let offset_secs = local.offset().fix().local_minus_utc();
 
-    match iana {
-        // India, Sri Lanka
-        "Asia/Kolkata" | "Asia/Calcutta" | "Asia/Colombo" => Some("IST"),
+    asia_pacific_abbreviation(iana, offset_secs)
+        .or_else(|| american_abbreviation(iana, offset_secs))
+        .or_else(|| european_abbreviation(iana, offset_secs))
+}
 
-        // Japan, Korea
+fn asia_pacific_abbreviation(iana: &str, offset_secs: i32) -> Option<&'static str> {
+    match iana {
+        "Asia/Kolkata" | "Asia/Calcutta" | "Asia/Colombo" => Some("IST"),
         "Asia/Tokyo" => Some("JST"),
         "Asia/Seoul" => Some("KST"),
-
-        // China, Hong Kong, Singapore, Taiwan, Philippines, Malaysia
         "Asia/Shanghai" | "Asia/Chongqing" | "Asia/Harbin" | "Asia/Urumqi" | "Asia/Taipei" => {
             Some("CST")
         }
@@ -170,8 +171,6 @@ fn iana_to_abbreviation(
         "Asia/Singapore" => Some("SGT"),
         "Asia/Manila" => Some("PST"),
         "Asia/Kuala_Lumpur" | "Asia/Kuching" => Some("MYT"),
-
-        // Australia
         "Australia/Sydney" | "Australia/Melbourne" | "Australia/Canberra" | "Australia/Hobart" => {
             if offset_secs == 11 * 3600 {
                 Some("AEDT")
@@ -189,8 +188,6 @@ fn iana_to_abbreviation(
         }
         "Australia/Darwin" => Some("ACST"),
         "Australia/Perth" => Some("AWST"),
-
-        // New Zealand
         "Pacific/Auckland" | "NZ" => {
             if offset_secs == 13 * 3600 {
                 Some("NZDT")
@@ -198,8 +195,14 @@ fn iana_to_abbreviation(
                 Some("NZST")
             }
         }
+        "Asia/Dubai" => Some("GST"),
+        "Asia/Riyadh" => Some("AST"),
+        _ => None,
+    }
+}
 
-        // US & Canada Eastern
+fn american_abbreviation(iana: &str, offset_secs: i32) -> Option<&'static str> {
+    match iana {
         "America/New_York"
         | "America/Detroit"
         | "America/Toronto"
@@ -212,8 +215,6 @@ fn iana_to_abbreviation(
                 Some("EST")
             }
         }
-
-        // US & Canada Central
         "America/Chicago" | "America/Winnipeg" | "America/Mexico_City" | "US/Central" => {
             if offset_secs == -5 * 3600 {
                 Some("CDT")
@@ -221,8 +222,6 @@ fn iana_to_abbreviation(
                 Some("CST")
             }
         }
-
-        // US & Canada Mountain
         "America/Denver" | "America/Edmonton" | "America/Boise" | "US/Mountain" => {
             if offset_secs == -6 * 3600 {
                 Some("MDT")
@@ -231,8 +230,6 @@ fn iana_to_abbreviation(
             }
         }
         "America/Phoenix" => Some("MST"),
-
-        // US & Canada Pacific
         "America/Los_Angeles" | "America/Vancouver" | "America/Tijuana" | "US/Pacific" => {
             if offset_secs == -7 * 3600 {
                 Some("PDT")
@@ -240,8 +237,6 @@ fn iana_to_abbreviation(
                 Some("PST")
             }
         }
-
-        // Alaska & Hawaii
         "America/Anchorage" => {
             if offset_secs == -8 * 3600 {
                 Some("AKDT")
@@ -250,8 +245,12 @@ fn iana_to_abbreviation(
             }
         }
         "Pacific/Honolulu" => Some("HST"),
+        _ => None,
+    }
+}
 
-        // UK & Ireland
+fn european_abbreviation(iana: &str, offset_secs: i32) -> Option<&'static str> {
+    match iana {
         "Europe/London" | "Europe/Belfast" | "Europe/Dublin" => {
             if offset_secs == 3600 {
                 Some("BST")
@@ -259,8 +258,6 @@ fn iana_to_abbreviation(
                 Some("GMT")
             }
         }
-
-        // Central Europe
         "Europe/Berlin" | "Europe/Paris" | "Europe/Rome" | "Europe/Madrid" | "Europe/Amsterdam"
         | "Europe/Brussels" | "Europe/Vienna" | "Europe/Zurich" | "Europe/Stockholm"
         | "Europe/Oslo" | "Europe/Copenhagen" | "Europe/Prague" | "Europe/Warsaw"
@@ -271,8 +268,6 @@ fn iana_to_abbreviation(
                 Some("CET")
             }
         }
-
-        // Eastern Europe
         "Europe/Athens" | "Europe/Helsinki" | "Europe/Bucharest" | "Europe/Kiev"
         | "Europe/Sofia" | "Europe/Tallinn" | "Europe/Riga" | "Europe/Vilnius" => {
             if offset_secs == 3 * 3600 {
@@ -281,16 +276,9 @@ fn iana_to_abbreviation(
                 Some("EET")
             }
         }
-
-        // Moscow / Turkey / Gulf
         "Europe/Moscow" => Some("MSK"),
         "Europe/Istanbul" => Some("TRT"),
-        "Asia/Dubai" => Some("GST"),
-        "Asia/Riyadh" => Some("AST"),
-
-        // UTC & GMT
         "UTC" | "Etc/UTC" | "Etc/GMT" | "GMT" => Some("UTC"),
-
         _ => None,
     }
 }
@@ -370,12 +358,13 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         && app.mode == AppMode::Normal
         && app.content_focused
         && app.project_pane == ProjectPane::Editor;
-    let config_editor_focused =
-        app.page == Page::Settings && app.mode == AppMode::Normal && app.config_editor_focused;
+    let config_editor_focused = app.page == Page::Settings
+        && app.mode == AppMode::Normal
+        && app.overlay_flags.config_editor_focused;
     let cursor_style = if config_editor_focused || project_editor_focused {
         if project_editor_focused && app.project_editor_pending_sequence.is_some() {
             crossterm::cursor::SetCursorStyle::SteadyUnderScore
-        } else if app.config_editor_insert_mode
+        } else if app.overlay_flags.config_editor_insert_mode
             || (project_editor_focused && app.project_editor_insert_mode)
         {
             crossterm::cursor::SetCursorStyle::BlinkingBar
@@ -625,7 +614,7 @@ fn render_projects(
         return;
     };
     let (file_tree_area, editor_area, right_area) = if app.pdf_viewer == "internal"
-        || app.project_build_visible
+        || app.project_view_flags.build_visible
     {
         let panes = Layout::horizontal([
             Constraint::Length(22),
@@ -685,7 +674,7 @@ fn render_projects(
         app.project_editor_wrap_width,
         editor_height,
         &mut app.project_editor_scroll,
-        !app.project_editor_manual_scroll,
+        !app.project_view_flags.editor_manual_scroll,
     );
     let visual_lines = app.project_editor_visual_line_anchor.map(|anchor| {
         let current = app.project_editor_text
@@ -810,13 +799,13 @@ fn render_projects(
             frame.render_stateful_widget(list, popup, &mut state);
         }
     }
-    if app.project_build_visible {
+    if app.project_view_flags.build_visible {
         let Some(build_area) = right_area else {
             return;
         };
         app.project_build_viewport_height = build_area.height.saturating_sub(2) as usize;
         let build_right_title = " Alt+3 PDF PREVIEW ";
-        if app.project_build_show_raw {
+        if app.project_view_flags.build_show_raw {
             let raw_log = if app.project_build_raw_log.is_empty() {
                 "No compiler output captured yet.".to_owned()
             } else {
@@ -1108,18 +1097,20 @@ fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
         let lines = build_paper_lines(
             app,
             theme,
-            Some(paper.id),
-            paper.display_name(),
-            &paper.authors,
-            &paper.reading_status,
-            paper.file_size,
-            Some(availability),
-            None,
-            None,
-            None,
-            None,
-            None,
-            available_width,
+            PaperLineContext {
+                paper_id: Some(paper.id),
+                title: paper.display_name(),
+                authors: &paper.authors,
+                reading_status: &paper.reading_status,
+                file_size: paper.file_size,
+                availability: Some(availability),
+                bookmark_year: None,
+                bookmark_journal: None,
+                bookmark_doi: None,
+                bookmark_page: None,
+                download_label: None,
+                available_width,
+            },
         );
         workspace_list_item(lines)
     });
@@ -1228,18 +1219,20 @@ fn render_author_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
         let lines = build_paper_lines(
             app,
             theme,
-            Some(paper.id),
-            paper.display_name(),
-            &paper.authors,
-            &paper.reading_status,
-            paper.file_size,
-            Some(availability),
-            None,
-            None,
-            None,
-            None,
-            None,
-            available_width,
+            PaperLineContext {
+                paper_id: Some(paper.id),
+                title: paper.display_name(),
+                authors: &paper.authors,
+                reading_status: &paper.reading_status,
+                file_size: paper.file_size,
+                availability: Some(availability),
+                bookmark_year: None,
+                bookmark_journal: None,
+                bookmark_doi: None,
+                bookmark_page: None,
+                download_label: None,
+                available_width,
+            },
         );
         workspace_list_item(lines)
     });
@@ -1487,18 +1480,20 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
                 let lines = build_paper_lines(
                     app,
                     theme,
-                    Some(item.paper_id),
-                    item.display_name(),
-                    &item.authors,
-                    reading_status,
-                    file_size,
-                    None,
-                    item.year.as_deref(),
-                    item.journal.as_deref(),
-                    item.doi.as_deref(),
-                    item.page.map(u64::from),
-                    None,
-                    available_width,
+                    PaperLineContext {
+                        paper_id: Some(item.paper_id),
+                        title: item.display_name(),
+                        authors: &item.authors,
+                        reading_status,
+                        file_size,
+                        availability: None,
+                        bookmark_year: item.year.as_deref(),
+                        bookmark_journal: item.journal.as_deref(),
+                        bookmark_doi: item.doi.as_deref(),
+                        bookmark_page: item.page.map(u64::from),
+                        download_label: None,
+                        available_width,
+                    },
                 );
                 workspace_list_item(lines)
             })
@@ -1510,18 +1505,20 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
                 let lines = build_paper_lines(
                     app,
                     theme,
-                    Some(paper.id),
-                    paper.display_name(),
-                    &paper.authors,
-                    &paper.reading_status,
-                    paper.file_size,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    available_width,
+                    PaperLineContext {
+                        paper_id: Some(paper.id),
+                        title: paper.display_name(),
+                        authors: &paper.authors,
+                        reading_status: &paper.reading_status,
+                        file_size: paper.file_size,
+                        availability: None,
+                        bookmark_year: None,
+                        bookmark_journal: None,
+                        bookmark_doi: None,
+                        bookmark_page: None,
+                        download_label: None,
+                        available_width,
+                    },
                 );
                 workspace_list_item(lines)
             })
@@ -1576,7 +1573,10 @@ fn render_note_editor(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         .note_editor
         .as_ref()
         .map_or("", |note| note.body.as_str());
-    let preview = app.note_preview.then(|| markdown_preview(body, theme));
+    let preview = app
+        .overlay_flags
+        .note_preview
+        .then(|| markdown_preview(body, theme));
     let content = if let Some(preview) = &preview {
         preview.lines.clone()
     } else {
@@ -1590,7 +1590,7 @@ fn render_note_editor(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         frame.area(),
     );
     let visible_rows = area.height.saturating_sub(2);
-    if !app.note_preview {
+    if !app.overlay_flags.note_preview {
         let cursor = app.note_editor.as_ref().map_or(0, |note| note.cursor);
         let cursor_row =
             u16::try_from(body[..cursor].lines().count().saturating_sub(1)).unwrap_or(0);
@@ -1601,7 +1601,7 @@ fn render_note_editor(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         }
     }
     frame.render_widget(Clear, area);
-    let title = if app.note_preview {
+    let title = if app.overlay_flags.note_preview {
         " MARKDOWN PREVIEW - TAB TO EDIT - j/k SCROLL - CLICK LINKS "
     } else {
         " MARKDOWN NOTE - AUTOSAVED - TAB TO PREVIEW "
@@ -1630,7 +1630,7 @@ fn render_note_editor(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
             ),
         );
     }
-    if app.note_preview {
+    if app.overlay_flags.note_preview {
         return;
     }
     let cursor = app.note_editor.as_ref().map_or(0, |note| note.cursor);
@@ -2396,6 +2396,10 @@ impl LatexRenderer {
 }
 
 fn latex_symbol(name: &str) -> Option<&'static str> {
+    latex_greek_symbol(name).or_else(|| latex_operator_symbol(name))
+}
+
+fn latex_greek_symbol(name: &str) -> Option<&'static str> {
     Some(match name {
         "alpha" => "α",
         "beta" => "β",
@@ -2431,6 +2435,12 @@ fn latex_symbol(name: &str) -> Option<&'static str> {
         "Phi" => "Φ",
         "Psi" => "Ψ",
         "Omega" => "Ω",
+        _ => return None,
+    })
+}
+
+fn latex_operator_symbol(name: &str) -> Option<&'static str> {
+    Some(match name {
         "sum" => "∑",
         "prod" | "coprod" => "∏",
         "int" | "iint" | "iiint" | "oint" => "∫",
@@ -2869,18 +2879,20 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         let lines = build_paper_lines(
             app,
             theme,
-            Some(paper.id),
-            paper.display_name(),
-            &paper.authors,
-            &paper.reading_status,
-            paper.file_size,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            available_width,
+            PaperLineContext {
+                paper_id: Some(paper.id),
+                title: paper.display_name(),
+                authors: &paper.authors,
+                reading_status: &paper.reading_status,
+                file_size: paper.file_size,
+                availability: None,
+                bookmark_year: None,
+                bookmark_journal: None,
+                bookmark_doi: None,
+                bookmark_page: None,
+                download_label: None,
+                available_width,
+            },
         );
         workspace_list_item(lines)
     });
@@ -2924,18 +2936,20 @@ fn render_reading_queue(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
         let lines = build_paper_lines(
             app,
             theme,
-            Some(paper.id),
-            paper.display_name(),
-            &paper.authors,
-            &paper.reading_status,
-            paper.file_size,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            available_width,
+            PaperLineContext {
+                paper_id: Some(paper.id),
+                title: paper.display_name(),
+                authors: &paper.authors,
+                reading_status: &paper.reading_status,
+                file_size: paper.file_size,
+                availability: None,
+                bookmark_year: None,
+                bookmark_journal: None,
+                bookmark_doi: None,
+                bookmark_page: None,
+                download_label: None,
+                available_width,
+            },
         );
         workspace_list_item(lines)
     });
@@ -2971,27 +2985,7 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
     }
     let available_width = area.width.saturating_sub(2) as usize;
     let items = downloads.iter().map(|download| {
-        let (label, color) = match &download.status {
-            DownloadStatus::Starting => ("Starting".to_owned(), theme.warning),
-            DownloadStatus::Running => (
-                download.total.map_or_else(
-                    || format_bytes(download.downloaded),
-                    |total| {
-                        format!(
-                            "{} / {}",
-                            format_bytes(download.downloaded),
-                            format_bytes(total)
-                        )
-                    },
-                ),
-                theme.accent,
-            ),
-            DownloadStatus::ExtractingMetadata => ("Extracting Metadata".to_owned(), theme.warning),
-            DownloadStatus::Enriching => ("Enriching".to_owned(), theme.warning),
-            DownloadStatus::Renaming => ("Renaming".to_owned(), theme.warning),
-            DownloadStatus::Completed => ("Completed".to_owned(), theme.success),
-            DownloadStatus::Failed(_) => ("Failed".to_owned(), theme.error),
-        };
+        let (label, color) = download_status_label(download, theme);
 
         let paper = if let Some(paper_id) = download.paper_id {
             app.library.papers.iter().find(|p| p.id == paper_id)
@@ -3008,18 +3002,20 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
             let mut pl = build_paper_lines(
                 app,
                 theme,
-                Some(paper.id),
-                paper.display_name(),
-                &paper.authors,
-                &paper.reading_status,
-                paper.file_size,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                available_width,
+                PaperLineContext {
+                    paper_id: Some(paper.id),
+                    title: paper.display_name(),
+                    authors: &paper.authors,
+                    reading_status: &paper.reading_status,
+                    file_size: paper.file_size,
+                    availability: None,
+                    bookmark_year: None,
+                    bookmark_journal: None,
+                    bookmark_doi: None,
+                    bookmark_page: None,
+                    download_label: None,
+                    available_width,
+                },
             );
             let len = pl.len();
             pl.insert(len - 1, Line::styled(label, Style::default().fg(color)));
@@ -3028,18 +3024,20 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
             let mut pl = build_paper_lines(
                 app,
                 theme,
-                None,
-                download.display_name(),
-                "",
-                "",
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                available_width,
+                PaperLineContext {
+                    paper_id: None,
+                    title: download.display_name(),
+                    authors: "",
+                    reading_status: "",
+                    file_size: None,
+                    availability: None,
+                    bookmark_year: None,
+                    bookmark_journal: None,
+                    bookmark_doi: None,
+                    bookmark_page: None,
+                    download_label: None,
+                    available_width,
+                },
             );
             let len = pl.len();
             pl.insert(len - 1, Line::styled(label, Style::default().fg(color)));
@@ -3064,6 +3062,33 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
     app.download_scroll = state.offset();
 }
 
+fn download_status_label(
+    download: &DownloadTask,
+    theme: &Theme,
+) -> (String, ratatui::style::Color) {
+    match &download.status {
+        DownloadStatus::Starting => ("Starting".to_owned(), theme.warning),
+        DownloadStatus::Running => (
+            download.total.map_or_else(
+                || format_bytes(download.downloaded),
+                |total| {
+                    format!(
+                        "{} / {}",
+                        format_bytes(download.downloaded),
+                        format_bytes(total)
+                    )
+                },
+            ),
+            theme.accent,
+        ),
+        DownloadStatus::ExtractingMetadata => ("Extracting Metadata".to_owned(), theme.warning),
+        DownloadStatus::Enriching => ("Enriching".to_owned(), theme.warning),
+        DownloadStatus::Renaming => ("Renaming".to_owned(), theme.warning),
+        DownloadStatus::Completed => ("Completed".to_owned(), theme.success),
+        DownloadStatus::Failed(_) => ("Failed".to_owned(), theme.error),
+    }
+}
+
 fn format_bytes(bytes: u64) -> String {
     const MIB: u64 = 1024 * 1024;
     const KIB: u64 = 1024;
@@ -3083,6 +3108,11 @@ fn format_decimal_bytes(bytes: u64, unit: u64, suffix: &str) -> String {
 }
 
 fn render_discover(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+    let results_area = render_discover_inputs(frame, area, app, theme);
+    render_discover_status(frame, results_area, app, theme);
+}
+
+fn render_discover_inputs(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) -> Rect {
     let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(4)]).split(area);
     let show_filter = !app.discovery.results.is_empty();
     let inputs = Layout::horizontal(if show_filter {
@@ -3174,14 +3204,18 @@ fn render_discover(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
         ));
     }
 
+    rows[1]
+}
+
+fn render_discover_status(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     match &app.discovery.status {
-        DiscoveryStatus::Idle => render_discover_empty(frame, rows[1], theme),
+        DiscoveryStatus::Idle => render_discover_empty(frame, area, theme),
         DiscoveryStatus::Loading if app.discovery.results.is_empty() => {
             frame.render_widget(
                 Paragraph::new("Searching arXiv...")
                     .style(Style::default().fg(theme.accent))
                     .alignment(Alignment::Center),
-                rows[1],
+                area,
             );
         }
         DiscoveryStatus::Error(_) if app.discovery.results.is_empty() => {
@@ -3193,7 +3227,7 @@ fn render_discover(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
                 ])
                 .alignment(Alignment::Center)
                 .wrap(Wrap { trim: true }),
-                rows[1],
+                area,
             );
         }
         DiscoveryStatus::Ready if app.discovery.results.is_empty() => {
@@ -3201,11 +3235,11 @@ fn render_discover(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &The
                 Paragraph::new("No papers found. Try a broader query.")
                     .style(Style::default().fg(theme.muted))
                     .alignment(Alignment::Center),
-                rows[1],
+                area,
             );
         }
         DiscoveryStatus::Loading | DiscoveryStatus::Error(_) | DiscoveryStatus::Ready => {
-            render_search_results(frame, rows[1], app, theme);
+            render_search_results(frame, area, app, theme);
         }
     }
 }
@@ -3809,7 +3843,11 @@ fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &
 
     let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(4)]).split(area);
 
-    // ── Search bar ────────────────────────────────────────────────────────
+    render_project_citation_query(frame, chunks[0], app, theme);
+    render_project_citation_results(frame, chunks[1], app, theme);
+}
+
+fn render_project_citation_query(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     let mode_hint = match app.project_citation_search_mode {
         ProjectCitationSearchMode::Local => {
             " LOCAL SEARCH  [ Tab: Online Search ]  [ Enter: Add ] "
@@ -3839,7 +3877,7 @@ fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &
         Paragraph::new(search_content)
             .style(Style::default().bg(theme.surface))
             .block(search_block),
-        chunks[0],
+        area,
     );
 
     let cursor_offset = app
@@ -3848,18 +3886,21 @@ fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &
         .take(app.project_citation_cursor)
         .count();
     frame.set_cursor_position((
-        chunks[0]
-            .x
+        area.x
             .saturating_add(1)
             .saturating_add(u16::try_from(cursor_offset).unwrap_or(0)),
-        chunks[0].y.saturating_add(1),
+        area.y.saturating_add(1),
     ));
+}
 
-    // ── Results list ─────────────────────────────────────────────────────
-    // Layout: each row has a fixed right slot for the "(Added)" badge.
-    // Borders (2) + highlight symbol "> " (2) + right border (1) = 5 overhead.
+fn render_project_citation_results(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &mut App,
+    theme: &Theme,
+) {
     let badge_width = CITATION_BADGE.len();
-    let list_inner_width = (chunks[1].width as usize).saturating_sub(5);
+    let list_inner_width = usize::from(area.width).saturating_sub(5);
     let max_title_width = list_inner_width.saturating_sub(badge_width + 1).max(4);
     let max_authors_width = max_title_width + badge_width + 1;
 
@@ -3943,7 +3984,7 @@ fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &
             Some(app.project_citation_selected)
         })
         .with_offset(app.project_citation_scroll);
-    frame.render_stateful_widget(list, chunks[1], &mut state);
+    frame.render_stateful_widget(list, area, &mut state);
     app.project_citation_scroll = state.offset();
 }
 
@@ -4405,6 +4446,12 @@ fn format_help_column(group: &[HelpSection], width: u16, theme: &Theme) -> Vec<L
 /// by destination. Each row has one command or one pair of equivalent keys,
 /// making the reference readable without sacrificing accuracy.
 fn keyboard_reference() -> Vec<HelpSection> {
+    let mut sections = general_help_sections();
+    sections.extend(project_help_sections());
+    sections
+}
+
+fn general_help_sections() -> Vec<HelpSection> {
     vec![
         HelpSection {
             title: "GLOBAL & NAVIGATION",
@@ -4495,6 +4542,11 @@ fn keyboard_reference() -> Vec<HelpSection> {
             scope: &[],
             entries: &[("r", "retry failed download")],
         },
+    ]
+}
+
+fn project_help_sections() -> Vec<HelpSection> {
+    vec![
         HelpSection {
             title: "PROJECT LIST",
             scope: &[],
@@ -4571,9 +4623,28 @@ fn centered(width: u16, height: u16, area: Rect) -> Rect {
 fn render_credits(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let chunks =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
+    render_credits_about(frame, chunks[0], theme);
+    render_credits_links(frame, chunks[1], app, theme);
+}
 
-    // Left Column: Overview and info
-    let left_lines = vec![
+fn render_credits_about(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    let mut left_lines = credits_overview_lines(theme);
+    left_lines.extend(credits_technology_lines(theme));
+
+    let left_para = Paragraph::new(left_lines)
+        .block(
+            Block::default()
+                .title(" ABOUT PAPR ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border))
+                .style(Style::default().bg(theme.surface)),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(left_para, area);
+}
+
+fn credits_overview_lines(theme: &Theme) -> Vec<Line<'static>> {
+    vec![
         Line::styled(
             "Papr - Academic TUI Workspace",
             Style::default()
@@ -4623,87 +4694,66 @@ fn render_credits(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
             Style::default().fg(theme.text),
         ),
         Line::raw(""),
-        Line::styled(
-            "CORE TECHNOLOGIES USED",
-            Style::default()
-                .fg(theme.secondary)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Line::styled(
-            "• Rust (Robust system programming language)",
-            Style::default().fg(theme.text),
-        ),
+    ]
+}
+
+fn credits_technology_lines(theme: &Theme) -> Vec<Line<'static>> {
+    let heading_style = Style::default()
+        .fg(theme.secondary)
+        .add_modifier(Modifier::BOLD);
+    let text_style = Style::default().fg(theme.text);
+    vec![
+        Line::styled("CORE TECHNOLOGIES USED", heading_style),
+        Line::styled("• Rust (Robust system programming language)", text_style),
         Line::styled(
             "• Ratatui & Crossterm (Terminal rendering and TUI library)",
-            Style::default().fg(theme.text),
+            text_style,
         ),
         Line::styled(
             "• SQLite (Local metadata storage and persistence)",
-            Style::default().fg(theme.text),
+            text_style,
         ),
         Line::styled(
             "• Tokio (Asynchronous task pool and download scheduler)",
-            Style::default().fg(theme.text),
+            text_style,
         ),
         Line::styled(
             "• Reqwest (HTTP client for querying search APIs)",
-            Style::default().fg(theme.text),
+            text_style,
         ),
         Line::styled(
             "• Typst (Markup-based document typesetting and embedded PDF compiler)",
-            Style::default().fg(theme.text),
+            text_style,
         ),
         Line::styled(
             "• ratatui-image & Poppler (Terminal PDF rendering protocol)",
-            Style::default().fg(theme.text),
+            text_style,
         ),
         Line::styled(
             "• pulldown-cmark & syntect (Markdown note parsing and syntax highlighting)",
-            Style::default().fg(theme.text),
+            text_style,
         ),
         Line::styled(
             "• arboard (Cross-platform system clipboard integration)",
-            Style::default().fg(theme.text),
+            text_style,
         ),
         Line::styled(
             "• iana-time-zone & Chrono (Cross-platform timezone detection and formatting)",
-            Style::default().fg(theme.text),
+            text_style,
         ),
         Line::raw(""),
-        Line::styled(
-            "SPECIAL THANKS",
-            Style::default()
-                .fg(theme.secondary)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Line::styled(
-            "Dedicated to the open-source community,",
-            Style::default().fg(theme.text),
-        ),
+        Line::styled("SPECIAL THANKS", heading_style),
+        Line::styled("Dedicated to the open-source community,", text_style),
         Line::styled(
             "and academic authors worldwide who share their work freely.",
-            Style::default().fg(theme.text),
+            text_style,
         ),
-        Line::styled(
-            "To our parents who always supported us.",
-            Style::default().fg(theme.text),
-        ),
-    ];
+        Line::styled("To our parents who always supported us.", text_style),
+    ]
+}
 
-    let left_para = Paragraph::new(left_lines)
-        .block(
-            Block::default()
-                .title(" ABOUT PAPR ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.border))
-                .style(Style::default().bg(theme.surface)),
-        )
-        .wrap(Wrap { trim: false });
-    frame.render_widget(left_para, chunks[0]);
-
-    // Right Column: Interactive links & dependencies list
-    let right_chunks =
-        Layout::vertical([Constraint::Min(4), Constraint::Length(1)]).split(chunks[1]);
+fn render_credits_links(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+    let right_chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(1)]).split(area);
 
     let credits_items = app.credits_items();
     let list_items: Vec<ListItem> = credits_items
@@ -4875,32 +4925,51 @@ fn wrap_text_to_spans(
         }
     }
 
-    if result_lines.is_empty() {
-        result_lines.push(Line::from(vec![Span::styled(
-            label_prefix.to_string(),
-            label_style,
-        )]));
-    }
+    ensure_wrapped_line(&mut result_lines, label_prefix, label_style);
 
     result_lines
 }
 
-fn build_paper_lines<'a>(
-    app: &App,
-    theme: &Theme,
+fn ensure_wrapped_line(lines: &mut Vec<Line<'static>>, label_prefix: &str, label_style: Style) {
+    if lines.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            label_prefix.to_string(),
+            label_style,
+        )]));
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PaperLineContext<'a> {
     paper_id: Option<i64>,
     title: &'a str,
     authors: &'a str,
-    reading_status: &str,
+    reading_status: &'a str,
     file_size: Option<u64>,
-    availability: Option<&str>,
-    bookmark_year: Option<&str>,
-    bookmark_journal: Option<&str>,
-    bookmark_doi: Option<&str>,
+    availability: Option<&'a str>,
+    bookmark_year: Option<&'a str>,
+    bookmark_journal: Option<&'a str>,
+    bookmark_doi: Option<&'a str>,
     bookmark_page: Option<u64>,
-    download_label: Option<(&str, ratatui::style::Color)>,
+    download_label: Option<(&'a str, ratatui::style::Color)>,
     available_width: usize,
-) -> Vec<Line<'a>> {
+}
+
+fn build_paper_lines<'a>(app: &App, theme: &Theme, context: PaperLineContext<'a>) -> Vec<Line<'a>> {
+    let PaperLineContext {
+        paper_id,
+        title,
+        authors,
+        reading_status,
+        file_size,
+        availability,
+        bookmark_year,
+        bookmark_journal,
+        bookmark_doi,
+        bookmark_page,
+        download_label,
+        available_width,
+    } = context;
     let mut stats_spans = Vec::new();
 
     // 1. Read/Unread Status
