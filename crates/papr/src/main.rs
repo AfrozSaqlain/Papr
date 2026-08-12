@@ -484,6 +484,7 @@ enum UiAction {
         path: PathBuf,
         name: String,
     },
+    SummaryModal(i64),
 }
 
 enum KeyHandling {
@@ -1919,6 +1920,10 @@ enum AppEvent {
         query: String,
         result: Result<Vec<RemotePaper>, String>,
     },
+    SummaryReady {
+        paper_id: i64,
+        summary: Result<String, String>,
+    },
 }
 
 #[derive(Debug)]
@@ -2423,6 +2428,26 @@ fn process_app_events(
             AppEvent::ProjectCitationSearchFinished { query, result } => {
                 apply_project_citation_search_result(app, &query, result);
             }
+            AppEvent::SummaryReady { paper_id, summary } => {
+                match summary {
+                    Ok(text) => {
+                        let _ = runtime.database.update_paper_summary(paper_id, &text);
+                        if app.mode != AppMode::SummaryModal || Some(paper_id) != app.summary_paper_id {
+                            app.toast = Some("AI summary generated successfully.".to_string());
+                        }
+                        if Some(paper_id) == app.summary_paper_id {
+                            app.summary_state = Some(SummaryState::Ready(text));
+                        }
+                    }
+                    Err(err) => {
+                        if Some(paper_id) == app.summary_paper_id {
+                            app.summary_state = Some(SummaryState::Error(err));
+                        } else {
+                            app.toast = Some(format!("AI summary failed: {}", err));
+                        }
+                    }
+                }
+            }
         }
     }
     Ok(changed)
@@ -2850,6 +2875,63 @@ async fn apply_ui_action(
         | UiAction::ConfirmDeleteCollection { .. }
         | UiAction::DeletePaper { .. }
         | UiAction::DeleteCollection { .. }) => apply_deletion_action(action, runtime, app),
+        UiAction::SummaryModal(paper_id) => {
+            app.mode = AppMode::SummaryModal;
+            app.summary_paper_id = Some(paper_id);
+            app.summary_scroll = 0;
+            if let Ok(Some(paper)) = runtime.database.library_paper_by_id(paper_id) {
+                if let Some(summary) = paper.ai_summary {
+                    app.summary_state = Some(SummaryState::Ready(summary));
+                    return Ok(());
+                }
+            }
+            
+            let model = runtime.config.ai.model.clone();
+            app.summary_state = Some(SummaryState::Generating(model.clone()));
+            
+            let api_key = runtime.config.ai.api_key.clone();
+            let event_sender = senders.app_events.clone();
+            
+            let pdf_path_opt = runtime.database.library_paper_by_id(paper_id).ok().flatten().and_then(|p| p.pdf_path.map(std::path::PathBuf::from));
+            
+            tokio::spawn(async move {
+                if api_key.is_empty() {
+                    let _ = event_sender.send(AppEvent::SummaryReady {
+                        paper_id,
+                        summary: Err("No AI provider API key configured. Please configure it in settings.".to_string()),
+                    });
+                    return;
+                }
+                
+                let path = match pdf_path_opt {
+                    Some(p) => p,
+                    None => {
+                        let _ = event_sender.send(AppEvent::SummaryReady {
+                            paper_id,
+                            summary: Err("Paper does not have a local PDF.".to_string()),
+                        });
+                        return;
+                    }
+                };
+
+                let res = papr_core::ai::generate_summary(&api_key, &model, &path).await;
+                match res {
+                    Ok(summary) => {
+                        let _ = event_sender.send(AppEvent::SummaryReady {
+                            paper_id,
+                            summary: Ok(summary),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = event_sender.send(AppEvent::SummaryReady {
+                            paper_id,
+                            summary: Err(format!("Generation failed: {}", e)),
+                        });
+                    }
+                }
+            });
+            Ok(())
+        }
     }
 }
 
@@ -4993,6 +5075,7 @@ fn handle_active_mode_key(app: &mut App, key: KeyEvent) -> KeyHandling {
         AppMode::DiscoverFilter => handle_discover_filter_key(app, key),
         AppMode::WorkspaceSearch => handle_workspace_search_key(app, key),
         AppMode::ProjectCitationSearch => handle_project_citation_search_key(app, key),
+        AppMode::SummaryModal => handle_summary_modal_key(app, key),
         _ => return KeyHandling::Ignored,
     };
     KeyHandling::Handled(action.map(Box::new))
@@ -5193,6 +5276,7 @@ fn handle_selected_paper_shortcut(app: &mut App, key: KeyEvent) -> KeyHandling {
         return KeyHandling::Ignored;
     };
     let action = match key.code {
+        KeyCode::Char('s') => UiAction::SummaryModal(paper_id),
         KeyCode::Char('u') => UiAction::MarkUnread(paper_id),
         KeyCode::Char('a')
             if app
@@ -8412,6 +8496,30 @@ fn finalize_download_task(task: &mut DownloadTask) {
             let _ = std::fs::rename(&temp_path, &final_path);
         }
     }
+}
+
+fn handle_summary_modal_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.mode = AppMode::Normal;
+            app.summary_state = None;
+            app.summary_paper_id = None;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.summary_scroll = app.summary_scroll.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.summary_scroll = app.summary_scroll.saturating_add(1);
+        }
+        KeyCode::Char('s') => {
+            if let Some(paper_id) = app.summary_paper_id {
+                app.mode = AppMode::Normal;
+                return Some(UiAction::SummaryModal(paper_id));
+            }
+        }
+        _ => {}
+    }
+    None
 }
 
 #[cfg(test)]

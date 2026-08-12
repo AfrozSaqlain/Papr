@@ -100,6 +100,8 @@ pub struct LibraryPaper {
     pub reading_status: String,
     /// Whether the paper is a favorite.
     pub is_favorite: bool,
+    /// AI-generated summary of the paper.
+    pub ai_summary: Option<String>,
 }
 
 impl LibraryPaper {

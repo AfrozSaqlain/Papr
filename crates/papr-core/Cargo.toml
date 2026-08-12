@@ -34,6 +34,8 @@ typst-layout.workspace = true
 typst-pdf.workspace = true
 url.workspace = true
 walkdir.workspace = true
+pdf-extract = "0.12.0"
+async-openai = "0.41.3"
 
 [lints]
 workspace = true

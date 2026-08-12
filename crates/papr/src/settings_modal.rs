@@ -114,6 +114,12 @@ pub fn open_settings_modal(app: &mut App, config: &Config, current_theme_name: &
     modal.plugins_selected = 0;
     modal.plugins_scroll = 0;
 
+    // Copy AI values to staged
+    modal.ai_api_key = config.ai.api_key.clone();
+    modal.ai_api_key_cursor = modal.ai_api_key.chars().count();
+    modal.ai_model = config.ai.model.clone();
+    modal.ai_model_cursor = modal.ai_model.chars().count();
+
     // Start on Theme tab with Tab Bar Header focused
     modal.tab = SettingsTab::Theme;
     modal.tab_bar_focused = true;
@@ -171,6 +177,10 @@ pub fn staged_config(modal: &SettingsModalState, options: &[String], _base: &Con
         dashboard_keywords,
         default_project_compiler: modal.default_project_compiler.clone(),
         enabled_plugins: modal.enabled_plugins.clone(),
+        ai: papr_core::config::AiConfig {
+            api_key: modal.ai_api_key.clone(),
+            model: modal.ai_model.clone(),
+        },
     }
 }
 
@@ -241,6 +251,10 @@ pub fn paste_into_active_field(app: &mut App, text: Option<&str>) -> bool {
             &mut modal.projects_directory_cursor,
         );
         modal.projects_directory_error = None;
+    } else if modal.ai_editing_api_key {
+        insert(&mut modal.ai_api_key, &mut modal.ai_api_key_cursor);
+    } else if modal.ai_editing_model {
+        insert(&mut modal.ai_model, &mut modal.ai_model_cursor);
     }
     true
 }
@@ -332,6 +346,9 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
                     SettingsTab::Paths => {
                         app.settings_modal.paths_focus = PathsTabFocus::LibraryFolders;
                     }
+                    SettingsTab::Ai => {
+                        app.settings_modal.ai_focus = 0;
+                    }
                     SettingsTab::Plugins => {
                         app.settings_modal.plugins_selected = 0;
                     }
@@ -347,6 +364,7 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
         SettingsTab::Theme => handle_theme_key(app, key),
         SettingsTab::General => handle_general_key(app, key),
         SettingsTab::Paths => handle_paths_key(app, key),
+        SettingsTab::Ai => handle_ai_key(app, key),
         SettingsTab::Plugins => handle_plugins_key(app, key),
     }
 }
@@ -402,6 +420,8 @@ fn any_field_editing(app: &App) -> bool {
         || m.paths_editing.library
         || m.paths_editing.download_path
         || m.paths_editing.projects_directory
+        || m.ai_editing_api_key
+        || m.ai_editing_model
 }
 
 fn clear_edit_state(app: &mut App) {
@@ -411,6 +431,8 @@ fn clear_edit_state(app: &mut App) {
     m.paths_editing.library = false;
     m.paths_editing.download_path = false;
     m.paths_editing.projects_directory = false;
+    m.ai_editing_api_key = false;
+    m.ai_editing_model = false;
 }
 
 // --- Theme tab ---
@@ -1082,6 +1104,70 @@ fn single_path_text_and_cursor(
     }
 }
 
+// --- AI tab ---
+
+fn handle_ai_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
+    let focus = app.settings_modal.ai_focus;
+    if app.settings_modal.ai_editing_api_key {
+        return handle_ai_field_edit(app, 0, key);
+    }
+    if app.settings_modal.ai_editing_model {
+        return handle_ai_field_edit(app, 1, key);
+    }
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            if focus == 1 {
+                app.settings_modal.ai_focus = 0;
+            } else {
+                app.settings_modal.tab_bar_focused = true;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if focus == 0 {
+                app.settings_modal.ai_focus = 1;
+            }
+        }
+        KeyCode::Enter => {
+            match focus {
+                0 => app.settings_modal.ai_editing_api_key = true,
+                1 => app.settings_modal.ai_editing_model = true,
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    SettingsKeyResult::Handled
+}
+
+fn handle_ai_field_edit(app: &mut App, focus: usize, key: KeyEvent) -> SettingsKeyResult {
+    if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
+        if focus == 0 {
+            app.settings_modal.ai_editing_api_key = false;
+        } else {
+            app.settings_modal.ai_editing_model = false;
+        }
+        return SettingsKeyResult::Apply;
+    }
+    let (text, cursor) = match focus {
+        0 => (&mut app.settings_modal.ai_api_key, &mut app.settings_modal.ai_api_key_cursor),
+        _ => (&mut app.settings_modal.ai_model, &mut app.settings_modal.ai_model_cursor),
+    };
+    match key.code {
+        KeyCode::Char(c) => {
+            text.insert(*cursor, c);
+            *cursor += c.len_utf8();
+        }
+        KeyCode::Backspace if *cursor > 0 => {
+            *cursor = prev_char_boundary(text, *cursor);
+            text.remove(*cursor);
+        }
+        KeyCode::Left if *cursor > 0 => *cursor = prev_char_boundary(text, *cursor),
+        KeyCode::Right if *cursor < text.len() => *cursor = next_char_boundary(text, *cursor),
+        _ => {}
+    }
+    SettingsKeyResult::Handled
+}
+
 // --- Plugins tab ---
 
 fn handle_plugins_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
@@ -1238,6 +1324,7 @@ fn render_tab_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
         SettingsTab::Theme => render_theme_tab(frame, content_area, app, theme),
         SettingsTab::General => render_general_tab(frame, content_area, app, theme),
         SettingsTab::Paths => render_paths_tab(frame, content_area, app, theme),
+        SettingsTab::Ai => render_ai_tab(frame, content_area, app, theme),
         SettingsTab::Plugins => render_plugins_tab(frame, content_area, app, theme),
     }
 }
@@ -1953,6 +2040,50 @@ fn render_single_path_field(
         Paragraph::new(Line::styled(content, style)).block(block),
         area,
     );
+}
+
+// --- AI tab rendering ---
+
+fn render_ai_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+    let chunks = Layout::vertical([Constraint::Length(3), Constraint::Length(3)])
+        .margin(1)
+        .split(area);
+    let is_focused = app.content_focused && !app.settings_modal.tab_bar_focused;
+
+    let api_key_focused = is_focused && app.settings_modal.ai_focus == 0;
+    let model_focused = is_focused && app.settings_modal.ai_focus == 1;
+
+    let api_key_title = if app.settings_modal.ai_editing_api_key { " API Key (editing) " } else { " API Key " };
+    let model_title = if app.settings_modal.ai_editing_model { " AI Model (editing) " } else { " AI Model " };
+
+    let display_key = if app.settings_modal.ai_editing_api_key {
+        app.settings_modal.ai_api_key.clone()
+    } else if app.settings_modal.ai_api_key.is_empty() {
+        "None configured".to_string()
+    } else {
+        "*".repeat(app.settings_modal.ai_api_key.len())
+    };
+
+    frame.render_widget(
+        Paragraph::new(display_key)
+            .block(focused_block(api_key_title, api_key_focused, theme)),
+        chunks[0],
+    );
+    frame.render_widget(
+        Paragraph::new(app.settings_modal.ai_model.as_str())
+            .block(focused_block(model_title, model_focused, theme)),
+        chunks[1],
+    );
+
+    if app.settings_modal.ai_editing_api_key {
+        frame.set_cursor_position(ratatui::layout::Position::new(
+            chunks[0].x + 1 + app.settings_modal.ai_api_key_cursor as u16, chunks[0].y + 1
+        ));
+    } else if app.settings_modal.ai_editing_model {
+        frame.set_cursor_position(ratatui::layout::Position::new(
+            chunks[1].x + 1 + app.settings_modal.ai_model_cursor as u16, chunks[1].y + 1
+        ));
+    }
 }
 
 // --- Plugins tab rendering ---

@@ -1,5 +1,7 @@
 //! Core domain and infrastructure for the `papr` research workspace.
 
+/// AI-powered operations (e.g. paper summarization)
+pub mod ai;
 pub mod api;
 pub mod completions;
 pub mod config;

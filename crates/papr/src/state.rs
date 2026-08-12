@@ -246,6 +246,19 @@ pub enum AppMode {
     SettingsModal,
     /// Interactive citation search modal for the active project.
     ProjectCitationSearch,
+    /// AI paper summary modal.
+    SummaryModal,
+}
+
+/// State of an AI paper summary generation process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SummaryState {
+    /// Summary is currently being generated. Contains the model name.
+    Generating(String),
+    /// Summary generation failed. Contains the error message.
+    Error(String),
+    /// Summary generation succeeded or was loaded from DB.
+    Ready(String),
 }
 
 /// Tabs shown in the settings modal.
@@ -258,6 +271,8 @@ pub enum SettingsTab {
     General,
     /// Filesystem paths.
     Paths,
+    /// AI Configuration.
+    Ai,
     /// Plugin management.
     Plugins,
 }
@@ -303,7 +318,7 @@ impl ProjectCitationResult {
 
 impl SettingsTab {
     /// All tabs in display order.
-    pub const ALL: [Self; 4] = [Self::Theme, Self::General, Self::Paths, Self::Plugins];
+    pub const ALL: [Self; 5] = [Self::Theme, Self::General, Self::Paths, Self::Ai, Self::Plugins];
 
     /// Human-readable tab label.
     #[must_use]
@@ -312,6 +327,7 @@ impl SettingsTab {
             Self::Theme => "Theme",
             Self::General => "General",
             Self::Paths => "Paths",
+            Self::Ai => "AI",
             Self::Plugins => "Plugins",
         }
     }
@@ -461,6 +477,21 @@ pub struct SettingsModalState {
     pub projects_directory_error: Option<String>,
     /// Focus within the Paths tab.
     pub paths_focus: PathsTabFocus,
+    // --- AI tab ---
+    /// Staged `ai.api_key`.
+    pub ai_api_key: String,
+    /// Cursor for `ai.api_key`.
+    pub ai_api_key_cursor: usize,
+    /// Staged `ai.model`.
+    pub ai_model: String,
+    /// Cursor for `ai.model`.
+    pub ai_model_cursor: usize,
+    /// Whether `api_key` is being edited.
+    pub ai_editing_api_key: bool,
+    /// Whether `model` is being edited.
+    pub ai_editing_model: bool,
+    /// Focus within AI tab (0 = API Key, 1 = Model).
+    pub ai_focus: usize,
     // --- Plugins tab ---
     /// Selected plugin index.
     pub plugins_selected: usize,
@@ -497,6 +528,13 @@ impl Default for SettingsModalState {
             projects_directory_cursor: 0,
             projects_directory_error: None,
             paths_focus: PathsTabFocus::default(),
+            ai_api_key: String::new(),
+            ai_api_key_cursor: 0,
+            ai_model: String::new(),
+            ai_model_cursor: 0,
+            ai_editing_api_key: false,
+            ai_editing_model: false,
+            ai_focus: 0,
             plugins_selected: 0,
             plugins_scroll: 0,
             original_theme: String::new(),
@@ -589,6 +627,8 @@ pub enum DiscoveryStatus {
     /// The provider returned an error.
     Error(String),
 }
+
+
 
 /// Search query, results, and selection state.
 #[derive(Debug, Default)]
@@ -1098,6 +1138,12 @@ pub struct App {
     pub project_rename_cursor: usize,
     /// File or folder being renamed from the active project tree.
     pub project_entry_rename_path: Option<std::path::PathBuf>,
+    /// State of the AI summary generation.
+    pub summary_state: Option<SummaryState>,
+    /// ID of the paper currently being summarized or viewed in the summary modal.
+    pub summary_paper_id: Option<i64>,
+    /// Vertical scroll of the summary modal.
+    pub summary_scroll: usize,
     /// Remote paper discovery state.
     pub discovery: DiscoveryState,
     /// Scroll offset within the currently open paper detail view.
@@ -1212,6 +1258,9 @@ impl Default for App {
             mode: AppMode::Normal,
             help_scroll: 0,
             help_return_mode: AppMode::Normal,
+            summary_paper_id: None,
+            summary_scroll: 0,
+            summary_state: None,
             session_flags: AppSessionFlags::default(),
             stats: DashboardStats::default(),
             dashboard: ResearchDashboard::default(),

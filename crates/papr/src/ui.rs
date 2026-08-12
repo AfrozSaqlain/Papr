@@ -346,6 +346,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         | AppMode::ProjectFileCreate
         | AppMode::ProjectEntryRename => render_project_name_prompt(frame, app, theme),
         AppMode::ProjectCitationSearch => render_project_citation_search(frame, app, theme),
+        AppMode::SummaryModal => render_summary_modal(frame, app, theme),
         AppMode::Normal
         | AppMode::Search
         | AppMode::DiscoverFilter
@@ -5124,6 +5125,72 @@ fn push_paper_stat(
 ) {
     push_paper_separator(spans, theme);
     spans.push(Span::styled(value, Style::default().fg(color)));
+}
+
+fn render_summary_modal(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
+    let centered_rect = |percent_x, percent_y, r: ratatui::layout::Rect| {
+        let popup_layout = Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Percentage((100 - percent_y) / 2),
+                ratatui::layout::Constraint::Percentage(percent_y),
+                ratatui::layout::Constraint::Percentage((100 - percent_y) / 2),
+            ])
+            .split(r);
+
+        Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([
+                ratatui::layout::Constraint::Percentage((100 - percent_x) / 2),
+                ratatui::layout::Constraint::Percentage(percent_x),
+                ratatui::layout::Constraint::Percentage((100 - percent_x) / 2),
+            ])
+            .split(popup_layout[1])[1]
+    };
+
+    let modal_area = centered_rect(80, 80, frame.area());
+    frame.render_widget(ratatui::widgets::Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" AI Summary ")
+        .border_style(Style::default().fg(theme.accent))
+        .style(Style::default().bg(theme.background).fg(theme.text));
+
+    let content_area = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    match &app.summary_state {
+        Some(crate::state::SummaryState::Generating(model)) => {
+            let text = format!("Generating summary using {}...\nThis may take a minute or two.", model);
+            let p = Paragraph::new(text)
+                .alignment(Alignment::Center)
+                .wrap(ratatui::widgets::Wrap { trim: true });
+            let centered = centered_rect(60, 20, content_area);
+            frame.render_widget(p, centered);
+        }
+        Some(crate::state::SummaryState::Error(err)) => {
+            let text = format!("Error generating summary:\n\n{}", err);
+            let p = Paragraph::new(text)
+                .style(Style::default().fg(ratatui::style::Color::Red))
+                .alignment(Alignment::Center)
+                .wrap(ratatui::widgets::Wrap { trim: true });
+            let centered = centered_rect(80, 50, content_area);
+            frame.render_widget(p, centered);
+        }
+        Some(crate::state::SummaryState::Ready(summary)) => {
+            let preview = markdown_preview(summary.as_str(), theme);
+            let p = Paragraph::new(preview.lines)
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .scroll((app.summary_scroll as u16, 0));
+            frame.render_widget(p, content_area);
+            frame.render_widget(
+                MarkdownHyperlinks::new(preview.hyperlinks, app.summary_scroll as u16),
+                content_area,
+            );
+        }
+        None => {}
+    }
 }
 
 #[cfg(test)]

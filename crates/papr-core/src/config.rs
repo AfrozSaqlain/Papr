@@ -70,6 +70,25 @@ impl Paths {
     }
 }
 
+/// AI model and provider configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AiConfig {
+    /// The API key for the AI provider.
+    pub api_key: String,
+    /// The model to use for summarization.
+    pub model: String,
+}
+
+impl Default for AiConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            model: "google/gemini-2.5-flash".into(),
+        }
+    }
+}
+
 /// User preferences loaded from TOML.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -92,6 +111,9 @@ pub struct Config {
     pub default_project_compiler: String,
     /// Plugin identifiers explicitly allowed to execute.
     pub enabled_plugins: Vec<String>,
+    /// AI configuration.
+    #[serde(default)]
+    pub ai: AiConfig,
 }
 
 #[derive(Serialize)]
@@ -116,6 +138,7 @@ impl Default for Config {
             dashboard_keywords: String::new(),
             default_project_compiler: "typst".into(),
             enabled_plugins: Vec::new(),
+            ai: AiConfig::default(),
         }
     }
 }
@@ -146,6 +169,10 @@ impl Config {
             if config.projects_directory.is_none() {
                 config.projects_directory = Some(paths.projects_dir.clone());
                 fs::write(&paths.config_file, toml::to_string_pretty(&config)?)?;
+            }
+            if config.ai.api_key.is_empty() && config.ai.model == "google/gemini-2.5-flash" {
+                // If it's empty, we might want to just keep the default or let them edit it.
+                // It will be serialized with default values on next write if needed.
             }
             fs::create_dir_all(config.projects_directory(paths))?;
             return Ok(config);
@@ -214,6 +241,12 @@ default_project_compiler = "typst"
 
 # Plugin identifiers explicitly allowed to execute.
 enabled_plugins = []
+
+[ai]
+# The API key for OpenRouter or AI provider
+api_key = ""
+# The model to use for summarization
+model = "google/gemini-2.5-flash"
 "#
         );
 
