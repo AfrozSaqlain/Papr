@@ -38,6 +38,8 @@ pub struct Paths {
     pub plugins_config_file: PathBuf,
     /// Default directory for managed writing projects.
     pub projects_dir: PathBuf,
+    /// Default directory for AI summaries.
+    pub summaries_dir: PathBuf,
 }
 
 impl Paths {
@@ -66,6 +68,7 @@ impl Paths {
             plugins_dir: dirs.data_dir().join("plugins"),
             plugins_config_file: dirs.config_dir().join("plugins.toml"),
             projects_dir: dirs.data_dir().join("projects"),
+            summaries_dir: dirs.data_dir().join("summaries"),
         }
     }
 }
@@ -320,6 +323,7 @@ mod tests {
         assert_eq!(paths.downloads_dir, dirs.data_dir().join("papers"));
         assert_eq!(paths.plugins_dir, dirs.data_dir().join("plugins"));
         assert_eq!(paths.projects_dir, dirs.data_dir().join("projects"));
+        assert_eq!(paths.summaries_dir, dirs.data_dir().join("summaries"));
         Ok(())
     }
 

@@ -253,8 +253,13 @@ pub enum AppMode {
 /// State of an AI paper summary generation process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SummaryState {
-    /// Summary is currently being generated. Contains the model name.
-    Generating(String),
+    /// Summary is currently being generated. Contains the model name and messages.
+    Generating {
+        /// The name of the AI model being used.
+        model: String,
+        /// Live progress messages generated so far.
+        messages: String,
+    },
     /// Summary generation failed. Contains the error message.
     Error(String),
     /// Summary generation succeeded or was loaded from DB.
@@ -482,16 +487,22 @@ pub struct SettingsModalState {
     pub ai_api_key: String,
     /// Cursor for `ai.api_key`.
     pub ai_api_key_cursor: usize,
-    /// Staged `ai.model`.
-    pub ai_model: String,
-    /// Cursor for `ai.model`.
-    pub ai_model_cursor: usize,
     /// Whether `api_key` is being edited.
     pub ai_editing_api_key: bool,
-    /// Whether `model` is being edited.
-    pub ai_editing_model: bool,
     /// Focus within AI tab (0 = API Key, 1 = Model).
     pub ai_focus: usize,
+    /// Fetched free OpenRouter models.
+    pub ai_models: Vec<papr_core::ai::AiModel>,
+    /// Whether the model list is currently loading.
+    pub ai_models_loading: bool,
+    /// Error message if fetching models failed.
+    pub ai_models_error: Option<String>,
+    /// Selected index in `ai_models`.
+    pub ai_models_selected: usize,
+    /// Scroll offset for `ai_models`.
+    pub ai_models_scroll: usize,
+    /// Staged selected model ID.
+    pub ai_model: String,
     // --- Plugins tab ---
     /// Selected plugin index.
     pub plugins_selected: usize,
@@ -530,11 +541,14 @@ impl Default for SettingsModalState {
             paths_focus: PathsTabFocus::default(),
             ai_api_key: String::new(),
             ai_api_key_cursor: 0,
-            ai_model: String::new(),
-            ai_model_cursor: 0,
             ai_editing_api_key: false,
-            ai_editing_model: false,
             ai_focus: 0,
+            ai_models: Vec::new(),
+            ai_models_loading: false,
+            ai_models_error: None,
+            ai_models_selected: 0,
+            ai_models_scroll: 0,
+            ai_model: String::new(),
             plugins_selected: 0,
             plugins_scroll: 0,
             original_theme: String::new(),

@@ -287,6 +287,7 @@ fn print_application_paths(paths: &Paths) {
     println!("downloads: {}", paths.downloads_dir.display());
     println!("plugins: {}", paths.plugins_dir.display());
     println!("projects: {}", paths.projects_dir.display());
+    println!("summaries: {}", paths.summaries_dir.display());
 }
 
 fn index_library(config: &Config, paths: &Paths, database: &Database) -> Result<()> {
@@ -1920,10 +1921,16 @@ enum AppEvent {
         query: String,
         result: Result<Vec<RemotePaper>, String>,
     },
+    SummaryProgress {
+        paper_id: i64,
+        message: String,
+    },
     SummaryReady {
         paper_id: i64,
         summary: Result<String, String>,
     },
+    FetchAiModels,
+    AiModelsFetched(Result<Vec<papr_core::ai::AiModel>, String>),
 }
 
 #[derive(Debug)]
@@ -2013,7 +2020,7 @@ async fn run(
             app,
         )
         .await?;
-        state_changed |= process_app_events(&mut app_events_receiver, &runtime, app)?;
+        state_changed |= process_app_events(&mut app_events_receiver, &runtime, app, &senders)?;
         state_changed |= process_page_change(&runtime, app, &mut theme, &mut last_page)?;
         state_changed |= update_toast_and_download_cleanup(app, &mut last_toast);
 
@@ -2404,6 +2411,7 @@ fn process_app_events(
     receiver: &mut mpsc::UnboundedReceiver<AppEvent>,
     runtime: &Runtime,
     app: &mut App,
+    senders: &ActionSenders,
 ) -> Result<bool> {
     let mut changed = false;
     while let Ok(event) = receiver.try_recv() {
@@ -2428,15 +2436,20 @@ fn process_app_events(
             AppEvent::ProjectCitationSearchFinished { query, result } => {
                 apply_project_citation_search_result(app, &query, result);
             }
+            AppEvent::SummaryProgress { paper_id, message } => {
+                if Some(paper_id) == app.summary_paper_id {
+                    if let Some(SummaryState::Generating { messages, .. }) = &mut app.summary_state {
+                        messages.push_str(&message);
+                        messages.push('\n');
+                    }
+                }
+            }
             AppEvent::SummaryReady { paper_id, summary } => {
                 match summary {
-                    Ok(text) => {
-                        let _ = runtime.database.update_paper_summary(paper_id, &text);
+                    Ok(summary_text) => {
+                        app.summary_state = Some(SummaryState::Ready(summary_text.clone()));
                         if app.mode != AppMode::SummaryModal || Some(paper_id) != app.summary_paper_id {
                             app.toast = Some("AI summary generated successfully.".to_string());
-                        }
-                        if Some(paper_id) == app.summary_paper_id {
-                            app.summary_state = Some(SummaryState::Ready(text));
                         }
                     }
                     Err(err) => {
@@ -2445,6 +2458,33 @@ fn process_app_events(
                         } else {
                             app.toast = Some(format!("AI summary failed: {}", err));
                         }
+                    }
+                }
+            }
+            AppEvent::FetchAiModels => {
+                app.settings_modal.ai_models_loading = true;
+                app.settings_modal.ai_models_error = None;
+                let tx = senders.app_events.clone();
+                tokio::spawn(async move {
+                    let res = papr_core::ai::fetch_free_models().await;
+                    let payload = res.map_err(|e| format!("{:#}", e));
+                    let _ = tx.send(AppEvent::AiModelsFetched(payload));
+                });
+            }
+            AppEvent::AiModelsFetched(result) => {
+                app.settings_modal.ai_models_loading = false;
+                match result {
+                    Ok(models) => {
+                        // Find if current model is in list
+                        let current_model = &app.settings_modal.ai_model;
+                        if let Some(pos) = models.iter().position(|m| &m.id == current_model) {
+                            app.settings_modal.ai_models_selected = pos;
+                        }
+                        app.settings_modal.ai_models = models;
+                        app.settings_modal.ai_models_error = None;
+                    }
+                    Err(e) => {
+                        app.settings_modal.ai_models_error = Some(e);
                     }
                 }
             }
@@ -2879,15 +2919,19 @@ async fn apply_ui_action(
             app.mode = AppMode::SummaryModal;
             app.summary_paper_id = Some(paper_id);
             app.summary_scroll = 0;
-            if let Ok(Some(paper)) = runtime.database.library_paper_by_id(paper_id) {
-                if let Some(summary) = paper.ai_summary {
-                    app.summary_state = Some(SummaryState::Ready(summary));
+            
+            let output_dir = papr_core::Paths::discover().unwrap().summaries_dir.join(format!("paper_{}", paper_id));
+            let summary_md = output_dir.join("summary.md");
+            
+            if summary_md.exists() {
+                if let Ok(content) = std::fs::read_to_string(&summary_md) {
+                    app.summary_state = Some(SummaryState::Ready(content));
                     return Ok(());
                 }
             }
             
             let model = runtime.config.ai.model.clone();
-            app.summary_state = Some(SummaryState::Generating(model.clone()));
+            app.summary_state = Some(SummaryState::Generating { model: model.clone(), messages: String::new() });
             
             let api_key = runtime.config.ai.api_key.clone();
             let event_sender = senders.app_events.clone();
@@ -2904,18 +2948,29 @@ async fn apply_ui_action(
                 }
                 
                 let path = match pdf_path_opt {
-                    Some(p) => p,
-                    None => {
+                    Some(p) if p.exists() => p,
+                    _ => {
                         let _ = event_sender.send(AppEvent::SummaryReady {
                             paper_id,
-                            summary: Err("Paper does not have a local PDF.".to_string()),
+                            summary: Err("PDF file not found. Cannot generate summary.".to_string()),
                         });
                         return;
                     }
                 };
 
-                let res = papr_core::ai::generate_summary(&api_key, &model, &path).await;
-                match res {
+                let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+                
+                let progress_event_sender = event_sender.clone();
+                tokio::spawn(async move {
+                    while let Some(msg) = progress_rx.recv().await {
+                        let _ = progress_event_sender.send(AppEvent::SummaryProgress {
+                            paper_id,
+                            message: msg,
+                        });
+                    }
+                });
+
+                match papr_core::ai::generate_summary(&api_key, &model, &path, progress_tx, &output_dir).await {
                     Ok(summary) => {
                         let _ = event_sender.send(AppEvent::SummaryReady {
                             paper_id,
@@ -2925,7 +2980,7 @@ async fn apply_ui_action(
                     Err(e) => {
                         let _ = event_sender.send(AppEvent::SummaryReady {
                             paper_id,
-                            summary: Err(format!("Generation failed: {}", e)),
+                            summary: Err(e.to_string()),
                         });
                     }
                 }
@@ -4336,7 +4391,9 @@ fn pdf_scroll(app: &mut App, delta: i64) {
 fn handle_mouse(app: &mut App, mouse: MouseEvent) -> Option<UiAction> {
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            if app.mode == AppMode::PdfView {
+            if app.mode == AppMode::SummaryModal {
+                app.summary_scroll = app.summary_scroll.saturating_sub(3);
+            } else if app.mode == AppMode::PdfView {
                 pdf_scroll(app, -3);
             } else if app.page == Page::Projects
                 && app.content_focused
@@ -4346,7 +4403,9 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) -> Option<UiAction> {
             }
         }
         MouseEventKind::ScrollDown => {
-            if app.mode == AppMode::PdfView {
+            if app.mode == AppMode::SummaryModal {
+                app.summary_scroll = app.summary_scroll.saturating_add(3);
+            } else if app.mode == AppMode::PdfView {
                 pdf_scroll(app, 3);
             } else if app.page == Page::Projects
                 && app.content_focused
@@ -8049,7 +8108,14 @@ fn handle_settings_modal_key(
         return Ok(None);
     }
 
-    match handle_settings_key(app, key) {
+    let old_tab = app.settings_modal.tab;
+    let result = handle_settings_key(app, key);
+    
+    if app.settings_modal.tab == crate::state::SettingsTab::Ai && old_tab != crate::state::SettingsTab::Ai {
+        let _ = senders.app_events.send(AppEvent::FetchAiModels);
+    }
+
+    match result {
         SettingsKeyResult::Handled => {}
 
         SettingsKeyResult::Apply => {

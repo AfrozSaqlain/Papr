@@ -5160,13 +5160,14 @@ fn render_summary_modal(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let content_area = block.inner(modal_area);
     frame.render_widget(block, modal_area);
 
-    match &app.summary_state {
-        Some(crate::state::SummaryState::Generating(model)) => {
-            let text = format!("Generating summary using {}...\nThis may take a minute or two.", model);
+    let state = app.summary_state.clone();
+    match state {
+        Some(crate::state::SummaryState::Generating { model, messages }) => {
+            let text = format!("Generating summary using {}...\nThis may take a minute or two.\n\n{}", model, messages);
             let p = Paragraph::new(text)
                 .alignment(Alignment::Center)
                 .wrap(ratatui::widgets::Wrap { trim: true });
-            let centered = centered_rect(60, 20, content_area);
+            let centered = centered_rect(60, 40, content_area);
             frame.render_widget(p, centered);
         }
         Some(crate::state::SummaryState::Error(err)) => {
@@ -5180,13 +5181,23 @@ fn render_summary_modal(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         }
         Some(crate::state::SummaryState::Ready(summary)) => {
             let preview = markdown_preview(summary.as_str(), theme);
-            let p = Paragraph::new(preview.lines)
+            let content = Paragraph::new(preview.lines.clone())
+                .block(Block::default().padding(ratatui::widgets::Padding::uniform(1)))
                 .wrap(ratatui::widgets::Wrap { trim: false })
                 .scroll((app.summary_scroll as u16, 0));
-            frame.render_widget(p, content_area);
-            frame.render_widget(
-                MarkdownHyperlinks::new(preview.hyperlinks, app.summary_scroll as u16),
+            
+            let mut scrollbar_state = ratatui::widgets::ScrollbarState::default()
+                .content_length(preview.lines.len().saturating_sub(content_area.height as usize))
+                .position(app.summary_scroll as usize);
+                
+            frame.render_widget(content, content_area);
+            frame.render_stateful_widget(
+                ratatui::widgets::Scrollbar::default()
+                    .orientation(ratatui::widgets::ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(Some("↑"))
+                    .end_symbol(Some("↓")),
                 content_area,
+                &mut scrollbar_state,
             );
         }
         None => {}

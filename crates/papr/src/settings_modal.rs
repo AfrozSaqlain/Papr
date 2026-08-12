@@ -118,7 +118,13 @@ pub fn open_settings_modal(app: &mut App, config: &Config, current_theme_name: &
     modal.ai_api_key = config.ai.api_key.clone();
     modal.ai_api_key_cursor = modal.ai_api_key.chars().count();
     modal.ai_model = config.ai.model.clone();
-    modal.ai_model_cursor = modal.ai_model.chars().count();
+    
+    // Reset AI models state
+    modal.ai_models = Vec::new();
+    modal.ai_models_loading = false;
+    modal.ai_models_error = None;
+    modal.ai_models_selected = 0;
+    modal.ai_models_scroll = 0;
 
     // Start on Theme tab with Tab Bar Header focused
     modal.tab = SettingsTab::Theme;
@@ -253,8 +259,6 @@ pub fn paste_into_active_field(app: &mut App, text: Option<&str>) -> bool {
         modal.projects_directory_error = None;
     } else if modal.ai_editing_api_key {
         insert(&mut modal.ai_api_key, &mut modal.ai_api_key_cursor);
-    } else if modal.ai_editing_model {
-        insert(&mut modal.ai_model, &mut modal.ai_model_cursor);
     }
     true
 }
@@ -421,7 +425,6 @@ fn any_field_editing(app: &App) -> bool {
         || m.paths_editing.download_path
         || m.paths_editing.projects_directory
         || m.ai_editing_api_key
-        || m.ai_editing_model
 }
 
 fn clear_edit_state(app: &mut App) {
@@ -432,7 +435,6 @@ fn clear_edit_state(app: &mut App) {
     m.paths_editing.download_path = false;
     m.paths_editing.projects_directory = false;
     m.ai_editing_api_key = false;
-    m.ai_editing_model = false;
 }
 
 // --- Theme tab ---
@@ -1111,13 +1113,14 @@ fn handle_ai_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
     if app.settings_modal.ai_editing_api_key {
         return handle_ai_field_edit(app, 0, key);
     }
-    if app.settings_modal.ai_editing_model {
-        return handle_ai_field_edit(app, 1, key);
-    }
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => {
             if focus == 1 {
-                app.settings_modal.ai_focus = 0;
+                if app.settings_modal.ai_models_selected > 0 {
+                    app.settings_modal.ai_models_selected -= 1;
+                } else {
+                    app.settings_modal.ai_focus = 0;
+                }
             } else {
                 app.settings_modal.tab_bar_focused = true;
             }
@@ -1125,13 +1128,18 @@ fn handle_ai_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
         KeyCode::Down | KeyCode::Char('j') => {
             if focus == 0 {
                 app.settings_modal.ai_focus = 1;
+            } else if focus == 1 && app.settings_modal.ai_models_selected + 1 < app.settings_modal.ai_models.len() {
+                app.settings_modal.ai_models_selected += 1;
             }
         }
         KeyCode::Enter => {
-            match focus {
-                0 => app.settings_modal.ai_editing_api_key = true,
-                1 => app.settings_modal.ai_editing_model = true,
-                _ => {}
+            if focus == 0 {
+                app.settings_modal.ai_editing_api_key = true;
+            } else if focus == 1 && !app.settings_modal.ai_models.is_empty() {
+                if let Some(m) = app.settings_modal.ai_models.get(app.settings_modal.ai_models_selected) {
+                    app.settings_modal.ai_model = m.id.clone();
+                }
+                return SettingsKeyResult::Apply;
             }
         }
         _ => {}
@@ -1139,19 +1147,12 @@ fn handle_ai_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
     SettingsKeyResult::Handled
 }
 
-fn handle_ai_field_edit(app: &mut App, focus: usize, key: KeyEvent) -> SettingsKeyResult {
+fn handle_ai_field_edit(app: &mut App, _focus: usize, key: KeyEvent) -> SettingsKeyResult {
     if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
-        if focus == 0 {
-            app.settings_modal.ai_editing_api_key = false;
-        } else {
-            app.settings_modal.ai_editing_model = false;
-        }
+        app.settings_modal.ai_editing_api_key = false;
         return SettingsKeyResult::Apply;
     }
-    let (text, cursor) = match focus {
-        0 => (&mut app.settings_modal.ai_api_key, &mut app.settings_modal.ai_api_key_cursor),
-        _ => (&mut app.settings_modal.ai_model, &mut app.settings_modal.ai_model_cursor),
-    };
+    let (text, cursor) = (&mut app.settings_modal.ai_api_key, &mut app.settings_modal.ai_api_key_cursor);
     match key.code {
         KeyCode::Char(c) => {
             text.insert(*cursor, c);
@@ -2045,7 +2046,19 @@ fn render_single_path_field(
 // --- AI tab rendering ---
 
 fn render_ai_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
-    let chunks = Layout::vertical([Constraint::Length(3), Constraint::Length(3)])
+    let mut warning_msg = String::new();
+    if !app.settings_modal.ai_models_loading 
+        && !app.settings_modal.ai_model.is_empty()
+        && !app.settings_modal.ai_models.iter().any(|m| m.id == app.settings_modal.ai_model)
+    {
+        warning_msg = format!("⚠ Configured model '{}' is no longer available as free.", app.settings_modal.ai_model);
+    }
+
+    let chunks = Layout::vertical([
+        Constraint::Length(3), 
+        Constraint::Length(if warning_msg.is_empty() { 0 } else { 2 }), 
+        Constraint::Min(0)
+    ])
         .margin(1)
         .split(area);
     let is_focused = app.content_focused && !app.settings_modal.tab_bar_focused;
@@ -2054,7 +2067,7 @@ fn render_ai_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme
     let model_focused = is_focused && app.settings_modal.ai_focus == 1;
 
     let api_key_title = if app.settings_modal.ai_editing_api_key { " API Key (editing) " } else { " API Key " };
-    let model_title = if app.settings_modal.ai_editing_model { " AI Model (editing) " } else { " AI Model " };
+    let model_title = " AI Model ";
 
     let display_key = if app.settings_modal.ai_editing_api_key {
         app.settings_modal.ai_api_key.clone()
@@ -2069,19 +2082,48 @@ fn render_ai_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme
             .block(focused_block(api_key_title, api_key_focused, theme)),
         chunks[0],
     );
-    frame.render_widget(
-        Paragraph::new(app.settings_modal.ai_model.as_str())
-            .block(focused_block(model_title, model_focused, theme)),
-        chunks[1],
-    );
+
+    if !warning_msg.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::styled(warning_msg, Style::default().fg(theme.error))),
+            chunks[1],
+        );
+    }
+
+    let model_block = focused_block(model_title, model_focused, theme);
+    
+    if app.settings_modal.ai_models_loading {
+        frame.render_widget(Paragraph::new("Loading free models...").style(Style::default().fg(theme.muted)).block(model_block), chunks[2]);
+    } else if let Some(ref err) = app.settings_modal.ai_models_error {
+        let msg = format!("Error loading models: {}", err);
+        frame.render_widget(Paragraph::new(Line::styled(msg, Style::default().fg(theme.error))).block(model_block).wrap(Wrap { trim: false }), chunks[2]);
+    } else if app.settings_modal.ai_models.is_empty() {
+        frame.render_widget(Paragraph::new("No free models found.").style(Style::default().fg(theme.muted)).block(model_block), chunks[2]);
+    } else {
+        let items: Vec<ListItem> = app.settings_modal.ai_models.iter().map(|m| {
+            let active = if m.id == app.settings_modal.ai_model { " [Active]" } else { "" };
+            let content = format!("{}{}", m.name, active);
+            let style = if m.id == app.settings_modal.ai_model {
+                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.text)
+            };
+            ListItem::new(Line::styled(content, style))
+        }).collect();
+        
+        let list = List::new(items)
+            .block(model_block)
+            .highlight_style(Style::default().bg(theme.surface).add_modifier(Modifier::BOLD))
+            .highlight_symbol(">> ");
+            
+        let mut state = ListState::default();
+        state.select(Some(app.settings_modal.ai_models_selected));
+        frame.render_stateful_widget(list, chunks[2], &mut state);
+    }
 
     if app.settings_modal.ai_editing_api_key {
         frame.set_cursor_position(ratatui::layout::Position::new(
             chunks[0].x + 1 + app.settings_modal.ai_api_key_cursor as u16, chunks[0].y + 1
-        ));
-    } else if app.settings_modal.ai_editing_model {
-        frame.set_cursor_position(ratatui::layout::Position::new(
-            chunks[1].x + 1 + app.settings_modal.ai_model_cursor as u16, chunks[1].y + 1
         ));
     }
 }
