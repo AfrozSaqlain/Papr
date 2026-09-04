@@ -175,6 +175,14 @@ brew trust AfrozSaqlain/tap
 brew install papr
 ```
 
+## X-CMD
+
+[x-cmd](https://www.x-cmd.com/) is a modern Shell toolkit that gives AI agents and developers powerful, portable, and composable command-line capabilities.
+
+```sh
+x eget use AfrozSaqlain/Papr
+```
+
 ## Shell Script Installer (Linux & macOS)
 Install the latest pre-compiled release binary automatically:
 
