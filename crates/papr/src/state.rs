@@ -2207,6 +2207,7 @@ mod tests {
             file_size: None,
             reading_status: "unread".into(),
             is_favorite: false,
+            abstract_text: None,
         });
 
         assert!(app.downloaded_remote_paper(&remote).is_none());

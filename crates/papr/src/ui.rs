@@ -1508,6 +1508,7 @@ fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
                 bookmark_page: None,
                 download_label: None,
                 available_width,
+                abstract_text: paper.abstract_text.as_deref(),
             },
         );
         workspace_list_item_for(lines, index, selected, theme)
@@ -1644,6 +1645,7 @@ fn render_author_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
                 bookmark_page: None,
                 download_label: None,
                 available_width,
+                abstract_text: paper.abstract_text.as_deref(),
             },
         );
         workspace_list_item_for(lines, index, selected, theme)
@@ -1923,6 +1925,7 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
                         bookmark_page: item.page.map(u64::from),
                         download_label: None,
                         available_width,
+                        abstract_text: lib_paper.and_then(|p| p.abstract_text.as_deref()),
                     },
                 );
                 workspace_list_item_for(lines, index, selected, theme)
@@ -1949,6 +1952,7 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
                         bookmark_page: None,
                         download_label: None,
                         available_width,
+                        abstract_text: paper.abstract_text.as_deref(),
                     },
                 );
                 workspace_list_item_for(lines, index, selected, theme)
@@ -3325,6 +3329,7 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
                 bookmark_page: None,
                 download_label: None,
                 available_width,
+                abstract_text: paper.abstract_text.as_deref(),
             },
         );
         workspace_list_item_for(lines, index, selected, theme)
@@ -3388,6 +3393,7 @@ fn render_reading_queue(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
                 bookmark_page: None,
                 download_label: None,
                 available_width,
+                abstract_text: paper.abstract_text.as_deref(),
             },
         );
         workspace_list_item_for(lines, index, selected, theme)
@@ -3457,10 +3463,15 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
                     bookmark_page: None,
                     download_label: None,
                     available_width,
+                    abstract_text: paper.abstract_text.as_deref().or_else(|| {
+                        download
+                            .remote_paper
+                            .as_ref()
+                            .map(|rp| rp.abstract_text.as_str())
+                    }),
                 },
             );
-            let len = pl.len();
-            pl.insert(len - 1, Line::styled(label, Style::default().fg(color)));
+            pl.insert(1, Line::styled(label, Style::default().fg(color)));
             pl
         } else {
             let mut pl = build_paper_lines(
@@ -3479,10 +3490,13 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
                     bookmark_page: None,
                     download_label: None,
                     available_width,
+                    abstract_text: download
+                        .remote_paper
+                        .as_ref()
+                        .map(|rp| rp.abstract_text.as_str()),
                 },
             );
-            let len = pl.len();
-            pl.insert(len - 1, Line::styled(label, Style::default().fg(color)));
+            pl.insert(1, Line::styled(label, Style::default().fg(color)));
             pl
         };
 
@@ -3766,18 +3780,23 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
                 ));
             }
 
-            workspace_list_item_for(
-                vec![
-                    Line::styled(
-                        display_paper_title(&paper.title),
-                        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-                    ),
-                    Line::from(spans),
-                ],
-                index,
-                selected,
-                theme,
-            )
+            let preview_width = usize::from(area.width.saturating_sub(8)).max(24);
+            let abstract_preview = compact_text(&paper.abstract_text, preview_width);
+            let mut lines = vec![
+                Line::styled(
+                    display_paper_title(&paper.title),
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                ),
+                Line::from(spans),
+            ];
+            if !abstract_preview.is_empty() {
+                lines.push(Line::styled(
+                    abstract_preview,
+                    Style::default().fg(theme.muted),
+                ));
+            }
+
+            workspace_list_item_for(lines, index, selected, theme)
         });
     let focused =
         app.content_focused && !matches!(app.mode, AppMode::Search | AppMode::DiscoverFilter);
@@ -5454,6 +5473,7 @@ struct PaperLineContext<'a> {
     bookmark_page: Option<u64>,
     download_label: Option<(&'a str, ratatui::style::Color)>,
     available_width: usize,
+    abstract_text: Option<&'a str>,
 }
 
 fn build_paper_lines<'a>(app: &App, theme: &Theme, context: PaperLineContext<'a>) -> Vec<Line<'a>> {
@@ -5476,7 +5496,7 @@ fn build_paper_lines<'a>(app: &App, theme: &Theme, context: PaperLineContext<'a>
         .saturating_sub(stats_len)
         .saturating_sub(separator_len);
 
-    if stats_spans.is_empty()
+    let mut lines = if stats_spans.is_empty()
         || authors_str.chars().count() <= max_authors_width
         || max_authors_width >= 20
     {
@@ -5516,7 +5536,16 @@ fn build_paper_lines<'a>(app: &App, theme: &Theme, context: PaperLineContext<'a>
             lines.push(Line::from(stats_spans));
         }
         lines
+    };
+
+    if let Some(abstract_text) = context.abstract_text.filter(|a| !a.trim().is_empty()) {
+        let preview = compact_text(abstract_text, available_width);
+        if !preview.is_empty() {
+            lines.push(Line::styled(preview, Style::default().fg(theme.muted)));
+        }
     }
+
+    lines
 }
 
 fn paper_stats_spans<'a>(app: &App, theme: &Theme, context: PaperLineContext<'a>) -> Vec<Span<'a>> {
@@ -5719,6 +5748,7 @@ mod tests {
                     file_size: None,
                     reading_status: "unread".into(),
                     is_favorite: false,
+                    abstract_text: None,
                 }],
                 ..LibraryState::default()
             },
@@ -5800,6 +5830,7 @@ mod tests {
                     file_size: None,
                     reading_status: "unread".into(),
                     is_favorite: false,
+                    abstract_text: None,
                 }],
                 ..LibraryState::default()
             },
@@ -6040,12 +6071,111 @@ Image: ![plot](plot.png)[^1]
 
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
         assert!(rendered_text(&terminal).contains("Terminal Research Systems"));
+        assert!(rendered_text(&terminal).contains("A testable abstract"));
 
         app.mode = AppMode::PaperDetail;
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
         let detail = rendered_text(&terminal);
         assert!(detail.contains("ABSTRACT"));
         assert!(detail.contains("10.1000/papr"));
+        Ok(())
+    }
+
+    #[test]
+    fn workspaces_render_abstract_preview_on_third_line() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let backend = TestBackend::new(100, 32);
+        let mut terminal = Terminal::new(backend)?;
+        let theme = Theme::load("nord")?;
+
+        let sample_lib_paper = LibraryPaper {
+            id: 1,
+            title: "Quantum Gravity Overview".into(),
+            authors: "Alice Specialist".into(),
+            doi: None,
+            arxiv_id: None,
+            pdf_path: Some("/tmp/Quantum Gravity Overview.pdf".into()),
+            file_size: Some(1024),
+            reading_status: "reading".into(),
+            is_favorite: false,
+            abstract_text: Some("Quantum gravity theoretical foundations and recent tests.".into()),
+        };
+
+        // 1. Library workspace
+        let mut app = App {
+            page: Page::Library,
+            content_focused: true,
+            library: LibraryState {
+                papers: vec![sample_lib_paper.clone()],
+                selected: 0,
+                ..LibraryState::default()
+            },
+            ..App::default()
+        };
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let text = rendered_text(&terminal);
+        assert!(text.contains("Quantum Gravity Overview"));
+        assert!(text.contains("Alice Specialist"));
+        assert!(text.contains("Quantum gravity theoretical foundations"));
+
+        // 2. Discover workspace
+        let mut app = App {
+            page: Page::Discover,
+            content_focused: true,
+            discovery: DiscoveryState {
+                status: DiscoveryStatus::Ready,
+                results: vec![sample_paper()?],
+                selected: 0,
+                ..DiscoveryState::default()
+            },
+            ..App::default()
+        };
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let text = rendered_text(&terminal);
+        assert!(text.contains("Terminal Research Systems"));
+        assert!(text.contains("A testable abstract"));
+
+        // 3. Notes workspace
+        let mut app = App {
+            page: Page::Notes,
+            content_focused: true,
+            notes_papers: vec![sample_lib_paper.clone()],
+            notes_selected: 0,
+            ..App::default()
+        };
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let text = rendered_text(&terminal);
+        assert!(text.contains("Quantum Gravity Overview"));
+        assert!(text.contains("Quantum gravity theoretical foundations"));
+
+        // 4. Bookmarks workspace
+        let mut app = App {
+            page: Page::Bookmarks,
+            content_focused: true,
+            library: LibraryState {
+                papers: vec![sample_lib_paper.clone()],
+                ..LibraryState::default()
+            },
+            bookmarks: vec![BookmarkSummary {
+                id: 1,
+                paper_id: 1,
+                paper_title: "Quantum Gravity Overview".into(),
+                authors: "Alice Specialist".into(),
+                year: Some("2026".into()),
+                journal: None,
+                doi: None,
+                pdf_path: "/tmp/Quantum Gravity Overview.pdf".into(),
+                page: Some(3),
+                label: None,
+            }],
+            bookmark_selected: 0,
+            ..App::default()
+        };
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let text = rendered_text(&terminal);
+        assert!(text.contains("Quantum Gravity Overview"));
+        assert!(text.contains("Quantum gravity theoretical foundations"));
+
         Ok(())
     }
 
@@ -6122,6 +6252,7 @@ Image: ![plot](plot.png)[^1]
             file_size: Some(2048),
             reading_status: "unread".into(),
             is_favorite: false,
+            abstract_text: None,
         });
         let theme = Theme::load("gruvbox")?;
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
@@ -6215,6 +6346,7 @@ Image: ![plot](plot.png)[^1]
             file_size: Some(1024),
             reading_status: "unread".into(),
             is_favorite: false,
+            abstract_text: None,
         });
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
         let rendered = rendered_text(&terminal);
@@ -6317,6 +6449,7 @@ Image: ![plot](plot.png)[^1]
             file_size: Some(1024),
             reading_status: "unread".into(),
             is_favorite: false,
+            abstract_text: None,
         };
         let collection = CollectionSummary {
             id: 1,
@@ -6659,6 +6792,7 @@ Image: ![plot](plot.png)[^1]
             file_size: Some(1024),
             reading_status: "unread".into(),
             is_favorite: false,
+            abstract_text: None,
         };
 
         for (page, expected_text) in [

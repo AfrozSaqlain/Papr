@@ -10942,6 +10942,7 @@ mod tests {
             file_size: Some(1),
             reading_status: "read".into(),
             is_favorite: false,
+            abstract_text: None,
         };
 
         let library_app = App {
@@ -11045,6 +11046,7 @@ mod tests {
             file_size: Some(1),
             reading_status: "read".into(),
             is_favorite: false,
+            abstract_text: None,
         };
 
         let mut downloads_app = App {
@@ -11157,6 +11159,7 @@ mod tests {
             file_size: None,
             reading_status: "unread".into(),
             is_favorite: false,
+            abstract_text: None,
         };
         let mut app = App {
             page: Page::Library,
@@ -11227,6 +11230,7 @@ mod tests {
                         file_size: None,
                         reading_status: "unread".into(),
                         is_favorite: false,
+                        abstract_text: None,
                     }],
                     ..LibraryState::default()
                 },
@@ -11326,6 +11330,7 @@ mod tests {
                     file_size: None,
                     reading_status: "unread".into(),
                     is_favorite: false,
+                    abstract_text: None,
                 }],
                 ..LibraryState::default()
             },
@@ -11408,6 +11413,7 @@ mod tests {
             file_size: None,
             reading_status: "unread".into(),
             is_favorite: false,
+            abstract_text: None,
         };
         let mut app = App {
             page: Page::Collections,
@@ -11446,6 +11452,7 @@ mod tests {
             file_size: None,
             reading_status: "unread".into(),
             is_favorite: false,
+            abstract_text: None,
         };
         let mut app = App {
             page: Page::Library,
@@ -11550,6 +11557,7 @@ mod tests {
             file_size: None,
             reading_status: "unread".into(),
             is_favorite: false,
+            abstract_text: None,
         };
 
         // Case 1: Toggle Add to queue from Library
@@ -11706,6 +11714,7 @@ mod tests {
             file_size: Some(12),
             reading_status: "unread".into(),
             is_favorite: false,
+            abstract_text: None,
         }];
 
         let prompt = MetadataPrompt {
