@@ -139,7 +139,8 @@ async fn run_app(cli: Cli) -> Result<()> {
     if handle_plugin_cli(cli.command.as_ref(), &plugin_host).await? {
         return Ok(());
     }
-    let theme = Theme::load(&config.theme).context("failed to load theme")?;
+    let theme = Theme::load_with_transparency(&config.theme, config.transparent_background)
+        .context("failed to load theme")?;
     let database = Database::open(&paths.database_file).context("failed to open database")?;
     if matches!(&cli.command, Some(CliCommand::Index)) {
         index_library(&config, &paths, &database)?;
@@ -1957,8 +1958,7 @@ async fn run(
     start_runtime_scan(&runtime, &senders, app);
     let mut last_date_check = std::time::Instant::now();
     let mut last_enrichment_check = std::time::Instant::now();
-    let mut last_page: Option<Page> = None;
-    let mut last_toast = None;
+    let (mut last_page, mut last_toast, mut last_background) = (None, None, Some(theme.background));
     let mut last_pdf_page_cached = false;
     let mut force_redraw = true;
 
@@ -2044,9 +2044,15 @@ async fn run(
 
         // Step 3: draw with the fully-updated state (key effects are visible
         // in THIS iteration, not the next one).
-        if state_changed || force_redraw {
+        if state_changed || force_redraw || last_background != Some(theme.background) {
             force_redraw = false; // consumed here
-            draw_application(session, app, &theme, &runtime.database_file)?;
+            draw_application(
+                session,
+                app,
+                &theme,
+                &runtime.database_file,
+                &mut last_background,
+            )?;
         }
 
         tokio::task::yield_now().await;
@@ -2067,7 +2073,12 @@ fn draw_application(
     app: &mut App,
     theme: &Theme,
     database_file: &Path,
+    last_background: &mut Option<ratatui::style::Color>,
 ) -> Result<()> {
+    if *last_background != Some(theme.background) {
+        session.terminal_mut().clear()?;
+        *last_background = Some(theme.background);
+    }
     session.set_command_cursor_active(app.mode == AppMode::TerminalCommand)?;
     let draw_start = std::time::Instant::now();
     session
@@ -2501,9 +2512,11 @@ fn process_page_change(
     app.workspace_query_cursor = 0;
     if *last_page == Some(Page::Settings) {
         let original = app.settings_modal.original_theme.clone();
+        let is_transparent = theme.background == ratatui::style::Color::Reset;
         if !original.is_empty()
-            && theme.name != original
-            && let Ok(reverted) = Theme::load(&original)
+            && (theme.name != original || is_transparent != runtime.config.transparent_background)
+            && let Ok(reverted) =
+                Theme::load_with_transparency(&original, runtime.config.transparent_background)
         {
             *theme = reverted;
         }
@@ -8003,10 +8016,14 @@ fn handle_settings_modal_key(
 
         SettingsKeyResult::ReturnToSidebar => {
             app.content_focused = false;
+            app.settings_modal.transparent_background = runtime.config.transparent_background;
             let original = app.settings_modal.original_theme.clone();
+            let is_transparent = theme.background == ratatui::style::Color::Reset;
             if !original.is_empty()
-                && theme.name != original
-                && let Ok(reverted) = Theme::load(&original)
+                && (theme.name != original
+                    || is_transparent != runtime.config.transparent_background)
+                && let Ok(reverted) =
+                    Theme::load_with_transparency(&original, runtime.config.transparent_background)
             {
                 *theme = reverted;
             }
@@ -8015,9 +8032,12 @@ fn handle_settings_modal_key(
 
         SettingsKeyResult::Quit => {
             let original = app.settings_modal.original_theme.clone();
+            let is_transparent = theme.background == ratatui::style::Color::Reset;
             if !original.is_empty()
-                && theme.name != original
-                && let Ok(reverted) = Theme::load(&original)
+                && (theme.name != original
+                    || is_transparent != runtime.config.transparent_background)
+                && let Ok(reverted) =
+                    Theme::load_with_transparency(&original, runtime.config.transparent_background)
             {
                 *theme = reverted;
             }
@@ -8028,7 +8048,9 @@ fn handle_settings_modal_key(
         }
 
         SettingsKeyResult::PreviewTheme(name) => {
-            if let Ok(preview) = Theme::load(&name) {
+            if let Ok(preview) =
+                Theme::load_with_transparency(&name, app.settings_modal.transparent_background)
+            {
                 *theme = preview;
             }
         }
@@ -8044,9 +8066,13 @@ fn apply_config_update(
     senders: &ActionSenders,
 ) -> Result<()> {
     let previous = runtime.config.clone();
-    if config.theme != previous.theme {
-        let new_theme =
-            Theme::load(&config.theme).map_err(|e| anyhow::anyhow!("Theme load failed: {e}"))?;
+    let is_transparent = theme.background == ratatui::style::Color::Reset;
+    if config.theme != previous.theme
+        || config.transparent_background != previous.transparent_background
+        || is_transparent != config.transparent_background
+    {
+        let new_theme = Theme::load_with_transparency(&config.theme, config.transparent_background)
+            .map_err(|e| anyhow::anyhow!("Theme load failed: {e}"))?;
         *theme = new_theme;
     }
 
@@ -8131,6 +8157,7 @@ fn apply_config_update(
     app.settings_modal
         .default_project_compiler
         .clone_from(&config.default_project_compiler);
+    app.settings_modal.transparent_background = config.transparent_background;
 
     Ok(())
 }

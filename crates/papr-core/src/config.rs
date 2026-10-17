@@ -76,6 +76,8 @@ impl Paths {
 pub struct Config {
     /// Active built-in theme name or path to a custom TOML theme.
     pub theme: String,
+    /// Whether the TUI should use the terminal's native background instead of an opaque fill.
+    pub transparent_background: bool,
     /// Page selected at startup.
     pub startup_page: String,
     /// Preferred external PDF viewer command.
@@ -108,6 +110,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             theme: "catppuccin-mocha".into(),
+            transparent_background: false,
             startup_page: "dashboard".into(),
             pdf_viewer: None,
             library_folders: Vec::new(),
@@ -188,6 +191,9 @@ impl Config {
         let toml_content = format!(
             r#"# Active built-in theme name or path to a custom TOML theme.
 theme = "catppuccin-mocha"
+
+# Render the TUI with a transparent terminal background.
+transparent_background = false
 
 # Page selected at startup.
 startup_page = "dashboard"
@@ -343,6 +349,7 @@ mod tests {
         let content = std::fs::read_to_string(&paths.config_file)?;
 
         assert!(content.contains("theme ="));
+        assert!(content.contains("transparent_background ="));
         assert!(content.contains("startup_page ="));
         assert!(content.contains("pdf_viewer ="));
         assert!(content.contains("library_folders ="));
@@ -361,6 +368,8 @@ mod tests {
 
         let parsed: Config = toml::from_str(&content)?;
         assert_eq!(parsed.theme, config.theme);
+        assert!(!config.transparent_background);
+        assert!(!parsed.transparent_background);
         assert_eq!(parsed.startup_page, config.startup_page);
         assert_eq!(config.default_project_compiler, "typst");
         assert_eq!(parsed.default_project_compiler, "typst");

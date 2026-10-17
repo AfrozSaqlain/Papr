@@ -15,8 +15,8 @@ pub enum ThemeError {
     /// Theme TOML is invalid.
     #[error("invalid theme TOML: {0}")]
     Toml(#[from] toml::de::Error),
-    /// A color was not a `#RRGGBB` value.
-    #[error("invalid color '{0}'; expected #RRGGBB")]
+    /// A color was not a `#RRGGBB` value or `transparent`.
+    #[error("invalid color '{0}'; expected #RRGGBB or transparent")]
     InvalidColor(String),
     /// Requested built-in theme is unknown.
     #[error("unknown theme '{0}'")]
@@ -57,6 +57,8 @@ pub struct Theme {
     pub name: String,
     /// Main terminal background.
     pub background: Color,
+    /// Foreground text color used on high-contrast accent pills and badges.
+    pub inverted_fg: Color,
     /// Raised panel background.
     pub surface: Color,
     /// Primary foreground.
@@ -115,15 +117,44 @@ impl Theme {
         };
         Self::try_from(spec)
     }
+
+    /// Load a built-in or custom theme and optionally make its main background transparent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unknown themes, malformed files, or invalid colors.
+    pub fn load_with_transparency(
+        name_or_path: &str,
+        transparent_background: bool,
+    ) -> Result<Self, ThemeError> {
+        Ok(Self::load(name_or_path)?.with_transparent_background(transparent_background))
+    }
+
+    /// Return a copy of this theme with `background` set to [`Color::Reset`] when
+    /// `transparent` is `true`.
+    #[must_use]
+    pub const fn with_transparent_background(mut self, transparent: bool) -> Self {
+        if transparent {
+            self.background = Color::Reset;
+        }
+        self
+    }
 }
 
 impl TryFrom<ThemeSpec> for Theme {
     type Error = ThemeError;
 
     fn try_from(spec: ThemeSpec) -> Result<Self, Self::Error> {
+        let background = parse_color(&spec.background)?;
+        let inverted_fg = if matches!(background, Color::Reset) {
+            Color::Black
+        } else {
+            background
+        };
         Ok(Self {
             name: spec.name,
-            background: parse_color(&spec.background)?,
+            background,
+            inverted_fg,
             surface: parse_color(&spec.surface)?,
             text: parse_color(&spec.text)?,
             muted: parse_color(&spec.muted)?,
@@ -138,7 +169,14 @@ impl TryFrom<ThemeSpec> for Theme {
 }
 
 fn parse_color(value: &str) -> Result<Color, ThemeError> {
-    let value = value.strip_prefix('#').unwrap_or(value);
+    let trimmed = value.trim();
+    if matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "transparent" | "reset" | "default" | "none"
+    ) {
+        return Ok(Color::Reset);
+    }
+    let value = trimmed.strip_prefix('#').unwrap_or(trimmed);
     if value.len() != 6 {
         return Err(ThemeError::InvalidColor(value.into()));
     }
@@ -287,6 +325,25 @@ mod tests {
     fn parses_rgb_colors() -> Result<(), Box<dyn std::error::Error>> {
         let theme = Theme::load("catppuccin")?;
         assert_eq!(theme.accent, Color::Rgb(137, 180, 250));
+        assert_eq!(theme.inverted_fg, Color::Rgb(30, 30, 46));
+        Ok(())
+    }
+
+    #[test]
+    fn transparent_background_resets_main_bg_and_preserves_inverted_fg()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let theme = Theme::load_with_transparency("catppuccin-mocha", true)?;
+        assert_eq!(theme.background, Color::Reset);
+        assert_eq!(theme.inverted_fg, Color::Rgb(30, 30, 46));
+        assert_eq!(theme.surface, Color::Rgb(49, 50, 68));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_transparent_color_keywords() -> Result<(), Box<dyn std::error::Error>> {
+        for keyword in ["transparent", "TRANSPARENT", "reset", "default", "none"] {
+            assert_eq!(super::parse_color(keyword)?, Color::Reset);
+        }
         Ok(())
     }
 }

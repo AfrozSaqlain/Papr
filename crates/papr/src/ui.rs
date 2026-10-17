@@ -497,7 +497,7 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
             Style::default().fg(theme.text).bg(theme.surface)
         } else {
             Style::default()
-                .fg(theme.background)
+                .fg(theme.inverted_fg)
                 .bg(theme.accent)
                 .add_modifier(Modifier::BOLD)
         })
@@ -3748,40 +3748,46 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme
         Line::from(vec![
             Span::styled(
                 " n ",
-                Style::default().fg(theme.background).bg(theme.accent),
+                Style::default().fg(theme.inverted_fg).bg(theme.accent),
             ),
             Span::styled(" new  ", Style::default().fg(theme.muted)),
             Span::styled(
                 " enter/right ",
-                Style::default().fg(theme.background).bg(theme.secondary),
+                Style::default().fg(theme.inverted_fg).bg(theme.secondary),
             ),
             Span::styled(" open  ", Style::default().fg(theme.muted)),
             Span::styled(
                 " esc ",
-                Style::default().fg(theme.background).bg(theme.warning),
+                Style::default().fg(theme.inverted_fg).bg(theme.warning),
             ),
             Span::styled(" projects  ", Style::default().fg(theme.muted)),
-            Span::styled(" x ", Style::default().fg(theme.background).bg(theme.error)),
+            Span::styled(
+                " x ",
+                Style::default().fg(theme.inverted_fg).bg(theme.error),
+            ),
             Span::styled(" delete", Style::default().fg(theme.muted)),
         ])
     } else {
         Line::from(vec![
             Span::styled(
                 " j/k ",
-                Style::default().fg(theme.background).bg(theme.accent),
+                Style::default().fg(theme.inverted_fg).bg(theme.accent),
             ),
             Span::styled(" navigate  ", Style::default().fg(theme.muted)),
             Span::styled(
                 " enter ",
-                Style::default().fg(theme.background).bg(theme.secondary),
+                Style::default().fg(theme.inverted_fg).bg(theme.secondary),
             ),
             Span::styled(" open  ", Style::default().fg(theme.muted)),
             Span::styled(
                 " ? ",
-                Style::default().fg(theme.background).bg(theme.warning),
+                Style::default().fg(theme.inverted_fg).bg(theme.warning),
             ),
             Span::styled(" help  ", Style::default().fg(theme.muted)),
-            Span::styled(" q ", Style::default().fg(theme.background).bg(theme.error)),
+            Span::styled(
+                " q ",
+                Style::default().fg(theme.inverted_fg).bg(theme.error),
+            ),
             Span::styled(" quit", Style::default().fg(theme.muted)),
         ])
     };
@@ -4669,6 +4675,11 @@ fn render_credits(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
 fn render_credits_about(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     let mut left_lines = credits_overview_lines(theme);
     left_lines.extend(credits_technology_lines(theme));
+    let block_bg = if matches!(theme.background, ratatui::style::Color::Reset) {
+        theme.background
+    } else {
+        theme.surface
+    };
 
     let left_para = Paragraph::new(left_lines)
         .block(
@@ -4676,7 +4687,7 @@ fn render_credits_about(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
                 .title(" ABOUT PAPR ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.border))
-                .style(Style::default().bg(theme.surface)),
+                .style(Style::default().bg(block_bg)),
         )
         .wrap(Wrap { trim: false });
     frame.render_widget(left_para, area);
@@ -4793,6 +4804,11 @@ fn credits_technology_lines(theme: &Theme) -> Vec<Line<'static>> {
 
 fn render_credits_links(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let right_chunks = Layout::vertical([Constraint::Min(4), Constraint::Length(1)]).split(area);
+    let block_bg = if matches!(theme.background, ratatui::style::Color::Reset) {
+        theme.background
+    } else {
+        theme.surface
+    };
 
     let credits_items = app.credits_items();
     let list_items: Vec<ListItem> = credits_items
@@ -4811,7 +4827,7 @@ fn render_credits_links(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
                 .title(" INTERACTIVE LINKS & DEPENDENCIES ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.accent))
-                .style(Style::default().bg(theme.surface)),
+                .style(Style::default().bg(block_bg)),
         )
         .highlight_style(Style::default().bg(theme.border).fg(theme.accent))
         .highlight_symbol("> ");
@@ -5881,5 +5897,38 @@ Image: ![plot](plot.png)[^1]
 
         let formatted = super::format_local_datetime(&chrono::Utc::now(), "%Y-%m-%d %H:%M");
         assert!(formatted.contains(&tz));
+    }
+
+    #[test]
+    fn transparent_background_renders_reset_bg_and_retains_pill_contrast()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut app = App::default();
+        let theme = Theme::load_with_transparency("nord", true)?;
+        let backend = TestBackend::new(110, 30);
+        let mut terminal = Terminal::new(backend)?;
+
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let buffer = terminal.backend().buffer();
+
+        // Top-left background cell uses Color::Reset
+        assert_eq!(
+            buffer[(0, 0)].style().bg,
+            Some(ratatui::style::Color::Reset)
+        );
+
+        // Sidebar active row uses theme.inverted_fg (original Nord RGB background) on theme.accent
+        let mut found_sidebar_pill = false;
+        for y in 0..30 {
+            for x in 0..22 {
+                let style = buffer[(x, y)].style();
+                if style.bg == Some(theme.accent) {
+                    assert_eq!(style.fg, Some(theme.inverted_fg));
+                    assert_ne!(style.fg, Some(ratatui::style::Color::Reset));
+                    found_sidebar_pill = true;
+                }
+            }
+        }
+        assert!(found_sidebar_pill);
+        Ok(())
     }
 }

@@ -384,6 +384,8 @@ pub enum GeneralTabFocus {
     DashboardKeywords,
     /// `default_project_compiler`.
     DefaultProjectCompiler,
+    /// `transparent_background` toggle.
+    TransparentBackground,
     /// `enabled_plugins` toggle list.
     EnabledPlugins,
 }
@@ -438,6 +440,8 @@ pub struct SettingsModalState {
     pub enabled_plugins: Vec<String>,
     /// Staged `default_project_compiler` value.
     pub default_project_compiler: String,
+    /// Staged `transparent_background` value.
+    pub transparent_background: bool,
     /// Focus within the General tab.
     pub general_focus: GeneralTabFocus,
     // --- Paths tab ---
@@ -486,6 +490,7 @@ impl Default for SettingsModalState {
             keyword_selected: 0,
             enabled_plugins: Vec::new(),
             default_project_compiler: String::new(),
+            transparent_background: false,
             general_focus: GeneralTabFocus::default(),
             library_entries: Vec::new(),
             library_selected: 0,

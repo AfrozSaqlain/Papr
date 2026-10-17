@@ -110,6 +110,7 @@ struct CropKey {
     /// The embedded project preview displays a fitted full page instead of a
     /// scroll crop, so it must not reuse an encoded scroll-mode frame.
     page_fit: bool,
+    transparent_padding: bool,
 }
 
 /// The result of one encode pass: the Kitty escape string that uploads the
@@ -1085,11 +1086,13 @@ struct ViewerLayout {
 }
 
 fn prepare_viewer_layout(frame: &mut Frame<'_>, app: &mut App, area: Rect) -> Option<ViewerLayout> {
+    let bg = if app.settings_modal.transparent_background {
+        Color::Reset
+    } else {
+        Color::Rgb(20, 20, 20)
+    };
     frame.render_widget(Clear, area);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(Color::Rgb(20, 20, 20))),
-        area,
-    );
+    frame.render_widget(Block::default().style(Style::default().bg(bg)), area);
     let Some(pdf_path) = app.pdf_viewer_path.clone() else {
         frame.render_widget(
             Paragraph::new("No PDF file open").style(Style::default().fg(Color::Red)),
@@ -1293,6 +1296,7 @@ pub fn draw_pdf_viewer_in_with_occlusion(
     app.pdf_viewer_max_scroll_y = max_scroll_cells;
 
     // Build the crop key for this frame
+    let transparent_padding = app.settings_modal.transparent_background && view.is_kitty;
     let crop_key = CropKey {
         path_fp: path_fingerprint(&pdf_path),
         page: view.current_page,
@@ -1301,6 +1305,7 @@ pub fn draw_pdf_viewer_in_with_occlusion(
         crop_y: scroll_px,
         crop_h: pixel_h,
         page_fit,
+        transparent_padding,
     };
 
     let needs_encode = view.last_crop_key.as_ref() != Some(&crop_key);
@@ -1412,6 +1417,7 @@ fn encode_pdf_crop(
     context: CropRenderContext<'_>,
 ) -> bool {
     let page_height = context.page_data.pixel_h;
+    let transparent_padding = context.crop_key.transparent_padding;
     let cropped = if context.page_fit {
         fit_page_to_viewport(&context.page_data.image, context.pixel_w, context.pixel_h)
     } else if context.scroll_px + context.pixel_h > page_height
@@ -1423,6 +1429,7 @@ fn encode_pdf_crop(
                     &context.page_data.image,
                     context.scroll_px,
                     context.pixel_h,
+                    transparent_padding,
                 )
             },
             |next| {
@@ -1439,7 +1446,12 @@ fn encode_pdf_crop(
         .min(page_height.saturating_sub(context.scroll_px))
         < context.pixel_h
     {
-        crop_single_with_padding(&context.page_data.image, context.scroll_px, context.pixel_h)
+        crop_single_with_padding(
+            &context.page_data.image,
+            context.scroll_px,
+            context.pixel_h,
+            transparent_padding,
+        )
     } else {
         crop_view(&context.page_data.image, context.scroll_px, context.pixel_h)
     };
@@ -1574,8 +1586,13 @@ fn render_status_bar(
             Style::default().fg(Color::DarkGray),
         ),
     ]);
+    let status_bg = if app.settings_modal.transparent_background {
+        Color::Reset
+    } else {
+        Color::Rgb(28, 28, 36)
+    };
     frame.render_widget(
-        Paragraph::new(status).style(Style::default().bg(Color::Rgb(28, 28, 36))),
+        Paragraph::new(status).style(Style::default().bg(status_bg)),
         area,
     );
 }
@@ -1813,7 +1830,12 @@ fn crop_and_stitch(
     DynamicImage::ImageRgba8(stitched)
 }
 
-fn crop_single_with_padding(curr_img: &RgbaImage, scroll_y: u32, viewport_h: u32) -> DynamicImage {
+fn crop_single_with_padding(
+    curr_img: &RgbaImage,
+    scroll_y: u32,
+    viewport_h: u32,
+    transparent_padding: bool,
+) -> DynamicImage {
     let w = curr_img.width();
     if w == 0 || viewport_h == 0 {
         return DynamicImage::ImageRgba8(RgbaImage::new(w.max(1), viewport_h.max(1)));
@@ -1832,14 +1854,20 @@ fn crop_single_with_padding(curr_img: &RgbaImage, scroll_y: u32, viewport_h: u32
         data[0..copy_len].copy_from_slice(&slice[0..copy_len]);
     }
 
-    let curr_len = (curr_visible as usize * bytes_per_row).min(data.len());
-    let padding_slice = &mut data[curr_len..];
-    padding_slice.chunks_exact_mut(4).for_each(|pixel| {
-        pixel[0] = 20;
-        pixel[1] = 20;
-        pixel[2] = 20;
-        pixel[3] = 255;
-    });
+    if !transparent_padding {
+        let curr_len = (curr_visible as usize * bytes_per_row).min(data.len());
+        let padding_slice = &mut data[curr_len..];
+        padding_slice
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .for_each(|pixel| {
+                pixel[0] = 20;
+                pixel[1] = 20;
+                pixel[2] = 20;
+                pixel[3] = 255;
+            });
+    }
 
     let stitched =
         RgbaImage::from_raw(w, viewport_h, data).unwrap_or_else(|| RgbaImage::new(w, viewport_h));
@@ -1963,6 +1991,18 @@ mod kitty_placeholder_tests {
         assert!(upload.len() < raw.len());
     }
 
+    #[test]
+    fn crop_single_with_padding_respects_transparent_flag() {
+        let src = RgbaImage::from_pixel(2, 1, Rgba([255, 255, 255, 255]));
+        let opaque = crop_single_with_padding(&src, 0, 2, false).to_rgba8();
+        assert_eq!(*opaque.get_pixel(0, 0), Rgba([255, 255, 255, 255]));
+        assert_eq!(*opaque.get_pixel(0, 1), Rgba([20, 20, 20, 255]));
+
+        let transparent = crop_single_with_padding(&src, 0, 2, true).to_rgba8();
+        assert_eq!(*transparent.get_pixel(0, 0), Rgba([255, 255, 255, 255]));
+        assert_eq!(*transparent.get_pixel(0, 1), Rgba([0, 0, 0, 0]));
+    }
+
     struct ReleaseFixture {
         cache: Arc<Mutex<PageCache>>,
         closed: PathBuf,
@@ -2027,6 +2067,7 @@ mod kitty_placeholder_tests {
             crop_y: 0,
             crop_h: 1,
             page_fit: false,
+            transparent_padding: false,
         });
         state.last_encoded = Some(EncodedFrame {
             transmit_seq: String::new(),
@@ -2132,6 +2173,7 @@ mod kitty_placeholder_tests {
                 crop_y: 0,
                 crop_h: 1,
                 page_fit: true,
+                transparent_padding: false,
             });
             state.last_encoded = Some(EncodedFrame {
                 transmit_seq: "old upload".into(),

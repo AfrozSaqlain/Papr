@@ -82,6 +82,7 @@ pub fn open_settings_modal(app: &mut App, config: &Config, current_theme_name: &
     modal
         .default_project_compiler
         .clone_from(&config.default_project_compiler);
+    modal.transparent_background = config.transparent_background;
     modal.general_focus = GeneralTabFocus::StartupPage;
 
     // Paths tab
@@ -163,6 +164,7 @@ pub fn staged_config(modal: &SettingsModalState, options: &[String], _base: &Con
             .copied()
             .unwrap_or("catppuccin-mocha")
             .to_owned(),
+        transparent_background: modal.transparent_background,
         startup_page,
         pdf_viewer,
         library_folders,
@@ -254,13 +256,15 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
 
     // Check if current context requires Left/Right for its own control-specific functionality:
     //   • In active text edit mode: Left/Right moves text cursor.
-    //   • In General tab when startup_page or default_project_compiler selector is focused: Left/Right cycles options.
+    //   • In General tab when startup_page, default_project_compiler, or transparent_background selector is focused: Left/Right cycles options.
     let consumes_left_right = is_editing
         || (app.settings_modal.tab == SettingsTab::General
             && !app.settings_modal.tab_bar_focused
             && matches!(
                 app.settings_modal.general_focus,
-                GeneralTabFocus::StartupPage | GeneralTabFocus::DefaultProjectCompiler
+                GeneralTabFocus::StartupPage
+                    | GeneralTabFocus::DefaultProjectCompiler
+                    | GeneralTabFocus::TransparentBackground
             ));
 
     // Universal Left / Right Arrow tab cycling across all tabs (where not consumed by control):
@@ -447,6 +451,10 @@ fn handle_theme_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
             app.settings_modal.tab_bar_focused = true;
             SettingsKeyResult::PreviewTheme(app.settings_modal.original_theme.clone())
         }
+        KeyCode::Char(' ') => {
+            app.settings_modal.transparent_background = !app.settings_modal.transparent_background;
+            SettingsKeyResult::Apply
+        }
         KeyCode::Enter => SettingsKeyResult::Apply,
         _ => SettingsKeyResult::Handled,
     }
@@ -477,6 +485,7 @@ fn handle_general_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
         GeneralTabFocus::PdfViewer => handle_pdf_viewer_selector_key(app, key),
         GeneralTabFocus::DashboardKeywords => handle_dashboard_keywords_key(app, key),
         GeneralTabFocus::DefaultProjectCompiler => handle_default_compiler_key(app, key),
+        GeneralTabFocus::TransparentBackground => handle_transparent_background_key(app, key),
         GeneralTabFocus::EnabledPlugins => handle_enabled_plugins_key(app, key),
     }
 }
@@ -610,7 +619,7 @@ fn handle_default_compiler_key(app: &mut App, key: KeyEvent) -> SettingsKeyResul
             }
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            app.settings_modal.general_focus = GeneralTabFocus::EnabledPlugins;
+            app.settings_modal.general_focus = GeneralTabFocus::TransparentBackground;
         }
         KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l') => {
             if app.settings_modal.default_project_compiler == "typst" {
@@ -625,10 +634,31 @@ fn handle_default_compiler_key(app: &mut App, key: KeyEvent) -> SettingsKeyResul
     SettingsKeyResult::Handled
 }
 
-fn handle_enabled_plugins_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
+fn handle_transparent_background_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => {
             app.settings_modal.general_focus = GeneralTabFocus::DefaultProjectCompiler;
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.settings_modal.general_focus = GeneralTabFocus::EnabledPlugins;
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l') => {
+            app.settings_modal.transparent_background = !app.settings_modal.transparent_background;
+        }
+        KeyCode::Char(' ') => {
+            app.settings_modal.transparent_background = !app.settings_modal.transparent_background;
+            return SettingsKeyResult::Apply;
+        }
+        KeyCode::Enter => return SettingsKeyResult::Apply,
+        _ => {}
+    }
+    SettingsKeyResult::Handled
+}
+
+fn handle_enabled_plugins_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.settings_modal.general_focus = GeneralTabFocus::TransparentBackground;
         }
         KeyCode::Char(' ') => {
             if let Some(plugin) = app.plugins.get(app.settings_modal.plugins_selected) {
@@ -1130,6 +1160,11 @@ pub fn render_settings_modal(frame: &mut Frame<'_>, area: Rect, app: &mut App, t
 
 /// Render the embedded settings workspace UI inside `area`.
 pub fn render_settings_ui(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+    let outer_bg = if matches!(theme.background, ratatui::style::Color::Reset) {
+        theme.background
+    } else {
+        theme.surface
+    };
     let outer_block = Block::default()
         .title(Line::styled(
             " SETTINGS ",
@@ -1149,7 +1184,7 @@ pub fn render_settings_ui(frame: &mut Frame<'_>, area: Rect, app: &mut App, them
         } else {
             Style::default().fg(theme.border)
         })
-        .style(Style::default().bg(theme.surface));
+        .style(Style::default().bg(outer_bg));
 
     let inner = outer_block.inner(area);
     frame.render_widget(outer_block, area);
@@ -1176,7 +1211,7 @@ fn render_tab_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
             let style = if active {
                 if is_tab_bar_active {
                     Style::default()
-                        .fg(theme.background)
+                        .fg(theme.inverted_fg)
                         .bg(theme.accent)
                         .add_modifier(Modifier::BOLD)
                 } else if app.content_focused {
@@ -1341,10 +1376,17 @@ fn render_theme_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
     let chunks = Layout::vertical([Constraint::Length(2), Constraint::Min(4)]).split(area);
 
     let is_focused = app.content_focused && !app.settings_modal.tab_bar_focused;
+    let transparency_status = if app.settings_modal.transparent_background {
+        "On"
+    } else {
+        "Off"
+    };
 
     frame.render_widget(
         Paragraph::new(Line::styled(
-            "  ↑/↓ to navigate. Selection previews immediately. Enter to Apply.",
+            format!(
+                "  ↑/↓ to navigate. Space: Transparent Background [{transparency_status}]. Enter to Apply."
+            ),
             Style::default().fg(theme.muted),
         )),
         chunks[0],
@@ -1511,12 +1553,13 @@ fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
     let kw_height = saturating_u16(kw_count)
         .saturating_add(2)
         .max(4)
-        .min(area.height.saturating_sub(10));
+        .min(area.height.saturating_sub(13));
 
     let chunks = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(3),
         Constraint::Length(kw_height),
+        Constraint::Length(3),
         Constraint::Length(3),
         Constraint::Min(3),
     ])
@@ -1539,34 +1582,12 @@ fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
     // default_project_compiler
     let compiler_focused = is_body_active
         && app.settings_modal.general_focus == GeneralTabFocus::DefaultProjectCompiler;
-    let compiler_block = focused_block(
-        " Default Project Compiler (◄/► to cycle) ",
-        compiler_focused,
-        theme,
-    );
-    let compiler_label = match app.settings_modal.default_project_compiler.as_str() {
-        "typst" => "Typst",
-        _ => "LaTeX",
-    };
-    let compiler_text = format!(" ◄  {compiler_label}  ► ");
-    frame.render_widget(
-        Paragraph::new(Line::styled(
-            compiler_text,
-            Style::default()
-                .fg(if compiler_focused {
-                    theme.text
-                } else {
-                    theme.muted
-                })
-                .add_modifier(if compiler_focused {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
-        ))
-        .block(compiler_block),
-        chunks[3],
-    );
+    render_default_compiler_setting(frame, chunks[3], app, compiler_focused, theme);
+
+    // transparent_background
+    let transparent_focused = is_body_active
+        && app.settings_modal.general_focus == GeneralTabFocus::TransparentBackground;
+    render_transparent_background_setting(frame, chunks[4], app, transparent_focused, theme);
 
     // enabled_plugins
     let plugins_focused =
@@ -1591,7 +1612,60 @@ fn render_general_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
             plugins_focused,
             theme,
         )),
-        chunks[4],
+        chunks[5],
+    );
+}
+
+fn render_default_compiler_setting(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    focused: bool,
+    theme: &Theme,
+) {
+    let compiler_label = match app.settings_modal.default_project_compiler.as_str() {
+        "typst" => "Typst",
+        _ => "LaTeX",
+    };
+    let compiler_text = format!(" ◄  {compiler_label}  ► ");
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            compiler_text,
+            setting_value_style(focused, theme),
+        ))
+        .block(focused_block(
+            " Default Project Compiler (◄/► to cycle) ",
+            focused,
+            theme,
+        )),
+        area,
+    );
+}
+
+fn render_transparent_background_setting(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    focused: bool,
+    theme: &Theme,
+) {
+    let transparent_label = if app.settings_modal.transparent_background {
+        "Enabled"
+    } else {
+        "Disabled"
+    };
+    let transparent_text = format!(" ◄  {transparent_label}  ► ");
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            transparent_text,
+            setting_value_style(focused, theme),
+        ))
+        .block(focused_block(
+            " Transparent Background (◄/► or Space to toggle) ",
+            focused,
+            theme,
+        )),
+        area,
     );
 }
 
@@ -2574,5 +2648,29 @@ mod tests {
         assert!(matches!(res, SettingsKeyResult::Handled));
         assert_eq!(app.settings_modal.tab, SettingsTab::General);
         assert_eq!(app.settings_modal.default_project_compiler, "latex");
+    }
+
+    #[test]
+    fn test_transparent_background_toggle_and_staging() {
+        let mut app = App::default();
+        app.settings_modal.tab = SettingsTab::General;
+        app.settings_modal.tab_bar_focused = false;
+        app.settings_modal.general_focus = GeneralTabFocus::TransparentBackground;
+        assert!(!app.settings_modal.transparent_background);
+
+        let key_right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        let res = handle_settings_key(&mut app, key_right);
+        assert!(matches!(res, SettingsKeyResult::Handled));
+        assert_eq!(app.settings_modal.tab, SettingsTab::General);
+        assert!(app.settings_modal.transparent_background);
+
+        let base = Config::default();
+        let staged = staged_config(&app.settings_modal, &app.startup_page_options, &base);
+        assert!(staged.transparent_background);
+
+        let key_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+        let res = handle_settings_key(&mut app, key_space);
+        assert!(matches!(res, SettingsKeyResult::Apply));
+        assert!(!app.settings_modal.transparent_background);
     }
 }
