@@ -516,6 +516,34 @@ pub fn format_local_datetime(dt: &chrono::DateTime<chrono::Utc>, fmt: &str) -> S
     format!("{} {}", local.format(fmt), tz)
 }
 
+/// Format a paper publication date string if available, parsing timestamps to local date format.
+pub fn format_published_date(raw: Option<&str>) -> Option<String> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Some(format_local_datetime(
+            &dt.with_timezone(&chrono::Utc),
+            "%Y-%m-%d",
+        ));
+    }
+
+    if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S"))
+    {
+        let dt = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(ndt, chrono::Utc);
+        return Some(format_local_datetime(&dt, "%Y-%m-%d"));
+    }
+
+    if chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d").is_ok() {
+        return Some(raw.to_string());
+    }
+
+    Some(raw.to_string())
+}
+
 /// Render the complete application for the current state.
 pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     if app.mode == AppMode::PdfView {
@@ -1492,6 +1520,7 @@ fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
         } else {
             "Metadata only"
         };
+        let published_date = format_published_date(paper.published_at.as_deref());
         let lines = build_paper_lines(
             app,
             theme,
@@ -1509,6 +1538,7 @@ fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
                 download_label: None,
                 available_width,
                 abstract_text: paper.abstract_text.as_deref(),
+                published_date: published_date.as_deref(),
             },
         );
         workspace_list_item_for(lines, index, selected, theme)
@@ -1629,6 +1659,7 @@ fn render_author_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
         } else {
             "Metadata only"
         };
+        let published_date = format_published_date(paper.published_at.as_deref());
         let lines = build_paper_lines(
             app,
             theme,
@@ -1646,6 +1677,7 @@ fn render_author_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
                 download_label: None,
                 available_width,
                 abstract_text: paper.abstract_text.as_deref(),
+                published_date: published_date.as_deref(),
             },
         );
         workspace_list_item_for(lines, index, selected, theme)
@@ -1909,6 +1941,11 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
                 let lib_paper = app.library.papers.iter().find(|p| p.id == item.paper_id);
                 let reading_status = lib_paper.map_or("", |p| p.reading_status.as_str());
                 let file_size = lib_paper.and_then(|p| p.file_size);
+                let published_date = format_published_date(
+                    lib_paper
+                        .and_then(|p| p.published_at.as_deref())
+                        .or(item.year.as_deref()),
+                );
                 let lines = build_paper_lines(
                     app,
                     theme,
@@ -1919,13 +1956,14 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
                         reading_status,
                         file_size,
                         availability: None,
-                        bookmark_year: item.year.as_deref(),
+                        bookmark_year: None,
                         bookmark_journal: item.journal.as_deref(),
                         bookmark_doi: item.doi.as_deref(),
                         bookmark_page: item.page.map(u64::from),
                         download_label: None,
                         available_width,
                         abstract_text: lib_paper.and_then(|p| p.abstract_text.as_deref()),
+                        published_date: published_date.as_deref(),
                     },
                 );
                 workspace_list_item_for(lines, index, selected, theme)
@@ -1936,6 +1974,7 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
             .iter()
             .enumerate()
             .map(|(index, paper)| {
+                let published_date = format_published_date(paper.published_at.as_deref());
                 let lines = build_paper_lines(
                     app,
                     theme,
@@ -1953,6 +1992,7 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
                         download_label: None,
                         available_width,
                         abstract_text: paper.abstract_text.as_deref(),
+                        published_date: published_date.as_deref(),
                     },
                 );
                 workspace_list_item_for(lines, index, selected, theme)
@@ -3313,6 +3353,7 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
     let available_width = rows[1].width.saturating_sub(2) as usize;
     let selected = workspace_highlight_selection(app, app.library.selected);
     let items = papers.iter().enumerate().map(|(index, paper)| {
+        let published_date = format_published_date(paper.published_at.as_deref());
         let lines = build_paper_lines(
             app,
             theme,
@@ -3330,6 +3371,7 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
                 download_label: None,
                 available_width,
                 abstract_text: paper.abstract_text.as_deref(),
+                published_date: published_date.as_deref(),
             },
         );
         workspace_list_item_for(lines, index, selected, theme)
@@ -3377,6 +3419,7 @@ fn render_reading_queue(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
     let available_width = rows[1].width.saturating_sub(2) as usize;
     let selected = workspace_highlight_selection(app, app.reading_queue_selected);
     let items = papers.iter().enumerate().map(|(index, paper)| {
+        let published_date = format_published_date(paper.published_at.as_deref());
         let lines = build_paper_lines(
             app,
             theme,
@@ -3394,6 +3437,7 @@ fn render_reading_queue(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
                 download_label: None,
                 available_width,
                 abstract_text: paper.abstract_text.as_deref(),
+                published_date: published_date.as_deref(),
             },
         );
         workspace_list_item_for(lines, index, selected, theme)
@@ -3419,6 +3463,7 @@ fn render_reading_queue(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
     app.reading_queue_scroll = state.offset();
 }
 
+#[allow(clippy::too_many_lines)]
 fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let downloads = app.filtered_downloads();
     if downloads.is_empty() {
@@ -3447,6 +3492,13 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
         };
 
         let lines = if let Some(paper) = paper {
+            let published_date =
+                format_published_date(paper.published_at.as_deref()).or_else(|| {
+                    download
+                        .remote_paper
+                        .as_ref()
+                        .map(|rp| format_local_datetime(&rp.published, "%Y-%m-%d"))
+                });
             let mut pl = build_paper_lines(
                 app,
                 theme,
@@ -3469,11 +3521,16 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
                             .as_ref()
                             .map(|rp| rp.abstract_text.as_str())
                     }),
+                    published_date: published_date.as_deref(),
                 },
             );
             pl.insert(1, Line::styled(label, Style::default().fg(color)));
             pl
         } else {
+            let published_date = download
+                .remote_paper
+                .as_ref()
+                .map(|rp| format_local_datetime(&rp.published, "%Y-%m-%d"));
             let mut pl = build_paper_lines(
                 app,
                 theme,
@@ -3494,6 +3551,7 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
                         .remote_paper
                         .as_ref()
                         .map(|rp| rp.abstract_text.as_str()),
+                    published_date: published_date.as_deref(),
                 },
             );
             pl.insert(1, Line::styled(label, Style::default().fg(color)));
@@ -3748,16 +3806,13 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
 
             let has_local = app.downloaded_remote_paper(paper).is_some();
 
+            let category = paper
+                .categories
+                .first()
+                .map_or("uncategorized", String::as_str);
+
             let mut spans = vec![Span::styled(
-                format!(
-                    "{}  |  {}  |  {}",
-                    format_local_datetime(&paper.published, "%Y-%m-%d"),
-                    compact_authors(paper),
-                    paper
-                        .categories
-                        .first()
-                        .map_or("uncategorized", String::as_str)
-                ),
+                format!("{}  |  {}", compact_authors(paper), category),
                 Style::default().fg(theme.muted),
             )];
 
@@ -3780,6 +3835,7 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
                 ));
             }
 
+            let published_date = format_local_datetime(&paper.published, "%Y-%m-%d");
             let preview_width = usize::from(area.width.saturating_sub(8)).max(24);
             let abstract_preview = compact_text(&paper.abstract_text, preview_width);
             let mut lines = vec![
@@ -3788,6 +3844,7 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
                     Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
                 ),
                 Line::from(spans),
+                Line::styled(published_date, Style::default().fg(theme.muted)),
             ];
             if !abstract_preview.is_empty() {
                 lines.push(Line::styled(
@@ -4061,11 +4118,7 @@ fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
                 let downloaded = app.downloaded_remote_paper(paper);
                 let local_status = downloaded.map(|local| local.reading_status.as_str());
 
-                let mut meta_str = format!(
-                    "{}  |  {}",
-                    compact_authors(paper),
-                    format_local_datetime(&paper.published, "%Y-%m-%d")
-                );
+                let mut meta_str = compact_authors(paper);
                 if let Some(status) = local_status {
                     meta_str.push_str("  |  ");
                     meta_str.push_str(status);
@@ -4083,19 +4136,24 @@ fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
                     ));
                 }
 
-                workspace_list_item_for(
-                    vec![
-                        Line::styled(
-                            display_paper_title(&paper.title),
-                            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-                        ),
-                        Line::from(meta_spans),
-                        Line::styled(abstract_preview, Style::default().fg(theme.muted)),
-                    ],
-                    index,
-                    selected,
-                    theme,
-                )
+                let published_date = format_local_datetime(&paper.published, "%Y-%m-%d");
+
+                let mut lines = vec![
+                    Line::styled(
+                        display_paper_title(&paper.title),
+                        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                    ),
+                    Line::from(meta_spans),
+                    Line::styled(published_date, Style::default().fg(theme.muted)),
+                ];
+                if !abstract_preview.is_empty() {
+                    lines.push(Line::styled(
+                        abstract_preview,
+                        Style::default().fg(theme.muted),
+                    ));
+                }
+
+                workspace_list_item_for(lines, index, selected, theme)
             })
             .collect(),
     };
@@ -5474,9 +5532,14 @@ struct PaperLineContext<'a> {
     download_label: Option<(&'a str, ratatui::style::Color)>,
     available_width: usize,
     abstract_text: Option<&'a str>,
+    published_date: Option<&'a str>,
 }
 
-fn build_paper_lines<'a>(app: &App, theme: &Theme, context: PaperLineContext<'a>) -> Vec<Line<'a>> {
+fn build_paper_lines(
+    app: &App,
+    theme: &Theme,
+    context: PaperLineContext<'_>,
+) -> Vec<Line<'static>> {
     let PaperLineContext {
         title,
         authors,
@@ -5538,6 +5601,13 @@ fn build_paper_lines<'a>(app: &App, theme: &Theme, context: PaperLineContext<'a>
         lines
     };
 
+    if let Some(published_date) = context.published_date.filter(|d| !d.trim().is_empty()) {
+        lines.push(Line::styled(
+            published_date.trim().to_string(),
+            Style::default().fg(theme.muted),
+        ));
+    }
+
     if let Some(abstract_text) = context.abstract_text.filter(|a| !a.trim().is_empty()) {
         let preview = compact_text(abstract_text, available_width);
         if !preview.is_empty() {
@@ -5548,7 +5618,11 @@ fn build_paper_lines<'a>(app: &App, theme: &Theme, context: PaperLineContext<'a>
     lines
 }
 
-fn paper_stats_spans<'a>(app: &App, theme: &Theme, context: PaperLineContext<'a>) -> Vec<Span<'a>> {
+fn paper_stats_spans(
+    app: &App,
+    theme: &Theme,
+    context: PaperLineContext<'_>,
+) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     if !context.reading_status.is_empty() {
         push_paper_stat(
@@ -5586,7 +5660,10 @@ fn paper_stats_spans<'a>(app: &App, theme: &Theme, context: PaperLineContext<'a>
     }
     if let Some(size) = context.file_size {
         push_paper_stat(&mut spans, format_bytes(size), theme.muted, theme);
-    } else if context.bookmark_year.is_none()
+    } else if context.published_date.is_none()
+        && context.bookmark_year.is_none()
+        && context.bookmark_journal.is_none()
+        && context.bookmark_doi.is_none()
         && context.download_label.is_none()
         && context.paper_id.is_some()
     {
@@ -5601,14 +5678,14 @@ fn paper_stats_spans<'a>(app: &App, theme: &Theme, context: PaperLineContext<'a>
     spans
 }
 
-fn push_paper_separator(spans: &mut Vec<Span<'_>>, theme: &Theme) {
+fn push_paper_separator(spans: &mut Vec<Span<'static>>, theme: &Theme) {
     if !spans.is_empty() {
         spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
     }
 }
 
 fn push_paper_stat(
-    spans: &mut Vec<Span<'_>>,
+    spans: &mut Vec<Span<'static>>,
     value: String,
     color: ratatui::style::Color,
     theme: &Theme,
@@ -5749,6 +5826,7 @@ mod tests {
                     reading_status: "unread".into(),
                     is_favorite: false,
                     abstract_text: None,
+                    published_at: None,
                 }],
                 ..LibraryState::default()
             },
@@ -5831,6 +5909,7 @@ mod tests {
                     reading_status: "unread".into(),
                     is_favorite: false,
                     abstract_text: None,
+                    published_at: None,
                 }],
                 ..LibraryState::default()
             },
@@ -6099,6 +6178,7 @@ Image: ![plot](plot.png)[^1]
             reading_status: "reading".into(),
             is_favorite: false,
             abstract_text: Some("Quantum gravity theoretical foundations and recent tests.".into()),
+            published_at: Some("2026-01-02T00:00:00Z".into()),
         };
 
         // 1. Library workspace
@@ -6116,6 +6196,7 @@ Image: ![plot](plot.png)[^1]
         let text = rendered_text(&terminal);
         assert!(text.contains("Quantum Gravity Overview"));
         assert!(text.contains("Alice Specialist"));
+        assert!(text.contains("2026-01-02"));
         assert!(text.contains("Quantum gravity theoretical foundations"));
 
         // 2. Discover workspace
@@ -6133,6 +6214,7 @@ Image: ![plot](plot.png)[^1]
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
         let text = rendered_text(&terminal);
         assert!(text.contains("Terminal Research Systems"));
+        assert!(text.contains("2026-01-02"));
         assert!(text.contains("A testable abstract"));
 
         // 3. Notes workspace
@@ -6146,6 +6228,7 @@ Image: ![plot](plot.png)[^1]
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
         let text = rendered_text(&terminal);
         assert!(text.contains("Quantum Gravity Overview"));
+        assert!(text.contains("2026-01-02"));
         assert!(text.contains("Quantum gravity theoretical foundations"));
 
         // 4. Bookmarks workspace
@@ -6174,6 +6257,7 @@ Image: ![plot](plot.png)[^1]
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
         let text = rendered_text(&terminal);
         assert!(text.contains("Quantum Gravity Overview"));
+        assert!(text.contains("2026-01-02"));
         assert!(text.contains("Quantum gravity theoretical foundations"));
 
         Ok(())
@@ -6253,6 +6337,7 @@ Image: ![plot](plot.png)[^1]
             reading_status: "unread".into(),
             is_favorite: false,
             abstract_text: None,
+            published_at: None,
         });
         let theme = Theme::load("gruvbox")?;
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
@@ -6347,6 +6432,7 @@ Image: ![plot](plot.png)[^1]
             reading_status: "unread".into(),
             is_favorite: false,
             abstract_text: None,
+            published_at: None,
         });
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
         let rendered = rendered_text(&terminal);
@@ -6450,6 +6536,7 @@ Image: ![plot](plot.png)[^1]
             reading_status: "unread".into(),
             is_favorite: false,
             abstract_text: None,
+            published_at: None,
         };
         let collection = CollectionSummary {
             id: 1,
@@ -6676,14 +6763,14 @@ Image: ![plot](plot.png)[^1]
 
         for theme_name in ["nord", "parchment", "tokyo-night"] {
             let theme = Theme::load_with_transparency(theme_name, true)?;
-            let backend = TestBackend::new(110, 30);
+            let backend = TestBackend::new(110, 36);
             let mut terminal = Terminal::new(backend)?;
 
             terminal.draw(|frame| render(frame, &mut app, &theme))?;
             let buffer = terminal.backend().buffer();
 
             let mut marker_pos = None;
-            for y in 0..30 {
+            for y in 0..36 {
                 for x in 20..110 {
                     if buffer[(x, y)].symbol() == ">" && buffer[(x, y)].fg == theme.accent {
                         marker_pos = Some((x, y));
@@ -6703,13 +6790,18 @@ Image: ![plot](plot.png)[^1]
             assert!(title_cell.modifier.contains(ratatui::style::Modifier::BOLD));
             assert!(!title_cell.modifier.contains(ratatui::style::Modifier::DIM));
 
-            // Selected paper line 1 (author + publication date): promoted to bright theme.text
+            // Selected paper line 1 (authors + reading status): promoted to bright theme.text
             let meta_cell = &buffer[(text_x, my + 1)];
             assert_eq!(meta_cell.fg, theme.text);
             assert!(!meta_cell.modifier.contains(ratatui::style::Modifier::DIM));
 
-            // Selected paper line 2 (abstract preview): bright secondary foreground
-            let abstract_cell = &buffer[(text_x, my + 2)];
+            // Selected paper line 2 (published date): bright secondary foreground
+            let date_cell = &buffer[(text_x, my + 2)];
+            assert_eq!(date_cell.fg, super::selected_secondary_text_color(&theme));
+            assert!(!date_cell.modifier.contains(ratatui::style::Modifier::DIM));
+
+            // Selected paper line 3 (abstract preview): bright secondary foreground
+            let abstract_cell = &buffer[(text_x, my + 3)];
             assert_eq!(
                 abstract_cell.fg,
                 super::selected_secondary_text_color(&theme)
@@ -6721,7 +6813,7 @@ Image: ![plot](plot.png)[^1]
             );
 
             // Second (unselected) paper in the focused panel: remains legible without Modifier::DIM
-            let second_title_y = my + 4;
+            let second_title_y = my + 5;
             let second_title_cell = &buffer[(text_x, second_title_y)];
             assert_eq!(second_title_cell.fg, theme.text);
             assert!(
@@ -6735,7 +6827,7 @@ Image: ![plot](plot.png)[^1]
                     .contains(ratatui::style::Modifier::DIM)
             );
 
-            let second_abstract_cell = &buffer[(text_x, second_title_y + 2)];
+            let second_abstract_cell = &buffer[(text_x, second_title_y + 3)];
             assert_eq!(second_abstract_cell.fg, super::focused_muted_color(&theme));
             assert!(
                 !second_abstract_cell
@@ -6793,6 +6885,7 @@ Image: ![plot](plot.png)[^1]
             reading_status: "unread".into(),
             is_favorite: false,
             abstract_text: None,
+            published_at: None,
         };
 
         for (page, expected_text) in [

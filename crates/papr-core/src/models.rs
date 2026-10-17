@@ -102,6 +102,8 @@ pub struct LibraryPaper {
     pub is_favorite: bool,
     /// Full abstract when known.
     pub abstract_text: Option<String>,
+    /// Publication timestamp or date string when known.
+    pub published_at: Option<String>,
 }
 
 impl LibraryPaper {

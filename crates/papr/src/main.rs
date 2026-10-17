@@ -10943,6 +10943,7 @@ mod tests {
             reading_status: "read".into(),
             is_favorite: false,
             abstract_text: None,
+            published_at: None,
         };
 
         let library_app = App {
@@ -11047,6 +11048,7 @@ mod tests {
             reading_status: "read".into(),
             is_favorite: false,
             abstract_text: None,
+            published_at: None,
         };
 
         let mut downloads_app = App {
@@ -11160,6 +11162,7 @@ mod tests {
             reading_status: "unread".into(),
             is_favorite: false,
             abstract_text: None,
+            published_at: None,
         };
         let mut app = App {
             page: Page::Library,
@@ -11231,6 +11234,7 @@ mod tests {
                         reading_status: "unread".into(),
                         is_favorite: false,
                         abstract_text: None,
+                        published_at: None,
                     }],
                     ..LibraryState::default()
                 },
@@ -11331,6 +11335,7 @@ mod tests {
                     reading_status: "unread".into(),
                     is_favorite: false,
                     abstract_text: None,
+                    published_at: None,
                 }],
                 ..LibraryState::default()
             },
@@ -11414,6 +11419,7 @@ mod tests {
             reading_status: "unread".into(),
             is_favorite: false,
             abstract_text: None,
+            published_at: None,
         };
         let mut app = App {
             page: Page::Collections,
@@ -11453,6 +11459,7 @@ mod tests {
             reading_status: "unread".into(),
             is_favorite: false,
             abstract_text: None,
+            published_at: None,
         };
         let mut app = App {
             page: Page::Library,
@@ -11558,6 +11565,7 @@ mod tests {
             reading_status: "unread".into(),
             is_favorite: false,
             abstract_text: None,
+            published_at: None,
         };
 
         // Case 1: Toggle Add to queue from Library
@@ -11715,6 +11723,7 @@ mod tests {
             reading_status: "unread".into(),
             is_favorite: false,
             abstract_text: None,
+            published_at: None,
         }];
 
         let prompt = MetadataPrompt {

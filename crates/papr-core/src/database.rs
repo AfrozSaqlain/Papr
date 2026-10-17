@@ -396,7 +396,7 @@ impl Database {
                                     WHERE pa.paper_id = p.id
                                     ORDER BY pa.position)), ''),
                     p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite,
-                    p.abstract
+                    p.abstract, p.published_at
              FROM papers p
              WHERE p.pdf_path IS NOT NULL
              ORDER BY p.created_at DESC, p.id DESC",
@@ -414,6 +414,7 @@ impl Database {
                 reading_status: row.get(7)?,
                 is_favorite: row.get(8)?,
                 abstract_text: row.get(9)?,
+                published_at: row.get(10)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -436,7 +437,7 @@ impl Database {
                                     WHERE pa.paper_id = p.id
                                     ORDER BY pa.position)), ''),
                     p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite,
-                    p.abstract
+                    p.abstract, p.published_at
              FROM papers p
              WHERE p.id = ?1",
         )?;
@@ -453,6 +454,7 @@ impl Database {
                 reading_status: row.get(7)?,
                 is_favorite: row.get(8)?,
                 abstract_text: row.get(9)?,
+                published_at: row.get(10)?,
             })
         })?;
         if let Some(row) = rows.next() {
@@ -497,7 +499,7 @@ impl Database {
                                     WHERE pa.paper_id = p.id
                                     ORDER BY pa.position)), ''),
                     p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite,
-                    p.abstract
+                    p.abstract, p.published_at
              FROM papers p
              JOIN reading_queue rq ON rq.paper_id = p.id
              ORDER BY rq.queue_order ASC",
@@ -515,6 +517,7 @@ impl Database {
                 reading_status: row.get(7)?,
                 is_favorite: row.get(8)?,
                 abstract_text: row.get(9)?,
+                published_at: row.get(10)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -953,7 +956,7 @@ impl Database {
                                     WHERE pa.paper_id = p.id
                                     ORDER BY pa.position)), ''),
                     p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite,
-                    p.abstract
+                    p.abstract, p.published_at
              FROM notes n JOIN papers p ON p.id = n.paper_id
              WHERE p.pdf_path IS NOT NULL
              ORDER BY n.updated_at DESC, n.id DESC",
@@ -971,6 +974,7 @@ impl Database {
                 reading_status: row.get(7)?,
                 is_favorite: row.get(8)?,
                 abstract_text: row.get(9)?,
+                published_at: row.get(10)?,
             })
         })?;
         let mut papers = Vec::new();
@@ -1094,7 +1098,7 @@ impl Database {
                                     WHERE pa.paper_id = p.id
                                     ORDER BY pa.position)), ''),
                     p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite,
-                    p.abstract
+                    p.abstract, p.published_at
              FROM collection_papers cp JOIN papers p ON p.id = cp.paper_id
              WHERE cp.collection_id = ?1 ORDER BY p.created_at DESC, p.id DESC",
         )?;
@@ -1111,6 +1115,7 @@ impl Database {
                 reading_status: row.get(7)?,
                 is_favorite: row.get(8)?,
                 abstract_text: row.get(9)?,
+                published_at: row.get(10)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -2007,7 +2012,7 @@ impl Database {
                                     WHERE pa2.paper_id = p.id
                                     ORDER BY pa2.position)), ''),
                     p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite,
-                    p.abstract
+                    p.abstract, p.published_at
              FROM papers p
              JOIN paper_authors pa ON pa.paper_id = p.id
              WHERE p.pdf_path IS NOT NULL
@@ -2028,6 +2033,7 @@ impl Database {
                 reading_status: row.get(7)?,
                 is_favorite: row.get(8)?,
                 abstract_text: row.get(9)?,
+                published_at: row.get(10)?,
             })
         })?;
         let mut papers = Vec::new();
