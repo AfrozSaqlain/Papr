@@ -230,14 +230,14 @@ fn single_line_list_item<'a>(
 fn list_highlight_style(
     theme: &Theme,
     highlight_bg: ratatui::style::Color,
-    highlight_fg: Option<ratatui::style::Color>,
+    text_fg: Option<ratatui::style::Color>,
 ) -> Style {
     if is_transparent(theme) {
         Style::default().bg(ratatui::style::Color::Reset)
     } else {
         let mut style = Style::default().bg(highlight_bg);
         if highlight_bg == theme.accent
-            && let Some(fg) = highlight_fg
+            && let Some(fg) = text_fg
         {
             style = style.fg(fg);
         }
@@ -287,13 +287,22 @@ fn focus_block<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> {
 }
 
 /// A workspace section block whose border stays `theme.border` while its title
-/// on the border is rendered brightly in bold `theme.text`.
-fn titled_block<'a>(title: impl Into<String>, borders: Borders, theme: &Theme) -> Block<'a> {
+/// on the border uses `theme.accent` when focused and `theme.text` when unfocused.
+fn titled_block<'a>(
+    title: impl Into<String>,
+    borders: Borders,
+    focused: bool,
+    theme: &Theme,
+) -> Block<'a> {
+    let title_style = if focused {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
+    };
     Block::default()
-        .title(Line::styled(
-            title.into(),
-            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-        ))
+        .title(Line::styled(title.into(), title_style))
         .borders(borders)
         .border_style(Style::default().fg(theme.border))
 }
@@ -887,12 +896,14 @@ fn render_project_list(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &The
             theme,
         )
     });
+    let block = focus_block(
+        " PROJECTS — n NEW  ENTER/RIGHT OPEN  x DELETE  r REFRESH ",
+        app.content_focused,
+        theme,
+    );
+    let inner = block.inner(area);
     let list = List::new(items)
-        .block(focus_block(
-            " PROJECTS — n NEW  ENTER/RIGHT OPEN  x DELETE  r REFRESH ",
-            app.content_focused,
-            theme,
-        ))
+        .block(block)
         .highlight_style(list_highlight_style(
             theme,
             theme.surface,
@@ -906,7 +917,7 @@ fn render_project_list(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &The
             Paragraph::new("No projects yet. Press n to create one.")
                 .alignment(Alignment::Center)
                 .style(Style::default().fg(theme.muted)),
-            area,
+            inner,
         );
     }
 }
@@ -1412,10 +1423,12 @@ fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
         };
         workspace_list_item_for(lines, index, selected, theme)
     });
+    let focused = app.content_focused && app.mode != AppMode::WorkspaceSearch;
     let list = List::new(items)
         .block(titled_block(
             " GROUPS - ENTER VIEW  g NEW  R RENAME x Delete",
             Borders::TOP,
+            focused,
             theme,
         ))
         .highlight_style(list_highlight_style(
@@ -1490,10 +1503,12 @@ fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
         );
         workspace_list_item_for(lines, index, selected, theme)
     });
+    let focused = app.content_focused && app.mode != AppMode::WorkspaceSearch;
     let list = List::new(items)
         .block(titled_block(
             format!(" {} PAPERS ", papers.len()),
             Borders::TOP,
+            focused,
             theme,
         ))
         .highlight_style(list_highlight_style(
@@ -1544,10 +1559,12 @@ fn render_authors(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
             theme,
         )
     });
+    let focused = app.content_focused && app.mode != AppMode::WorkspaceSearch;
     let list = List::new(items)
         .block(titled_block(
             format!(" {} AUTHORS - ENTER VIEW ", authors.len()),
             Borders::TOP,
+            focused,
             theme,
         ))
         .highlight_style(list_highlight_style(
@@ -1622,10 +1639,12 @@ fn render_author_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
         );
         workspace_list_item_for(lines, index, selected, theme)
     });
+    let focused = app.content_focused && app.mode != AppMode::WorkspaceSearch;
     let list = List::new(items)
         .block(titled_block(
             format!(" {} PAPERS ", papers.len()),
             Borders::TOP,
+            focused,
             theme,
         ))
         .highlight_style(list_highlight_style(
@@ -1666,6 +1685,7 @@ fn render_history(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         List::new(items).block(titled_block(
             " READING AND RESEARCH ACTIVITY ",
             Borders::TOP,
+            app.content_focused,
             theme,
         )),
         area,
@@ -1798,6 +1818,7 @@ fn render_statistics(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &T
         .block(titled_block(
             " 12-WEEK READING ACTIVITY ",
             Borders::ALL,
+            app.content_focused,
             theme,
         )),
         rows[2],
@@ -1851,6 +1872,7 @@ fn activity_kind(kind: &str) -> &str {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let available_width = area.width.saturating_sub(2) as usize;
     let (title, selected_idx, scroll_idx) = match app.page {
@@ -1933,8 +1955,9 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
             area,
         );
     } else {
+        let focused = app.content_focused && app.mode != AppMode::WorkspaceSearch;
         let list = List::new(items)
-            .block(titled_block(title, Borders::TOP, theme))
+            .block(titled_block(title, Borders::TOP, focused, theme))
             .style(Style::default().fg(theme.text))
             .highlight_style(list_highlight_style(
                 theme,
@@ -3297,10 +3320,12 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         );
         workspace_list_item_for(lines, index, selected, theme)
     });
+    let focused = app.content_focused && app.mode != AppMode::WorkspaceSearch;
     let list = List::new(items)
         .block(titled_block(
             format!(" {} PAPERS ", papers.len()),
             Borders::TOP,
+            focused,
             theme,
         ))
         .highlight_style(list_highlight_style(
@@ -3358,10 +3383,12 @@ fn render_reading_queue(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
         );
         workspace_list_item_for(lines, index, selected, theme)
     });
+    let focused = app.content_focused && app.mode != AppMode::WorkspaceSearch;
     let list = List::new(items)
         .block(titled_block(
             format!(" {} PAPERS ", papers.len()),
             Borders::TOP,
+            focused,
             theme,
         ))
         .highlight_style(list_highlight_style(
@@ -3452,8 +3479,14 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
 
         workspace_list_item_for(lines, index, selected, theme)
     });
+    let focused = app.content_focused && app.mode != AppMode::WorkspaceSearch;
     let list = List::new(items)
-        .block(titled_block(" DOWNLOAD MANAGER ", Borders::TOP, theme))
+        .block(titled_block(
+            " DOWNLOAD MANAGER ",
+            Borders::TOP,
+            focused,
+            theme,
+        ))
         .highlight_style(list_highlight_style(theme, theme.surface, None))
         .highlight_symbol("> ");
     let mut state = ListState::default()
@@ -3737,6 +3770,8 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
                 theme,
             )
         });
+    let focused =
+        app.content_focused && !matches!(app.mode, AppMode::Search | AppMode::DiscoverFilter);
     let list = List::new(items)
         .block(titled_block(
             format!(
@@ -3747,6 +3782,7 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
                 app.discovery.filtered_result_count(),
             ),
             Borders::TOP,
+            focused,
             theme,
         ))
         .highlight_style(list_highlight_style(
@@ -4036,6 +4072,7 @@ fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
         .block(titled_block(
             " DASHBOARD PAPERS - j/k SELECT  ENTER OPEN  o BROWSER ",
             Borders::ALL,
+            app.content_focused,
             theme,
         ))
         .highlight_style(list_highlight_style(theme, theme.surface, Some(theme.text)))
@@ -4082,10 +4119,14 @@ fn render_dashboard_details(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
     let activity = Paragraph::new(activity_lines).block(titled_block(
         " RECENT ACTIVITY ",
         Borders::ALL,
+        false,
         theme,
     ));
     frame.render_widget(activity, lower[0]);
-    frame.render_widget(titled_block(" STORAGE ", Borders::ALL, theme), lower[1]);
+    frame.render_widget(
+        titled_block(" STORAGE ", Borders::ALL, false, theme),
+        lower[1],
+    );
     let storage = lower[1].inner(ratatui::layout::Margin {
         horizontal: 2,
         vertical: 1,
@@ -5066,7 +5107,8 @@ fn render_credits_about(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
 
     let left_para = Paragraph::new(left_lines)
         .block(
-            titled_block(" ABOUT PAPR ", Borders::ALL, theme).style(Style::default().bg(block_bg)),
+            titled_block(" ABOUT PAPR ", Borders::ALL, false, theme)
+                .style(Style::default().bg(block_bg)),
         )
         .wrap(Wrap { trim: false });
     frame.render_widget(left_para, area);
@@ -5214,11 +5256,13 @@ fn render_credits_links(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
 
     let list = List::new(list_items)
         .block(
-            Block::default()
-                .title(" INTERACTIVE LINKS & DEPENDENCIES ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .style(Style::default().bg(block_bg)),
+            titled_block(
+                " INTERACTIVE LINKS & DEPENDENCIES ",
+                Borders::ALL,
+                app.content_focused,
+                theme,
+            )
+            .style(Style::default().bg(block_bg)),
         )
         .highlight_style(list_highlight_style(
             theme,
@@ -6463,6 +6507,97 @@ Image: ![plot](plot.png)[^1]
         let inner_cell = &buffer[(popup_area.x + 2, popup_area.y + 1)];
         assert_eq!(inner_cell.bg, ratatui::style::Color::Reset);
         assert!(!inner_cell.modifier.contains(ratatui::style::Modifier::DIM));
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_section_titles_highlight_when_focused_and_restore_when_unfocused()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let theme = Theme::load("parchment")?;
+
+        let test_paper = LibraryPaper {
+            id: 1,
+            title: "Note Research Paper".into(),
+            authors: "Ada Lovelace".into(),
+            doi: None,
+            arxiv_id: None,
+            pdf_path: Some("/tmp/paper.pdf".into()),
+            file_size: Some(1024),
+            reading_status: "unread".into(),
+            is_favorite: false,
+        };
+
+        for (page, expected_text) in [
+            (Page::Dashboard, "DASHBOARD PAPERS"),
+            (Page::Notes, "NOTES"),
+            (Page::Downloads, "DOWNLOAD MANAGER"),
+            (Page::Projects, "PROJECTS"),
+        ] {
+            for content_focused in [true, false] {
+                let mut app = App {
+                    page,
+                    content_focused,
+                    today_papers: vec![sample_paper()?],
+                    notes_papers: vec![test_paper.clone()],
+                    downloads: vec![DownloadTask {
+                        id: "dl-1".into(),
+                        paper_id: None,
+                        pdf_path: None,
+                        title: "Download Paper".into(),
+                        status: DownloadStatus::Completed,
+                        downloaded: 1024,
+                        total: Some(1024),
+                        remote_paper: None,
+                        failed_at: None,
+                    }],
+                    ..App::default()
+                };
+
+                let backend = TestBackend::new(110, 30);
+                let mut terminal = Terminal::new(backend)?;
+                terminal.draw(|frame| render(frame, &mut app, &theme))?;
+                let buffer = terminal.backend().buffer();
+
+                let mut found_title_char = false;
+                for y in 0u16..30u16 {
+                    for x in 20u16..100u16 {
+                        // Check if the expected title starts at (x, y)
+                        let mut matches = true;
+                        for (offset, ch) in expected_text.chars().enumerate() {
+                            let ox = x + u16::try_from(offset).unwrap_or(u16::MAX);
+                            if ox >= 110 || buffer[(ox, y)].symbol() != ch.to_string() {
+                                matches = false;
+                                break;
+                            }
+                        }
+                        if matches {
+                            let cell = &buffer[(x, y)];
+                            if content_focused {
+                                assert_eq!(
+                                    cell.fg, theme.accent,
+                                    "Expected title '{expected_text}' on page {page:?} to use theme.accent when focused"
+                                );
+                            } else {
+                                assert_eq!(
+                                    cell.fg, theme.text,
+                                    "Expected title '{expected_text}' on page {page:?} to use theme.text when unfocused"
+                                );
+                            }
+                            assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
+                            found_title_char = true;
+                            break;
+                        }
+                    }
+                    if found_title_char {
+                        break;
+                    }
+                }
+                assert!(
+                    found_title_char,
+                    "Expected title '{expected_text}' not found on page {page:?} (content_focused: {content_focused})"
+                );
+            }
+        }
         Ok(())
     }
 }

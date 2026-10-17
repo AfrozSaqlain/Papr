@@ -191,7 +191,7 @@ const fn blend_color(from: Color, toward: Color, weight: u16, scale: u16) -> Col
     }
 }
 
-#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_possible_truncation, clippy::manual_div_ceil)]
 const fn ensure_min_luminance(color: Color, target_light: Color, min_lum: u32) -> Color {
     let lum = color_luminance(color);
     if lum >= min_lum {
