@@ -1423,14 +1423,18 @@ fn render_theme_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
                         .add_modifier(Modifier::BOLD)
                 } else if is_focused {
                     Style::default()
-                        .fg(dim_settings_list_color(theme.muted, theme.muted))
+                        .fg(focused_settings_muted_color(theme))
                         .bg(ratatui::style::Color::Reset)
-                        .add_modifier(Modifier::DIM)
                 } else {
                     Style::default().fg(theme.muted)
                 }
             } else if is_cursor && is_focused {
-                Style::default().fg(theme.text).bg(theme.accent)
+                Style::default()
+                    .fg(theme.text)
+                    .bg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else if is_focused {
+                Style::default().fg(focused_settings_muted_color(theme))
             } else {
                 Style::default().fg(theme.muted)
             };
@@ -1813,18 +1817,16 @@ fn render_dashboard_keywords(
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD)
             } else if focused {
-                Style::default()
-                    .fg(dim_settings_list_color(theme.muted, theme.muted))
-                    .add_modifier(Modifier::DIM)
+                Style::default().fg(focused_settings_muted_color(theme))
             } else {
                 Style::default().fg(theme.muted)
             }
+        } else if is_selected {
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
+        } else if focused {
+            Style::default().fg(focused_settings_muted_color(theme))
         } else {
-            setting_value_style(is_selected, theme).add_modifier(if is_selected {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            })
+            Style::default().fg(theme.muted)
         };
         let prefix = if is_selected { "> " } else { "  " };
 
@@ -1983,18 +1985,16 @@ fn render_library_folders(
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD)
             } else if focused {
-                Style::default()
-                    .fg(dim_settings_list_color(theme.muted, theme.muted))
-                    .add_modifier(Modifier::DIM)
+                Style::default().fg(focused_settings_muted_color(theme))
             } else {
                 Style::default().fg(theme.muted)
             }
+        } else if is_selected {
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
+        } else if focused {
+            Style::default().fg(focused_settings_muted_color(theme))
         } else {
-            setting_value_style(is_selected, theme).add_modifier(if is_selected {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            })
+            Style::default().fg(theme.muted)
         };
         let prefix = if is_selected { "> " } else { "  " };
         let display_text = format!("{}{}", prefix, entry.text);
@@ -2103,34 +2103,26 @@ fn render_plugins_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
             let selected = i == app.settings_modal.plugins_selected && is_focused;
             let staged_enabled = enabled_ids.contains(&plugin.id);
             let check = if staged_enabled { "✓" } else { "✗" };
-            let (check_style, name_style, detail_style) = if is_transparent_theme(theme) {
-                if selected {
-                    (
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD),
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD),
-                        Style::default().fg(theme.text),
-                    )
-                } else if is_focused {
-                    let dim_muted = Style::default()
-                        .fg(dim_settings_list_color(theme.muted, theme.muted))
-                        .add_modifier(Modifier::DIM);
-                    (dim_muted, dim_muted, dim_muted)
-                } else {
-                    let muted = Style::default().fg(theme.muted);
-                    (muted, muted, muted)
-                }
+            let focused_muted = focused_settings_muted_color(theme);
+            let (check_style, name_style, detail_style) = if selected {
+                (
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.text),
+                )
+            } else if is_focused {
+                (
+                    Style::default().fg(theme.text),
+                    Style::default().fg(theme.text),
+                    Style::default().fg(focused_muted),
+                )
             } else {
-                let cs = setting_value_style(selected, theme);
-                let ns = cs.add_modifier(if selected {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                });
-                (cs, ns, cs)
+                let muted = Style::default().fg(theme.muted);
+                (muted, muted, muted)
             };
             let prefix = if selected { "> " } else { "  " };
             ListItem::new(Line::from(vec![
@@ -2184,21 +2176,16 @@ fn is_transparent_theme(theme: &Theme) -> bool {
     matches!(theme.background, ratatui::style::Color::Reset)
 }
 
-fn dim_settings_list_color(
-    color: ratatui::style::Color,
-    fallback: ratatui::style::Color,
-) -> ratatui::style::Color {
-    match color {
-        ratatui::style::Color::Rgb(r, g, b) => {
-            let scale = |channel: u8| -> u8 {
-                u8::try_from(u16::from(channel) * 3 / 5).unwrap_or(channel / 2)
+fn focused_settings_muted_color(theme: &Theme) -> ratatui::style::Color {
+    match (theme.muted, theme.text) {
+        (ratatui::style::Color::Rgb(r1, g1, b1), ratatui::style::Color::Rgb(r2, g2, b2)) => {
+            let mix = |c1: u8, c2: u8| -> u8 {
+                let num = u32::from(c1) * 3 + u32::from(c2);
+                u8::try_from(num / 4).unwrap_or(c2)
             };
-            ratatui::style::Color::Rgb(scale(r), scale(g), scale(b))
+            ratatui::style::Color::Rgb(mix(r1, r2), mix(g1, g2), mix(b1, b2))
         }
-        ratatui::style::Color::Reset => {
-            dim_settings_list_color(fallback, ratatui::style::Color::DarkGray)
-        }
-        other => other,
+        _ => theme.muted,
     }
 }
 
@@ -2229,7 +2216,11 @@ fn focused_block<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> 
 
 /// Use the same subdued/active treatment for every settings value.
 fn setting_value_style(focused: bool, theme: &Theme) -> Style {
-    Style::default().fg(if focused { theme.text } else { theme.muted })
+    if focused {
+        Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.muted)
+    }
 }
 
 fn validate_path(text: &str) -> Option<String> {

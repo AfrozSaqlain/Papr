@@ -42,20 +42,36 @@ fn is_transparent(theme: &Theme) -> bool {
     matches!(theme.background, ratatui::style::Color::Reset)
 }
 
-fn dim_list_color(
+fn blend_fg_color(
     color: ratatui::style::Color,
-    fallback: ratatui::style::Color,
+    target: ratatui::style::Color,
+    weight_num: u16,
+    weight_den: u16,
 ) -> ratatui::style::Color {
-    match color {
-        ratatui::style::Color::Rgb(r, g, b) => {
-            let scale = |channel: u8| -> u8 {
-                u8::try_from(u16::from(channel) * 3 / 5).unwrap_or(channel / 2)
+    match (color, target) {
+        (ratatui::style::Color::Rgb(r1, g1, b1), ratatui::style::Color::Rgb(r2, g2, b2)) => {
+            let mix = |c1: u8, c2: u8| -> u8 {
+                let num = u32::from(c1) * u32::from(weight_den.saturating_sub(weight_num))
+                    + u32::from(c2) * u32::from(weight_num);
+                u8::try_from(num / u32::from(weight_den.max(1))).unwrap_or(c2)
             };
-            ratatui::style::Color::Rgb(scale(r), scale(g), scale(b))
+            ratatui::style::Color::Rgb(mix(r1, r2), mix(g1, g2), mix(b1, b2))
         }
-        ratatui::style::Color::Reset => dim_list_color(fallback, ratatui::style::Color::DarkGray),
-        other => other,
+        _ => color,
     }
+}
+
+/// Secondary/muted foreground color inside a focused panel so metadata and
+/// descriptions remain clearly legible against both opaque and translucent backgrounds.
+fn focused_muted_color(theme: &Theme) -> ratatui::style::Color {
+    blend_fg_color(theme.muted, theme.text, 1, 4)
+}
+
+/// Secondary text color (abstract preview, description, extended metadata) for the
+/// currently selected item: high contrast near `theme.text` while preserving visual
+/// hierarchy below the bold `theme.accent` title and `theme.text` author/date line.
+fn selected_secondary_text_color(theme: &Theme) -> ratatui::style::Color {
+    blend_fg_color(theme.muted, theme.text, 9, 11)
 }
 
 fn style_list_item_lines<'a>(
@@ -64,12 +80,13 @@ fn style_list_item_lines<'a>(
     selected: Option<usize>,
     theme: &Theme,
 ) -> Vec<Line<'a>> {
-    if !is_transparent(theme) {
-        return lines;
-    }
     let Some(sel) = selected else {
         return lines;
     };
+    let transparent = is_transparent(theme);
+    let focused_muted = focused_muted_color(theme);
+    let selected_secondary = selected_secondary_text_color(theme);
+
     if index == sel {
         for (line_idx, line) in lines.iter_mut().enumerate() {
             let orig_line_fg = line.style.fg;
@@ -80,7 +97,9 @@ fn style_list_item_lines<'a>(
                     .add_modifier(Modifier::BOLD);
                 for span in &mut line.spans {
                     let fg = span.style.fg.or(orig_line_fg);
-                    span.style.bg = Some(ratatui::style::Color::Reset);
+                    if transparent {
+                        span.style.bg = Some(ratatui::style::Color::Reset);
+                    }
                     span.style = span
                         .style
                         .add_modifier(orig_line_mods)
@@ -97,14 +116,21 @@ fn style_list_item_lines<'a>(
                     }
                 }
             } else {
+                let target_fg = if line_idx == 1 {
+                    theme.text
+                } else {
+                    selected_secondary
+                };
                 line.style = Style::default()
-                    .fg(theme.text)
+                    .fg(target_fg)
                     .remove_modifier(Modifier::BOLD);
                 for span in &mut line.spans {
                     let fg = span.style.fg.or(orig_line_fg);
                     let keep_bold = orig_line_mods.contains(Modifier::BOLD)
                         || span.style.add_modifier.contains(Modifier::BOLD);
-                    span.style.bg = Some(ratatui::style::Color::Reset);
+                    if transparent {
+                        span.style.bg = Some(ratatui::style::Color::Reset);
+                    }
                     span.style = span
                         .style
                         .add_modifier(orig_line_mods)
@@ -112,10 +138,14 @@ fn style_list_item_lines<'a>(
                     if !keep_bold {
                         span.style = span.style.remove_modifier(Modifier::BOLD);
                     }
-                    if fg.is_none() || fg == Some(theme.muted) {
-                        span.style.fg = Some(theme.text);
+                    if fg.is_none()
+                        || fg == Some(theme.muted)
+                        || fg == Some(theme.text)
+                        || (line_idx == 1 && fg == Some(theme.accent))
+                    {
+                        span.style.fg = Some(target_fg);
                     } else if fg == Some(theme.border) {
-                        span.style.fg = Some(theme.muted);
+                        span.style.fg = Some(focused_muted);
                     } else if let Some(color) = fg {
                         span.style.fg = Some(color);
                     }
@@ -125,19 +155,24 @@ fn style_list_item_lines<'a>(
     } else {
         for line in &mut lines {
             let orig_line_fg = line.style.fg;
-            line.style = Style::default()
-                .fg(dim_list_color(
-                    orig_line_fg.unwrap_or(theme.muted),
-                    theme.muted,
-                ))
-                .bg(ratatui::style::Color::Reset)
-                .add_modifier(Modifier::DIM);
+            line.style = line.style.remove_modifier(Modifier::DIM);
+            if transparent {
+                line.style.bg = Some(ratatui::style::Color::Reset);
+            }
+            if orig_line_fg == Some(theme.muted) {
+                line.style.fg = Some(focused_muted);
+            }
             for span in &mut line.spans {
-                let fg = span.style.fg.or(orig_line_fg).unwrap_or(theme.text);
-                span.style = Style::default()
-                    .fg(dim_list_color(fg, theme.muted))
-                    .bg(ratatui::style::Color::Reset)
-                    .add_modifier(Modifier::DIM);
+                let fg = span.style.fg.or(orig_line_fg);
+                span.style = span.style.remove_modifier(Modifier::DIM);
+                if transparent && span.style.bg.is_none() {
+                    span.style.bg = Some(ratatui::style::Color::Reset);
+                }
+                if fg == Some(theme.muted) {
+                    span.style.fg = Some(focused_muted);
+                } else if let Some(color) = fg {
+                    span.style.fg = Some(color);
+                }
             }
         }
     }
@@ -155,8 +190,7 @@ fn workspace_list_item(mut lines: Vec<Line<'_>>) -> ListItem<'_> {
     ListItem::new(lines)
 }
 
-/// Build a workspace list item styled for transparent spotlight selection when
-/// transparent background mode is active.
+/// Build a workspace list item styled for focus and selection hierarchy.
 fn workspace_list_item_for<'a>(
     lines: Vec<Line<'a>>,
     index: usize,
@@ -164,7 +198,7 @@ fn workspace_list_item_for<'a>(
     theme: &Theme,
 ) -> ListItem<'a> {
     let item = workspace_list_item(style_list_item_lines(lines, index, selected, theme));
-    if is_transparent(theme) && selected == Some(index) {
+    if selected == Some(index) {
         item.style(
             Style::default()
                 .fg(theme.accent)
@@ -182,7 +216,7 @@ fn single_line_list_item<'a>(
     theme: &Theme,
 ) -> ListItem<'a> {
     let item = ListItem::new(style_list_item_lines(vec![line], index, selected, theme));
-    if is_transparent(theme) && selected == Some(index) {
+    if selected == Some(index) {
         item.style(
             Style::default()
                 .fg(theme.accent)
@@ -195,14 +229,16 @@ fn single_line_list_item<'a>(
 
 fn list_highlight_style(
     theme: &Theme,
-    opaque_bg: ratatui::style::Color,
-    opaque_fg: Option<ratatui::style::Color>,
+    highlight_bg: ratatui::style::Color,
+    highlight_fg: Option<ratatui::style::Color>,
 ) -> Style {
     if is_transparent(theme) {
         Style::default().bg(ratatui::style::Color::Reset)
     } else {
-        let mut style = Style::default().bg(opaque_bg);
-        if let Some(fg) = opaque_fg {
+        let mut style = Style::default().bg(highlight_bg);
+        if highlight_bg == theme.accent
+            && let Some(fg) = highlight_fg
+        {
             style = style.fg(fg);
         }
         style
@@ -706,6 +742,7 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let focused_muted = focused_muted_color(theme);
     let items = Page::ALL.iter().enumerate().map(|(index, page)| {
         if is_transparent(theme) {
             let selected = index == app.sidebar_index;
@@ -718,9 +755,7 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
                     Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
                 }
             } else if focused {
-                Style::default()
-                    .fg(dim_list_color(theme.muted, theme.muted))
-                    .add_modifier(Modifier::DIM)
+                Style::default().fg(focused_muted)
             } else {
                 Style::default().fg(theme.muted)
             };
@@ -730,7 +765,7 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         }
     });
     let list = List::new(items)
-        .style(Style::default().fg(theme.muted))
+        .style(Style::default().fg(if focused { focused_muted } else { theme.muted }))
         .highlight_style(if is_transparent(theme) {
             Style::default().bg(ratatui::style::Color::Reset)
         } else if app.content_focused {
@@ -994,10 +1029,6 @@ fn render_project_editor(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
                 } else {
                     Style::default().bg(theme.surface).fg(theme.accent)
                 }
-            } else if visual_lines.is_some() && is_transparent(theme) {
-                Style::default()
-                    .fg(dim_list_color(theme.text, theme.muted))
-                    .add_modifier(Modifier::DIM)
             } else {
                 Style::default().fg(theme.text)
             };
@@ -1006,10 +1037,8 @@ fn render_project_editor(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
                     prefix.to_owned(),
                     if selected {
                         line_style
-                    } else if visual_lines.is_some() && is_transparent(theme) {
-                        Style::default()
-                            .fg(dim_list_color(theme.muted, theme.muted))
-                            .add_modifier(Modifier::DIM)
+                    } else if visual_lines.is_some() {
+                        Style::default().fg(focused_muted_color(theme))
                     } else {
                         Style::default().fg(theme.muted)
                     },
@@ -3186,10 +3215,6 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
                     Style::default()
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD)
-                } else if is_transparent(theme) {
-                    Style::default()
-                        .fg(dim_list_color(theme.text, theme.muted))
-                        .add_modifier(Modifier::DIM)
                 } else {
                     Style::default().fg(theme.text)
                 };
@@ -4176,10 +4201,6 @@ fn render_terminal_command(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
                         .bg(popup_bg(theme))
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD)
-                } else if app.terminal_completion_selected.is_some() && is_transparent(theme) {
-                    Style::default()
-                        .fg(dim_list_color(theme.text, theme.muted))
-                        .add_modifier(Modifier::DIM)
                 } else {
                     Style::default().fg(theme.text)
                 };
@@ -6297,23 +6318,120 @@ Image: ![plot](plot.png)[^1]
         }
         assert!(found_status_pill);
 
-        // Sidebar active row uses transparent background, '> ' marker, and bold theme.accent
+        // Sidebar active row uses transparent background, '> ' marker, and bold theme.accent,
+        // while unselected rows in the focused sidebar remain legible without Modifier::DIM.
         let mut found_sidebar_selected = false;
-        let mut found_sidebar_dimmed = false;
-        for y in 2..20 {
-            let cell = &buffer[(1, y)];
-            if cell.symbol() == ">" {
-                assert_eq!(cell.bg, ratatui::style::Color::Reset);
-                assert_eq!(cell.fg, theme.accent);
-                assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
+        let mut found_sidebar_unselected = false;
+        for y in 4..14 {
+            let marker_cell = &buffer[(1, y)];
+            let label_cell = &buffer[(4, y)];
+            if marker_cell.symbol() == ">" {
+                assert_eq!(marker_cell.bg, ratatui::style::Color::Reset);
+                assert_eq!(marker_cell.fg, theme.accent);
+                assert!(
+                    marker_cell
+                        .modifier
+                        .contains(ratatui::style::Modifier::BOLD)
+                );
                 found_sidebar_selected = true;
-            } else if cell.modifier.contains(ratatui::style::Modifier::DIM) {
-                assert_eq!(cell.bg, ratatui::style::Color::Reset);
-                found_sidebar_dimmed = true;
+            } else if label_cell.symbol() != " " {
+                assert_eq!(label_cell.bg, ratatui::style::Color::Reset);
+                assert_eq!(label_cell.fg, super::focused_muted_color(&theme));
+                assert!(!label_cell.modifier.contains(ratatui::style::Modifier::DIM));
+                found_sidebar_unselected = true;
             }
         }
         assert!(found_sidebar_selected);
-        assert!(found_sidebar_dimmed);
+        assert!(found_sidebar_unselected);
+        Ok(())
+    }
+
+    #[test]
+    fn focused_dashboard_selected_paper_retains_legible_hierarchy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut paper_two = sample_paper()?;
+        paper_two.id = "https://arxiv.org/abs/2601.00002".into();
+        paper_two.title = "Second Research Paper".into();
+        paper_two.authors = vec!["Grace Hopper".into()];
+        paper_two.abstract_text = "Second abstract preview text.".into();
+
+        let mut app = App {
+            page: Page::Dashboard,
+            content_focused: true,
+            today_papers: vec![sample_paper()?, paper_two],
+            today_selected: 0,
+            ..App::default()
+        };
+
+        for theme_name in ["nord", "parchment", "tokyo-night"] {
+            let theme = Theme::load_with_transparency(theme_name, true)?;
+            let backend = TestBackend::new(110, 30);
+            let mut terminal = Terminal::new(backend)?;
+
+            terminal.draw(|frame| render(frame, &mut app, &theme))?;
+            let buffer = terminal.backend().buffer();
+
+            let mut marker_pos = None;
+            for y in 0..30 {
+                for x in 20..110 {
+                    if buffer[(x, y)].symbol() == ">" && buffer[(x, y)].fg == theme.accent {
+                        marker_pos = Some((x, y));
+                        break;
+                    }
+                }
+                if marker_pos.is_some() {
+                    break;
+                }
+            }
+            let (mx, my) = marker_pos.ok_or("selected paper marker not found on Dashboard")?;
+            let text_x = mx + 2;
+
+            // Selected paper line 0 (title): bold theme.accent
+            let title_cell = &buffer[(text_x, my)];
+            assert_eq!(title_cell.fg, theme.accent);
+            assert!(title_cell.modifier.contains(ratatui::style::Modifier::BOLD));
+            assert!(!title_cell.modifier.contains(ratatui::style::Modifier::DIM));
+
+            // Selected paper line 1 (author + publication date): promoted to bright theme.text
+            let meta_cell = &buffer[(text_x, my + 1)];
+            assert_eq!(meta_cell.fg, theme.text);
+            assert!(!meta_cell.modifier.contains(ratatui::style::Modifier::DIM));
+
+            // Selected paper line 2 (abstract preview): bright secondary foreground
+            let abstract_cell = &buffer[(text_x, my + 2)];
+            assert_eq!(
+                abstract_cell.fg,
+                super::selected_secondary_text_color(&theme)
+            );
+            assert!(
+                !abstract_cell
+                    .modifier
+                    .contains(ratatui::style::Modifier::DIM)
+            );
+
+            // Second (unselected) paper in the focused panel: remains legible without Modifier::DIM
+            let second_title_y = my + 4;
+            let second_title_cell = &buffer[(text_x, second_title_y)];
+            assert_eq!(second_title_cell.fg, theme.text);
+            assert!(
+                second_title_cell
+                    .modifier
+                    .contains(ratatui::style::Modifier::BOLD)
+            );
+            assert!(
+                !second_title_cell
+                    .modifier
+                    .contains(ratatui::style::Modifier::DIM)
+            );
+
+            let second_abstract_cell = &buffer[(text_x, second_title_y + 2)];
+            assert_eq!(second_abstract_cell.fg, super::focused_muted_color(&theme));
+            assert!(
+                !second_abstract_cell
+                    .modifier
+                    .contains(ratatui::style::Modifier::DIM)
+            );
+        }
         Ok(())
     }
 

@@ -131,14 +131,80 @@ impl Theme {
     }
 
     /// Return a copy of this theme with `background` set to [`Color::Reset`] when
-    /// `transparent` is `true`.
+    /// `transparent` is `true`, adapting foreground contrast so all text elements
+    /// remain legible against a translucent terminal background.
     #[must_use]
     pub const fn with_transparent_background(mut self, transparent: bool) -> Self {
         if transparent {
+            if is_light_palette(self.background, self.text) {
+                let paper_light = self.background;
+                let dark_ink = self.text;
+                self.inverted_fg = dark_ink;
+                self.text = paper_light;
+                self.muted = blend_color(self.muted, paper_light, 45, 100);
+                self.accent = ensure_min_luminance(self.accent, paper_light, 175);
+                self.secondary = ensure_min_luminance(self.secondary, paper_light, 170);
+                self.success = ensure_min_luminance(self.success, paper_light, 165);
+                self.warning = ensure_min_luminance(self.warning, paper_light, 175);
+                self.error = ensure_min_luminance(self.error, paper_light, 165);
+                self.border = blend_color(dark_ink, self.muted, 55, 100);
+                self.surface = blend_color(dark_ink, self.muted, 30, 100);
+            } else {
+                self.muted = ensure_min_luminance(self.muted, self.text, 130);
+            }
             self.background = Color::Reset;
         }
         self
     }
+}
+
+const fn color_luminance(color: Color) -> u32 {
+    match color {
+        Color::Rgb(r, g, b) => (2126 * (r as u32) + 7152 * (g as u32) + 722 * (b as u32)) / 10_000,
+        _ => 128,
+    }
+}
+
+const fn is_light_palette(background: Color, text: Color) -> bool {
+    matches!(background, Color::Rgb(_, _, _))
+        && matches!(text, Color::Rgb(_, _, _))
+        && color_luminance(background) > color_luminance(text)
+}
+
+#[allow(clippy::cast_possible_truncation)]
+const fn mix_channel(a: u8, b: u8, inv: u16, w: u16, scale: u16) -> u8 {
+    (((a as u32) * (inv as u32) + (b as u32) * (w as u32)) / (scale as u32)) as u8
+}
+
+const fn blend_color(from: Color, toward: Color, weight: u16, scale: u16) -> Color {
+    match (from, toward) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) if scale > 0 => {
+            let w = if weight > scale { scale } else { weight };
+            let inv = scale - w;
+            Color::Rgb(
+                mix_channel(r1, r2, inv, w, scale),
+                mix_channel(g1, g2, inv, w, scale),
+                mix_channel(b1, b2, inv, w, scale),
+            )
+        }
+        _ => from,
+    }
+}
+
+#[allow(clippy::cast_possible_truncation)]
+const fn ensure_min_luminance(color: Color, target_light: Color, min_lum: u32) -> Color {
+    let lum = color_luminance(color);
+    if lum >= min_lum {
+        return color;
+    }
+    let target_lum = color_luminance(target_light);
+    if target_lum <= lum {
+        return color;
+    }
+    let span = target_lum - lum;
+    let needed = ((min_lum - lum) * 100 + span - 1) / span + 1;
+    let weight = if needed > 75 { 75 } else { needed as u16 };
+    blend_color(color, target_light, weight, 100)
 }
 
 impl TryFrom<ThemeSpec> for Theme {
@@ -343,6 +409,31 @@ mod tests {
     fn parses_transparent_color_keywords() -> Result<(), Box<dyn std::error::Error>> {
         for keyword in ["transparent", "TRANSPARENT", "reset", "default", "none"] {
             assert_eq!(super::parse_color(keyword)?, Color::Reset);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn transparent_themes_adapt_foreground_contrast_for_readability()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for name in Theme::BUILTIN_THEMES {
+            let theme = Theme::load_with_transparency(name, true)?;
+            assert_eq!(theme.background, Color::Reset);
+            assert!(
+                super::color_luminance(theme.text) >= 175,
+                "theme {name} primary text has low luminance in transparent mode: {:?}",
+                theme.text
+            );
+            assert!(
+                super::color_luminance(theme.muted) >= 130,
+                "theme {name} muted text has low luminance in transparent mode: {:?}",
+                theme.muted
+            );
+            assert!(
+                super::color_luminance(theme.accent) >= 140,
+                "theme {name} accent has low luminance in transparent mode: {:?}",
+                theme.accent
+            );
         }
         Ok(())
     }
