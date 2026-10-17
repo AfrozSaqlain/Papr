@@ -38,6 +38,112 @@ fn saturating_u16(value: usize) -> u16 {
     u16::try_from(value).unwrap_or(u16::MAX)
 }
 
+fn is_transparent(theme: &Theme) -> bool {
+    matches!(theme.background, ratatui::style::Color::Reset)
+}
+
+fn dim_list_color(
+    color: ratatui::style::Color,
+    fallback: ratatui::style::Color,
+) -> ratatui::style::Color {
+    match color {
+        ratatui::style::Color::Rgb(r, g, b) => {
+            let scale = |channel: u8| -> u8 {
+                u8::try_from(u16::from(channel) * 3 / 5).unwrap_or(channel / 2)
+            };
+            ratatui::style::Color::Rgb(scale(r), scale(g), scale(b))
+        }
+        ratatui::style::Color::Reset => dim_list_color(fallback, ratatui::style::Color::DarkGray),
+        other => other,
+    }
+}
+
+fn style_list_item_lines<'a>(
+    mut lines: Vec<Line<'a>>,
+    index: usize,
+    selected: Option<usize>,
+    theme: &Theme,
+) -> Vec<Line<'a>> {
+    if !is_transparent(theme) {
+        return lines;
+    }
+    let Some(sel) = selected else {
+        return lines;
+    };
+    if index == sel {
+        for (line_idx, line) in lines.iter_mut().enumerate() {
+            let orig_line_fg = line.style.fg;
+            let orig_line_mods = line.style.add_modifier;
+            if line_idx == 0 {
+                line.style = Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD);
+                for span in &mut line.spans {
+                    let fg = span.style.fg.or(orig_line_fg);
+                    span.style.bg = Some(ratatui::style::Color::Reset);
+                    span.style = span
+                        .style
+                        .add_modifier(orig_line_mods)
+                        .remove_modifier(Modifier::DIM)
+                        .add_modifier(Modifier::BOLD);
+                    if fg.is_none()
+                        || fg == Some(theme.text)
+                        || fg == Some(theme.muted)
+                        || fg == Some(theme.accent)
+                    {
+                        span.style.fg = Some(theme.accent);
+                    } else if let Some(color) = fg {
+                        span.style.fg = Some(color);
+                    }
+                }
+            } else {
+                line.style = Style::default()
+                    .fg(theme.text)
+                    .remove_modifier(Modifier::BOLD);
+                for span in &mut line.spans {
+                    let fg = span.style.fg.or(orig_line_fg);
+                    let keep_bold = orig_line_mods.contains(Modifier::BOLD)
+                        || span.style.add_modifier.contains(Modifier::BOLD);
+                    span.style.bg = Some(ratatui::style::Color::Reset);
+                    span.style = span
+                        .style
+                        .add_modifier(orig_line_mods)
+                        .remove_modifier(Modifier::DIM);
+                    if !keep_bold {
+                        span.style = span.style.remove_modifier(Modifier::BOLD);
+                    }
+                    if fg.is_none() || fg == Some(theme.muted) {
+                        span.style.fg = Some(theme.text);
+                    } else if fg == Some(theme.border) {
+                        span.style.fg = Some(theme.muted);
+                    } else if let Some(color) = fg {
+                        span.style.fg = Some(color);
+                    }
+                }
+            }
+        }
+    } else {
+        for line in &mut lines {
+            let orig_line_fg = line.style.fg;
+            line.style = Style::default()
+                .fg(dim_list_color(
+                    orig_line_fg.unwrap_or(theme.muted),
+                    theme.muted,
+                ))
+                .bg(ratatui::style::Color::Reset)
+                .add_modifier(Modifier::DIM);
+            for span in &mut line.spans {
+                let fg = span.style.fg.or(orig_line_fg).unwrap_or(theme.text);
+                span.style = Style::default()
+                    .fg(dim_list_color(fg, theme.muted))
+                    .bg(ratatui::style::Color::Reset)
+                    .add_modifier(Modifier::DIM);
+            }
+        }
+    }
+    lines
+}
+
 /// Build a workspace list item with the standard vertical separation.
 ///
 /// Keeping the gap here means item renderers only describe their content.
@@ -47,6 +153,60 @@ fn workspace_list_item(mut lines: Vec<Line<'_>>) -> ListItem<'_> {
         WORKSPACE_LIST_ITEM_GAP_ROWS,
     ));
     ListItem::new(lines)
+}
+
+/// Build a workspace list item styled for transparent spotlight selection when
+/// transparent background mode is active.
+fn workspace_list_item_for<'a>(
+    lines: Vec<Line<'a>>,
+    index: usize,
+    selected: Option<usize>,
+    theme: &Theme,
+) -> ListItem<'a> {
+    let item = workspace_list_item(style_list_item_lines(lines, index, selected, theme));
+    if is_transparent(theme) && selected == Some(index) {
+        item.style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        item
+    }
+}
+
+fn single_line_list_item<'a>(
+    line: Line<'a>,
+    index: usize,
+    selected: Option<usize>,
+    theme: &Theme,
+) -> ListItem<'a> {
+    let item = ListItem::new(style_list_item_lines(vec![line], index, selected, theme));
+    if is_transparent(theme) && selected == Some(index) {
+        item.style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        item
+    }
+}
+
+fn list_highlight_style(
+    theme: &Theme,
+    opaque_bg: ratatui::style::Color,
+    opaque_fg: Option<ratatui::style::Color>,
+) -> Style {
+    if is_transparent(theme) {
+        Style::default().bg(ratatui::style::Color::Reset)
+    } else {
+        let mut style = Style::default().bg(opaque_bg);
+        if let Some(fg) = opaque_fg {
+            style = style.fg(fg);
+        }
+        style
+    }
 }
 
 fn markdown_syntax_assets() -> &'static (SyntaxSet, ThemeSet) {
@@ -73,7 +233,7 @@ fn focus_block<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> {
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme.muted)
+        Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
     };
 
     let mut block = Block::default()
@@ -90,6 +250,18 @@ fn focus_block<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> {
     block
 }
 
+/// A workspace section block whose border stays `theme.border` while its title
+/// on the border is rendered brightly in bold `theme.text`.
+fn titled_block<'a>(title: impl Into<String>, borders: Borders, theme: &Theme) -> Block<'a> {
+    Block::default()
+        .title(Line::styled(
+            title.into(),
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        ))
+        .borders(borders)
+        .border_style(Style::default().fg(theme.border))
+}
+
 /// A pane header with independent left and right titles, avoiding text overlap.
 fn focus_block_with_right_title<'a>(
     left_title: &'a str,
@@ -102,7 +274,7 @@ fn focus_block_with_right_title<'a>(
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme.muted)
+        Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
     };
     focus_block(left_title, focused, theme)
         .title_top(Line::styled(right_title, right_style).alignment(Alignment::Right))
@@ -381,6 +553,54 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let _ = crossterm::execute!(std::io::stdout(), cursor_style);
 }
 
+fn popup_bg(theme: &Theme) -> ratatui::style::Color {
+    if matches!(theme.background, ratatui::style::Color::Reset) {
+        ratatui::style::Color::Reset
+    } else {
+        theme.surface
+    }
+}
+
+fn dim_color(
+    color: ratatui::style::Color,
+    fallback: ratatui::style::Color,
+) -> ratatui::style::Color {
+    match color {
+        ratatui::style::Color::Rgb(r, g, b) => ratatui::style::Color::Rgb(r / 2, g / 2, b / 2),
+        ratatui::style::Color::Reset => dim_color(fallback, ratatui::style::Color::DarkGray),
+        other => other,
+    }
+}
+
+/// Prepare a floating popup region.
+///
+/// When transparent background mode is active, dims the surrounding workspace
+/// buffer ("spotlight" effect) and keeps the popup interior transparent.
+fn prepare_popup_surface(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    if matches!(theme.background, ratatui::style::Color::Reset) {
+        let full = frame.area();
+        let buffer = frame.buffer_mut();
+        for y in full.top()..full.bottom() {
+            for x in full.left()..full.right() {
+                let cell = &mut buffer[(x, y)];
+                if cell.skip || cell.symbol().contains('\u{10EEEE}') {
+                    continue;
+                }
+                let dimmed_fg = dim_color(cell.fg, theme.muted);
+                cell.set_fg(dimmed_fg);
+                cell.set_bg(ratatui::style::Color::Reset);
+                cell.modifier.remove(Modifier::BOLD | Modifier::REVERSED);
+                cell.modifier.insert(Modifier::DIM);
+            }
+        }
+    }
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(popup_bg(theme))),
+        area,
+    );
+}
+
 fn render_project_name_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let is_create = app.mode == AppMode::ProjectCreate;
     let height = if is_create { 8 } else { 4 };
@@ -400,11 +620,7 @@ fn render_project_name_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         AppMode::ProjectRename => " RENAME PROJECT — ENTER SAVE  ESC CANCEL ",
         _ => unreachable!("project prompt rendered outside a project prompt mode"),
     };
-    frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme.surface)),
-        popup,
-    );
+    prepare_popup_surface(frame, popup, theme);
 
     if is_create {
         let chunks = Layout::vertical([Constraint::Length(3), Constraint::Length(3)])
@@ -413,6 +629,7 @@ fn render_project_name_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
 
         frame.render_widget(
             Paragraph::new(app.project_rename_input.as_str())
+                .style(Style::default().fg(theme.text).bg(popup_bg(theme)))
                 .block(focus_block(title, true, theme)),
             chunks[0],
         );
@@ -424,6 +641,7 @@ fn render_project_name_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         let compiler_text = format!(" ◄  {compiler_label}  ► ");
         frame.render_widget(
             Paragraph::new(Line::styled(compiler_text, Style::default().fg(theme.text)))
+                .style(Style::default().bg(popup_bg(theme)))
                 .block(focus_block(" Compiler (Tab to cycle) ", false, theme)),
             chunks[1],
         );
@@ -441,7 +659,7 @@ fn render_project_name_prompt(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     } else {
         frame.render_widget(
             Paragraph::new(app.project_rename_input.as_str())
-                .style(Style::default().bg(theme.surface))
+                .style(Style::default().fg(theme.text).bg(popup_bg(theme)))
                 .block(focus_block(title, true, theme)),
             popup,
         );
@@ -488,12 +706,34 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let items = Page::ALL
-        .iter()
-        .map(|page| ListItem::new(format!("  {}", page.title())));
+    let items = Page::ALL.iter().enumerate().map(|(index, page)| {
+        if is_transparent(theme) {
+            let selected = index == app.sidebar_index;
+            let style = if selected {
+                if focused {
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
+                }
+            } else if focused {
+                Style::default()
+                    .fg(dim_list_color(theme.muted, theme.muted))
+                    .add_modifier(Modifier::DIM)
+            } else {
+                Style::default().fg(theme.muted)
+            };
+            ListItem::new(Line::styled(format!(" {}", page.title()), style)).style(style)
+        } else {
+            ListItem::new(format!("  {}", page.title()))
+        }
+    });
     let list = List::new(items)
         .style(Style::default().fg(theme.muted))
-        .highlight_style(if app.content_focused {
+        .highlight_style(if is_transparent(theme) {
+            Style::default().bg(ratatui::style::Color::Reset)
+        } else if app.content_focused {
             Style::default().fg(theme.text).bg(theme.surface)
         } else {
             Style::default()
@@ -501,7 +741,7 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
                 .bg(theme.accent)
                 .add_modifier(Modifier::BOLD)
         })
-        .highlight_symbol("›");
+        .highlight_symbol(if is_transparent(theme) { "> " } else { "›" });
     let mut state = ListState::default()
         .with_selected(Some(app.sidebar_index))
         .with_offset(app.sidebar_scroll);
@@ -594,17 +834,23 @@ fn render_projects(
 }
 
 fn render_project_list(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    let items = app.projects.iter().map(|project| {
-        workspace_list_item(vec![
-            Line::styled(
-                &project.name,
-                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-            ),
-            Line::styled(
-                project.path.display().to_string(),
-                Style::default().fg(theme.muted),
-            ),
-        ])
+    let selected = workspace_highlight_selection(app, app.projects_selected);
+    let items = app.projects.iter().enumerate().map(|(index, project)| {
+        workspace_list_item_for(
+            vec![
+                Line::styled(
+                    &project.name,
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                ),
+                Line::styled(
+                    project.path.display().to_string(),
+                    Style::default().fg(theme.muted),
+                ),
+            ],
+            index,
+            selected,
+            theme,
+        )
     });
     let list = List::new(items)
         .block(focus_block(
@@ -612,10 +858,13 @@ fn render_project_list(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &The
             app.content_focused,
             theme,
         ))
-        .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
+        .highlight_style(list_highlight_style(
+            theme,
+            theme.surface,
+            Some(theme.accent),
+        ))
         .highlight_symbol("> ");
-    let mut state = ListState::default()
-        .with_selected(workspace_highlight_selection(app, app.projects_selected));
+    let mut state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(list, area, &mut state);
     if app.projects.is_empty() {
         frame.render_widget(
@@ -649,7 +898,9 @@ fn render_project_file_tree(
     theme: &Theme,
     project_path: &std::path::Path,
 ) {
-    let files = app.project_files.iter().map(|path| {
+    let file_tree_focused = app.content_focused && app.project_pane == ProjectPane::FileTree;
+    let selected = Some(app.project_file_selected);
+    let files = app.project_files.iter().enumerate().map(|(index, path)| {
         let mut label = path
             .strip_prefix(project_path)
             .unwrap_or(path)
@@ -658,9 +909,13 @@ fn render_project_file_tree(
         if path.is_dir() {
             label.push('/');
         }
-        ListItem::new(label)
+        single_line_list_item(
+            Line::styled(label, Style::default().fg(theme.text)),
+            index,
+            selected,
+            theme,
+        )
     });
-    let file_tree_focused = app.content_focused && app.project_pane == ProjectPane::FileTree;
     let tree_block = focus_block(" FILE TREE [ALT+1] ", file_tree_focused, theme).title_bottom(
         Line::styled(
             " n new · ↵/→ open ",
@@ -669,16 +924,20 @@ fn render_project_file_tree(
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme.muted)
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
             },
         )
         .alignment(Alignment::Center),
     );
     let tree = List::new(files)
         .block(tree_block)
-        .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
-        .highlight_symbol("› ");
-    let mut state = ListState::default().with_selected(Some(app.project_file_selected));
+        .highlight_style(list_highlight_style(
+            theme,
+            theme.surface,
+            Some(theme.accent),
+        ))
+        .highlight_symbol("> ");
+    let mut state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(tree, area, &mut state);
 }
 
@@ -727,7 +986,18 @@ fn render_project_editor(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
             let selected = visual_lines
                 .is_some_and(|(first, last)| (first..=last).contains(&rendered_source_line));
             let line_style = if selected {
-                Style::default().bg(theme.surface).fg(theme.accent)
+                if is_transparent(theme) {
+                    Style::default()
+                        .bg(ratatui::style::Color::Reset)
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().bg(theme.surface).fg(theme.accent)
+                }
+            } else if visual_lines.is_some() && is_transparent(theme) {
+                Style::default()
+                    .fg(dim_list_color(theme.text, theme.muted))
+                    .add_modifier(Modifier::DIM)
             } else {
                 Style::default().fg(theme.text)
             };
@@ -736,6 +1006,10 @@ fn render_project_editor(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
                     prefix.to_owned(),
                     if selected {
                         line_style
+                    } else if visual_lines.is_some() && is_transparent(theme) {
+                        Style::default()
+                            .fg(dim_list_color(theme.muted, theme.muted))
+                            .add_modifier(Modifier::DIM)
                     } else {
                         Style::default().fg(theme.muted)
                     },
@@ -809,21 +1083,36 @@ fn render_project_completions(
         width,
         height,
     );
-    let items = app.project_completions.iter().map(|item| {
-        ListItem::new(Line::from(vec![
-            Span::styled(
-                format!("{}  ", item.label),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(&item.detail, Style::default().fg(theme.text)),
-        ]))
-    });
+    let selected = Some(app.project_completion_selected);
+    let items = app
+        .project_completions
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            single_line_list_item(
+                Line::from(vec![
+                    Span::styled(
+                        format!("{}  ", item.label),
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(&item.detail, Style::default().fg(theme.text)),
+                ]),
+                index,
+                selected,
+                theme,
+            )
+        });
     let list = List::new(items)
         .block(focus_block(" CITATIONS — ENTER/TAB INSERT ", true, theme))
-        .highlight_style(Style::default().bg(theme.surface).fg(theme.accent));
-    let mut state = ListState::default().with_selected(Some(app.project_completion_selected));
+        .highlight_style(list_highlight_style(
+            theme,
+            theme.surface,
+            Some(theme.accent),
+        ))
+        .highlight_symbol("> ");
+    let mut state = ListState::default().with_selected(selected);
     frame.render_widget(Clear, popup);
     frame.render_stateful_widget(list, popup, &mut state);
 }
@@ -904,14 +1193,23 @@ fn render_project_build(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
         );
         return;
     }
+    let selected = Some(app.project_build_selected);
     let items = app
         .project_build_diagnostics
         .iter()
-        .map(|diagnostic| project_diagnostic_item(diagnostic, area.width as usize, theme));
+        .enumerate()
+        .map(|(index, diagnostic)| {
+            project_diagnostic_item(diagnostic, area.width as usize, index, selected, theme)
+        });
     let list = List::new(items)
         .block(project_build_block(app, theme))
-        .highlight_style(Style::default().bg(theme.surface).fg(theme.accent));
-    let mut state = ListState::default().with_selected(Some(app.project_build_selected));
+        .highlight_style(list_highlight_style(
+            theme,
+            theme.surface,
+            Some(theme.accent),
+        ))
+        .highlight_symbol("> ");
+    let mut state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -927,6 +1225,8 @@ fn project_build_block<'a>(app: &App, theme: &Theme) -> Block<'a> {
 fn project_diagnostic_item<'a>(
     diagnostic: &'a papr_core::ProjectBuildDiagnostic,
     width: usize,
+    index: usize,
+    selected: Option<usize>,
     theme: &Theme,
 ) -> ListItem<'a> {
     let (symbol, label, color) = match diagnostic.severity {
@@ -977,13 +1277,23 @@ fn project_diagnostic_item<'a>(
             ));
         }
     }
-    lines.push(Line::raw(""));
-    ListItem::new(lines)
+    let mut styled = style_list_item_lines(lines, index, selected, theme);
+    styled.push(Line::raw(""));
+    let item = ListItem::new(styled);
+    if is_transparent(theme) && selected == Some(index) {
+        item.style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        item
+    }
 }
 
 fn render_workspace_search_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     let style = if app.mode == AppMode::WorkspaceSearch {
-        Style::default().fg(theme.text).bg(theme.surface)
+        Style::default().fg(theme.text).bg(popup_bg(theme))
     } else {
         Style::default().fg(theme.muted)
     };
@@ -992,11 +1302,21 @@ fn render_workspace_search_bar(frame: &mut Frame<'_>, area: Rect, app: &App, the
     } else {
         Style::default().fg(theme.border)
     };
+    let title_style = if app.mode == AppMode::WorkspaceSearch {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .title(" Local Search (Press: > to toggle) ");
+        .title(Line::styled(
+            " Local Search (Press: > to toggle) ",
+            title_style,
+        ));
 
     let mut text = app.workspace_query.clone();
     if text.is_empty() && app.mode != AppMode::WorkspaceSearch {
@@ -1034,10 +1354,11 @@ fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
         );
         return;
     }
-    let items = collections.iter().map(|item| {
+    let selected = workspace_highlight_selection(app, app.collection_selected);
+    let items = collections.iter().enumerate().map(|(index, item)| {
         use CollectionSearchItem;
-        match item {
-            CollectionSearchItem::Collection(collection) => workspace_list_item(vec![
+        let lines = match item {
+            CollectionSearchItem::Collection(collection) => vec![
                 Line::styled(
                     &collection.name,
                     Style::default()
@@ -1048,8 +1369,8 @@ fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
                     format!("{} papers", collection.paper_count),
                     Style::default().fg(theme.muted),
                 ),
-            ]),
-            CollectionSearchItem::Paper(paper, _) => workspace_list_item(vec![
+            ],
+            CollectionSearchItem::Paper(paper, _) => vec![
                 Line::styled(
                     format!("  {}", paper.display_name()),
                     Style::default().fg(theme.text),
@@ -1058,20 +1379,24 @@ fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
                     format!("    {}", paper.authors),
                     Style::default().fg(theme.muted),
                 ),
-            ]),
-        }
+            ],
+        };
+        workspace_list_item_for(lines, index, selected, theme)
     });
     let list = List::new(items)
-        .block(
-            Block::default()
-                .title(" GROUPS - ENTER VIEW  g NEW  R RENAME x Delete")
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(theme.border)),
-        )
-        .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
+        .block(titled_block(
+            " GROUPS - ENTER VIEW  g NEW  R RENAME x Delete",
+            Borders::TOP,
+            theme,
+        ))
+        .highlight_style(list_highlight_style(
+            theme,
+            theme.surface,
+            Some(theme.accent),
+        ))
         .highlight_symbol("> ");
     let mut state = ListState::default()
-        .with_selected(workspace_highlight_selection(app, app.collection_selected))
+        .with_selected(selected)
         .with_offset(app.collection_scroll);
     frame.render_stateful_widget(list, area, &mut state);
     app.collection_scroll = state.offset();
@@ -1109,7 +1434,8 @@ fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
         return;
     }
     let available_width = rows[1].width.saturating_sub(2) as usize;
-    let items = papers.iter().map(|paper| {
+    let selected = workspace_highlight_selection(app, app.collection_paper_selected);
+    let items = papers.iter().enumerate().map(|(index, paper)| {
         let availability = if paper.pdf_path.is_some() {
             "PDF available"
         } else {
@@ -1133,22 +1459,22 @@ fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
                 available_width,
             },
         );
-        workspace_list_item(lines)
+        workspace_list_item_for(lines, index, selected, theme)
     });
     let list = List::new(items)
-        .block(
-            Block::default()
-                .title(format!(" {} PAPERS ", papers.len()))
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(theme.border)),
-        )
-        .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
+        .block(titled_block(
+            format!(" {} PAPERS ", papers.len()),
+            Borders::TOP,
+            theme,
+        ))
+        .highlight_style(list_highlight_style(
+            theme,
+            theme.surface,
+            Some(theme.accent),
+        ))
         .highlight_symbol("> ");
     let mut state = ListState::default()
-        .with_selected(workspace_highlight_selection(
-            app,
-            app.collection_paper_selected,
-        ))
+        .with_selected(selected)
         .with_offset(app.collection_paper_scroll);
     frame.render_stateful_widget(list, rows[1], &mut state);
     app.collection_paper_scroll = state.offset();
@@ -1169,31 +1495,40 @@ fn render_authors(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         );
         return;
     }
-    let items = authors.iter().map(|author| {
-        workspace_list_item(vec![
-            Line::styled(
-                &author.name,
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Line::styled(
-                format!("{} papers", author.paper_count),
-                Style::default().fg(theme.muted),
-            ),
-        ])
+    let selected = workspace_highlight_selection(app, app.author_selected);
+    let items = authors.iter().enumerate().map(|(index, author)| {
+        workspace_list_item_for(
+            vec![
+                Line::styled(
+                    &author.name,
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Line::styled(
+                    format!("{} papers", author.paper_count),
+                    Style::default().fg(theme.muted),
+                ),
+            ],
+            index,
+            selected,
+            theme,
+        )
     });
     let list = List::new(items)
-        .block(
-            Block::default()
-                .title(format!(" {} AUTHORS - ENTER VIEW ", authors.len()))
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(theme.border)),
-        )
-        .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
+        .block(titled_block(
+            format!(" {} AUTHORS - ENTER VIEW ", authors.len()),
+            Borders::TOP,
+            theme,
+        ))
+        .highlight_style(list_highlight_style(
+            theme,
+            theme.surface,
+            Some(theme.accent),
+        ))
         .highlight_symbol("> ");
     let mut state = ListState::default()
-        .with_selected(workspace_highlight_selection(app, app.author_selected))
+        .with_selected(selected)
         .with_offset(app.author_scroll);
     frame.render_stateful_widget(list, area, &mut state);
     app.author_scroll = state.offset();
@@ -1231,7 +1566,8 @@ fn render_author_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
         return;
     }
     let available_width = rows[1].width.saturating_sub(2) as usize;
-    let items = papers.iter().map(|paper| {
+    let selected = workspace_highlight_selection(app, app.author_paper_selected);
+    let items = papers.iter().enumerate().map(|(index, paper)| {
         let availability = if paper.pdf_path.is_some() {
             "PDF available"
         } else {
@@ -1255,22 +1591,22 @@ fn render_author_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
                 available_width,
             },
         );
-        workspace_list_item(lines)
+        workspace_list_item_for(lines, index, selected, theme)
     });
     let list = List::new(items)
-        .block(
-            Block::default()
-                .title(format!(" {} PAPERS ", papers.len()))
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(theme.border)),
-        )
-        .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
+        .block(titled_block(
+            format!(" {} PAPERS ", papers.len()),
+            Borders::TOP,
+            theme,
+        ))
+        .highlight_style(list_highlight_style(
+            theme,
+            theme.surface,
+            Some(theme.accent),
+        ))
         .highlight_symbol("> ");
     let mut state = ListState::default()
-        .with_selected(workspace_highlight_selection(
-            app,
-            app.author_paper_selected,
-        ))
+        .with_selected(selected)
         .with_offset(app.author_paper_scroll);
     frame.render_stateful_widget(list, rows[1], &mut state);
     app.author_paper_scroll = state.offset();
@@ -1298,12 +1634,11 @@ fn render_history(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         ])
     });
     frame.render_widget(
-        List::new(items).block(
-            Block::default()
-                .title(" READING AND RESEARCH ACTIVITY ")
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(theme.border)),
-        ),
+        List::new(items).block(titled_block(
+            " READING AND RESEARCH ACTIVITY ",
+            Borders::TOP,
+            theme,
+        )),
         area,
     );
 }
@@ -1431,12 +1766,11 @@ fn render_statistics(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &T
                 Style::default().fg(theme.muted),
             ),
         ])
-        .block(
-            Block::default()
-                .title(" 12-WEEK READING ACTIVITY ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.border)),
-        ),
+        .block(titled_block(
+            " 12-WEEK READING ACTIVITY ",
+            Borders::ALL,
+            theme,
+        )),
         rows[2],
     );
 }
@@ -1490,11 +1824,26 @@ fn activity_kind(kind: &str) -> &str {
 
 fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let available_width = area.width.saturating_sub(2) as usize;
+    let (title, selected_idx, scroll_idx) = match app.page {
+        Page::Bookmarks => (
+            " BOOKMARKS - j/k SELECT  ENTER/p OPEN  B REMOVE ",
+            app.bookmark_selected,
+            app.bookmark_scroll,
+        ),
+        Page::Notes => (
+            " NOTES - j/k SELECT  ENTER/n EDIT  x DELETE ",
+            app.notes_selected,
+            app.notes_scroll,
+        ),
+        _ => ("", 0, 0),
+    };
+    let selected = workspace_highlight_selection(app, selected_idx);
     let items: Vec<ListItem<'_>> = match app.page {
         Page::Bookmarks => app
             .filtered_bookmarks()
             .iter()
-            .map(|item| {
+            .enumerate()
+            .map(|(index, item)| {
                 let lib_paper = app.library.papers.iter().find(|p| p.id == item.paper_id);
                 let reading_status = lib_paper.map_or("", |p| p.reading_status.as_str());
                 let file_size = lib_paper.and_then(|p| p.file_size);
@@ -1516,13 +1865,14 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
                         available_width,
                     },
                 );
-                workspace_list_item(lines)
+                workspace_list_item_for(lines, index, selected, theme)
             })
             .collect(),
         Page::Notes => app
             .filtered_notes_papers()
             .iter()
-            .map(|paper| {
+            .enumerate()
+            .map(|(index, paper)| {
                 let lines = build_paper_lines(
                     app,
                     theme,
@@ -1541,7 +1891,7 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
                         available_width,
                     },
                 );
-                workspace_list_item(lines)
+                workspace_list_item_for(lines, index, selected, theme)
             })
             .collect(),
         _ => Vec::new(),
@@ -1554,31 +1904,17 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
             area,
         );
     } else {
-        let (title, selected_idx, scroll_idx) = match app.page {
-            Page::Bookmarks => (
-                " BOOKMARKS - j/k SELECT  ENTER/p OPEN  B REMOVE ",
-                app.bookmark_selected,
-                app.bookmark_scroll,
-            ),
-            Page::Notes => (
-                " NOTES - j/k SELECT  ENTER/n EDIT  x DELETE ",
-                app.notes_selected,
-                app.notes_scroll,
-            ),
-            _ => ("", 0, 0),
-        };
         let list = List::new(items)
-            .block(
-                Block::default()
-                    .title(title)
-                    .borders(Borders::TOP)
-                    .border_style(Style::default().fg(theme.border)),
-            )
+            .block(titled_block(title, Borders::TOP, theme))
             .style(Style::default().fg(theme.text))
-            .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
+            .highlight_style(list_highlight_style(
+                theme,
+                theme.surface,
+                Some(theme.accent),
+            ))
             .highlight_symbol("> ");
         let mut state = ListState::default()
-            .with_selected(workspace_highlight_selection(app, selected_idx))
+            .with_selected(selected)
             .with_offset(scroll_idx);
         frame.render_stateful_widget(list, area, &mut state);
         match app.page {
@@ -1621,7 +1957,7 @@ fn render_note_editor(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
             app.note_scroll = cursor_row.saturating_sub(visible_rows.saturating_sub(1));
         }
     }
-    frame.render_widget(Clear, area);
+    prepare_popup_surface(frame, area, theme);
     let title = if app.overlay_flags.note_preview {
         " MARKDOWN PREVIEW - TAB TO EDIT - j/k SCROLL - CLICK LINKS "
     } else {
@@ -1629,7 +1965,7 @@ fn render_note_editor(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     };
     frame.render_widget(
         Paragraph::new(content)
-            .style(Style::default().fg(theme.text).bg(theme.surface))
+            .style(Style::default().fg(theme.text).bg(popup_bg(theme)))
             .wrap(Wrap { trim: false })
             .scroll((app.note_scroll, 0))
             .block(
@@ -2740,11 +3076,7 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let height = 12;
     let width = 64;
     let area = centered(width, height, frame.area());
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme.surface)),
-        area,
-    );
+    prepare_popup_surface(frame, area, theme);
 
     let lines = vec![
         Line::raw(""),
@@ -2772,11 +3104,11 @@ fn render_delete_confirmation(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.error))
-        .style(Style::default().bg(theme.surface));
+        .style(Style::default().bg(popup_bg(theme)));
 
     frame.render_widget(
         Paragraph::new(lines)
-            .style(Style::default().fg(theme.text).bg(theme.surface))
+            .style(Style::default().fg(theme.text).bg(popup_bg(theme)))
             .block(block)
             .wrap(Wrap { trim: true }),
         area,
@@ -2823,7 +3155,7 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     };
 
     let area = centered(64, height, frame.area());
-    frame.render_widget(Clear, area);
+    prepare_popup_surface(frame, area, theme);
 
     let mut lines = Vec::new();
     if let Some(current_collection) = prompt.current_collection.as_ref().filter(|_| has_current) {
@@ -2849,17 +3181,21 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         let start = prompt.selected.saturating_sub(5);
         lines.extend(app.collections.iter().enumerate().skip(start).take(6).map(
             |(index, collection)| {
+                let selected = index == prompt.selected;
+                let style = if selected {
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_transparent(theme) {
+                    Style::default()
+                        .fg(dim_list_color(theme.text, theme.muted))
+                        .add_modifier(Modifier::DIM)
+                } else {
+                    Style::default().fg(theme.text)
+                };
                 Line::styled(
-                    format!(
-                        "{} {}",
-                        if index == prompt.selected { ">" } else { " " },
-                        collection.name
-                    ),
-                    Style::default().fg(if index == prompt.selected {
-                        theme.accent
-                    } else {
-                        theme.text
-                    }),
+                    format!("{} {}", if selected { ">" } else { " " }, collection.name),
+                    style,
                 )
             },
         ));
@@ -2867,12 +3203,12 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
 
     frame.render_widget(
         Paragraph::new(lines)
-            .style(Style::default().fg(theme.text).bg(theme.surface))
+            .style(Style::default().fg(theme.text).bg(popup_bg(theme)))
             .block(
                 Block::default()
                     .title(title)
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.secondary)),
+                    .border_style(Style::default().fg(theme.accent)),
             ),
         area,
     );
@@ -2914,7 +3250,8 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         return;
     }
     let available_width = rows[1].width.saturating_sub(2) as usize;
-    let items = papers.iter().map(|paper| {
+    let selected = workspace_highlight_selection(app, app.library.selected);
+    let items = papers.iter().enumerate().map(|(index, paper)| {
         let lines = build_paper_lines(
             app,
             theme,
@@ -2933,19 +3270,22 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
                 available_width,
             },
         );
-        workspace_list_item(lines)
+        workspace_list_item_for(lines, index, selected, theme)
     });
     let list = List::new(items)
-        .block(
-            Block::default()
-                .title(format!(" {} PAPERS ", papers.len()))
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(theme.border)),
-        )
-        .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
+        .block(titled_block(
+            format!(" {} PAPERS ", papers.len()),
+            Borders::TOP,
+            theme,
+        ))
+        .highlight_style(list_highlight_style(
+            theme,
+            theme.surface,
+            Some(theme.accent),
+        ))
         .highlight_symbol("> ");
     let mut state = ListState::default()
-        .with_selected(workspace_highlight_selection(app, app.library.selected))
+        .with_selected(selected)
         .with_offset(app.library.scroll);
     frame.render_stateful_widget(list, rows[1], &mut state);
     app.library.scroll = state.offset();
@@ -2971,7 +3311,8 @@ fn render_reading_queue(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
         return;
     }
     let available_width = rows[1].width.saturating_sub(2) as usize;
-    let items = papers.iter().map(|paper| {
+    let selected = workspace_highlight_selection(app, app.reading_queue_selected);
+    let items = papers.iter().enumerate().map(|(index, paper)| {
         let lines = build_paper_lines(
             app,
             theme,
@@ -2990,22 +3331,22 @@ fn render_reading_queue(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
                 available_width,
             },
         );
-        workspace_list_item(lines)
+        workspace_list_item_for(lines, index, selected, theme)
     });
     let list = List::new(items)
-        .block(
-            Block::default()
-                .title(format!(" {} PAPERS ", papers.len()))
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(theme.border)),
-        )
-        .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
+        .block(titled_block(
+            format!(" {} PAPERS ", papers.len()),
+            Borders::TOP,
+            theme,
+        ))
+        .highlight_style(list_highlight_style(
+            theme,
+            theme.surface,
+            Some(theme.accent),
+        ))
         .highlight_symbol("> ");
     let mut state = ListState::default()
-        .with_selected(workspace_highlight_selection(
-            app,
-            app.reading_queue_selected,
-        ))
+        .with_selected(selected)
         .with_offset(app.reading_queue_scroll);
     frame.render_stateful_widget(list, rows[1], &mut state);
     app.reading_queue_scroll = state.offset();
@@ -3023,7 +3364,8 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
         return;
     }
     let available_width = area.width.saturating_sub(2) as usize;
-    let items = downloads.iter().map(|download| {
+    let selected = workspace_highlight_selection(app, app.download_selected);
+    let items = downloads.iter().enumerate().map(|(index, download)| {
         let (label, color) = download_status_label(download, theme);
 
         let paper = if let Some(paper_id) = download.paper_id {
@@ -3083,19 +3425,14 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
             pl
         };
 
-        workspace_list_item(lines)
+        workspace_list_item_for(lines, index, selected, theme)
     });
     let list = List::new(items)
-        .block(
-            Block::default()
-                .title(" DOWNLOAD MANAGER ")
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(theme.border)),
-        )
-        .highlight_style(Style::default().bg(theme.surface))
+        .block(titled_block(" DOWNLOAD MANAGER ", Borders::TOP, theme))
+        .highlight_style(list_highlight_style(theme, theme.surface, None))
         .highlight_symbol("> ");
     let mut state = ListState::default()
-        .with_selected(workspace_highlight_selection(app, app.download_selected))
+        .with_selected(selected)
         .with_offset(app.download_scroll);
     frame.render_stateful_widget(list, area, &mut state);
     app.download_scroll = state.offset();
@@ -3166,7 +3503,7 @@ fn render_discover_inputs(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
         &app.discovery.query
     };
     let search_style = if app.mode == AppMode::Search {
-        Style::default().fg(theme.text).bg(theme.surface)
+        Style::default().fg(theme.text).bg(popup_bg(theme))
     } else if app.discovery.query.is_empty() {
         Style::default().fg(theme.muted)
     } else {
@@ -3194,7 +3531,7 @@ fn render_discover_inputs(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
             &app.discovery.filter
         };
         let filter_style = if app.mode == AppMode::DiscoverFilter {
-            Style::default().fg(theme.text).bg(theme.surface)
+            Style::default().fg(theme.text).bg(popup_bg(theme))
         } else if app.discovery.filter.is_empty() {
             Style::default().fg(theme.muted)
         } else {
@@ -3318,70 +3655,83 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
     } else {
         format!("{progress}  ")
     };
-    let items = app.discovery.visible_page_results().map(|paper| {
-        let local_status = app
-            .downloaded_remote_paper(paper)
-            .map(|local| local.reading_status.as_str());
+    let selected = workspace_highlight_selection(app, app.discovery.selected);
+    let items = app
+        .discovery
+        .visible_page_results()
+        .enumerate()
+        .map(|(index, paper)| {
+            let local_status = app
+                .downloaded_remote_paper(paper)
+                .map(|local| local.reading_status.as_str());
 
-        let has_local = app.downloaded_remote_paper(paper).is_some();
+            let has_local = app.downloaded_remote_paper(paper).is_some();
 
-        let mut spans = vec![Span::styled(
-            format!(
-                "{}  |  {}  |  {}",
-                format_local_datetime(&paper.published, "%Y-%m-%d"),
-                compact_authors(paper),
-                paper
-                    .categories
-                    .first()
-                    .map_or("uncategorized", String::as_str)
-            ),
-            Style::default().fg(theme.muted),
-        )];
-
-        if let Some(status) = local_status {
-            spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
-            spans.push(Span::styled(
-                status.to_string(),
+            let mut spans = vec![Span::styled(
+                format!(
+                    "{}  |  {}  |  {}",
+                    format_local_datetime(&paper.published, "%Y-%m-%d"),
+                    compact_authors(paper),
+                    paper
+                        .categories
+                        .first()
+                        .map_or("uncategorized", String::as_str)
+                ),
                 Style::default().fg(theme.muted),
-            ));
-        }
+            )];
 
-        if has_local {
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(
-                " (Downloaded) ",
-                Style::default()
-                    .fg(theme.success)
-                    .bg(theme.surface)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
+            if let Some(status) = local_status {
+                spans.push(Span::styled("  |  ", Style::default().fg(theme.border)));
+                spans.push(Span::styled(
+                    status.to_string(),
+                    Style::default().fg(theme.muted),
+                ));
+            }
 
-        workspace_list_item(vec![
-            Line::styled(
-                display_paper_title(&paper.title),
-                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-            ),
-            Line::from(spans),
-        ])
-    });
+            if has_local {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(
+                    " (Downloaded) ",
+                    Style::default()
+                        .fg(theme.success)
+                        .bg(popup_bg(theme))
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+
+            workspace_list_item_for(
+                vec![
+                    Line::styled(
+                        display_paper_title(&paper.title),
+                        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                    ),
+                    Line::from(spans),
+                ],
+                index,
+                selected,
+                theme,
+            )
+        });
     let list = List::new(items)
-        .block(
-            Block::default()
-                .title(format!(
-                    " {}PAGE {} / {}  |  {} RESULTS  |  Ctrl+Left/Right: page ",
-                    progress_prefix,
-                    app.discovery.page + 1,
-                    app.discovery.page_count(),
-                    app.discovery.filtered_result_count(),
-                ))
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(theme.border)),
-        )
-        .highlight_style(Style::default().bg(theme.surface).fg(theme.accent))
+        .block(titled_block(
+            format!(
+                " {}PAGE {} / {}  |  {} RESULTS  |  Ctrl+Left/Right: page ",
+                progress_prefix,
+                app.discovery.page + 1,
+                app.discovery.page_count(),
+                app.discovery.filtered_result_count(),
+            ),
+            Borders::TOP,
+            theme,
+        ))
+        .highlight_style(list_highlight_style(
+            theme,
+            theme.surface,
+            Some(theme.accent),
+        ))
         .highlight_symbol("> ");
     let mut state = ListState::default()
-        .with_selected(workspace_highlight_selection(app, app.discovery.selected))
+        .with_selected(selected)
         .with_offset(app.discovery.scroll);
     frame.render_stateful_widget(list, area, &mut state);
     app.discovery.scroll = state.offset();
@@ -3483,7 +3833,7 @@ fn paper_detail_lines<'a>(
             " (Downloaded) ",
             Style::default()
                 .fg(theme.success)
-                .bg(theme.surface)
+                .bg(popup_bg(theme))
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -3597,6 +3947,8 @@ fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
 
 fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let preview_width = usize::from(area.width.saturating_sub(8)).max(24);
+    let selected =
+        (app.content_focused && !app.today_papers.is_empty()).then_some(app.today_selected);
     let today = match &app.today_status {
         DiscoveryStatus::Loading => vec![workspace_list_item(vec![Line::raw(
             "Loading dashboard papers...",
@@ -3611,7 +3963,8 @@ fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
             .today_papers
             .iter()
             .take(10)
-            .map(|paper| {
+            .enumerate()
+            .map(|(index, paper)| {
                 let abstract_preview = compact_text(&paper.abstract_text, preview_width);
                 let downloaded = app.downloaded_remote_paper(paper);
                 let local_status = downloaded.map(|local| local.reading_status.as_str());
@@ -3633,33 +3986,35 @@ fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
                         " (Downloaded) ",
                         Style::default()
                             .fg(theme.success)
-                            .bg(theme.surface)
+                            .bg(popup_bg(theme))
                             .add_modifier(Modifier::BOLD),
                     ));
                 }
 
-                workspace_list_item(vec![
-                    Line::styled(
-                        display_paper_title(&paper.title),
-                        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-                    ),
-                    Line::from(meta_spans),
-                    Line::styled(abstract_preview, Style::default().fg(theme.muted)),
-                ])
+                workspace_list_item_for(
+                    vec![
+                        Line::styled(
+                            display_paper_title(&paper.title),
+                            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                        ),
+                        Line::from(meta_spans),
+                        Line::styled(abstract_preview, Style::default().fg(theme.muted)),
+                    ],
+                    index,
+                    selected,
+                    theme,
+                )
             })
             .collect(),
     };
     let list = List::new(today)
-        .block(
-            Block::default()
-                .title(" DASHBOARD PAPERS - j/k SELECT  ENTER OPEN  o BROWSER ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.border)),
-        )
-        .highlight_style(Style::default().bg(theme.surface).fg(theme.text))
+        .block(titled_block(
+            " DASHBOARD PAPERS - j/k SELECT  ENTER OPEN  o BROWSER ",
+            Borders::ALL,
+            theme,
+        ))
+        .highlight_style(list_highlight_style(theme, theme.surface, Some(theme.text)))
         .highlight_symbol("> ");
-    let selected =
-        (app.content_focused && !app.today_papers.is_empty()).then_some(app.today_selected);
     let mut state = ListState::default()
         .with_selected(selected)
         .with_offset(app.today_scroll);
@@ -3699,20 +4054,13 @@ fn render_dashboard_details(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
             ])
         })
         .collect::<Vec<_>>();
-    let activity = Paragraph::new(activity_lines).block(
-        Block::default()
-            .title(" RECENT ACTIVITY ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.border)),
-    );
+    let activity = Paragraph::new(activity_lines).block(titled_block(
+        " RECENT ACTIVITY ",
+        Borders::ALL,
+        theme,
+    ));
     frame.render_widget(activity, lower[0]);
-    frame.render_widget(
-        Block::default()
-            .title(" STORAGE ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.border)),
-        lower[1],
-    );
+    frame.render_widget(titled_block(" STORAGE ", Borders::ALL, theme), lower[1]);
     let storage = lower[1].inner(ratatui::layout::Margin {
         horizontal: 2,
         vertical: 1,
@@ -3804,7 +4152,7 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme
 
 fn render_terminal_command(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
     let area = centered(76, 20, frame.area());
-    frame.render_widget(Clear, area);
+    prepare_popup_surface(frame, area, theme);
     let working_directory = app.terminal_command_directory.as_ref().map_or_else(
         || "current application directory".to_owned(),
         |directory| directory.display().to_string(),
@@ -3822,23 +4170,21 @@ fn render_terminal_command(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         ));
         output_lines.extend(app.terminal_completions.iter().enumerate().map(
             |(index, candidate)| {
-                let style = if app.terminal_completion_selected == Some(index) {
+                let selected = app.terminal_completion_selected == Some(index);
+                let style = if selected {
                     Style::default()
-                        .bg(theme.surface)
+                        .bg(popup_bg(theme))
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD)
+                } else if app.terminal_completion_selected.is_some() && is_transparent(theme) {
+                    Style::default()
+                        .fg(dim_list_color(theme.text, theme.muted))
+                        .add_modifier(Modifier::DIM)
                 } else {
                     Style::default().fg(theme.text)
                 };
                 Line::styled(
-                    format!(
-                        "{} {candidate}",
-                        if app.terminal_completion_selected == Some(index) {
-                            "›"
-                        } else {
-                            " "
-                        }
-                    ),
+                    format!("{} {candidate}", if selected { ">" } else { " " }),
                     style,
                 )
             },
@@ -3852,21 +4198,22 @@ fn render_terminal_command(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
         Constraint::Length(3),
     ])
     .split(area);
+    let bg = popup_bg(theme);
     frame.render_widget(
         Paragraph::new(output_lines)
-            .style(Style::default().bg(theme.surface))
+            .style(Style::default().fg(theme.text).bg(bg))
             .wrap(Wrap { trim: false })
             .block(focus_block(" TERMINAL OUTPUT ", false, theme)),
         sections[0],
     );
     frame.render_widget(
         Paragraph::new(format!("cwd: {working_directory}"))
-            .style(Style::default().fg(theme.muted).bg(theme.surface)),
+            .style(Style::default().fg(theme.muted).bg(bg)),
         sections[1],
     );
     frame.render_widget(
         Paragraph::new(app.terminal_command.as_str())
-            .style(Style::default().bg(theme.surface))
+            .style(Style::default().fg(theme.text).bg(bg))
             .block(focus_block(
                 " TERMINAL — ENTER RUN  ESC CLOSE ",
                 true,
@@ -3884,7 +4231,7 @@ fn render_terminal_command(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
 
 fn render_project_citation_search(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let area = project_citation_search_area(frame.area());
-    frame.render_widget(Clear, area);
+    prepare_popup_surface(frame, area, theme);
 
     let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(4)]).split(area);
 
@@ -3920,7 +4267,7 @@ fn render_project_citation_query(frame: &mut Frame<'_>, area: Rect, app: &App, t
     };
     frame.render_widget(
         Paragraph::new(search_content)
-            .style(Style::default().bg(theme.surface))
+            .style(Style::default().bg(popup_bg(theme)))
             .block(search_block),
         area,
     );
@@ -3949,10 +4296,17 @@ fn render_project_citation_results(
     let max_title_width = list_inner_width.saturating_sub(badge_width + 1).max(4);
     let max_authors_width = max_title_width + badge_width + 1;
 
+    app.project_citation_selected = app
+        .project_citation_selected
+        .min(app.project_citation_results.len().saturating_sub(1));
+    let selected =
+        (!app.project_citation_results.is_empty()).then_some(app.project_citation_selected);
+
     let items: Vec<ListItem> = app
         .project_citation_results
         .iter()
-        .map(|paper| {
+        .enumerate()
+        .map(|(index, paper)| {
             // (Added) detection: compare by lowercased title against the set of
             // BibTeX titles already indexed from the project's .bib files.
             let is_added = !paper.title().is_empty()
@@ -3999,7 +4353,7 @@ fn render_project_citation_results(
                 Style::default().fg(theme.muted),
             )]);
 
-            workspace_list_item(vec![title_line, authors_line])
+            workspace_list_item_for(vec![title_line, authors_line], index, selected, theme)
         })
         .collect();
 
@@ -4012,22 +4366,18 @@ fn render_project_citation_results(
             Block::default()
                 .title(results_title)
                 .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                .style(Style::default().bg(theme.surface))
+                .style(Style::default().bg(popup_bg(theme)))
                 .border_style(Style::default().fg(theme.accent)),
         )
-        .highlight_style(Style::default().bg(theme.border).fg(theme.accent))
+        .highlight_style(list_highlight_style(
+            theme,
+            theme.border,
+            Some(theme.accent),
+        ))
         .highlight_symbol("> ");
 
-    app.project_citation_selected = app
-        .project_citation_selected
-        .min(app.project_citation_results.len().saturating_sub(1));
-
     let mut state = ListState::default()
-        .with_selected(if app.project_citation_results.is_empty() {
-            None
-        } else {
-            Some(app.project_citation_selected)
-        })
+        .with_selected(selected)
         .with_offset(app.project_citation_scroll);
     frame.render_stateful_widget(list, area, &mut state);
     app.project_citation_scroll = state.offset();
@@ -4039,7 +4389,8 @@ fn project_citation_search_area(area: Rect) -> Rect {
 
 fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let area = centered(45, 18, frame.area());
-    frame.render_widget(Clear, area);
+    prepare_popup_surface(frame, area, theme);
+    let bg = popup_bg(theme);
 
     // Split the area into Search Bar and Results List
     let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(4)]).split(area);
@@ -4051,13 +4402,18 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         .title(" BROWSE PAPR ");
 
     let query_text = &app.palette_query;
+    let query_fg = if query_text.is_empty() {
+        theme.muted
+    } else {
+        theme.text
+    };
     frame.render_widget(
         Paragraph::new(if query_text.is_empty() {
             "Search workspaces, papers, groups, settings…"
         } else {
             query_text.as_str()
         })
-        .style(Style::default().bg(theme.surface))
+        .style(Style::default().fg(query_fg).bg(bg))
         .block(search_block),
         chunks[0],
     );
@@ -4078,32 +4434,38 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
 
     // 2. Filter items and render list
     let filtered_pages = app.filtered_palette_items();
-    let items = filtered_pages
-        .iter()
-        .map(|page| ListItem::new(Line::styled(page.title(), Style::default().fg(theme.text))));
+    // Ensure selected index is valid for filtered items
+    app.palette_selected = app
+        .palette_selected
+        .min(filtered_pages.len().saturating_sub(1));
+    let selected = (!filtered_pages.is_empty()).then_some(app.palette_selected);
+
+    let items = filtered_pages.iter().enumerate().map(|(index, page)| {
+        single_line_list_item(
+            Line::styled(page.title(), Style::default().fg(theme.text)),
+            index,
+            selected,
+            theme,
+        )
+    });
 
     let list = List::new(items)
         .block(
             Block::default()
                 .title(" DESTINATIONS ")
                 .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-                .style(Style::default().bg(theme.surface))
+                .style(Style::default().bg(bg))
                 .border_style(Style::default().fg(theme.accent)),
         )
-        .highlight_style(Style::default().bg(theme.border).fg(theme.accent))
+        .highlight_style(list_highlight_style(
+            theme,
+            theme.border,
+            Some(theme.accent),
+        ))
         .highlight_symbol("> ");
 
-    // Ensure selected index is valid for filtered items
-    app.palette_selected = app
-        .palette_selected
-        .min(filtered_pages.len().saturating_sub(1));
-
     let mut state = ListState::default()
-        .with_selected(if filtered_pages.is_empty() {
-            None
-        } else {
-            Some(app.palette_selected)
-        })
+        .with_selected(selected)
         .with_offset(app.palette_scroll);
 
     frame.render_stateful_widget(list, chunks[1], &mut state);
@@ -4134,7 +4496,7 @@ fn render_help(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let desired_height = u16::try_from(total_rows.saturating_add(2)).unwrap_or(u16::MAX);
     let height = desired_height.clamp(12, max_area.height);
     let area = centered(max_area.width, height, frame.area());
-    frame.render_widget(Clear, area);
+    prepare_popup_surface(frame, area, theme);
     let title = if area.width < 86 {
         " KEYBOARD HELP — ↑/↓ SCROLL  ?/ESC CLOSE "
     } else {
@@ -4143,8 +4505,8 @@ fn render_help(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .style(Style::default().bg(theme.surface))
-        .border_style(Style::default().fg(theme.secondary));
+        .style(Style::default().bg(popup_bg(theme)))
+        .border_style(Style::default().fg(theme.accent));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let viewport_rows = inner.height as usize;
@@ -4469,7 +4831,7 @@ fn format_help_column(group: &[HelpSection], width: u16, theme: &Theme) -> Vec<L
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("  {key:<key_width$}  "),
-                    Style::default().fg(theme.secondary),
+                    Style::default().fg(theme.accent),
                 ),
                 Span::styled(description[0].clone(), Style::default().fg(theme.text)),
             ]));
@@ -4683,11 +5045,7 @@ fn render_credits_about(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
 
     let left_para = Paragraph::new(left_lines)
         .block(
-            Block::default()
-                .title(" ABOUT PAPR ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.border))
-                .style(Style::default().bg(block_bg)),
+            titled_block(" ABOUT PAPR ", Borders::ALL, theme).style(Style::default().bg(block_bg)),
         )
         .wrap(Wrap { trim: false });
     frame.render_widget(left_para, area);
@@ -4811,13 +5169,25 @@ fn render_credits_links(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
     };
 
     let credits_items = app.credits_items();
+    // Safety check selection boundaries
+    app.credits_selected = app
+        .credits_selected
+        .min(credits_items.len().saturating_sub(1));
+    let selected = workspace_highlight_selection(app, app.credits_selected);
+
     let list_items: Vec<ListItem> = credits_items
         .iter()
-        .map(|item| {
-            workspace_list_item(vec![
-                Line::styled(&item.label, Style::default().fg(theme.text)),
-                Line::styled(&item.url, Style::default().fg(theme.muted)),
-            ])
+        .enumerate()
+        .map(|(index, item)| {
+            workspace_list_item_for(
+                vec![
+                    Line::styled(&item.label, Style::default().fg(theme.text)),
+                    Line::styled(&item.url, Style::default().fg(theme.muted)),
+                ],
+                index,
+                selected,
+                theme,
+            )
         })
         .collect();
 
@@ -4829,16 +5199,15 @@ fn render_credits_links(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
                 .border_style(Style::default().fg(theme.accent))
                 .style(Style::default().bg(block_bg)),
         )
-        .highlight_style(Style::default().bg(theme.border).fg(theme.accent))
+        .highlight_style(list_highlight_style(
+            theme,
+            theme.border,
+            Some(theme.accent),
+        ))
         .highlight_symbol("> ");
 
-    // Safety check selection boundaries
-    app.credits_selected = app
-        .credits_selected
-        .min(credits_items.len().saturating_sub(1));
-
     let mut state = ListState::default()
-        .with_selected(workspace_highlight_selection(app, app.credits_selected))
+        .with_selected(selected)
         .with_offset(app.credits_scroll);
 
     frame.render_stateful_widget(list, right_chunks[0], &mut state);
@@ -5103,7 +5472,7 @@ fn paper_stats_spans<'a>(app: &App, theme: &Theme, context: PaperLineContext<'a>
         spans.push(Span::styled(
             name,
             Style::default()
-                .bg(theme.surface)
+                .bg(popup_bg(theme))
                 .fg(theme.secondary)
                 .add_modifier(Modifier::BOLD),
         ));
@@ -5916,19 +6285,66 @@ Image: ![plot](plot.png)[^1]
             Some(ratatui::style::Color::Reset)
         );
 
-        // Sidebar active row uses theme.inverted_fg (original Nord RGB background) on theme.accent
-        let mut found_sidebar_pill = false;
-        for y in 0..30 {
-            for x in 0..22 {
-                let style = buffer[(x, y)].style();
-                if style.bg == Some(theme.accent) {
-                    assert_eq!(style.fg, Some(theme.inverted_fg));
-                    assert_ne!(style.fg, Some(ratatui::style::Color::Reset));
-                    found_sidebar_pill = true;
-                }
+        // Status bar key pills use theme.inverted_fg (original Nord RGB background) on theme.accent
+        let mut found_status_pill = false;
+        for x in 0..110 {
+            let style = buffer[(x, 29)].style();
+            if style.bg == Some(theme.accent) {
+                assert_eq!(style.fg, Some(theme.inverted_fg));
+                assert_ne!(style.fg, Some(ratatui::style::Color::Reset));
+                found_status_pill = true;
             }
         }
-        assert!(found_sidebar_pill);
+        assert!(found_status_pill);
+
+        // Sidebar active row uses transparent background, '> ' marker, and bold theme.accent
+        let mut found_sidebar_selected = false;
+        let mut found_sidebar_dimmed = false;
+        for y in 2..20 {
+            let cell = &buffer[(1, y)];
+            if cell.symbol() == ">" {
+                assert_eq!(cell.bg, ratatui::style::Color::Reset);
+                assert_eq!(cell.fg, theme.accent);
+                assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
+                found_sidebar_selected = true;
+            } else if cell.modifier.contains(ratatui::style::Modifier::DIM) {
+                assert_eq!(cell.bg, ratatui::style::Color::Reset);
+                found_sidebar_dimmed = true;
+            }
+        }
+        assert!(found_sidebar_selected);
+        assert!(found_sidebar_dimmed);
+        Ok(())
+    }
+
+    #[test]
+    fn transparent_popup_keeps_reset_bg_and_dims_backdrop() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut app = App {
+            mode: AppMode::CommandPalette,
+            ..App::default()
+        };
+        let theme = Theme::load_with_transparency("nord", true)?;
+        let backend = TestBackend::new(110, 30);
+        let mut terminal = Terminal::new(backend)?;
+
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let buffer = terminal.backend().buffer();
+
+        // Background cell outside popup is dimmed and transparent
+        let backdrop_cell = &buffer[(1, 0)];
+        assert_eq!(backdrop_cell.bg, ratatui::style::Color::Reset);
+        assert!(
+            backdrop_cell
+                .modifier
+                .contains(ratatui::style::Modifier::DIM)
+        );
+
+        // Center cell inside the CommandPalette search input has Reset background and is not dimmed
+        let popup_area = super::centered(45, 18, Rect::new(0, 0, 110, 30));
+        let inner_cell = &buffer[(popup_area.x + 2, popup_area.y + 1)];
+        assert_eq!(inner_cell.bg, ratatui::style::Color::Reset);
+        assert!(!inner_cell.modifier.contains(ratatui::style::Modifier::DIM));
         Ok(())
     }
 }

@@ -1173,7 +1173,7 @@ pub fn render_settings_ui(frame: &mut Frame<'_>, area: Rect, app: &mut App, them
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme.muted)
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
             },
         ))
         .borders(Borders::ALL)
@@ -1410,7 +1410,26 @@ fn render_theme_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
             let is_cursor = i == app.settings_modal.theme_selected;
             let is_applied = name.eq_ignore_ascii_case(&app.settings_modal.original_theme);
 
-            let mut style = if is_cursor && is_focused {
+            let mut style = if is_transparent_theme(theme) {
+                if is_cursor && is_focused {
+                    Style::default()
+                        .fg(theme.accent)
+                        .bg(ratatui::style::Color::Reset)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_cursor {
+                    Style::default()
+                        .fg(theme.text)
+                        .bg(ratatui::style::Color::Reset)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_focused {
+                    Style::default()
+                        .fg(dim_settings_list_color(theme.muted, theme.muted))
+                        .bg(ratatui::style::Color::Reset)
+                        .add_modifier(Modifier::DIM)
+                } else {
+                    Style::default().fg(theme.muted)
+                }
+            } else if is_cursor && is_focused {
                 Style::default().fg(theme.text).bg(theme.accent)
             } else {
                 Style::default().fg(theme.muted)
@@ -1788,12 +1807,26 @@ fn render_dashboard_keywords(
             total_rows.min(inner.height - y_offset),
         );
 
-        let base_style = setting_value_style(is_selected, theme).add_modifier(if is_selected {
-            Modifier::BOLD
+        let base_style = if is_transparent_theme(theme) {
+            if is_selected {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else if focused {
+                Style::default()
+                    .fg(dim_settings_list_color(theme.muted, theme.muted))
+                    .add_modifier(Modifier::DIM)
+            } else {
+                Style::default().fg(theme.muted)
+            }
         } else {
-            Modifier::empty()
-        });
-        let prefix = if is_selected { "› " } else { "  " };
+            setting_value_style(is_selected, theme).add_modifier(if is_selected {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            })
+        };
+        let prefix = if is_selected { "> " } else { "  " };
 
         let display_text = format!("{}{}", prefix, entry.text);
         let paragraph = Paragraph::new(display_text)
@@ -1944,12 +1977,26 @@ fn render_library_folders(
             total_rows.min(inner.height - y_offset),
         );
 
-        let base_style = setting_value_style(is_selected, theme).add_modifier(if is_selected {
-            Modifier::BOLD
+        let base_style = if is_transparent_theme(theme) {
+            if is_selected {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else if focused {
+                Style::default()
+                    .fg(dim_settings_list_color(theme.muted, theme.muted))
+                    .add_modifier(Modifier::DIM)
+            } else {
+                Style::default().fg(theme.muted)
+            }
         } else {
-            Modifier::empty()
-        });
-        let prefix = if is_selected { "› " } else { "  " };
+            setting_value_style(is_selected, theme).add_modifier(if is_selected {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            })
+        };
+        let prefix = if is_selected { "> " } else { "  " };
         let display_text = format!("{}{}", prefix, entry.text);
 
         if is_editing {
@@ -2056,15 +2103,38 @@ fn render_plugins_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
             let selected = i == app.settings_modal.plugins_selected && is_focused;
             let staged_enabled = enabled_ids.contains(&plugin.id);
             let check = if staged_enabled { "✓" } else { "✗" };
-            let check_style = setting_value_style(selected, theme);
-            let name_style = setting_value_style(selected, theme).add_modifier(if selected {
-                Modifier::BOLD
+            let (check_style, name_style, detail_style) = if is_transparent_theme(theme) {
+                if selected {
+                    (
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(theme.text),
+                    )
+                } else if is_focused {
+                    let dim_muted = Style::default()
+                        .fg(dim_settings_list_color(theme.muted, theme.muted))
+                        .add_modifier(Modifier::DIM);
+                    (dim_muted, dim_muted, dim_muted)
+                } else {
+                    let muted = Style::default().fg(theme.muted);
+                    (muted, muted, muted)
+                }
             } else {
-                Modifier::empty()
-            });
-            let detail_style = setting_value_style(selected, theme);
+                let cs = setting_value_style(selected, theme);
+                let ns = cs.add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                });
+                (cs, ns, cs)
+            };
+            let prefix = if selected { "> " } else { "  " };
             ListItem::new(Line::from(vec![
-                Span::raw("  "),
+                Span::styled(prefix, name_style),
                 Span::styled(format!("[{check}] "), check_style),
                 Span::styled(format!("{} ", plugin.name), name_style),
                 Span::styled(format!("v{}", plugin.version), detail_style),
@@ -2095,7 +2165,11 @@ fn render_plugins_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
                 is_focused,
                 theme,
             ))
-            .highlight_style(Style::default().bg(theme.surface)),
+            .highlight_style(if is_transparent_theme(theme) {
+                Style::default().bg(ratatui::style::Color::Reset)
+            } else {
+                Style::default().bg(theme.surface)
+            }),
         area,
         &mut state,
     );
@@ -2105,6 +2179,28 @@ fn render_plugins_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn is_transparent_theme(theme: &Theme) -> bool {
+    matches!(theme.background, ratatui::style::Color::Reset)
+}
+
+fn dim_settings_list_color(
+    color: ratatui::style::Color,
+    fallback: ratatui::style::Color,
+) -> ratatui::style::Color {
+    match color {
+        ratatui::style::Color::Rgb(r, g, b) => {
+            let scale = |channel: u8| -> u8 {
+                u8::try_from(u16::from(channel) * 3 / 5).unwrap_or(channel / 2)
+            };
+            ratatui::style::Color::Rgb(scale(r), scale(g), scale(b))
+        }
+        ratatui::style::Color::Reset => {
+            dim_settings_list_color(fallback, ratatui::style::Color::DarkGray)
+        }
+        other => other,
+    }
+}
 
 fn focused_block<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> {
     let border_style = if focused {
@@ -2117,7 +2213,7 @@ fn focused_block<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> 
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme.text)
+        Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
     };
     let mut block = Block::default()
         .title(Line::styled(title, title_style))
