@@ -330,7 +330,16 @@ fn focus_block_with_right_title<'a>(
 /// The selected index remains in the application state at all times; omitting it
 /// here only prevents Ratatui from drawing the selection treatment.
 fn workspace_highlight_selection(app: &App, selected: usize) -> Option<usize> {
-    app.content_focused.then_some(selected)
+    if !app.content_focused {
+        return None;
+    }
+    if matches!(
+        app.mode,
+        AppMode::WorkspaceSearch | AppMode::Search | AppMode::DiscoverFilter
+    ) {
+        return None;
+    }
+    Some(selected)
 }
 
 /// Resolve the user-visible timezone label for a local timestamp.
@@ -4008,8 +4017,11 @@ fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
 
 fn render_today_research(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let preview_width = usize::from(area.width.saturating_sub(8)).max(24);
-    let selected =
-        (app.content_focused && !app.today_papers.is_empty()).then_some(app.today_selected);
+    let selected = if app.today_papers.is_empty() {
+        None
+    } else {
+        workspace_highlight_selection(app, app.today_selected)
+    };
     let today = match &app.today_status {
         DiscoveryStatus::Loading => vec![workspace_list_item(vec![Line::raw(
             "Loading dashboard papers...",
@@ -5667,6 +5679,22 @@ mod tests {
 
         app.content_focused = true;
         assert_eq!(workspace_highlight_selection(&app, 4), Some(4));
+
+        // When in WorkspaceSearch mode, selection is not highlighted
+        app.mode = AppMode::WorkspaceSearch;
+        assert_eq!(workspace_highlight_selection(&app, 4), None);
+
+        // When in Discover Search mode, selection is not highlighted
+        app.mode = AppMode::Search;
+        assert_eq!(workspace_highlight_selection(&app, 4), None);
+
+        // When in Discover Filter mode, selection is not highlighted
+        app.mode = AppMode::DiscoverFilter;
+        assert_eq!(workspace_highlight_selection(&app, 4), None);
+
+        // Restored in Normal mode
+        app.mode = AppMode::Normal;
+        assert_eq!(workspace_highlight_selection(&app, 4), Some(4));
     }
 
     #[test]
@@ -5725,6 +5753,112 @@ mod tests {
         assert_eq!(buffer[(x, y)].style().bg, Some(theme.surface));
         assert_eq!(app.library.selected, 0);
         assert_eq!(app.library.scroll, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn search_bars_and_discover_inputs_hide_selection_highlight()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let backend = TestBackend::new(100, 32);
+        let mut terminal = Terminal::new(backend)?;
+        let theme = Theme::load("nord")?;
+
+        let find_text = |buf: &Buffer, text: &str| -> Option<(u16, u16)> {
+            for y in 0..buf.area.height {
+                for x in 0..buf.area.width {
+                    let mut matched = true;
+                    for (offset, ch) in text.chars().enumerate() {
+                        let ox = x + u16::try_from(offset).unwrap_or(u16::MAX);
+                        if ox >= buf.area.width || buf[(ox, y)].symbol() != ch.to_string() {
+                            matched = false;
+                            break;
+                        }
+                    }
+                    if matched {
+                        return Some((x, y));
+                    }
+                }
+            }
+            None
+        };
+
+        // 1. Library workspace with local search bar
+        let mut app = App {
+            page: Page::Library,
+            content_focused: true,
+            mode: AppMode::WorkspaceSearch,
+            library: LibraryState {
+                selected: 0,
+                scroll: 0,
+                papers: vec![LibraryPaper {
+                    id: 1,
+                    title: "Focus Aware Paper".into(),
+                    authors: "Test Author".into(),
+                    doi: None,
+                    arxiv_id: None,
+                    pdf_path: None,
+                    file_size: None,
+                    reading_status: "unread".into(),
+                    is_favorite: false,
+                }],
+                ..LibraryState::default()
+            },
+            ..App::default()
+        };
+
+        // When in WorkspaceSearch mode, paper is not highlighted
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let buffer = terminal.backend().buffer();
+        let (x, y) = find_text(buffer, "Focus Aware Paper").ok_or("paper title not found")?;
+        assert_ne!(buffer[(x - 2, y)].symbol(), ">");
+        assert_ne!(buffer[(x, y)].style().bg, Some(theme.surface));
+
+        // When in Normal mode, paper is highlighted
+        app.mode = AppMode::Normal;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let buffer = terminal.backend().buffer();
+        let (x, y) = find_text(buffer, "Focus Aware Paper").ok_or("paper title not found")?;
+        assert_eq!(buffer[(x - 2, y)].symbol(), ">");
+        assert_eq!(buffer[(x, y)].style().bg, Some(theme.surface));
+
+        // 2. Discover workspace with search bar and filter bar
+        let sample = sample_paper()?;
+        let mut app = App {
+            page: Page::Discover,
+            content_focused: true,
+            mode: AppMode::Search,
+            discovery: DiscoveryState {
+                status: DiscoveryStatus::Ready,
+                selected: 0,
+                results: vec![sample],
+                ..DiscoveryState::default()
+            },
+            ..App::default()
+        };
+
+        // In Search mode: results are not highlighted
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let buffer = terminal.backend().buffer();
+        let (x, y) =
+            find_text(buffer, "Terminal Research Systems").ok_or("paper title not found")?;
+        assert_ne!(buffer[(x - 2, y)].symbol(), ">");
+
+        // In DiscoverFilter mode: results are not highlighted
+        app.mode = AppMode::DiscoverFilter;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let buffer = terminal.backend().buffer();
+        let (x, y) =
+            find_text(buffer, "Terminal Research Systems").ok_or("paper title not found")?;
+        assert_ne!(buffer[(x - 2, y)].symbol(), ">");
+
+        // In Normal mode: results are highlighted
+        app.mode = AppMode::Normal;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let buffer = terminal.backend().buffer();
+        let (x, y) =
+            find_text(buffer, "Terminal Research Systems").ok_or("paper title not found")?;
+        assert_eq!(buffer[(x - 2, y)].symbol(), ">");
+
         Ok(())
     }
 
