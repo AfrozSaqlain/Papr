@@ -410,10 +410,19 @@ impl Database {
                                     WHERE pa.paper_id = p.id
                                     ORDER BY pa.position)), ''),
                     p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite,
-                    p.abstract, p.published_at
+                    p.abstract, p.published_at,
+                    COALESCE(
+                        (SELECT a.occurred_at FROM activity_log a WHERE a.paper_id = p.id AND a.kind = 'downloaded' ORDER BY a.occurred_at DESC LIMIT 1),
+                        p.indexed_at,
+                        p.created_at
+                    )
              FROM papers p
              WHERE p.pdf_path IS NOT NULL
-             ORDER BY p.created_at DESC, p.id DESC",
+             ORDER BY COALESCE(
+                 (SELECT a.occurred_at FROM activity_log a WHERE a.paper_id = p.id AND a.kind = 'downloaded' ORDER BY a.occurred_at DESC LIMIT 1),
+                 p.indexed_at,
+                 p.created_at
+             ) DESC, p.id DESC",
         )?;
         let rows = statement.query_map([], |row| {
             let file_size: Option<i64> = row.get(6)?;
@@ -429,6 +438,7 @@ impl Database {
                 is_favorite: row.get(8)?,
                 abstract_text: row.get(9)?,
                 published_at: row.get(10)?,
+                downloaded_at: row.get(11)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -451,7 +461,12 @@ impl Database {
                                     WHERE pa.paper_id = p.id
                                     ORDER BY pa.position)), ''),
                     p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite,
-                    p.abstract, p.published_at
+                    p.abstract, p.published_at,
+                    COALESCE(
+                        (SELECT a.occurred_at FROM activity_log a WHERE a.paper_id = p.id AND a.kind = 'downloaded' ORDER BY a.occurred_at DESC LIMIT 1),
+                        p.indexed_at,
+                        p.created_at
+                    )
              FROM papers p
              WHERE p.id = ?1",
         )?;
@@ -469,6 +484,7 @@ impl Database {
                 is_favorite: row.get(8)?,
                 abstract_text: row.get(9)?,
                 published_at: row.get(10)?,
+                downloaded_at: row.get(11)?,
             })
         })?;
         if let Some(row) = rows.next() {
@@ -513,7 +529,12 @@ impl Database {
                                     WHERE pa.paper_id = p.id
                                     ORDER BY pa.position)), ''),
                     p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite,
-                    p.abstract, p.published_at
+                    p.abstract, p.published_at,
+                    COALESCE(
+                        (SELECT a.occurred_at FROM activity_log a WHERE a.paper_id = p.id AND a.kind = 'downloaded' ORDER BY a.occurred_at DESC LIMIT 1),
+                        p.indexed_at,
+                        p.created_at
+                    )
              FROM papers p
              JOIN reading_queue rq ON rq.paper_id = p.id
              ORDER BY rq.queue_order ASC",
@@ -532,6 +553,7 @@ impl Database {
                 is_favorite: row.get(8)?,
                 abstract_text: row.get(9)?,
                 published_at: row.get(10)?,
+                downloaded_at: row.get(11)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -807,7 +829,7 @@ impl Database {
                     abstract = CASE WHEN trim(?2) = '' THEN abstract ELSE ?2 END,
                     doi = ?3, arxiv_id = ?4,
                     published_at = ?5, updated_at = ?6, pdf_path = ?7,
-                    file_size = ?8, content_hash = ?9, journal = ?10, indexed_at = CURRENT_TIMESTAMP WHERE id = ?11",
+                    file_size = ?8, content_hash = ?9, journal = ?10, indexed_at = CURRENT_TIMESTAMP, created_at = CURRENT_TIMESTAMP WHERE id = ?11",
                 params![
                     paper.title,
                     paper.abstract_text,
@@ -970,7 +992,12 @@ impl Database {
                                     WHERE pa.paper_id = p.id
                                     ORDER BY pa.position)), ''),
                     p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite,
-                    p.abstract, p.published_at
+                    p.abstract, p.published_at,
+                    COALESCE(
+                        (SELECT a.occurred_at FROM activity_log a WHERE a.paper_id = p.id AND a.kind = 'downloaded' ORDER BY a.occurred_at DESC LIMIT 1),
+                        p.indexed_at,
+                        p.created_at
+                    )
              FROM notes n JOIN papers p ON p.id = n.paper_id
              WHERE p.pdf_path IS NOT NULL
              ORDER BY n.updated_at DESC, n.id DESC",
@@ -989,6 +1016,7 @@ impl Database {
                 is_favorite: row.get(8)?,
                 abstract_text: row.get(9)?,
                 published_at: row.get(10)?,
+                downloaded_at: row.get(11)?,
             })
         })?;
         let mut papers = Vec::new();
@@ -1112,9 +1140,19 @@ impl Database {
                                     WHERE pa.paper_id = p.id
                                     ORDER BY pa.position)), ''),
                     p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite,
-                    p.abstract, p.published_at
+                    p.abstract, p.published_at,
+                    COALESCE(
+                        (SELECT a.occurred_at FROM activity_log a WHERE a.paper_id = p.id AND a.kind = 'downloaded' ORDER BY a.occurred_at DESC LIMIT 1),
+                        p.indexed_at,
+                        p.created_at
+                    )
              FROM collection_papers cp JOIN papers p ON p.id = cp.paper_id
-             WHERE cp.collection_id = ?1 ORDER BY p.created_at DESC, p.id DESC",
+             WHERE cp.collection_id = ?1
+             ORDER BY COALESCE(
+                 (SELECT a.occurred_at FROM activity_log a WHERE a.paper_id = p.id AND a.kind = 'downloaded' ORDER BY a.occurred_at DESC LIMIT 1),
+                 p.indexed_at,
+                 p.created_at
+             ) DESC, p.id DESC",
         )?;
         let rows = statement.query_map([collection_id], |row| {
             let file_size: Option<i64> = row.get(6)?;
@@ -1130,6 +1168,7 @@ impl Database {
                 is_favorite: row.get(8)?,
                 abstract_text: row.get(9)?,
                 published_at: row.get(10)?,
+                downloaded_at: row.get(11)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -2026,13 +2065,22 @@ impl Database {
                                     WHERE pa2.paper_id = p.id
                                     ORDER BY pa2.position)), ''),
                     p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite,
-                    p.abstract, p.published_at
+                    p.abstract, p.published_at,
+                    COALESCE(
+                        (SELECT a.occurred_at FROM activity_log a WHERE a.paper_id = p.id AND a.kind = 'downloaded' ORDER BY a.occurred_at DESC LIMIT 1),
+                        p.indexed_at,
+                        p.created_at
+                    )
              FROM papers p
              JOIN paper_authors pa ON pa.paper_id = p.id
              WHERE p.pdf_path IS NOT NULL
                AND pa.author_id = ?1
                AND pa.position < 5
-             ORDER BY p.created_at DESC, p.id DESC",
+             ORDER BY COALESCE(
+                 (SELECT a.occurred_at FROM activity_log a WHERE a.paper_id = p.id AND a.kind = 'downloaded' ORDER BY a.occurred_at DESC LIMIT 1),
+                 p.indexed_at,
+                 p.created_at
+             ) DESC, p.id DESC",
         )?;
         let rows = statement.query_map([author_id], |row| {
             let file_size: Option<i64> = row.get(6)?;
@@ -2048,6 +2096,7 @@ impl Database {
                 is_favorite: row.get(8)?,
                 abstract_text: row.get(9)?,
                 published_at: row.get(10)?,
+                downloaded_at: row.get(11)?,
             })
         })?;
         let mut papers = Vec::new();

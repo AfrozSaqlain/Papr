@@ -104,6 +104,8 @@ pub struct LibraryPaper {
     pub abstract_text: Option<String>,
     /// Publication timestamp or date string when known.
     pub published_at: Option<String>,
+    /// Download or indexing timestamp string when known.
+    pub downloaded_at: Option<String>,
 }
 
 impl LibraryPaper {

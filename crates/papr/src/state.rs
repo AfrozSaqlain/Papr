@@ -1,5 +1,6 @@
 //! Application state machine and navigation commands.
 
+use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use papr_core::models::{
     AuthorSummary, BookmarkSummary, CollectionSummary, DashboardStats, LibraryPaper, PaperNote,
     RemotePaper, ResearchDashboard,
@@ -840,6 +841,151 @@ pub enum CollectionSearchItem<'a> {
     Paper(&'a LibraryPaper, &'a CollectionSummary),
 }
 
+/// Sort order for papers displayed in Library and Authors workspaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PaperSortOrder {
+    /// Default database order.
+    #[default]
+    Default,
+    /// Sort by published date, newest/latest first.
+    LatestFirst,
+    /// Sort by published date, oldest first.
+    OldestFirst,
+}
+
+impl PaperSortOrder {
+    /// Return the next sort order in cycle.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Default => Self::LatestFirst,
+            Self::LatestFirst => Self::OldestFirst,
+            Self::OldestFirst => Self::Default,
+        }
+    }
+
+    /// Return the previous sort order in cycle.
+    #[must_use]
+    pub const fn prev(self) -> Self {
+        match self {
+            Self::Default => Self::OldestFirst,
+            Self::LatestFirst => Self::Default,
+            Self::OldestFirst => Self::LatestFirst,
+        }
+    }
+
+    /// Display label for the sort order.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::LatestFirst => "Latest first",
+            Self::OldestFirst => "Oldest first",
+        }
+    }
+
+    /// Apply this sort order in-place to a slice of library papers.
+    pub fn apply(self, papers: &mut [&LibraryPaper]) {
+        match self {
+            Self::Default => {
+                papers.sort_by(|a, b| {
+                    let ts_a = paper_download_timestamp(a);
+                    let ts_b = paper_download_timestamp(b);
+                    match (ts_a, ts_b) {
+                        (Some(ta), Some(tb)) => tb.cmp(&ta).then_with(|| b.id.cmp(&a.id)),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => b.id.cmp(&a.id),
+                    }
+                });
+            }
+            Self::LatestFirst => {
+                papers.sort_by(|a, b| {
+                    let ts_a = parse_published_timestamp(a.published_at.as_deref());
+                    let ts_b = parse_published_timestamp(b.published_at.as_deref());
+                    match (ts_a, ts_b) {
+                        (Some(ta), Some(tb)) => tb.cmp(&ta).then_with(|| b.id.cmp(&a.id)),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => b.id.cmp(&a.id),
+                    }
+                });
+            }
+            Self::OldestFirst => {
+                papers.sort_by(|a, b| {
+                    let ts_a = parse_published_timestamp(a.published_at.as_deref());
+                    let ts_b = parse_published_timestamp(b.published_at.as_deref());
+                    match (ts_a, ts_b) {
+                        (Some(ta), Some(tb)) => ta.cmp(&tb).then_with(|| a.id.cmp(&b.id)),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => a.id.cmp(&b.id),
+                    }
+                });
+            }
+        }
+    }
+}
+
+/// Helper to extract download timestamp (seconds) from a paper's `downloaded_at` metadata
+/// or falling back to the PDF file's modified time on disk.
+#[must_use]
+pub fn paper_download_timestamp(paper: &LibraryPaper) -> Option<i64> {
+    if let Some(ts) = parse_published_timestamp(paper.downloaded_at.as_deref()) {
+        return Some(ts);
+    }
+    if let Some(path) = &paper.pdf_path
+        && let Ok(metadata) = std::fs::metadata(path)
+        && let Ok(modified) = metadata.modified()
+        && let Ok(duration) = modified.duration_since(std::time::SystemTime::UNIX_EPOCH)
+    {
+        return i64::try_from(duration.as_secs()).ok();
+    }
+    None
+}
+
+/// Helper to parse a publication date string into a comparable unix timestamp (seconds).
+#[must_use]
+pub fn parse_published_timestamp(raw: Option<&str>) -> Option<i64> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
+        return Some(dt.timestamp());
+    }
+
+    if let Ok(ndt) = NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
+        .or_else(|_| NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S"))
+    {
+        return Some(ndt.and_utc().timestamp());
+    }
+
+    if let Ok(nd) = NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
+        return nd.and_hms_opt(0, 0, 0).map(|dt| dt.and_utc().timestamp());
+    }
+
+    if let Ok(nd) = NaiveDate::parse_from_str(&format!("{raw}-01"), "%Y-%m-%d") {
+        return nd.and_hms_opt(0, 0, 0).map(|dt| dt.and_utc().timestamp());
+    }
+
+    if let Ok(year) = raw.parse::<i32>()
+        && let Some(nd) = NaiveDate::from_ymd_opt(year, 1, 1)
+    {
+        return nd.and_hms_opt(0, 0, 0).map(|dt| dt.and_utc().timestamp());
+    }
+
+    if raw.len() >= 4
+        && let Ok(year) = raw[..4].parse::<i32>()
+        && let Some(nd) = NaiveDate::from_ymd_opt(year, 1, 1)
+    {
+        return nd.and_hms_opt(0, 0, 0).map(|dt| dt.and_utc().timestamp());
+    }
+
+    None
+}
+
 /// Local catalog rows and selection.
 #[derive(Debug, Default)]
 pub struct LibraryState {
@@ -853,6 +999,8 @@ pub struct LibraryState {
     pub indexing: bool,
     /// Last indexing summary or failure.
     pub message: Option<String>,
+    /// Sorting order for displayed library papers.
+    pub sort: PaperSortOrder,
 }
 
 /// Commands available to keybindings and Browse Papr.
@@ -1171,6 +1319,8 @@ pub struct App {
     pub author_paper_scroll: usize,
     /// Most recently opened author, used to restore its paper cursor.
     pub last_opened_author_id: Option<i64>,
+    /// Sorting order for displayed author papers.
+    pub author_sort: PaperSortOrder,
     /// Short user-facing operation result.
     pub toast: Option<String>,
     /// Timestamp when toast was last set.
@@ -1289,6 +1439,7 @@ impl Default for App {
             author_paper_selected: 0,
             author_paper_scroll: 0,
             last_opened_author_id: None,
+            author_sort: PaperSortOrder::default(),
             toast: None,
             toast_timestamp: None,
             modal_return: AppMode::Normal,
@@ -1517,7 +1668,8 @@ impl App {
     /// Get the library papers filtered by the workspace search query.
     #[must_use]
     pub fn filtered_library_papers(&self) -> Vec<&LibraryPaper> {
-        self.library
+        let mut papers: Vec<&LibraryPaper> = self
+            .library
             .papers
             .iter()
             .filter(|p| {
@@ -1529,7 +1681,9 @@ impl App {
                     p.arxiv_id.as_deref(),
                 )
             })
-            .collect()
+            .collect();
+        self.library.sort.apply(&mut papers);
+        papers
     }
 
     /// Get the reading queue papers filtered by the workspace search query.
@@ -1648,7 +1802,8 @@ impl App {
     /// Get the active author's papers filtered by the workspace search query.
     #[must_use]
     pub fn filtered_author_papers(&self) -> Vec<&LibraryPaper> {
-        self.author_papers
+        let mut papers: Vec<&LibraryPaper> = self
+            .author_papers
             .iter()
             .filter(|p| {
                 Self::matches_query(
@@ -1659,7 +1814,53 @@ impl App {
                     p.arxiv_id.as_deref(),
                 )
             })
-            .collect()
+            .collect();
+        self.author_sort.apply(&mut papers);
+        papers
+    }
+
+    /// Return the sort order for the active workspace, if supported.
+    #[must_use]
+    pub fn current_sort_order(&self) -> Option<PaperSortOrder> {
+        match self.page {
+            Page::Library => Some(self.library.sort),
+            Page::Authors if self.active_author.is_some() => Some(self.author_sort),
+            _ => None,
+        }
+    }
+
+    /// Advance the sort order for the current workspace.
+    pub fn cycle_current_sort_order(&mut self) {
+        match self.page {
+            Page::Library => {
+                self.library.sort = self.library.sort.next();
+                self.library.selected = 0;
+                self.library.scroll = 0;
+            }
+            Page::Authors if self.active_author.is_some() => {
+                self.author_sort = self.author_sort.next();
+                self.author_paper_selected = 0;
+                self.author_paper_scroll = 0;
+            }
+            _ => {}
+        }
+    }
+
+    /// Advance the sort order for the current workspace in reverse.
+    pub fn cycle_current_sort_order_reverse(&mut self) {
+        match self.page {
+            Page::Library => {
+                self.library.sort = self.library.sort.prev();
+                self.library.selected = 0;
+                self.library.scroll = 0;
+            }
+            Page::Authors if self.active_author.is_some() => {
+                self.author_sort = self.author_sort.prev();
+                self.author_paper_selected = 0;
+                self.author_paper_scroll = 0;
+            }
+            _ => {}
+        }
     }
 
     /// Get the bookmarks filtered by the workspace search query.
@@ -1990,7 +2191,7 @@ mod tests {
 
     use papr_core::{LibraryPaper, RemotePaper};
 
-    use super::{App, Command, DiscoveryState, Page};
+    use super::{App, Command, DiscoveryState, Page, PaperSortOrder, parse_published_timestamp};
 
     fn remote_paper(index: usize) -> RemotePaper {
         RemotePaper {
@@ -2209,6 +2410,7 @@ mod tests {
             is_favorite: false,
             abstract_text: None,
             published_at: None,
+            downloaded_at: None,
         });
 
         assert!(app.downloaded_remote_paper(&remote).is_none());
@@ -2254,5 +2456,167 @@ mod tests {
         app.set_page(Page::Discover);
         assert_eq!(app.page, Page::Discover);
         assert_eq!(Page::ALL.get(app.sidebar_index), Some(&Page::Discover));
+    }
+
+    #[test]
+    fn test_paper_sort_order_cycle_and_apply() {
+        assert_eq!(PaperSortOrder::Default.next(), PaperSortOrder::LatestFirst);
+        assert_eq!(
+            PaperSortOrder::LatestFirst.next(),
+            PaperSortOrder::OldestFirst
+        );
+        assert_eq!(PaperSortOrder::OldestFirst.next(), PaperSortOrder::Default);
+
+        assert_eq!(PaperSortOrder::Default.prev(), PaperSortOrder::OldestFirst);
+        assert_eq!(
+            PaperSortOrder::OldestFirst.prev(),
+            PaperSortOrder::LatestFirst
+        );
+        assert_eq!(PaperSortOrder::LatestFirst.prev(), PaperSortOrder::Default);
+
+        assert_eq!(PaperSortOrder::Default.label(), "Default");
+        assert_eq!(PaperSortOrder::LatestFirst.label(), "Latest first");
+        assert_eq!(PaperSortOrder::OldestFirst.label(), "Oldest first");
+
+        let p1 = LibraryPaper {
+            id: 1,
+            title: "Old Paper".into(),
+            authors: "Author A".into(),
+            doi: None,
+            arxiv_id: None,
+            pdf_path: None,
+            file_size: None,
+            reading_status: "unread".into(),
+            is_favorite: false,
+            abstract_text: None,
+            published_at: Some("2021-01-01".into()),
+            downloaded_at: Some("2024-01-01 10:00:00".into()),
+        };
+        let p2 = LibraryPaper {
+            id: 2,
+            title: "Newest Paper".into(),
+            authors: "Author B".into(),
+            doi: None,
+            arxiv_id: None,
+            pdf_path: None,
+            file_size: None,
+            reading_status: "unread".into(),
+            is_favorite: false,
+            abstract_text: None,
+            published_at: Some("2025-06-15T12:00:00Z".into()),
+            downloaded_at: Some("2024-02-01 10:00:00".into()),
+        };
+        let p3 = LibraryPaper {
+            id: 3,
+            title: "Mid Paper".into(),
+            authors: "Author C".into(),
+            doi: None,
+            arxiv_id: None,
+            pdf_path: None,
+            file_size: None,
+            reading_status: "unread".into(),
+            is_favorite: false,
+            abstract_text: None,
+            published_at: Some("2023-04-10".into()),
+            downloaded_at: Some("2024-03-01 10:00:00".into()),
+        };
+        let p4 = LibraryPaper {
+            id: 4,
+            title: "Undated Paper".into(),
+            authors: "Author D".into(),
+            doi: None,
+            arxiv_id: None,
+            pdf_path: None,
+            file_size: None,
+            reading_status: "unread".into(),
+            is_favorite: false,
+            abstract_text: None,
+            published_at: None,
+            downloaded_at: None,
+        };
+
+        // Default order (download date descending: 3 [March], 2 [Feb], 1 [Jan], 4 [None])
+        let mut papers = vec![&p1, &p2, &p3, &p4];
+        PaperSortOrder::Default.apply(&mut papers);
+        assert_eq!(
+            papers.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![3, 2, 1, 4]
+        );
+
+        // Latest first: 2 (2025), 3 (2023), 1 (2021), 4 (undated)
+        PaperSortOrder::LatestFirst.apply(&mut papers);
+        assert_eq!(
+            papers.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![2, 3, 1, 4]
+        );
+
+        // Oldest first: 1 (2021), 3 (2023), 2 (2025), 4 (undated)
+        PaperSortOrder::OldestFirst.apply(&mut papers);
+        assert_eq!(
+            papers.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec![1, 3, 2, 4]
+        );
+    }
+
+    #[test]
+    fn test_parse_published_timestamp_formats() {
+        assert!(parse_published_timestamp(None).is_none());
+        assert!(parse_published_timestamp(Some("")).is_none());
+        assert!(parse_published_timestamp(Some("  ")).is_none());
+        assert!(parse_published_timestamp(Some("invalid")).is_none());
+
+        let ts_rfc = parse_published_timestamp(Some("2024-05-10T00:00:00Z")).unwrap();
+        let ts_iso = parse_published_timestamp(Some("2024-05-10")).unwrap();
+        assert_eq!(ts_rfc, ts_iso);
+
+        let ts_year = parse_published_timestamp(Some("2024")).unwrap();
+        let ts_ym = parse_published_timestamp(Some("2024-01")).unwrap();
+        assert_eq!(ts_year, ts_ym);
+
+        let ts_older = parse_published_timestamp(Some("2020-01-01")).unwrap();
+        assert!(ts_older < ts_iso);
+    }
+
+    #[test]
+    fn test_app_workspace_sort_cycling() {
+        let mut app = App {
+            page: Page::Library,
+            ..App::default()
+        };
+        assert_eq!(app.current_sort_order(), Some(PaperSortOrder::Default));
+
+        app.cycle_current_sort_order();
+        assert_eq!(app.library.sort, PaperSortOrder::LatestFirst);
+        assert_eq!(app.current_sort_order(), Some(PaperSortOrder::LatestFirst));
+
+        app.cycle_current_sort_order();
+        assert_eq!(app.library.sort, PaperSortOrder::OldestFirst);
+
+        app.cycle_current_sort_order();
+        assert_eq!(app.library.sort, PaperSortOrder::Default);
+
+        app.cycle_current_sort_order_reverse();
+        assert_eq!(app.library.sort, PaperSortOrder::OldestFirst);
+
+        // Authors page - main page (active_author = None): no sort order
+        app.page = Page::Authors;
+        app.active_author = None;
+        assert_eq!(app.current_sort_order(), None);
+
+        // Inside an author (active_author is Some): sort order active
+        app.active_author = Some(papr_core::models::AuthorSummary {
+            id: 1,
+            name: "Feynman".into(),
+            paper_count: 5,
+        });
+        assert_eq!(app.current_sort_order(), Some(PaperSortOrder::Default));
+
+        app.cycle_current_sort_order();
+        assert_eq!(app.author_sort, PaperSortOrder::LatestFirst);
+        assert_eq!(app.current_sort_order(), Some(PaperSortOrder::LatestFirst));
+
+        // Other pages do not have sort order
+        app.page = Page::Dashboard;
+        assert_eq!(app.current_sort_order(), None);
     }
 }

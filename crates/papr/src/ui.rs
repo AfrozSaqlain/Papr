@@ -2,7 +2,7 @@
 
 use crate::state::{
     App, AppMode, CollectionSearchItem, DeletionTarget, DiscoveryStatus, DownloadStatus,
-    DownloadTask, Page, ProjectCitationSearchMode, ProjectPane,
+    DownloadTask, Page, PaperSortOrder, ProjectCitationSearchMode, ProjectPane,
 };
 use crate::theme::Theme;
 use std::{fmt::Write as _, sync::OnceLock};
@@ -844,7 +844,14 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
     let mut workspace_area = inset;
     if app.page.supports_workspace_search() {
         let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(4)]).split(inset);
-        render_workspace_search_bar(frame, rows[0], app, theme);
+        if let Some(sort_order) = app.current_sort_order().filter(|_| rows[0].width >= 40) {
+            let cols =
+                Layout::horizontal([Constraint::Min(20), Constraint::Length(24)]).split(rows[0]);
+            render_workspace_search_bar(frame, cols[0], app, theme);
+            render_workspace_sort_box(frame, cols[1], sort_order, theme);
+        } else {
+            render_workspace_search_bar(frame, rows[0], app, theme);
+        }
         workspace_area = rows[1];
     }
 
@@ -1416,6 +1423,42 @@ fn render_workspace_search_bar(frame: &mut Frame<'_>, area: Rect, app: &App, the
     }
 }
 
+fn render_workspace_sort_box(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    sort_order: PaperSortOrder,
+    theme: &Theme,
+) {
+    let active = sort_order != PaperSortOrder::Default;
+    let border_style = if active {
+        Style::default().fg(theme.accent)
+    } else {
+        Style::default().fg(theme.border)
+    };
+    let title_style = if active {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.text).add_modifier(Modifier::BOLD)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Line::styled(" Sort (s) ", title_style));
+
+    let value_style = if active {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.muted)
+    };
+
+    let text = Line::styled(format!(" {}", sort_order.label()), value_style);
+    frame.render_widget(Paragraph::new(text).block(block), area);
+}
+
 fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     if app.active_collection.is_some() {
         render_collection_papers(frame, area, app, theme);
@@ -1636,7 +1679,7 @@ fn render_author_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "   h/Esc back   Enter/Right/l open PDF",
+                "   h/Esc back   s sort   Enter/Right/l open PDF",
                 Style::default().fg(theme.muted),
             ),
         ])),
@@ -3328,11 +3371,10 @@ fn render_metadata_prompt(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
 fn render_library(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(4)]).split(area);
     let papers = app.filtered_library_papers();
-    let message = app
-        .library
-        .message
-        .as_deref()
-        .unwrap_or("Local papers from configured library folders. Press r to rescan.");
+    let message =
+        app.library.message.as_deref().unwrap_or(
+            "Local papers from configured library folders. Press r to rescan, s to sort.",
+        );
     frame.render_widget(
         Paragraph::new(message).style(Style::default().fg(if app.library.indexing {
             theme.warning
@@ -5827,6 +5869,7 @@ mod tests {
                     is_favorite: false,
                     abstract_text: None,
                     published_at: None,
+                    downloaded_at: None,
                 }],
                 ..LibraryState::default()
             },
@@ -5910,6 +5953,7 @@ mod tests {
                     is_favorite: false,
                     abstract_text: None,
                     published_at: None,
+                    downloaded_at: None,
                 }],
                 ..LibraryState::default()
             },
@@ -6179,6 +6223,7 @@ Image: ![plot](plot.png)[^1]
             is_favorite: false,
             abstract_text: Some("Quantum gravity theoretical foundations and recent tests.".into()),
             published_at: Some("2026-01-02T00:00:00Z".into()),
+            downloaded_at: None,
         };
 
         // 1. Library workspace
@@ -6338,6 +6383,7 @@ Image: ![plot](plot.png)[^1]
             is_favorite: false,
             abstract_text: None,
             published_at: None,
+            downloaded_at: None,
         });
         let theme = Theme::load("gruvbox")?;
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
@@ -6433,6 +6479,7 @@ Image: ![plot](plot.png)[^1]
             is_favorite: false,
             abstract_text: None,
             published_at: None,
+            downloaded_at: None,
         });
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
         let rendered = rendered_text(&terminal);
@@ -6537,6 +6584,7 @@ Image: ![plot](plot.png)[^1]
             is_favorite: false,
             abstract_text: None,
             published_at: None,
+            downloaded_at: None,
         };
         let collection = CollectionSummary {
             id: 1,
@@ -6886,6 +6934,7 @@ Image: ![plot](plot.png)[^1]
             is_favorite: false,
             abstract_text: None,
             published_at: None,
+            downloaded_at: None,
         };
 
         for (page, expected_text) in [
@@ -6959,6 +7008,67 @@ Image: ![plot](plot.png)[^1]
                 );
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_sort_box_renders_in_library_and_authors() -> Result<(), Box<dyn std::error::Error>> {
+        let theme = Theme::load("nord")?;
+        let backend = TestBackend::new(120, 32);
+        let mut terminal = Terminal::new(backend)?;
+
+        // 1. Library workspace with Default sort
+        let mut app = App {
+            page: Page::Library,
+            content_focused: true,
+            ..App::default()
+        };
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let text = rendered_text(&terminal);
+        assert!(text.contains("Local Search"));
+        assert!(text.contains("Sort (s)"));
+        assert!(text.contains("Default"));
+
+        // 2. Library workspace with LatestFirst sort
+        app.library.sort = PaperSortOrder::LatestFirst;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let text = rendered_text(&terminal);
+        assert!(text.contains("Latest first"));
+
+        // 3. Library workspace with OldestFirst sort
+        app.library.sort = PaperSortOrder::OldestFirst;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let text = rendered_text(&terminal);
+        assert!(text.contains("Oldest first"));
+
+        // 4. Authors workspace main page (authors list): no sort box
+        app.page = Page::Authors;
+        app.author_sort = PaperSortOrder::LatestFirst;
+        app.active_author = None;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let text = rendered_text(&terminal);
+        assert!(text.contains("Local Search"));
+        assert!(!text.contains("Sort (s)"));
+
+        // 5. Inside an author in Authors workspace: sort box appears
+        app.active_author = Some(papr_core::models::AuthorSummary {
+            id: 1,
+            name: "Feynman".into(),
+            paper_count: 5,
+        });
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let text = rendered_text(&terminal);
+        assert!(text.contains("Local Search"));
+        assert!(text.contains("Sort (s)"));
+        assert!(text.contains("Latest first"));
+
+        // 6. ReadingQueue workspace: no sort box
+        app.page = Page::ReadingQueue;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let text = rendered_text(&terminal);
+        assert!(text.contains("Local Search"));
+        assert!(!text.contains("Sort (s)"));
+
         Ok(())
     }
 }

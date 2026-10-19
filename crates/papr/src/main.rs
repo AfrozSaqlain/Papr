@@ -5093,7 +5093,33 @@ fn handle_navigation_key(app: &mut App, key: KeyEvent) -> KeyHandling {
     KeyHandling::Ignored
 }
 
+fn handle_workspace_sort_key(app: &mut App, key: KeyEvent) -> bool {
+    if app.current_sort_order().is_none() {
+        return false;
+    }
+    if matches!(key.code, KeyCode::Char('s' | 'S')) {
+        if key.modifiers.contains(KeyModifiers::SHIFT) || key.code == KeyCode::Char('S') {
+            app.cycle_current_sort_order_reverse();
+        } else {
+            app.cycle_current_sort_order();
+        }
+        return true;
+    }
+    if key.code == KeyCode::Tab {
+        app.cycle_current_sort_order();
+        return true;
+    }
+    if key.code == KeyCode::BackTab {
+        app.cycle_current_sort_order_reverse();
+        return true;
+    }
+    false
+}
+
 fn handle_focused_workspace_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    if handle_workspace_sort_key(app, key) {
+        return None;
+    }
     if key.code == KeyCode::Char('r')
         && app.page == Page::Discover
         && !app.discovery.query.trim().is_empty()
@@ -6852,6 +6878,15 @@ fn handle_project_citation_search_key(app: &mut App, key: KeyEvent) -> Option<Ui
 }
 
 fn handle_workspace_search_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    if app.current_sort_order().is_some() && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+        if key.modifiers.contains(KeyModifiers::SHIFT) || key.code == KeyCode::BackTab {
+            app.cycle_current_sort_order_reverse();
+        } else {
+            app.cycle_current_sort_order();
+        }
+        return None;
+    }
+
     if key.code == KeyCode::Char('>') {
         app.mode = AppMode::Normal;
         app.content_focused = true;
@@ -10944,6 +10979,7 @@ mod tests {
             is_favorite: false,
             abstract_text: None,
             published_at: None,
+            downloaded_at: None,
         };
 
         let library_app = App {
@@ -11049,6 +11085,7 @@ mod tests {
             is_favorite: false,
             abstract_text: None,
             published_at: None,
+            downloaded_at: None,
         };
 
         let mut downloads_app = App {
@@ -11163,6 +11200,7 @@ mod tests {
             is_favorite: false,
             abstract_text: None,
             published_at: None,
+            downloaded_at: None,
         };
         let mut app = App {
             page: Page::Library,
@@ -11235,6 +11273,7 @@ mod tests {
                         is_favorite: false,
                         abstract_text: None,
                         published_at: None,
+                        downloaded_at: None,
                     }],
                     ..LibraryState::default()
                 },
@@ -11336,6 +11375,7 @@ mod tests {
                     is_favorite: false,
                     abstract_text: None,
                     published_at: None,
+                    downloaded_at: None,
                 }],
                 ..LibraryState::default()
             },
@@ -11420,6 +11460,7 @@ mod tests {
             is_favorite: false,
             abstract_text: None,
             published_at: None,
+            downloaded_at: None,
         };
         let mut app = App {
             page: Page::Collections,
@@ -11460,6 +11501,7 @@ mod tests {
             is_favorite: false,
             abstract_text: None,
             published_at: None,
+            downloaded_at: None,
         };
         let mut app = App {
             page: Page::Library,
@@ -11566,6 +11608,7 @@ mod tests {
             is_favorite: false,
             abstract_text: None,
             published_at: None,
+            downloaded_at: None,
         };
 
         // Case 1: Toggle Add to queue from Library
@@ -11724,6 +11767,7 @@ mod tests {
             is_favorite: false,
             abstract_text: None,
             published_at: None,
+            downloaded_at: None,
         }];
 
         let prompt = MetadataPrompt {
@@ -11856,5 +11900,147 @@ print(json.dumps({"actions": actions}))
 
         std::fs::remove_dir_all(&temp_dir)?;
         Ok(())
+    }
+
+    #[test]
+    fn test_workspace_sort_keyboard_interactions() {
+        let p_old = LibraryPaper {
+            id: 1,
+            title: "Classical Physics".into(),
+            authors: "Newton".into(),
+            doi: None,
+            arxiv_id: None,
+            pdf_path: None,
+            file_size: None,
+            reading_status: "unread".into(),
+            is_favorite: false,
+            abstract_text: None,
+            published_at: Some("2020-01-01".into()),
+            downloaded_at: Some("2024-02-01 10:00:00".into()),
+        };
+        let p_new = LibraryPaper {
+            id: 2,
+            title: "Quantum Computing".into(),
+            authors: "Feynman".into(),
+            doi: None,
+            arxiv_id: None,
+            pdf_path: None,
+            file_size: None,
+            reading_status: "unread".into(),
+            is_favorite: false,
+            abstract_text: None,
+            published_at: Some("2025-01-01".into()),
+            downloaded_at: Some("2024-01-01 10:00:00".into()),
+        };
+
+        let mut app = App {
+            page: Page::Library,
+            content_focused: true,
+            mode: AppMode::Normal,
+            library: LibraryState {
+                papers: vec![p_old.clone(), p_new.clone()],
+                selected: 1,
+                ..LibraryState::default()
+            },
+            ..App::default()
+        };
+
+        // 1. Initial default order
+        assert_eq!(app.library.sort, PaperSortOrder::Default);
+        assert_eq!(
+            app.filtered_library_papers()
+                .iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        // 2. Press 's' -> LatestFirst
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.library.sort, PaperSortOrder::LatestFirst);
+        assert_eq!(app.library.selected, 0); // resets selection to 0
+        assert_eq!(
+            app.filtered_library_papers()
+                .iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+
+        // 3. Press 's' -> OldestFirst
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.library.sort, PaperSortOrder::OldestFirst);
+        assert_eq!(
+            app.filtered_library_papers()
+                .iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        // 4. Press 'S' (Shift+S) -> reverses back to LatestFirst
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT),
+        );
+        assert_eq!(app.library.sort, PaperSortOrder::LatestFirst);
+
+        // 5. Test Tab cycling in WorkspaceSearch mode
+        app.mode = AppMode::WorkspaceSearch;
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.library.sort, PaperSortOrder::OldestFirst);
+        assert_eq!(app.mode, AppMode::WorkspaceSearch);
+
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.library.sort, PaperSortOrder::Default);
+
+        // 6. Test Authors workspace
+        app.page = Page::Authors;
+        app.mode = AppMode::Normal;
+        app.active_author = None;
+        assert_eq!(app.current_sort_order(), None);
+
+        // Pressing 's' on main Authors page has no effect
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.author_sort, PaperSortOrder::Default);
+
+        // Go inside an author
+        app.author_papers = vec![p_old, p_new];
+        app.active_author = Some(papr_core::models::AuthorSummary {
+            id: 1,
+            name: "Feynman".into(),
+            paper_count: 2,
+        });
+        assert_eq!(app.author_sort, PaperSortOrder::Default);
+        assert_eq!(
+            app.filtered_author_papers()
+                .iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        // Press 's' when inside author
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.author_sort, PaperSortOrder::LatestFirst);
+        assert_eq!(
+            app.filtered_author_papers()
+                .iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
     }
 }
