@@ -288,6 +288,20 @@ impl Database {
             return Ok(false);
         }
 
+        // A path conflict updates a paper that predates content-hash indexing.
+        // Keep that distinct from a new insert: `last_insert_rowid()` is not
+        // updated by the `DO UPDATE` branch, so using it to create activity can
+        // point at an unrelated (and possibly deleted) paper.
+        let paper_already_at_path = self
+            .connection
+            .query_row(
+                "SELECT id FROM papers WHERE pdf_path = ?1 LIMIT 1",
+                [pdf.path.to_string_lossy().as_ref()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some();
+
         let changed = self.connection.execute(
             "INSERT INTO papers (title, pdf_path, file_size, content_hash, indexed_at)
              VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
@@ -303,7 +317,7 @@ impl Database {
                 pdf.content_hash,
             ],
         )?;
-        if changed > 0 && existing.is_none() {
+        if changed > 0 && !paper_already_at_path {
             let paper_id = self.connection.last_insert_rowid();
             self.record_paper_activity("paper_created", Some(paper_id), Some(&pdf.title))?;
         }
@@ -2561,6 +2575,42 @@ mod tests {
         let rows = database.library_papers()?;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].file_size, Some(84));
+        Ok(())
+    }
+
+    #[test]
+    fn reindexing_a_legacy_path_conflict_does_not_log_a_new_paper()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        database.connection.execute(
+            "INSERT INTO papers (title, pdf_path) VALUES ('Legacy paper', 'paper.pdf')",
+            [],
+        )?;
+        database
+            .connection
+            .execute("INSERT INTO papers (title) VALUES ('Deleted paper')", [])?;
+        let deleted_id = database.connection.last_insert_rowid();
+        database
+            .connection
+            .execute("DELETE FROM papers WHERE id = ?1", [deleted_id])?;
+
+        // The UPSERT takes its update branch because this older record has no
+        // content hash. Its previous implementation used the deleted row ID
+        // above for an activity-log insert, violating that table's foreign key.
+        assert!(database.import_pdf(&imported_pdf("paper.pdf"))?);
+
+        let hash: Option<String> = database.connection.query_row(
+            "SELECT content_hash FROM papers WHERE pdf_path = 'paper.pdf'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(hash.is_some());
+        let activity_count: i64 = database.connection.query_row(
+            "SELECT COUNT(*) FROM activity_log WHERE kind = 'paper_created'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(activity_count, 0);
         Ok(())
     }
 
