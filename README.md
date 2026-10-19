@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/papr4.gif" alt="Demo" width="900">
+  <img src="assets/papr2.gif" alt="Demo" width="900">
 </p>
 
 Papr is a fast, terminal-based workspace built for academic research. It brings together a personalized daily papers feed, arXiv search, local PDF library management, reading, Markdown note-taking, automatic author-based paper organization, and manuscript editing with LaTeX and Typst.
