@@ -9581,6 +9581,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("papr-terminal-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root)?;
+        let root = std::fs::canonicalize(&root)?;
         let mut app = project_editor_app("", 0);
         app.active_project = Some(Project {
             name: "terminal".into(),
@@ -10416,6 +10417,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("papr-file-create-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root)?;
+        let root = std::fs::canonicalize(&root)?;
 
         let created =
             create_project_file(&root, "chapters/introduction.tex").map_err(anyhow::Error::msg)?;

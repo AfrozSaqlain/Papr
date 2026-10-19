@@ -1345,9 +1345,20 @@ impl Database {
         roots: &[PathBuf],
         directories: &[CollectionDirectory],
     ) -> Result<(), DatabaseError> {
+        let canonical_roots: Vec<PathBuf> = roots
+            .iter()
+            .map(|r| std::fs::canonicalize(r).unwrap_or_else(|_| r.clone()))
+            .collect();
         let discovered = directories
             .iter()
             .map(|directory| directory.library_root.join(&directory.relative_path))
+            .collect::<HashSet<_>>();
+        let canonical_discovered = directories
+            .iter()
+            .map(|directory| {
+                let p = directory.library_root.join(&directory.relative_path);
+                std::fs::canonicalize(&p).unwrap_or(p)
+            })
             .collect::<HashSet<_>>();
         let tx = self.connection.unchecked_transaction()?;
         tx.execute("DELETE FROM collections WHERE folder_path IS NULL", [])?;
@@ -1364,8 +1375,16 @@ impl Database {
                 .collect::<Result<Vec<_>, _>>()?
         };
         for (id, folder) in backed_collections {
-            let inside_library = roots.iter().any(|root| folder.starts_with(root));
-            if !inside_library || !discovered.contains(&folder) {
+            let canonical_folder =
+                std::fs::canonicalize(&folder).unwrap_or_else(|_| folder.clone());
+            let inside_library = roots.iter().any(|root| folder.starts_with(root))
+                || canonical_roots
+                    .iter()
+                    .any(|root| canonical_folder.starts_with(root));
+            if !inside_library
+                || (!discovered.contains(&folder)
+                    && !canonical_discovered.contains(&canonical_folder))
+            {
                 tx.execute("DELETE FROM collections WHERE id = ?1", [id])?;
             }
         }
@@ -1385,9 +1404,11 @@ impl Database {
             let valid = path.as_deref().is_some_and(|path| {
                 let path = Path::new(path);
                 path.is_file()
-                    && roots.iter().any(|root| {
+                    && (roots.iter().any(|root| {
                         path.starts_with(root) && path.parent().is_some_and(|parent| parent != root)
-                    })
+                    }) || canonical_roots.iter().any(|root| {
+                        path.starts_with(root) && path.parent().is_some_and(|parent| parent != root)
+                    }))
             });
             if !valid {
                 tx.execute(
@@ -3727,7 +3748,9 @@ mod tests {
         assert_eq!(papers.len(), 1);
         assert_eq!(papers[0].id, paper_id);
         assert_eq!(papers[0].title, "old name");
-        assert_eq!(papers[0].pdf_path.as_deref(), new_path.to_str());
+        let canonical_new_path =
+            std::fs::canonicalize(&new_path).unwrap_or_else(|_| new_path.clone());
+        assert_eq!(papers[0].pdf_path.as_deref(), canonical_new_path.to_str());
 
         fs::remove_file(&new_path)?;
         fs::remove_dir(&root)?;

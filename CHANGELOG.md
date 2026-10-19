@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-10-19
+
+### Added
+- **Transparent Mode**: Added support for transparent UI mode to enhance the application's visual appearance and aesthetics.
+- **Paper Sorting**: Added sorting options in the Library and Authors sections, allowing papers to be ordered by newest first, oldest first, or download date.
+- **Publication Dates**: Added publication dates to paper listings, making it easier to identify and browse papers based on when they were published.
+
+### Fixed
+- **Symlinked Path Reconciliation**: Resolved collection reconciliation and path comparisons on platforms with symlinked library paths (e.g., macOS `/var` -> `/private/var`).
+
 ## [0.1.1] - 2026-08-11
 
 ### Added
