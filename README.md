@@ -381,6 +381,11 @@ Paper rows include Library, Downloads, Bookmarks, Notes, Reading Queue, and the 
 | `a` | toggle reading queue |
 | `u` | mark PDF unread |
 
+### Library & Authors
+| Key | Action |
+| :--- | :--- |
+| `s` | sort papers |
+
 ### Notes & PDF Viewer
 | Key | Action |
 | :--- | :--- |
@@ -428,7 +433,7 @@ Paper rows include Library, Downloads, Bookmarks, Notes, Reading Queue, and the 
 | :--- | :--- |
 | `r` | retry failed download |
 
-### Project List
+### Project Workspace (Outside)
 | Key | Action |
 | :--- | :--- |
 | `n` | create named project |
@@ -436,7 +441,7 @@ Paper rows include Library, Downloads, Bookmarks, Notes, Reading Queue, and the 
 | `R` | rename selected project |
 | `x` | delete selected project |
 
-### Project File Tree
+### Project Workspace (Inside)
 
 Shows folders, source files, and supported image files.
 
@@ -449,10 +454,6 @@ Shows folders, source files, and supported image files.
 | `x` | confirm then delete file or folder |
 | `Ctrl+f` | search and add citation |
 | `Esc` | return to project list at root |
-
-### Project Panes
-| Key | Action |
-| :--- | :--- |
 | `Alt+1` | focus file tree |
 | `Alt+2` | focus editor |
 | `Alt+3` | focus PDF preview |

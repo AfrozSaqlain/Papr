@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Paper Sorting**: Added sorting options in the Library and Authors sections, allowing papers to be ordered by newest first, oldest first, or download date.
 - **Publication Dates**: Added publication dates to paper listings, making it easier to identify and browse papers based on when they were published.
 
+### Changed
+- **Help Window**: Redesigned and improved the help pop-up window for a clearer, more intuitive user experience.
+
 ### Fixed
 - **Symlinked Path Reconciliation**: Resolved collection reconciliation and path comparisons on platforms with symlinked library paths (e.g., macOS `/var` -> `/private/var`).
 

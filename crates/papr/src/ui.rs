@@ -5088,6 +5088,13 @@ fn general_help_sections() -> Vec<HelpSection> {
             ],
         },
         HelpSection {
+            title: "LIRARY & AUTHORS",
+            scope: &[],
+            entries: &[
+                ("s", "sort papers"),
+            ],
+        },
+        HelpSection {
             title: "NOTES & PDF VIEWER",
             scope: &[],
             entries: &[
@@ -5148,7 +5155,7 @@ fn general_help_sections() -> Vec<HelpSection> {
 fn project_help_sections() -> Vec<HelpSection> {
     vec![
         HelpSection {
-            title: "PROJECT LIST",
+            title: "PROJECT WORKSPAC (OUTSIDE)",
             scope: &[],
             entries: &[
                 ("n", "create named project"),
@@ -5158,7 +5165,7 @@ fn project_help_sections() -> Vec<HelpSection> {
             ],
         },
         HelpSection {
-            title: "PROJECT FILE TREE",
+            title: "PROJECT WORKSPACE (INSIDE)",
             scope: &["Shows folders, source files, and supported image files."],
             entries: &[
                 ("Enter / →", "open file or enter folder"),
@@ -5168,12 +5175,6 @@ fn project_help_sections() -> Vec<HelpSection> {
                 ("x", "confirm then delete file or folder"),
                 ("Ctrl+f", "search and add citation"),
                 ("Esc", "return to project list at root"),
-            ],
-        },
-        HelpSection {
-            title: "PROJECT PANES & PREVIEW",
-            scope: &[],
-            entries: &[
                 ("Alt+1", "focus file tree"),
                 ("Alt+2", "focus editor"),
                 ("Alt+3", "focus PDF preview"),
