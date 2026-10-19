@@ -754,22 +754,66 @@ fn looks_like_category(value: &str) -> bool {
 }
 
 fn clean_arxiv_id(s: &str) -> String {
-    let s = s.trim().to_ascii_lowercase();
+    let mut s = s.trim();
+
+    // Markdown link extraction: e.g. [Title](url_or_id) or [Title](<url_or_id>)
+    if let Some(open_bracket) = s.find('[')
+        && let Some(close_bracket_paren) = s[open_bracket..].find("](")
+    {
+        let after_open_paren = &s[open_bracket + close_bracket_paren + 2..];
+        if let Some(close_paren) = after_open_paren.find(')') {
+            let inside_link = after_open_paren[..close_paren].trim();
+            let unquoted = inside_link.trim_matches(['<', '>', '"', '\'', ' ']);
+            if !unquoted.is_empty() {
+                s = unquoted;
+            }
+        }
+    }
+
+    let mut s = s
+        .trim()
+        .trim_matches(['<', '>', '"', '\'', '[', ']'])
+        .to_ascii_lowercase();
+
+    if let Some(idx) = s.find(['?', '#']) {
+        s.truncate(idx);
+    }
+
     let clean = if let Some(idx) = s.find("/abs/") {
         &s[idx + 5..]
     } else if let Some(idx) = s.find("/pdf/") {
-        let after = &s[idx + 5..];
-        after.strip_suffix(".pdf").unwrap_or(after)
+        &s[idx + 5..]
+    } else if let Some(idx) = s.find("/html/") {
+        &s[idx + 6..]
+    } else if let Some(idx) = s.find("10.48550/arxiv.") {
+        &s[idx + 15..]
     } else {
         &s
     };
+
+    let clean = clean.trim_end_matches('/');
+    let clean = clean.strip_suffix(".pdf").unwrap_or(clean);
+    let clean = clean.trim();
+    let clean = if let Some(after) = clean.strip_prefix("arxiv:") {
+        after
+    } else if let Some(after) = clean.strip_prefix("arxiv") {
+        let trimmed = after.trim_start();
+        if let Some(after_colon) = trimmed.strip_prefix(':') {
+            after_colon
+        } else {
+            clean
+        }
+    } else {
+        clean
+    };
+
     clean.trim().to_string()
 }
 
 /// Parse an arXiv identifier or URL into a canonical identifier.
+#[must_use]
 pub fn parse_arxiv_id(s: &str) -> Option<String> {
-    let s = s.trim().to_ascii_lowercase();
-    let clean = clean_arxiv_id(&s);
+    let clean = clean_arxiv_id(s);
     let (base, version) = if let Some(v_idx) = clean.rfind('v') {
         let (b, v) = clean.split_at(v_idx);
         let v_suffix = &v[1..];
@@ -959,5 +1003,96 @@ mod tests {
         assert_eq!(papers[0].authors, ["Prayush Kumar"]);
         assert_eq!(papers[1].title, "Cyber bullying detection");
         Ok(())
+    }
+
+    #[test]
+    fn parses_arxiv_ids_from_various_formats() {
+        // Modern plain identifiers
+        assert_eq!(parse_arxiv_id("2101.12345").as_deref(), Some("2101.12345"));
+        assert_eq!(parse_arxiv_id("0704.0001").as_deref(), Some("0704.0001"));
+        assert_eq!(
+            parse_arxiv_id("2312.12345v2").as_deref(),
+            Some("2312.12345v2")
+        );
+
+        // Prefixed identifiers
+        assert_eq!(
+            parse_arxiv_id("arXiv:2101.12345").as_deref(),
+            Some("2101.12345")
+        );
+        assert_eq!(
+            parse_arxiv_id("arxiv: 2101.12345v1").as_deref(),
+            Some("2101.12345v1")
+        );
+        assert_eq!(
+            parse_arxiv_id("ARXIV: hep-th/0211069").as_deref(),
+            Some("hep-th/0211069")
+        );
+
+        // URLs (abs, pdf, html)
+        assert_eq!(
+            parse_arxiv_id("https://arxiv.org/abs/2101.12345").as_deref(),
+            Some("2101.12345")
+        );
+        assert_eq!(
+            parse_arxiv_id("http://arxiv.org/abs/2101.12345v2/").as_deref(),
+            Some("2101.12345v2")
+        );
+        assert_eq!(
+            parse_arxiv_id("https://arxiv.org/pdf/2101.12345.pdf").as_deref(),
+            Some("2101.12345")
+        );
+        assert_eq!(
+            parse_arxiv_id("https://arxiv.org/html/2312.12345v1").as_deref(),
+            Some("2312.12345v1")
+        );
+        assert_eq!(
+            parse_arxiv_id("https://export.arxiv.org/pdf/hep-th/0211069.pdf").as_deref(),
+            Some("hep-th/0211069")
+        );
+        assert_eq!(
+            parse_arxiv_id("https://arxiv.org/abs/2101.12345?context=cs.AI#main").as_deref(),
+            Some("2101.12345")
+        );
+
+        // DOI URL
+        assert_eq!(
+            parse_arxiv_id("https://doi.org/10.48550/arXiv.2101.12345").as_deref(),
+            Some("2101.12345")
+        );
+
+        // Markdown links
+        assert_eq!(
+            parse_arxiv_id("[Attention Is All You Need](https://arxiv.org/abs/1706.03762)")
+                .as_deref(),
+            Some("1706.03762")
+        );
+        assert_eq!(
+            parse_arxiv_id("[1706.03762](https://arxiv.org/pdf/1706.03762.pdf)").as_deref(),
+            Some("1706.03762")
+        );
+        assert_eq!(
+            parse_arxiv_id("[hep-th/0211069](<https://arxiv.org/abs/hep-th/0211069>)").as_deref(),
+            Some("hep-th/0211069")
+        );
+        assert_eq!(
+            parse_arxiv_id("[Paper Title](arxiv:1706.03762)").as_deref(),
+            Some("1706.03762")
+        );
+        assert_eq!(
+            parse_arxiv_id("[1706.03762](1706.03762)").as_deref(),
+            Some("1706.03762")
+        );
+
+        // Legacy formats
+        assert_eq!(
+            parse_arxiv_id("math.PR/0211069v3").as_deref(),
+            Some("math.pr/0211069v3")
+        );
+
+        // Rejections
+        assert_eq!(parse_arxiv_id(""), None);
+        assert_eq!(parse_arxiv_id("not-an-arxiv-id"), None);
+        assert_eq!(parse_arxiv_id("https://example.com/paper.pdf"), None);
     }
 }

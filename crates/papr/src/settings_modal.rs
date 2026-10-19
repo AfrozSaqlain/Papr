@@ -1180,7 +1180,9 @@ pub fn render_settings_ui(frame: &mut Frame<'_>, area: Rect, app: &mut App, them
         .border_type(BorderType::Rounded)
         .border_set(border::ROUNDED)
         .border_style(if app.content_focused {
-            Style::default().fg(theme.accent)
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.border)
         })
@@ -1255,11 +1257,15 @@ fn render_tab_bar(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
 
 fn render_tab_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let divider_area = Rect::new(area.x, area.y, area.width, 1);
+    let divider_style = if app.content_focused {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.border)
+    };
     frame.render_widget(
-        Paragraph::new(Line::styled(
-            "─".repeat(area.width as usize),
-            Style::default().fg(theme.border),
-        )),
+        Paragraph::new(Line::styled("─".repeat(area.width as usize), divider_style)),
         divider_area,
     );
     let content_area = Rect::new(
@@ -1278,10 +1284,14 @@ fn render_tab_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
-    let divider = Paragraph::new(Line::styled(
-        "─".repeat(area.width as usize),
-        Style::default().fg(theme.border),
-    ));
+    let divider_style = if app.content_focused {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.border)
+    };
+    let divider = Paragraph::new(Line::styled("─".repeat(area.width as usize), divider_style));
     let div_area = Rect::new(area.x, area.y, area.width, 1);
     frame.render_widget(divider, div_area);
 

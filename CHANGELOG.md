@@ -11,9 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Transparent Mode**: Added support for transparent UI mode to enhance the application's visual appearance and aesthetics.
 - **Paper Sorting**: Added sorting options in the Library, Groups, and Authors sections, allowing papers to be ordered by newest first, oldest first, or download date.
 - **Publication Dates**: Added publication dates to paper listings, making it easier to identify and browse papers based on when they were published.
+- **arXiv Paper CLI Download**: Added `papr download <ARXIV-ID>` to download papers using modern or legacy arXiv identifiers, URLs, or Markdown-formatted links, featuring duplicate detection, safe atomic file transfer, and automatic library indexing.
 
 ### Changed
 - **Help Window**: Redesigned and improved the help pop-up window for a clearer, more intuitive user experience.
+- **Configured CLI Paths**: `papr paths` now reports the configured `download_path`, `projects_directory`, and `library_folders` defined in `config.toml`, falling back to platform defaults when unset.
+
+### Removed
+- **CLI Commands**: Removed CLI subcommands `papr index`, `papr completions`, and `papr plugins` while preserving underlying library indexing and plugin execution capabilities.
 
 ### Fixed
 - **Symlinked Path Reconciliation**: Resolved collection reconciliation and path comparisons on platforms with symlinked library paths (e.g., macOS `/var` -> `/private/var`).

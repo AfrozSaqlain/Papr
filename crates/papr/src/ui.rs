@@ -286,14 +286,21 @@ fn focus_block<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> {
     block
 }
 
-/// A workspace section block whose border stays `theme.border` while its title
-/// on the border uses `theme.accent` when focused and `theme.text` when unfocused.
+/// A workspace section block whose border and title use `theme.accent` when
+/// focused and `theme.border`/`theme.text` when unfocused.
 fn titled_block<'a>(
     title: impl Into<String>,
     borders: Borders,
     focused: bool,
     theme: &Theme,
 ) -> Block<'a> {
+    let border_style = if focused {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.border)
+    };
     let title_style = if focused {
         Style::default()
             .fg(theme.accent)
@@ -304,7 +311,7 @@ fn titled_block<'a>(
     Block::default()
         .title(Line::styled(title.into(), title_style))
         .borders(borders)
-        .border_style(Style::default().fg(theme.border))
+        .border_style(border_style)
 }
 
 /// A pane header with independent left and right titles, avoiding text overlap.
@@ -848,7 +855,7 @@ fn render_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
             let cols =
                 Layout::horizontal([Constraint::Min(20), Constraint::Length(24)]).split(rows[0]);
             render_workspace_search_bar(frame, cols[0], app, theme);
-            render_workspace_sort_box(frame, cols[1], sort_order, theme);
+            render_workspace_sort_box(frame, cols[1], sort_order, app.content_focused, theme);
         } else {
             render_workspace_search_bar(frame, rows[0], app, theme);
         }
@@ -1381,12 +1388,14 @@ fn render_workspace_search_bar(frame: &mut Frame<'_>, area: Rect, app: &App, the
     } else {
         Style::default().fg(theme.muted)
     };
-    let border_style = if app.mode == AppMode::WorkspaceSearch {
-        Style::default().fg(theme.accent)
+    let border_style = if app.content_focused {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.border)
     };
-    let title_style = if app.mode == AppMode::WorkspaceSearch {
+    let title_style = if app.content_focused {
         Style::default()
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD)
@@ -1427,15 +1436,18 @@ fn render_workspace_sort_box(
     frame: &mut Frame<'_>,
     area: Rect,
     sort_order: PaperSortOrder,
+    focused: bool,
     theme: &Theme,
 ) {
     let active = sort_order != PaperSortOrder::Default;
-    let border_style = if active {
-        Style::default().fg(theme.accent)
+    let border_style = if focused {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.border)
     };
-    let title_style = if active {
+    let title_style = if focused || active {
         Style::default()
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD)
@@ -1503,7 +1515,7 @@ fn render_collections(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
         };
         workspace_list_item_for(lines, index, selected, theme)
     });
-    let focused = app.content_focused && app.mode != AppMode::WorkspaceSearch;
+    let focused = app.content_focused;
     let list = List::new(items)
         .block(titled_block(
             " GROUPS - ENTER VIEW  g NEW  R RENAME x Delete",
@@ -1586,7 +1598,7 @@ fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
         );
         workspace_list_item_for(lines, index, selected, theme)
     });
-    let focused = app.content_focused && app.mode != AppMode::WorkspaceSearch;
+    let focused = app.content_focused;
     let list = List::new(items)
         .block(titled_block(
             format!(" {} PAPERS ", papers.len()),
@@ -1642,7 +1654,7 @@ fn render_authors(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
             theme,
         )
     });
-    let focused = app.content_focused && app.mode != AppMode::WorkspaceSearch;
+    let focused = app.content_focused;
     let list = List::new(items)
         .block(titled_block(
             format!(" {} AUTHORS - ENTER VIEW ", authors.len()),
@@ -1725,7 +1737,7 @@ fn render_author_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
         );
         workspace_list_item_for(lines, index, selected, theme)
     });
-    let focused = app.content_focused && app.mode != AppMode::WorkspaceSearch;
+    let focused = app.content_focused;
     let list = List::new(items)
         .block(titled_block(
             format!(" {} PAPERS ", papers.len()),
@@ -1842,7 +1854,15 @@ fn render_statistics(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &T
         ("SESSIONS", reading.sessions.to_string(), theme.secondary),
     ];
     for (area, (label, value, color)) in top.iter().zip(metrics) {
-        render_metric(frame, *area, label, &value, color, theme);
+        render_metric(
+            frame,
+            *area,
+            label,
+            &value,
+            color,
+            app.content_focused,
+            theme,
+        );
     }
     let middle = Layout::horizontal([Constraint::Ratio(1, 3); 3])
         .spacing(1)
@@ -1853,6 +1873,7 @@ fn render_statistics(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &T
         "MOST ACTIVE DAY",
         reading.most_active_day.as_deref().unwrap_or("No data"),
         theme.accent,
+        app.content_focused,
         theme,
     );
     render_metric(
@@ -1861,6 +1882,7 @@ fn render_statistics(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &T
         "MOST READ AUTHOR",
         reading.most_read_author.as_deref().unwrap_or("No data"),
         theme.secondary,
+        app.content_focused,
         theme,
     );
     render_metric(
@@ -1869,6 +1891,7 @@ fn render_statistics(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &T
         "MOST READ JOURNAL",
         reading.most_read_journal.as_deref().unwrap_or("No data"),
         theme.success,
+        app.content_focused,
         theme,
     );
     let heatmap = reading
@@ -1917,8 +1940,16 @@ fn render_metric(
     label: &str,
     value: &str,
     color: ratatui::style::Color,
+    focused: bool,
     theme: &Theme,
 ) {
+    let border_style = if focused {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.border)
+    };
     frame.render_widget(
         Paragraph::new(vec![
             Line::styled(label, Style::default().fg(theme.muted)),
@@ -1931,7 +1962,7 @@ fn render_metric(
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.border)),
+                .border_style(border_style),
         ),
         area,
     );
@@ -2051,7 +2082,7 @@ fn render_organization(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: 
             area,
         );
     } else {
-        let focused = app.content_focused && app.mode != AppMode::WorkspaceSearch;
+        let focused = app.content_focused;
         let list = List::new(items)
             .block(titled_block(title, Borders::TOP, focused, theme))
             .style(Style::default().fg(theme.text))
@@ -3418,7 +3449,7 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Them
         );
         workspace_list_item_for(lines, index, selected, theme)
     });
-    let focused = app.content_focused && app.mode != AppMode::WorkspaceSearch;
+    let focused = app.content_focused;
     let list = List::new(items)
         .block(titled_block(
             format!(" {} PAPERS ", papers.len()),
@@ -3484,7 +3515,7 @@ fn render_reading_queue(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme:
         );
         workspace_list_item_for(lines, index, selected, theme)
     });
-    let focused = app.content_focused && app.mode != AppMode::WorkspaceSearch;
+    let focused = app.content_focused;
     let list = List::new(items)
         .block(titled_block(
             format!(" {} PAPERS ", papers.len()),
@@ -3602,7 +3633,7 @@ fn render_downloads(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
 
         workspace_list_item_for(lines, index, selected, theme)
     });
-    let focused = app.content_focused && app.mode != AppMode::WorkspaceSearch;
+    let focused = app.content_focused;
     let list = List::new(items)
         .block(titled_block(
             " DOWNLOAD MANAGER ",
@@ -3696,11 +3727,13 @@ fn render_discover_inputs(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(if app.mode == AppMode::Search {
-                        theme.accent
+                    .border_style(if app.content_focused {
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD)
                     } else {
-                        theme.border
-                    })),
+                        Style::default().fg(theme.border)
+                    }),
             ),
         inputs[0],
     );
@@ -3721,17 +3754,15 @@ fn render_discover_inputs(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &
         frame.render_widget(
             Paragraph::new(format!("> {filter}"))
                 .style(filter_style)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(
-                            if app.mode == AppMode::DiscoverFilter {
-                                theme.accent
-                            } else {
-                                theme.border
-                            },
-                        )),
-                ),
+                .block(Block::default().borders(Borders::ALL).border_style(
+                    if app.content_focused {
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme.border)
+                    },
+                )),
             inputs[1],
         );
     }
@@ -3897,8 +3928,7 @@ fn render_search_results(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme
 
             workspace_list_item_for(lines, index, selected, theme)
         });
-    let focused =
-        app.content_focused && !matches!(app.mode, AppMode::Search | AppMode::DiscoverFilter);
+    let focused = app.content_focused;
     let list = List::new(items)
         .block(titled_block(
             format!(
@@ -4124,7 +4154,13 @@ fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Th
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.border)),
+                .border_style(if app.content_focused {
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.border)
+                }),
         )
         .alignment(Alignment::Center);
         frame.render_widget(card, *area);
@@ -4250,12 +4286,12 @@ fn render_dashboard_details(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
     let activity = Paragraph::new(activity_lines).block(titled_block(
         " RECENT ACTIVITY ",
         Borders::ALL,
-        false,
+        app.content_focused,
         theme,
     ));
     frame.render_widget(activity, lower[0]);
     frame.render_widget(
-        titled_block(" STORAGE ", Borders::ALL, false, theme),
+        titled_block(" STORAGE ", Borders::ALL, app.content_focused, theme),
         lower[1],
     );
     let storage = lower[1].inner(ratatui::layout::Margin {
@@ -5222,11 +5258,11 @@ fn centered(width: u16, height: u16, area: Rect) -> Rect {
 fn render_credits(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
     let chunks =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
-    render_credits_about(frame, chunks[0], theme);
+    render_credits_about(frame, chunks[0], app.content_focused, theme);
     render_credits_links(frame, chunks[1], app, theme);
 }
 
-fn render_credits_about(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+fn render_credits_about(frame: &mut Frame<'_>, area: Rect, focused: bool, theme: &Theme) {
     let mut left_lines = credits_overview_lines(theme);
     left_lines.extend(credits_technology_lines(theme));
     let block_bg = if matches!(theme.background, ratatui::style::Color::Reset) {
@@ -5237,7 +5273,7 @@ fn render_credits_about(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
 
     let left_para = Paragraph::new(left_lines)
         .block(
-            titled_block(" ABOUT PAPR ", Borders::ALL, false, theme)
+            titled_block(" ABOUT PAPR ", Borders::ALL, focused, theme)
                 .style(Style::default().bg(block_bg)),
         )
         .wrap(Wrap { trim: false });
@@ -7090,6 +7126,155 @@ Image: ![plot](plot.png)[^1]
         assert!(text.contains("Local Search"));
         assert!(!text.contains("Sort (s)"));
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_workspace_borders_highlight_when_focused_and_restore_when_unfocused()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let theme = Theme::load("nord")?;
+        for page in [
+            Page::Dashboard,
+            Page::ReadingQueue,
+            Page::Statistics,
+            Page::History,
+            Page::Library,
+            Page::Credits,
+            Page::Settings,
+        ] {
+            for content_focused in [true, false] {
+                let mut app = App {
+                    page,
+                    content_focused,
+                    ..App::default()
+                };
+                let backend = TestBackend::new(110, 30);
+                let mut terminal = Terminal::new(backend)?;
+                terminal.draw(|frame| render(frame, &mut app, &theme))?;
+                let buffer = terminal.backend().buffer();
+
+                // 1. Navigation border at (0, 3)
+                let nav_border = &buffer[(0, 3)];
+                if content_focused {
+                    assert_eq!(
+                        nav_border.fg, theme.border,
+                        "Navigation border should be theme.border when content is focused on {page:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        nav_border.fg, theme.accent,
+                        "Navigation border should be theme.accent when sidebar is focused on {page:?}"
+                    );
+                }
+
+                // 2. Workspace outer border at (22, 3)
+                let ws_border = &buffer[(22, 3)];
+                if content_focused {
+                    assert_eq!(
+                        ws_border.fg, theme.accent,
+                        "Workspace outer border should be theme.accent when focused on {page:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        ws_border.fg, theme.border,
+                        "Workspace outer border should be theme.border when unfocused on {page:?}"
+                    );
+                }
+
+                // 3. Nested card/section borders depending on page
+                match page {
+                    Page::Dashboard => {
+                        // Stat card border at (24, 6)
+                        let card_border = &buffer[(24, 6)];
+                        let expected = if content_focused {
+                            theme.accent
+                        } else {
+                            theme.border
+                        };
+                        assert_eq!(
+                            card_border.fg, expected,
+                            "Dashboard stat card border should match focus state (focused: {content_focused})"
+                        );
+                    }
+                    Page::Statistics => {
+                        // Top metric card border at (24, 4)
+                        let metric_border = &buffer[(24, 4)];
+                        let expected = if content_focused {
+                            theme.accent
+                        } else {
+                            theme.border
+                        };
+                        assert_eq!(
+                            metric_border.fg, expected,
+                            "Statistics metric card border should match focus state (focused: {content_focused})"
+                        );
+                    }
+                    Page::ReadingQueue => {
+                        // Search bar border at (24, 4)
+                        let search_border = &buffer[(24, 4)];
+                        let expected = if content_focused {
+                            theme.accent
+                        } else {
+                            theme.border
+                        };
+                        assert_eq!(
+                            search_border.fg, expected,
+                            "ReadingQueue search border should match focus state (focused: {content_focused})"
+                        );
+                    }
+                    Page::History => {
+                        // History list section border: title ends around x=56, so x=70 is a horizontal border line '─'
+                        let history_border = &buffer[(70, 4)];
+                        let expected = if content_focused {
+                            theme.accent
+                        } else {
+                            theme.border
+                        };
+                        assert_eq!(
+                            history_border.fg, expected,
+                            "History section border should match focus state (focused: {content_focused})"
+                        );
+                    }
+                    Page::Library => {
+                        let search_border = &buffer[(24, 4)];
+                        let expected = if content_focused {
+                            theme.accent
+                        } else {
+                            theme.border
+                        };
+                        assert_eq!(
+                            search_border.fg, expected,
+                            "Library search border should match focus state (focused: {content_focused})"
+                        );
+                    }
+                    Page::Credits => {
+                        let about_border = &buffer[(24, 4)];
+                        let expected = if content_focused {
+                            theme.accent
+                        } else {
+                            theme.border
+                        };
+                        assert_eq!(
+                            about_border.fg, expected,
+                            "Credits ABOUT PAPR border should match focus state (focused: {content_focused})"
+                        );
+                    }
+                    Page::Settings => {
+                        let divider = &buffer[(24, 5)];
+                        let expected = if content_focused {
+                            theme.accent
+                        } else {
+                            theme.border
+                        };
+                        assert_eq!(
+                            divider.fg, expected,
+                            "Settings tab divider should match focus state (focused: {content_focused})"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
         Ok(())
     }
 }

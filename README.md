@@ -112,6 +112,8 @@ Papr was written in Rust because an academic research workspace needs to be fast
   ```sh
   xcode-select --install
   brew install poppler basictex git
+  sudo tlmgr update --self
+  sudo tlmgr install latexmk
   ```
 
 If you want to use kitty with Papr’s terminal PDF viewer, install it separately and register it as the terminal launcher where your OS supports that:
@@ -563,9 +565,7 @@ Papr is split into two core crates:
 ```sh
 papr                         # Start the TUI
 papr paths                   # Print where configs, databases, and folders reside
-papr index                   # Scan library folders and index new files
-papr completions <SHELL>     # Generate completions (bash, zsh, fish)
-papr plugins                 # Check discovered plugins and validation diagnostics
+papr download <ARXIV-ID>     # Download an arXiv paper by ID, URL, or Markdown link
 ```
 
 ---

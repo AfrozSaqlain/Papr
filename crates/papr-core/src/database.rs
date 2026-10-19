@@ -2659,7 +2659,10 @@ mod tests {
             library_paper.arxiv_id.as_deref(),
             Some("https://arxiv.org/abs/2602.00004")
         );
-        assert_eq!(library_paper.doi.as_deref(), Some("10.1000/abstract-lifecycle"));
+        assert_eq!(
+            library_paper.doi.as_deref(),
+            Some("10.1000/abstract-lifecycle")
+        );
         assert_eq!(library_paper.title, "Enriched title");
         let journal: Option<String> = database.connection.query_row(
             "SELECT journal FROM papers WHERE id = ?1",

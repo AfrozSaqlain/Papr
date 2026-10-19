@@ -28,8 +28,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use chrono::{Duration, Local, NaiveDate};
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::{Shell, generate};
+use clap::{Parser, Subcommand};
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
@@ -47,7 +46,8 @@ use papr_core::{
     MetadataCandidate, MetadataEnrichmentOutcome, MetadataEnrichmentService, PaperNote, Paths,
     PluginHost, Project, ProjectBuildDiagnostic, ProjectDiagnosticSeverity, ProjectManager,
     RankedCandidatePageRequest, RemotePaper, TypstCompileResult, TypstCompiler, canonicalize_path,
-    move_pdf_file, parse_latex_diagnostics, validate_collection_name,
+    move_pdf_file, parse_arxiv_id, parse_latex_diagnostics, sanitize_download_filename_component,
+    validate_collection_name,
 };
 use serde::{Deserialize, Serialize};
 use terminal_input::{
@@ -80,15 +80,12 @@ struct Cli {
 enum CliCommand {
     /// Print resolved configuration and data paths.
     Paths,
-    /// Scan configured library folders and update the catalog.
-    Index,
-    /// Generate completion definitions for a supported shell.
-    Completions {
-        /// Shell syntax to generate.
-        shell: Shell,
+    /// Download an arXiv paper by ID, URL, or Markdown link and add it to the library.
+    Download {
+        /// arXiv identifier, URL, or Markdown link (e.g. `2312.12345`, `<https://arxiv.org/abs/...>`, or `[title](url)`).
+        #[arg(value_name = "ARXIV-ID")]
+        target: String,
     },
-    /// List discovered plugins and validation diagnostics.
-    Plugins,
     /// Invoke an enabled plugin event using the JSON protocol.
     Plugin {
         /// Enabled plugin identifier.
@@ -121,17 +118,12 @@ fn main() -> Result<()> {
 }
 
 async fn run_app(cli: Cli) -> Result<()> {
-    if let Some(CliCommand::Completions { shell }) = &cli.command {
-        generate(*shell, &mut Cli::command(), "papr", &mut std::io::stdout());
-        return Ok(());
-    }
     let paths = Paths::discover().context("failed to resolve papr directories")?;
+    let config = Config::load_or_create(&paths).context("failed to load configuration")?;
     if matches!(&cli.command, Some(CliCommand::Paths)) {
-        print_application_paths(&paths);
+        print_application_paths(&paths, &config);
         return Ok(());
     }
-
-    let config = Config::load_or_create(&paths).context("failed to load configuration")?;
     let project_manager = ProjectManager::new(config.projects_directory(&paths))
         .context("failed to initialize projects directory")?;
     let plugin_host = PluginHost::discover(&paths.plugins_dir, &config.enabled_plugins)
@@ -139,13 +131,12 @@ async fn run_app(cli: Cli) -> Result<()> {
     if handle_plugin_cli(cli.command.as_ref(), &plugin_host).await? {
         return Ok(());
     }
+    if let Some(CliCommand::Download { target }) = &cli.command {
+        return handle_download_cli(target, &paths, &config, &plugin_host).await;
+    }
     let theme = Theme::load_with_transparency(&config.theme, config.transparent_background)
         .context("failed to load theme")?;
     let database = Database::open(&paths.database_file).context("failed to open database")?;
-    if matches!(&cli.command, Some(CliCommand::Index)) {
-        index_library(&config, &paths, &database)?;
-        return Ok(());
-    }
     let arxiv = ArxivClient::new().context("failed to initialize arXiv client")?;
     let (today_sender, today_receiver) = mpsc::unbounded_channel();
     let dashboard_startup = prepare_dashboard_feed(&config, &database, &arxiv, &today_sender)?;
@@ -282,34 +273,35 @@ fn prepare_dashboard_feed(
     })
 }
 
-fn print_application_paths(paths: &Paths) {
-    println!("config: {}", paths.config_file.display());
-    println!("database: {}", paths.database_file.display());
-    println!("downloads: {}", paths.downloads_dir.display());
-    println!("plugins: {}", paths.plugins_dir.display());
-    println!("projects: {}", paths.projects_dir.display());
+fn format_application_paths(paths: &Paths, config: &Config) -> String {
+    let downloads = config
+        .download_path
+        .as_ref()
+        .unwrap_or(&paths.downloads_dir);
+    let projects = config.projects_directory(paths);
+    let library = if config.library_folders.is_empty() {
+        paths.downloads_dir.display().to_string()
+    } else {
+        config
+            .library_folders
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    format!(
+        "config: {}\ndatabase: {}\ndownloads: {}\nlibrary: {library}\nplugins: {}\nprojects: {}",
+        paths.config_file.display(),
+        paths.database_file.display(),
+        downloads.display(),
+        paths.plugins_dir.display(),
+        projects.display(),
+    )
 }
 
-fn index_library(config: &Config, paths: &Paths, database: &Database) -> Result<()> {
-    let download_dir = config
-        .download_path
-        .clone()
-        .unwrap_or_else(|| paths.downloads_dir.clone());
-    let mut roots = config.library_folders.clone();
-    let download_dir = std::fs::canonicalize(&download_dir).unwrap_or(download_dir);
-    if !roots.iter().any(|root| {
-        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
-        download_dir.starts_with(root)
-    }) {
-        roots.push(download_dir);
-    }
-    let pdfs = LibraryIndexer::scan(&roots);
-    let mut imported = 0_usize;
-    for pdf in &pdfs {
-        imported += usize::from(database.import_pdf(pdf)?);
-    }
-    println!("indexed: {}, imported: {}", pdfs.len(), imported);
-    Ok(())
+fn print_application_paths(paths: &Paths, config: &Config) {
+    println!("{}", format_application_paths(paths, config));
 }
 
 struct LibraryLocations {
@@ -370,30 +362,212 @@ fn load_initial_dashboard(
     Ok((dashboard, papers))
 }
 
-async fn handle_plugin_cli(command: Option<&CliCommand>, plugin_host: &PluginHost) -> Result<bool> {
-    if matches!(command, Some(CliCommand::Plugins)) {
-        for plugin in plugin_host.plugins() {
-            println!(
-                "{}\t{}\t{}\t{}",
-                plugin.id,
-                plugin.version,
-                if plugin.enabled {
-                    "enabled"
-                } else {
-                    "disabled"
-                },
-                plugin.name
-            );
+#[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
+async fn handle_download_cli(
+    target: &str,
+    paths: &Paths,
+    config: &Config,
+    plugin_host: &PluginHost,
+) -> Result<()> {
+    let Some(arxiv_id) = parse_arxiv_id(target) else {
+        anyhow::bail!("Invalid arXiv identifier, URL, or Markdown link: '{target}'");
+    };
+
+    let mut database = Database::open(&paths.database_file).context("failed to open database")?;
+
+    // Check if the paper already exists in library with an existing PDF file.
+    let library_papers = database
+        .library_papers()
+        .context("failed to query library")?;
+    if let Some(existing) = library_papers.iter().find(|local| {
+        let file_exists = local
+            .pdf_path
+            .as_deref()
+            .is_some_and(|p| std::path::Path::new(p).is_file());
+        if !file_exists {
+            return false;
         }
-        for diagnostic in plugin_host.diagnostics() {
-            eprintln!(
-                "invalid\t{}\t{}",
-                diagnostic.path.display(),
-                diagnostic.message
-            );
+        local.arxiv_id.as_deref() == Some(arxiv_id.as_str())
+    }) {
+        println!("Paper already exists in library:");
+        println!("  Title: {}", existing.title);
+        if let Some(path) = &existing.pdf_path {
+            println!("  Path:  {path}");
         }
-        return Ok(true);
+        return Ok(());
     }
+
+    println!("Fetching metadata for arXiv ID: {arxiv_id}...");
+    let arxiv = ArxivClient::new().context("failed to initialize arXiv client")?;
+    let paper = arxiv
+        .get_by_id(&arxiv_id)
+        .await
+        .context("failed to fetch paper metadata from arXiv")?;
+
+    let Some(paper) = paper else {
+        anyhow::bail!("No arXiv paper found for identifier '{arxiv_id}'");
+    };
+
+    if let Some(existing) = library_papers.iter().find(|local| {
+        let file_exists = local
+            .pdf_path
+            .as_deref()
+            .is_some_and(|p| std::path::Path::new(p).is_file());
+        if !file_exists {
+            return false;
+        }
+        if local.arxiv_id.as_deref() == Some(paper.id.as_str())
+            || local.arxiv_id.as_deref() == Some(arxiv_id.as_str())
+        {
+            return true;
+        }
+        if let (Some(local_doi), Some(remote_doi)) = (&local.doi, &paper.doi)
+            && local_doi.eq_ignore_ascii_case(remote_doi)
+        {
+            return true;
+        }
+        local.title.eq_ignore_ascii_case(&paper.title)
+    }) {
+        println!("Paper already exists in library:");
+        println!("  Title: {}", existing.title);
+        if let Some(path) = &existing.pdf_path {
+            println!("  Path:  {path}");
+        }
+        return Ok(());
+    }
+
+    let Some(url) = paper.pdf_url.clone() else {
+        anyhow::bail!(
+            "arXiv metadata does not include a PDF URL for '{}'",
+            paper.title
+        );
+    };
+
+    let download_dir = config
+        .download_path
+        .clone()
+        .unwrap_or_else(|| paths.downloads_dir.clone());
+    std::fs::create_dir_all(&download_dir).context("failed to create download directory")?;
+    let download_dir = std::fs::canonicalize(&download_dir).unwrap_or(download_dir);
+
+    let sanitized_title = sanitize_download_filename_component(&paper.title);
+    let filename = if sanitized_title.is_empty() {
+        paper
+            .id
+            .rsplit('/')
+            .next()
+            .unwrap_or("paper")
+            .chars()
+            .map(|c| if c == '/' { '_' } else { c })
+            .collect()
+    } else {
+        sanitized_title
+    };
+    let destination = download_dir.join(format!("{filename}.pdf"));
+
+    let manager = DownloadManager::new().context("failed to initialize download manager")?;
+    let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
+    let id = paper.id.clone();
+    let dest_for_task = destination.clone();
+
+    println!("Downloading '{}'...", paper.title);
+    let download_task = tokio::spawn(async move {
+        manager
+            .download(&id, &url, &dest_for_task, &event_sender)
+            .await
+    });
+
+    let mut download_failed_error: Option<String> = None;
+    while let Some(event) = event_receiver.recv().await {
+        match event {
+            DownloadEvent::Started { total, .. } => {
+                if let Some(total) = total {
+                    let mb = total as f64 / 1_048_576.0;
+                    println!("Download started ({mb:.2} MB)...");
+                } else {
+                    println!("Download started...");
+                }
+            }
+            DownloadEvent::Progress { .. } => {}
+            DownloadEvent::Completed { path, .. } => {
+                let final_path = path.with_extension("");
+                if path.exists() {
+                    std::fs::rename(&path, &final_path)
+                        .context("failed to promote temporary download path")?;
+                }
+            }
+            DownloadEvent::Failed { error, .. } => {
+                download_failed_error = Some(error);
+            }
+        }
+    }
+
+    if let Some(error) = download_failed_error {
+        let temp_path = destination.with_extension("pdf.part");
+        let _ = std::fs::remove_file(&temp_path);
+        anyhow::bail!("Download failed: {error}");
+    }
+
+    match download_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            let temp_path = destination.with_extension("pdf.part");
+            let _ = std::fs::remove_file(&temp_path);
+            anyhow::bail!("Download failed: {err}");
+        }
+        Err(join_err) => {
+            let temp_path = destination.with_extension("pdf.part");
+            let _ = std::fs::remove_file(&temp_path);
+            anyhow::bail!("Download task failed: {join_err}");
+        }
+    }
+
+    let pdf = LibraryIndexer::inspect(&destination).context("failed to index downloaded PDF")?;
+    let paper_id = database
+        .attach_download(&paper, &pdf)
+        .context("failed to attach download to library database")?;
+    database.record_activity("downloaded", Some(paper_id), None)?;
+
+    let collection_roots = config
+        .library_folders
+        .iter()
+        .map(|root| std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
+        .collect::<Vec<_>>();
+    LibraryIngestionService::new(&database, &collection_roots).reconcile_paper(paper_id, &pdf)?;
+
+    for plugin in plugin_host.plugins() {
+        if !plugin.enabled {
+            continue;
+        }
+        let request = papr_core::PluginRequest::new(
+            "paper_downloaded",
+            serde_json::json!({
+                "paper_id": paper_id,
+                "paper": {
+                    "id": paper_id,
+                    "title": paper.title,
+                    "authors": paper.author_line(),
+                    "doi": paper.doi,
+                    "arxiv_id": paper.id,
+                    "pdf_path": destination.to_string_lossy(),
+                }
+            }),
+        );
+        let _ = plugin_host
+            .invoke(&plugin.id, &request, std::time::Duration::from_secs(5))
+            .await;
+    }
+
+    println!("Successfully downloaded and added to library:");
+    println!("  Title:     {}", paper.title);
+    println!("  arXiv ID:  {}", paper.id);
+    println!("  Authors:   {}", paper.author_line());
+    println!("  File:      {}", destination.display());
+
+    Ok(())
+}
+
+async fn handle_plugin_cli(command: Option<&CliCommand>, plugin_host: &PluginHost) -> Result<bool> {
     if let Some(CliCommand::Plugin { id, event, timeout }) = command {
         let response = plugin_host
             .invoke(
@@ -8533,16 +8707,16 @@ mod tests {
     use super::{
         Cli, CliCommand, ConfigFilesystemWatcher, PROJECT_EDITOR_PENDING_SEQUENCE_TIMEOUT,
         PaperTarget, TypstWorkerRequest, TypstWorkerResponse, UiAction, accept_project_completion,
-        build_config_editor_view, complete_terminal_command, create_project_file,
-        expire_project_editor_pending_sequence, handle_config_editor_insert_key,
-        handle_downloads_key, handle_key, handle_mouse, handle_paper_detail_key,
-        handle_project_citation_search_key, handle_project_exact_paste, insert_project_bibtex_text,
-        is_project_text_file, is_text_paste_shortcut, merge_enriched_remote_paper,
-        arxiv_page_url,
-        move_config_editor_page, paste_text_into_active_input, pdf_viewer_invocation,
-        project_tree_entries, refresh_downloads_from_dir, reload_config_editor_buffer,
-        run_terminal_command, should_open_generated_pdf, show_build_for_failed_compilation,
-        show_preview_after_successful_compilation, update_project_completions,
+        arxiv_page_url, build_config_editor_view, complete_terminal_command, create_project_file,
+        expire_project_editor_pending_sequence, format_application_paths,
+        handle_config_editor_insert_key, handle_downloads_key, handle_key, handle_mouse,
+        handle_paper_detail_key, handle_project_citation_search_key, handle_project_exact_paste,
+        insert_project_bibtex_text, is_project_text_file, is_text_paste_shortcut,
+        merge_enriched_remote_paper, move_config_editor_page, paste_text_into_active_input,
+        pdf_viewer_invocation, project_tree_entries, refresh_downloads_from_dir,
+        reload_config_editor_buffer, run_terminal_command, should_open_generated_pdf,
+        show_build_for_failed_compilation, show_preview_after_successful_compilation,
+        update_project_completions,
     };
 
     #[test]
@@ -8808,6 +8982,55 @@ mod tests {
             Some("https://doi.org/10.1145/3292500.3330701".into())
         );
         assert_eq!(arxiv_page_url("invalid-identifier"), None);
+    }
+
+    #[test]
+    fn test_format_application_paths_uses_configured_paths_and_defaults() {
+        use papr_core::Paths;
+        use std::path::PathBuf;
+
+        let paths = Paths {
+            config_file: PathBuf::from("/default/config.toml"),
+            database_file: PathBuf::from("/default/papr.db"),
+            downloads_dir: PathBuf::from("/default/papers"),
+            plugins_dir: PathBuf::from("/default/plugins"),
+            plugins_config_file: PathBuf::from("/default/plugins.toml"),
+            projects_dir: PathBuf::from("/default/projects"),
+        };
+
+        // Test with defaults (no custom paths)
+        let default_config = Config::default();
+        let default_output = format_application_paths(&paths, &default_config);
+        assert_eq!(
+            default_output,
+            "config: /default/config.toml\n\
+             database: /default/papr.db\n\
+             downloads: /default/papers\n\
+             library: /default/papers\n\
+             plugins: /default/plugins\n\
+             projects: /default/projects"
+        );
+
+        // Test with custom paths in config
+        let custom_config = Config {
+            download_path: Some(PathBuf::from("/custom/downloads")),
+            projects_directory: Some(PathBuf::from("/custom/projects")),
+            library_folders: vec![
+                PathBuf::from("/custom/library1"),
+                PathBuf::from("/custom/library2"),
+            ],
+            ..Config::default()
+        };
+        let custom_output = format_application_paths(&paths, &custom_config);
+        assert_eq!(
+            custom_output,
+            "config: /default/config.toml\n\
+             database: /default/papr.db\n\
+             downloads: /custom/downloads\n\
+             library: /custom/library1, /custom/library2\n\
+             plugins: /default/plugins\n\
+             projects: /custom/projects"
+        );
     }
 
     #[test]
@@ -12185,5 +12408,106 @@ print(json.dumps({"actions": actions}))
                 .collect::<Vec<_>>(),
             vec![2, 1]
         );
+    }
+
+    #[tokio::test]
+    async fn test_cli_subcommands_updated() {
+        use clap::Parser;
+
+        // Verify `papr download <target>` parses properly
+        let cli = Cli::try_parse_from(["papr", "download", "2101.12345"]).unwrap();
+        match cli.command {
+            Some(CliCommand::Download { target }) => assert_eq!(target, "2101.12345"),
+            _ => panic!("expected Download command"),
+        }
+
+        let cli =
+            Cli::try_parse_from(["papr", "download", "https://arxiv.org/abs/2101.12345"]).unwrap();
+        match cli.command {
+            Some(CliCommand::Download { target }) => {
+                assert_eq!(target, "https://arxiv.org/abs/2101.12345")
+            }
+            _ => panic!("expected Download command"),
+        }
+
+        // Verify removed subcommands are no longer accepted
+        assert!(Cli::try_parse_from(["papr", "index"]).is_err());
+        assert!(Cli::try_parse_from(["papr", "completions", "bash"]).is_err());
+        assert!(Cli::try_parse_from(["papr", "plugins"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handle_download_cli_rejects_invalid_target() {
+        let temp = std::env::temp_dir().join(format!("papr-dl-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp);
+        let paths = papr_core::Paths {
+            config_file: temp.join("config.toml"),
+            database_file: temp.join("papr.db"),
+            downloads_dir: temp.join("downloads"),
+            plugins_dir: temp.join("plugins"),
+            plugins_config_file: temp.join("plugins.toml"),
+            projects_dir: temp.join("projects"),
+        };
+        let config = Config::default();
+        let plugin_host = papr_core::PluginHost::discover(&paths.plugins_dir, &[]).unwrap();
+
+        let err = super::handle_download_cli("not-a-valid-arxiv-id", &paths, &config, &plugin_host)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Invalid arXiv identifier"));
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[tokio::test]
+    async fn test_handle_download_cli_duplicate_skipped() {
+        let temp = std::env::temp_dir().join(format!("papr-dl-dup-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp);
+        let downloads = temp.join("downloads");
+        let _ = std::fs::create_dir_all(&downloads);
+        let pdf_file = downloads.join("existing_paper.pdf");
+        std::fs::write(&pdf_file, b"%PDF-1.7 dummy content").unwrap();
+
+        let paths = papr_core::Paths {
+            config_file: temp.join("config.toml"),
+            database_file: temp.join("papr.db"),
+            downloads_dir: downloads,
+            plugins_dir: temp.join("plugins"),
+            plugins_config_file: temp.join("plugins.toml"),
+            projects_dir: temp.join("projects"),
+        };
+        let mut database = Database::open(&paths.database_file).unwrap();
+        let pdf = papr_core::LibraryIndexer::inspect(&pdf_file).unwrap();
+        let remote = RemotePaper {
+            id: "2101.12345".into(),
+            title: "Existing Paper".into(),
+            authors: vec!["Author One".into()],
+            abstract_text: "Abstract text".into(),
+            published: chrono::Utc::now(),
+            updated: chrono::Utc::now(),
+            categories: vec!["cs.AI".into()],
+            pdf_url: Some("https://arxiv.org/pdf/2101.12345.pdf".into()),
+            doi: None,
+            journal_ref: None,
+        };
+        database.attach_download(&remote, &pdf).unwrap();
+
+        let config = Config::default();
+        let plugin_host = papr_core::PluginHost::discover(&paths.plugins_dir, &[]).unwrap();
+
+        // Should detect duplicate by arxiv_id and return Ok without downloading
+        let res = super::handle_download_cli("2101.12345", &paths, &config, &plugin_host).await;
+        assert!(res.is_ok());
+
+        // Should also detect duplicate when given full URL or markdown link
+        let res_url = super::handle_download_cli(
+            "https://arxiv.org/abs/2101.12345",
+            &paths,
+            &config,
+            &plugin_host,
+        )
+        .await;
+        assert!(res_url.is_ok());
+
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }

@@ -48,8 +48,7 @@ in the request context to a Group).
 
 Papr currently sends lifecycle events named paper_imported, paper_downloaded,
 and paper_opened for local papers. The built-in auto-tagger listens to the
-first two. A bundle is only executable when its ID appears in enabled_plugins;
-`papr plugins` lists discovered bundles and validation diagnostics. `papr
+first two. A bundle is only executable when its ID appears in enabled_plugins; `papr
 plugin <ID> <EVENT> [--timeout <seconds>]` invokes an enabled plugin manually
 with an empty JSON context.
 

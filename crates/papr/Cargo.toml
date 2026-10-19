@@ -22,7 +22,6 @@ anyhow.workspace = true
 arboard.workspace = true
 chrono.workspace = true
 clap.workspace = true
-clap_complete.workspace = true
 crossterm.workspace = true
 flate2.workspace = true
 iana-time-zone.workspace = true
