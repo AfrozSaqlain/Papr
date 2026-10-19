@@ -1295,6 +1295,8 @@ pub struct App {
     pub collection_papers_map: std::collections::HashMap<i64, Vec<i64>>,
     /// Most recently opened collection, used to restore its paper cursor.
     pub last_opened_collection_id: Option<i64>,
+    /// Sorting order for displayed collection papers.
+    pub collection_sort: PaperSortOrder,
     /// Active delete confirmation state.
     pub delete_confirmation: Option<DeletionTarget>,
     /// Bookmark summaries.
@@ -1427,6 +1429,7 @@ impl Default for App {
             collection_paper_scroll: 0,
             collection_papers_map: std::collections::HashMap::new(),
             last_opened_collection_id: None,
+            collection_sort: PaperSortOrder::default(),
             delete_confirmation: None,
             bookmarks: Vec::new(),
             bookmark_selected: 0,
@@ -1776,7 +1779,8 @@ impl App {
     /// Get the active collection's papers filtered by the workspace search query.
     #[must_use]
     pub fn filtered_collection_papers(&self) -> Vec<&LibraryPaper> {
-        self.collection_papers
+        let mut papers: Vec<&LibraryPaper> = self
+            .collection_papers
             .iter()
             .filter(|p| {
                 Self::matches_query(
@@ -1787,7 +1791,9 @@ impl App {
                     p.arxiv_id.as_deref(),
                 )
             })
-            .collect()
+            .collect();
+        self.collection_sort.apply(&mut papers);
+        papers
     }
 
     /// Get the authors filtered by the workspace search query.
@@ -1825,6 +1831,7 @@ impl App {
         match self.page {
             Page::Library => Some(self.library.sort),
             Page::Authors if self.active_author.is_some() => Some(self.author_sort),
+            Page::Collections if self.active_collection.is_some() => Some(self.collection_sort),
             _ => None,
         }
     }
@@ -1842,6 +1849,11 @@ impl App {
                 self.author_paper_selected = 0;
                 self.author_paper_scroll = 0;
             }
+            Page::Collections if self.active_collection.is_some() => {
+                self.collection_sort = self.collection_sort.next();
+                self.collection_paper_selected = 0;
+                self.collection_paper_scroll = 0;
+            }
             _ => {}
         }
     }
@@ -1858,6 +1870,11 @@ impl App {
                 self.author_sort = self.author_sort.prev();
                 self.author_paper_selected = 0;
                 self.author_paper_scroll = 0;
+            }
+            Page::Collections if self.active_collection.is_some() => {
+                self.collection_sort = self.collection_sort.prev();
+                self.collection_paper_selected = 0;
+                self.collection_paper_scroll = 0;
             }
             _ => {}
         }
@@ -2613,6 +2630,24 @@ mod tests {
 
         app.cycle_current_sort_order();
         assert_eq!(app.author_sort, PaperSortOrder::LatestFirst);
+        assert_eq!(app.current_sort_order(), Some(PaperSortOrder::LatestFirst));
+
+        // Collections (Groups) page - main page (active_collection = None): no sort order
+        app.page = Page::Collections;
+        app.active_collection = None;
+        assert_eq!(app.current_sort_order(), None);
+
+        // Inside a collection (active_collection is Some): sort order active
+        app.active_collection = Some(papr_core::models::CollectionSummary {
+            id: 1,
+            name: "Physics".into(),
+            paper_count: 3,
+            folder_path: None,
+        });
+        assert_eq!(app.current_sort_order(), Some(PaperSortOrder::Default));
+
+        app.cycle_current_sort_order();
+        assert_eq!(app.collection_sort, PaperSortOrder::LatestFirst);
         assert_eq!(app.current_sort_order(), Some(PaperSortOrder::LatestFirst));
 
         // Other pages do not have sort order

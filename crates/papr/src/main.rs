@@ -12016,7 +12016,7 @@ print(json.dumps({"actions": actions}))
         assert_eq!(app.author_sort, PaperSortOrder::Default);
 
         // Go inside an author
-        app.author_papers = vec![p_old, p_new];
+        app.author_papers = vec![p_old.clone(), p_new.clone()];
         app.active_author = Some(papr_core::models::AuthorSummary {
             id: 1,
             name: "Feynman".into(),
@@ -12039,6 +12039,50 @@ print(json.dumps({"actions": actions}))
         assert_eq!(app.author_sort, PaperSortOrder::LatestFirst);
         assert_eq!(
             app.filtered_author_papers()
+                .iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+
+        // 7. Test Groups (Collections) workspace
+        app.page = Page::Collections;
+        app.mode = AppMode::Normal;
+        app.active_collection = None;
+        assert_eq!(app.current_sort_order(), None);
+
+        // Pressing 's' on main Groups page has no effect
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.collection_sort, PaperSortOrder::Default);
+
+        // Go inside a group
+        app.collection_papers = vec![p_old, p_new];
+        app.active_collection = Some(papr_core::models::CollectionSummary {
+            id: 1,
+            name: "Physics".into(),
+            paper_count: 2,
+            folder_path: None,
+        });
+        assert_eq!(app.collection_sort, PaperSortOrder::Default);
+        assert_eq!(
+            app.filtered_collection_papers()
+                .iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        // Press 's' when inside a group
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.collection_sort, PaperSortOrder::LatestFirst);
+        assert_eq!(
+            app.filtered_collection_papers()
                 .iter()
                 .map(|p| p.id)
                 .collect::<Vec<_>>(),

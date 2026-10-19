@@ -1540,7 +1540,7 @@ fn render_collection_papers(frame: &mut Frame<'_>, area: Rect, app: &mut App, th
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "   h/Esc back   Enter/Right/l open PDF",
+                "   h/Esc back   s sort   Enter/Right/l open PDF",
                 Style::default().fg(theme.muted),
             ),
         ])),
@@ -5088,11 +5088,9 @@ fn general_help_sections() -> Vec<HelpSection> {
             ],
         },
         HelpSection {
-            title: "LIRARY & AUTHORS",
+            title: "LIBRARY, GROUPS & AUTHORS",
             scope: &[],
-            entries: &[
-                ("s", "sort papers"),
-            ],
+            entries: &[("s", "sort papers")],
         },
         HelpSection {
             title: "NOTES & PDF VIEWER",
@@ -7063,7 +7061,29 @@ Image: ![plot](plot.png)[^1]
         assert!(text.contains("Sort (s)"));
         assert!(text.contains("Latest first"));
 
-        // 6. ReadingQueue workspace: no sort box
+        // 6. Groups (Collections) workspace main page (groups list): no sort box
+        app.page = Page::Collections;
+        app.collection_sort = PaperSortOrder::LatestFirst;
+        app.active_collection = None;
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let text = rendered_text(&terminal);
+        assert!(text.contains("Local Search"));
+        assert!(!text.contains("Sort (s)"));
+
+        // 7. Inside a group in Groups workspace: sort box appears
+        app.active_collection = Some(papr_core::models::CollectionSummary {
+            id: 1,
+            name: "Physics".into(),
+            paper_count: 3,
+            folder_path: None,
+        });
+        terminal.draw(|frame| render(frame, &mut app, &theme))?;
+        let text = rendered_text(&terminal);
+        assert!(text.contains("Local Search"));
+        assert!(text.contains("Sort (s)"));
+        assert!(text.contains("Latest first"));
+
+        // 8. ReadingQueue workspace: no sort box
         app.page = Page::ReadingQueue;
         terminal.draw(|frame| render(frame, &mut app, &theme))?;
         let text = rendered_text(&terminal);

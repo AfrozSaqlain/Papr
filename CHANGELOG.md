@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Transparent Mode**: Added support for transparent UI mode to enhance the application's visual appearance and aesthetics.
-- **Paper Sorting**: Added sorting options in the Library and Authors sections, allowing papers to be ordered by newest first, oldest first, or download date.
+- **Paper Sorting**: Added sorting options in the Library, Groups, and Authors sections, allowing papers to be ordered by newest first, oldest first, or download date.
 - **Publication Dates**: Added publication dates to paper listings, making it easier to identify and browse papers based on when they were published.
 
 ### Changed
