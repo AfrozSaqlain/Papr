@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Symlinked Path Reconciliation**: Resolved collection reconciliation and path comparisons on platforms with symlinked library paths (e.g., macOS `/var` -> `/private/var`).
+- **Online Paper Links**: Fixed an issue where pressing 'o' to view papers online failed after metadata enrichment replaced arXiv identifiers with DOIs, and added automatic fallback to DOI URLs.
 
 ## [0.1.1] - 2026-08-11
 

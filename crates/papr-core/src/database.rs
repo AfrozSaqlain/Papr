@@ -2214,25 +2214,32 @@ impl Database {
         paper_id: i64,
         paper: &RemotePaper,
     ) -> Result<(), DatabaseError> {
+        let is_arxiv = crate::api::arxiv::parse_arxiv_id(&paper.id).is_some()
+            || paper.id.starts_with("http://arxiv.org/")
+            || paper.id.starts_with("https://arxiv.org/");
         let transaction = self.connection.transaction()?;
-        let existing_id: Option<i64> = transaction
-            .query_row(
-                "SELECT id FROM papers WHERE arxiv_id = ?1 LIMIT 1",
-                params![paper.id],
-                |row| row.get(0),
-            )
-            .optional()?;
+        let existing_id: Option<i64> = if is_arxiv {
+            transaction
+                .query_row(
+                    "SELECT id FROM papers WHERE arxiv_id = ?1 LIMIT 1",
+                    params![paper.id],
+                    |row| row.get(0),
+                )
+                .optional()?
+        } else {
+            None
+        };
 
         let target_id = if let Some(existing) = existing_id {
             if existing == paper_id {
                 transaction.execute(
                     "UPDATE papers SET title = ?1,
                      abstract = CASE WHEN ?2 IS NULL OR trim(?2) = '' THEN abstract ELSE ?2 END,
-                     arxiv_id = ?3,
-                     doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6, journal = COALESCE(?7, journal)
-                     WHERE id = ?8",
+                     arxiv_id = CASE WHEN ?3 THEN ?4 ELSE arxiv_id END,
+                     doi = COALESCE(?5, doi), published_at = ?6, updated_at = ?7, journal = COALESCE(?8, journal)
+                     WHERE id = ?9",
                     params![
-                        paper.title, paper.abstract_text, paper.id, paper.doi,
+                        paper.title, paper.abstract_text, is_arxiv, paper.id, paper.doi,
                         paper.published.to_rfc3339(), paper.updated.to_rfc3339(), paper.journal_ref, paper_id
                     ],
                 )?;
@@ -2297,13 +2304,13 @@ impl Database {
             }
         } else {
             transaction.execute(
-            "UPDATE papers SET title = ?1,
-             abstract = CASE WHEN ?2 IS NULL OR trim(?2) = '' THEN abstract ELSE ?2 END,
-             arxiv_id = ?3,
-                 doi = COALESCE(?4, doi), published_at = ?5, updated_at = ?6, journal = COALESCE(?7, journal)
-                 WHERE id = ?8",
+                "UPDATE papers SET title = ?1,
+                 abstract = CASE WHEN ?2 IS NULL OR trim(?2) = '' THEN abstract ELSE ?2 END,
+                 arxiv_id = CASE WHEN ?3 THEN ?4 ELSE arxiv_id END,
+                 doi = COALESCE(?5, doi), published_at = ?6, updated_at = ?7, journal = COALESCE(?8, journal)
+                 WHERE id = ?9",
                 params![
-                    paper.title, paper.abstract_text, paper.id, paper.doi,
+                    paper.title, paper.abstract_text, is_arxiv, paper.id, paper.doi,
                     paper.published.to_rfc3339(), paper.updated.to_rfc3339(), paper.journal_ref, paper_id
                 ],
             )?;
@@ -2603,6 +2610,63 @@ mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(abstract_text, "Abstract fetched from arXiv.");
+        Ok(())
+    }
+
+    #[test]
+    fn crossref_doi_does_not_overwrite_stored_arxiv_id() -> Result<(), Box<dyn std::error::Error>> {
+        let mut database = Database::in_memory()?;
+        let timestamp = Utc
+            .with_ymd_and_hms(2026, 2, 1, 0, 0, 0)
+            .single()
+            .ok_or("invalid test timestamp")?;
+        let pdf = imported_pdf("arxiv-enrich.pdf");
+        let arxiv_paper = RemotePaper {
+            id: "https://arxiv.org/abs/2602.00004".into(),
+            title: "Original title".into(),
+            authors: vec!["Researcher".into()],
+            abstract_text: "Abstract fetched from arXiv.".into(),
+            published: timestamp,
+            updated: timestamp,
+            categories: vec![],
+            pdf_url: None,
+            doi: Some("10.1000/abstract-lifecycle".into()),
+            journal_ref: None,
+        };
+
+        let paper_id = database.attach_download(&arxiv_paper, &pdf)?;
+
+        // Now simulate Crossref returning enriched metadata where `id` is the DOI
+        let crossref_paper = RemotePaper {
+            id: "10.1000/abstract-lifecycle".into(),
+            title: "Enriched title".into(),
+            authors: vec!["Researcher".into()],
+            abstract_text: "".into(),
+            published: timestamp,
+            updated: timestamp,
+            categories: vec![],
+            pdf_url: None,
+            doi: Some("10.1000/abstract-lifecycle".into()),
+            journal_ref: Some("Nature".into()),
+        };
+
+        database.apply_arxiv_metadata(paper_id, &crossref_paper)?;
+
+        let library_paper = database
+            .library_paper_by_id(paper_id)?
+            .ok_or("missing paper")?;
+        assert_eq!(
+            library_paper.arxiv_id.as_deref(),
+            Some("https://arxiv.org/abs/2602.00004")
+        );
+        assert_eq!(library_paper.doi.as_deref(), Some("10.1000/abstract-lifecycle"));
+        assert_eq!(library_paper.title, "Enriched title");
+        let journal: Option<String> = database.connection.query_row(
+            "SELECT journal FROM papers WHERE id = ?1",
+            [paper_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(journal.as_deref(), Some("Nature"));
         Ok(())
     }
 

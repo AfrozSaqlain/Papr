@@ -766,7 +766,8 @@ fn clean_arxiv_id(s: &str) -> String {
     clean.trim().to_string()
 }
 
-fn parse_arxiv_id(s: &str) -> Option<String> {
+/// Parse an arXiv identifier or URL into a canonical identifier.
+pub fn parse_arxiv_id(s: &str) -> Option<String> {
     let s = s.trim().to_ascii_lowercase();
     let clean = clean_arxiv_id(&s);
     let (base, version) = if let Some(v_idx) = clean.rfind('v') {

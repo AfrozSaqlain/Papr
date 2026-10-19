@@ -4508,6 +4508,15 @@ fn log_message(database_file: &Path, message: &str) {
 /// disappear from the UI even though it remains in `SQLite`.
 fn merge_enriched_remote_paper(current: &RemotePaper, enriched: &RemotePaper) -> RemotePaper {
     let mut merged = enriched.clone();
+    if !current.id.is_empty() {
+        merged.id.clone_from(&current.id);
+    }
+    if merged.pdf_url.is_none() {
+        merged.pdf_url.clone_from(&current.pdf_url);
+    }
+    if merged.categories.is_empty() {
+        merged.categories.clone_from(&current.categories);
+    }
     if merged.abstract_text.trim().is_empty() {
         merged.abstract_text.clone_from(&current.abstract_text);
     }
@@ -7728,7 +7737,9 @@ fn handle_paper_detail_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             return selected_remote_target(app).map(UiAction::CopyCitation);
         }
         KeyCode::Char('o') => {
-            let arxiv_reference = selected_remote_paper(app).map(|paper| paper.id.clone());
+            let arxiv_reference = selected_remote_paper(app)
+                .map(|paper| paper.id.clone())
+                .or_else(|| selected_remote_paper(app).and_then(|p| p.doi.clone()));
             return open_arxiv_page(app, arxiv_reference.as_deref());
         }
         KeyCode::Enter => {
@@ -7831,7 +7842,9 @@ fn selected_paper_arxiv_reference(app: &App) -> PaperArxivSelection {
                                     .papers
                                     .iter()
                                     .find(|paper| paper.id == id)
-                                    .and_then(|paper| paper.arxiv_id.clone())
+                                    .and_then(|paper| {
+                                        paper.arxiv_id.clone().or_else(|| paper.doi.clone())
+                                    })
                             })
                         }),
                 )
@@ -7848,7 +7861,7 @@ fn selected_paper_arxiv_reference(app: &App) -> PaperArxivSelection {
                     .papers
                     .iter()
                     .find(|paper| paper.id == id)
-                    .and_then(|paper| paper.arxiv_id.clone()),
+                    .and_then(|paper| paper.arxiv_id.clone().or_else(|| paper.doi.clone())),
             )
         }),
         Page::Projects | Page::History | Page::Statistics | Page::Settings | Page::Credits => {
@@ -7870,8 +7883,20 @@ fn arxiv_page_url(reference: &str) -> Option<String> {
     if reference.starts_with("https://") || reference.starts_with("http://") {
         return Some(reference.to_owned());
     }
+    let clean_ref = reference.strip_prefix("doi:").unwrap_or(reference).trim();
+    if let Some(arxiv_part) = clean_ref
+        .strip_prefix("10.48550/arXiv.")
+        .or_else(|| clean_ref.strip_prefix("10.48550/arxiv."))
+    {
+        return Some(format!("https://arxiv.org/abs/{arxiv_part}"));
+    }
+    if clean_ref.starts_with("10.") && clean_ref.contains('/') {
+        return Some(format!("https://doi.org/{clean_ref}"));
+    }
     let id = reference
         .strip_prefix("arXiv:")
+        .or_else(|| reference.strip_prefix("arxiv:"))
+        .or_else(|| reference.strip_prefix("ARXIV:"))
         .unwrap_or(reference)
         .trim_end_matches(".pdf");
     let (base, version) = match id.rsplit_once('v') {
@@ -8513,6 +8538,7 @@ mod tests {
         handle_downloads_key, handle_key, handle_mouse, handle_paper_detail_key,
         handle_project_citation_search_key, handle_project_exact_paste, insert_project_bibtex_text,
         is_project_text_file, is_text_paste_shortcut, merge_enriched_remote_paper,
+        arxiv_page_url,
         move_config_editor_page, paste_text_into_active_input, pdf_viewer_invocation,
         project_tree_entries, refresh_downloads_from_dir, reload_config_editor_buffer,
         run_terminal_command, should_open_generated_pdf, show_build_for_failed_compilation,
@@ -8717,6 +8743,71 @@ mod tests {
 
         assert_eq!(merged.title, "Enriched title");
         assert_eq!(merged.abstract_text, "Abstract fetched from arXiv.");
+    }
+
+    #[test]
+    fn enrichment_projection_preserves_arxiv_id_and_pdf_url_when_provider_is_crossref() {
+        let mut displayed = remote_paper("https://arxiv.org/abs/2602.00004", "Original title");
+        displayed.pdf_url = Some("https://arxiv.org/pdf/2602.00004".into());
+        displayed.categories = vec!["cs.LG".into()];
+        displayed.abstract_text = "Abstract fetched from arXiv.".into();
+
+        let mut provider = displayed.clone();
+        provider.id = "10.1000/abstract-lifecycle".into();
+        provider.title = "Enriched title".into();
+        provider.pdf_url = None;
+        provider.categories = vec![];
+        provider.doi = Some("10.1000/abstract-lifecycle".into());
+        provider.journal_ref = Some("Nature".into());
+
+        let merged = merge_enriched_remote_paper(&displayed, &provider);
+
+        assert_eq!(merged.id, "https://arxiv.org/abs/2602.00004");
+        assert_eq!(
+            merged.pdf_url.as_deref(),
+            Some("https://arxiv.org/pdf/2602.00004")
+        );
+        assert_eq!(merged.categories, vec!["cs.LG"]);
+        assert_eq!(merged.title, "Enriched title");
+        assert_eq!(merged.doi.as_deref(), Some("10.1000/abstract-lifecycle"));
+        assert_eq!(merged.journal_ref.as_deref(), Some("Nature"));
+    }
+
+    #[test]
+    fn arxiv_page_url_resolves_arxiv_ids_urls_and_doi_fallbacks() {
+        assert_eq!(
+            arxiv_page_url("https://arxiv.org/abs/2101.12345"),
+            Some("https://arxiv.org/abs/2101.12345".into())
+        );
+        assert_eq!(
+            arxiv_page_url("http://arxiv.org/abs/2101.12345"),
+            Some("http://arxiv.org/abs/2101.12345".into())
+        );
+        assert_eq!(
+            arxiv_page_url("2101.12345"),
+            Some("https://arxiv.org/abs/2101.12345".into())
+        );
+        assert_eq!(
+            arxiv_page_url("2101.12345v2"),
+            Some("https://arxiv.org/abs/2101.12345v2".into())
+        );
+        assert_eq!(
+            arxiv_page_url("arXiv:2101.12345"),
+            Some("https://arxiv.org/abs/2101.12345".into())
+        );
+        assert_eq!(
+            arxiv_page_url("arxiv:2101.12345"),
+            Some("https://arxiv.org/abs/2101.12345".into())
+        );
+        assert_eq!(
+            arxiv_page_url("10.48550/arXiv.2101.12345"),
+            Some("https://arxiv.org/abs/2101.12345".into())
+        );
+        assert_eq!(
+            arxiv_page_url("10.1145/3292500.3330701"),
+            Some("https://doi.org/10.1145/3292500.3330701".into())
+        );
+        assert_eq!(arxiv_page_url("invalid-identifier"), None);
     }
 
     #[test]
@@ -11230,6 +11321,12 @@ mod tests {
             app.toast.as_deref(),
             Some("No valid arXiv page is available for this paper")
         );
+
+        app.library.papers[0].doi = Some("10.1145/3292500.3330701".into());
+        assert!(matches!(
+            handle_key(&mut app, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)),
+            Some(UiAction::OpenBrowser(url)) if url == "https://doi.org/10.1145/3292500.3330701"
+        ));
     }
 
     #[test]

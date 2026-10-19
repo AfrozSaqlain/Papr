@@ -14,7 +14,9 @@ pub mod plugins;
 pub mod projects;
 pub mod typst;
 
-pub use api::arxiv::{ArxivClient, ArxivRetryPolicy, RankedCandidatePageRequest};
+pub use api::arxiv::{
+    ArxivClient, ArxivRetryPolicy, RankedCandidatePageRequest, parse_arxiv_id,
+};
 pub use completions::{CitationEntry, CitationSource, CompletionItem, CompletionSource};
 pub use config::{Config, Paths};
 pub use dashboard::{
