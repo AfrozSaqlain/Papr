@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/papr.gif" alt="Demo" width="900">
+  <img src="assets/papr.mov" alt="Demo" width="900">
 </p>
 
 Papr is a fast, terminal-based workspace built for academic research. It brings together a personalized daily papers feed, arXiv search, local PDF library management, reading, Markdown note-taking, automatic author-based paper organization, and manuscript editing with LaTeX and Typst.
@@ -460,6 +460,9 @@ Shows folders, source files, and supported image files.
 | `Alt+2` | focus editor |
 | `Alt+3` | focus PDF preview |
 | `Alt+4` | focus compiler output |
+
+> [!NOTE]
+> On macOS, since the Option key produces special characters by default instead of Alt/Meta sequences, configure your terminal to treat Option as Alt (e.g., write `macos_option_as_alt yes` in `~/.config/kitty/kitty.conf` if you are using Kitty).
 
 ### Project Editor 
 
