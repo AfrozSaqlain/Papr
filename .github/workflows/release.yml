@@ -314,6 +314,16 @@ jobs:
             name=$(echo "$filename" | sed "s/\.rb$//")
             version=$(echo "$release" | jq .app_version --raw-output)
 
+            # Ensure Homebrew test block is present before linting and publishing
+            if ! grep -q "test do" "Formula/${filename}"; then
+              ruby -e '
+                content = File.read("Formula/'"${filename}"'")
+                test_block = "  test do\n    assert_match \"papr \#{version}\", shell_output(\"\#{bin}/papr --version\")\n  end\n"
+                content = content.sub(/^end\s*\z/m, "#{test_block}end\n")
+                File.write("Formula/'"${filename}"'", content)
+              '
+            fi
+
             export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
             brew update
             # We avoid reformatting user-provided data such as the app description and homepage.

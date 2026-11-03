@@ -43,8 +43,8 @@ install -Dpm0644 README.md %{buildroot}%{_docdir}/%{name}/README.md
 %{_bindir}/papr
 
 %changelog
-* Tue Nov 03 2026 Papr contributors <papr@example.invalid> - 0.1.2-1
+* Tue Nov 03 2026 Papr contributors <sqn3680@gmail.com> - 0.1.2-1
 - Release 0.1.2
 
-* Mon Aug 03 2026 Papr contributors <papr@example.invalid> - 0.1.1-1
+* Mon Aug 03 2026 Papr contributors <sqn3680@gmail.com> - 0.1.1-1
 - Initial Fedora COPR package
