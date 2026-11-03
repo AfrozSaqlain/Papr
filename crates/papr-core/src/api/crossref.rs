@@ -67,7 +67,7 @@ impl CrossrefClient {
     pub fn new() -> Self {
         Self {
             client: Client::builder()
-                .user_agent("papr/0.1.0")
+                .user_agent(concat!("papr/", env!("CARGO_PKG_VERSION")))
                 .build()
                 .unwrap_or_default(),
         }
