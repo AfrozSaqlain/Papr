@@ -165,7 +165,7 @@ sudo dnf install papr-tui
 and if already installed and you want to upgrade, then simply run:
 
 ```
-sudo dnf upgrade papr-tui
+sudo dnf upgrade --refresh papr-tui
 ```
 
 ## macOS Homebrew Tap
