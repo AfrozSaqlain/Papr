@@ -2195,7 +2195,10 @@ async fn run(
             || (app.page == Page::Projects
                 && app.active_project.is_some()
                 && app.pdf_viewer_path.is_some());
-        let animating = preview_active && pdf_viewer::is_animating();
+        // Keep redrawing while scrolling animates and while a visible page of
+        // the continuous viewer is still rendering/uploading.
+        let animating =
+            preview_active && (pdf_viewer::is_animating() || pdf_viewer::graphics_pending());
         let poll_timeout = terminal_poll_timeout(app, preview_active, animating);
         let got_event = poll_terminal_events(
             app,
@@ -2255,9 +2258,23 @@ fn draw_application(
     }
     session.set_command_cursor_active(app.mode == AppMode::TerminalCommand)?;
     let draw_start = std::time::Instant::now();
-    session
+    // Present text and PDF image placements atomically: the terminal holds
+    // the frame until EndSynchronizedUpdate, so pages never tear or lag one
+    // frame behind the surrounding UI while scrolling.
+    crossterm::queue!(
+        session.terminal_mut().backend_mut(),
+        crossterm::terminal::BeginSynchronizedUpdate
+    )?;
+    let drawn = session
         .terminal_mut()
-        .draw(|frame| ui::render(frame, app, theme))?;
+        .draw(|frame| ui::render(frame, app, theme))
+        .map(|_| ())
+        .and_then(|()| pdf_viewer::flush_terminal_graphics(session.terminal_mut().backend_mut()));
+    crossterm::execute!(
+        session.terminal_mut().backend_mut(),
+        crossterm::terminal::EndSynchronizedUpdate
+    )?;
+    drawn?;
     if draw_start.elapsed() > std::time::Duration::from_millis(16) {
         log_message(
             database_file,
