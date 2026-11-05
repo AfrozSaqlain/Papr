@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3]
+
+### Added
+- **Online Sync**: Library papers and their metadata are now synced to GitHub, so that all papers stay synchronized when a user downloads *Papr* on a new machine.
+
+### Changed
+- **PDF Reading**: Papr now tracks the page where you left off so that reopening a paper resumes from that page. Additionally, papers in the reading queue are now removed only once the user reaches the last page, rather than just opening the paper.
+
 ## [0.1.2]
 
 ### Added
