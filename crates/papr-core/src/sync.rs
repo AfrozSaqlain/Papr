@@ -85,6 +85,23 @@ struct GitHubContentResponse {
     content: Option<String>,
 }
 
+/// Response payload for GitHub create or update file contents API (PUT).
+#[derive(Debug, Deserialize)]
+struct GitHubPutFileResponse {
+    content: Option<GitHubPutFileContent>,
+    commit: Option<GitHubPutFileCommit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubPutFileContent {
+    sha: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubPutFileCommit {
+    sha: String,
+}
+
 /// Request payload for GitHub repository creation API.
 #[derive(Debug, Serialize)]
 struct CreateRepoRequest<'a> {
@@ -317,8 +334,13 @@ impl GitHubSyncService {
             return Err(SyncError::Api { status, message });
         }
 
-        let content_resp: GitHubContentResponse = serde_json::from_slice(&res.bytes().await?)?;
-        Ok(content_resp.sha)
+        let put_resp: GitHubPutFileResponse = serde_json::from_slice(&res.bytes().await?)?;
+        let sha = put_resp
+            .content
+            .map(|c| c.sha)
+            .or_else(|| put_resp.commit.map(|c| c.sha))
+            .unwrap_or_default();
+        Ok(sha)
     }
 
     /// Reconcile local library papers with a remote manifest.
@@ -594,6 +616,33 @@ mod tests {
         let json = serde_json::to_string(&manifest)?;
         let parsed: SyncManifest = serde_json::from_str(&json)?;
         assert_eq!(parsed, manifest);
+        Ok(())
+    }
+
+    #[test]
+    fn test_github_put_file_response_deserialization() -> Result<(), Box<dyn std::error::Error>> {
+        let payload = r#"{
+            "content": {
+                "name": "papers.json",
+                "path": "papers.json",
+                "sha": "95b9668d1d50300c7a4e00511ed8f1732442b0c2",
+                "size": 1234
+            },
+            "commit": {
+                "sha": "7638417db6d59f3c431d3e1f261cc637155684cd",
+                "message": "papr: sync papers"
+            }
+        }"#;
+
+        let resp: GitHubPutFileResponse = serde_json::from_str(payload)?;
+        assert_eq!(
+            resp.content.map(|c| c.sha).as_deref(),
+            Some("95b9668d1d50300c7a4e00511ed8f1732442b0c2")
+        );
+        assert_eq!(
+            resp.commit.map(|c| c.sha).as_deref(),
+            Some("7638417db6d59f3c431d3e1f261cc637155684cd")
+        );
         Ok(())
     }
 }
