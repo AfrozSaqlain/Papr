@@ -158,8 +158,8 @@ For the best reading experience inside the terminal, use the [Kitty](https://sw.
   curl -L https://sw.kovidgoyal.net/kitty/installer.sh | sh /dev/stdin
   ```
 
-  > [!NOTE]
-  > On macOS, configure Kitty to pass the Option key as Alt so window pane shortcuts work correctly: add `macos_option_as_alt yes` to `~/.config/kitty/kitty.conf`.
+> [!NOTE]
+> On macOS, configure Kitty to pass the Option key as Alt so window pane shortcuts work correctly: add `macos_option_as_alt yes` to `~/.config/kitty/kitty.conf`.
 
 #### **Install other system dependencies:**
 
