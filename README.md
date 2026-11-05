@@ -130,9 +130,9 @@ Download pre-built `.deb` or `.rpm` packages from the [GitHub Releases](https://
 
 ---
 
-### System Dependencies & Extra Setup
+## System Dependencies & Extra Setup
 
-#### Recommended Tools
+### Recommended Tools
 While Papr runs out of the box, certain features rely on standard system utilities:
 
 | Feature | Dependency | Package Name |
@@ -144,7 +144,7 @@ While Papr runs out of the box, certain features rely on standard system utiliti
 | **System Clipboard (Linux)** | Wayland or X11 utility | `wl-clipboard` (Wayland) or `xclip` (X11) |
 | **External PDF Viewer** | Optional desktop viewer | `zathura`, `okular`, or system default |
 
-#### **In-Terminal PDF Viewer Setup (Kitty)**
+### **In-Terminal PDF Viewer Setup (Kitty)**
 
 For the best reading experience inside the terminal, use the [Kitty](https://sw.kovidgoyal.net/kitty/) terminal emulator:
 
@@ -161,7 +161,7 @@ For the best reading experience inside the terminal, use the [Kitty](https://sw.
 > [!NOTE]
 > On macOS, configure Kitty to pass the Option key as Alt so window pane shortcuts work correctly: add `macos_option_as_alt yes` to `~/.config/kitty/kitty.conf`.
 
-#### **Install other system dependencies:**
+### **Install other system dependencies:**
 
 * **Ubuntu / Debian:**
   ```sh
