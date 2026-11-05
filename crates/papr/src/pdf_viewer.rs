@@ -358,6 +358,11 @@ fn drop_uploads(g: &mut PageCache, mut should_drop: impl FnMut(&PageKey) -> bool
 /// Flush all state that belongs to a different document than `new_path`.
 /// Always call this before entering `AppMode::PdfView` for a new file.
 pub fn reset_for_new_document(new_path: &Path) {
+    reset_for_new_document_at_page(new_path, 1);
+}
+
+pub fn reset_for_new_document_at_page(new_path: &Path, initial_page: usize) {
+    let initial_page = initial_page.max(1);
     let cache = get_cache();
     if let Ok(mut g) = cache.lock() {
         cancel_render_jobs(&mut g, |(path, _, _, _, _)| path.as_path() != new_path);
@@ -390,9 +395,9 @@ pub fn reset_for_new_document(new_path: &Path) {
         g.last_crop_key = None;
         g.last_encoded = None;
 
-        g.target_page = 1;
+        g.target_page = initial_page;
         g.target_scroll_px = 0.0;
-        g.current_page = 1;
+        g.current_page = initial_page;
         g.current_scroll_px = 0.0;
         g.last_update = None;
     }
@@ -506,6 +511,37 @@ pub fn page_count(path: &Path) -> Option<usize> {
         }
     });
     None
+}
+
+/// Retrieve the cached page count or synchronously query it when first opening a document.
+pub fn get_or_query_page_count(path: &Path) -> usize {
+    if let Some(count) = page_count(path) {
+        return count;
+    }
+    let count = papr_core::get_pdf_page_count(path).max(1);
+    let cache = get_cache();
+    if let Ok(mut g) = cache.lock() {
+        let generation = *g
+            .document_generations
+            .entry(path.to_path_buf())
+            .or_default();
+        g.page_counts
+            .insert((path.to_path_buf(), generation), count);
+    }
+    count
+}
+
+#[cfg(test)]
+pub(crate) fn set_cached_page_count(path: &Path, count: usize) {
+    let cache = get_cache();
+    if let Ok(mut g) = cache.lock() {
+        let generation = *g
+            .document_generations
+            .entry(path.to_path_buf())
+            .or_default();
+        g.page_counts
+            .insert((path.to_path_buf(), generation), count);
+    }
 }
 
 /// Emit pending Kitty image deletions as part of Ratatui's next draw.  The
@@ -967,9 +1003,8 @@ fn kitty_transmit(img: &DynamicImage, id: u32) -> String {
         converted.as_raw()
     };
 
-    let writer = KittyPayloadWriter::new(format!(
-        "i={id},a=T,U=1,f=32,t=d,s={width},v={height},o=z"
-    ));
+    let writer =
+        KittyPayloadWriter::new(format!("i={id},a=T,U=1,f=32,t=d,s={width},v={height},o=z"));
     let mut encoder = ZlibEncoder::new(writer, Compression::fast());
     if encoder.write_all(bytes).is_err() {
         return kitty_transmit_raw(bytes, id, width, height);
@@ -1010,9 +1045,7 @@ fn kitty_chunks_raw(bytes: &[u8], control: &str) -> String {
 /// Transmit (without placing) a whole RGB page over the PTY. Used when the
 /// terminal cannot read local files (SSH) or the transfer file failed.
 fn kitty_upload_direct(rgb: &[u8], id: u32, width: u32, height: u32) -> String {
-    let writer = KittyPayloadWriter::new(format!(
-        "i={id},a=t,f=24,t=d,s={width},v={height},o=z"
-    ));
+    let writer = KittyPayloadWriter::new(format!("i={id},a=t,f=24,t=d,s={width},v={height},o=z"));
     let mut encoder = ZlibEncoder::new(writer, Compression::fast());
     let fallback = || kitty_chunks_raw(rgb, &format!("i={id},a=t,f=24,t=d,s={width},v={height}"));
     if encoder.write_all(rgb).is_err() {
@@ -1129,8 +1162,9 @@ fn layout_continuous_pages(
 fn continuous_scrolling_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("PAPR_PDF_CONTINUOUS")
-            .map_or(true, |value| !matches!(value.trim(), "0" | "false" | "off" | "no"))
+        std::env::var("PAPR_PDF_CONTINUOUS").map_or(true, |value| {
+            !matches!(value.trim(), "0" | "false" | "off" | "no")
+        })
     })
 }
 
@@ -1551,7 +1585,9 @@ fn prepare_viewer_frame(
         .find(|((path, cached_generation, _, _, cached_width), _)| {
             path == pdf_path && *cached_generation == generation && *cached_width == pixel_w
         })
-        .map_or(f64::from(pixel_w) * 1.3, |(_, page)| f64::from(page.pixel_h));
+        .map_or(f64::from(pixel_w) * 1.3, |(_, page)| {
+            f64::from(page.pixel_h)
+        });
     update_viewer_scroll(&mut cache, app.pdf_viewer_total_pages, page_fit);
     app.pdf_viewer_page = cache.current_page;
     app.pdf_viewer_scroll_y = (cache.current_scroll_px / f64::from(font_h))
@@ -1939,13 +1975,16 @@ fn sync_continuous_uploads(
         if g.uploads.contains_key(&key) {
             continue;
         }
-        let Some(image) = g.pages.get(&key).map(|rendered| Arc::clone(&rendered.image)) else {
+        let Some(image) = g
+            .pages
+            .get(&key)
+            .map(|rendered| Arc::clone(&rendered.image))
+        else {
             continue;
         };
         let id = g.next_kitty_id;
         g.next_kitty_id = g.next_kitty_id.wrapping_add(1).max(1);
-        g.uploads
-            .insert(key.clone(), KittyUpload::Preparing { id });
+        g.uploads.insert(key.clone(), KittyUpload::Preparing { id });
         spawn_upload_preparation(Arc::clone(cache_arc), key, id, image, use_file);
     }
 
@@ -1992,7 +2031,13 @@ fn request_continuous_pages(
 
 /// Show a "Rendering page N…" label centred in a page slot that has no
 /// resident image yet.
-fn render_loading_slot(frame: &mut Frame<'_>, area: Rect, slot: &PageSlot, viewport_h: i64, font_h: u32) {
+fn render_loading_slot(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    slot: &PageSlot,
+    viewport_h: i64,
+    font_h: u32,
+) {
     let font_h = i64::from(font_h.max(1));
     let top = slot.top.max(0);
     let bottom = slot.top.saturating_add(slot.height).min(viewport_h);
@@ -2302,7 +2347,12 @@ fn get_page_height_helper(
 }
 
 /// Height of a page plus the gap that follows it in the continuous strip.
-fn slot_height(page: usize, pages: &HashMap<PageKey, RenderedPage>, default_h: f64, gap: f64) -> f64 {
+fn slot_height(
+    page: usize,
+    pages: &HashMap<PageKey, RenderedPage>,
+    default_h: f64,
+    gap: f64,
+) -> f64 {
     get_page_height_helper(page, pages, default_h) + gap
 }
 
@@ -2365,7 +2415,14 @@ fn move_scroll_target(g: &mut PageCache, delta_px: f64, total_pages: usize) {
     let viewport_h = f64::from(g.last_viewport_h);
     let mut page = g.target_page;
     let mut offset = g.target_scroll_px + delta_px;
-    normalize_coords(&mut page, &mut offset, total_pages, &g.pages, default_h, gap);
+    normalize_coords(
+        &mut page,
+        &mut offset,
+        total_pages,
+        &g.pages,
+        default_h,
+        gap,
+    );
 
     if total_pages > 0 && page <= total_pages {
         // Content remaining below the viewport top, stopping early once it
@@ -2382,7 +2439,14 @@ fn move_scroll_target(g: &mut PageCache, delta_px: f64, total_pages: usize) {
         }
         if remaining < viewport_h {
             offset -= viewport_h - remaining;
-            normalize_coords(&mut page, &mut offset, total_pages, &g.pages, default_h, gap);
+            normalize_coords(
+                &mut page,
+                &mut offset,
+                total_pages,
+                &g.pages,
+                default_h,
+                gap,
+            );
         }
     }
     if page <= 1 && offset < 0.0 {

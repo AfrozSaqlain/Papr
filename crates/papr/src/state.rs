@@ -1104,8 +1104,10 @@ pub struct AppWorkspaceState {
     pub(crate) pdf_viewer_page_pixel_h: u32,
     pub(crate) pdf_viewer_max_scroll_y: u32,
     pub(crate) active_pdf_session_id: Option<i64>,
+    pub(crate) active_pdf_paper_id: Option<i64>,
     pub(crate) active_pdf_session_start: Option<std::time::Instant>,
     pub(crate) pdf_viewer: String,
+    pub(crate) pdf_viewer_saved_page: usize,
 }
 
 impl Default for AppWorkspaceState {
@@ -1154,8 +1156,10 @@ impl Default for AppWorkspaceState {
             pdf_viewer_page_pixel_h: 0,
             pdf_viewer_max_scroll_y: 0,
             active_pdf_session_id: None,
+            active_pdf_paper_id: None,
             active_pdf_session_start: None,
             pdf_viewer: "internal".to_owned(),
+            pdf_viewer_saved_page: 0,
         }
     }
 }

@@ -60,6 +60,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         14,
         include_str!("../migrations/0014_dashboard_feed_history.sql"),
     ),
+    (16, include_str!("../migrations/0016_reading_progress.sql")),
 ];
 
 /// Paper identifier, optional arXiv identifier, and optional local PDF path.
@@ -67,6 +68,27 @@ pub type EnrichmentCandidate = (i64, Option<String>, Option<String>);
 
 /// Paper identifier, optional arXiv identifier, DOI, and local PDF path.
 pub type EnrichmentCandidateWithDoi = (i64, Option<String>, Option<String>, Option<String>);
+
+/// Check whether a timestamp string indicates an opening more than 30 days ago.
+#[must_use]
+pub fn is_older_than_30_days(timestamp_str: &str) -> bool {
+    let now = chrono::Utc::now().naive_utc();
+    if let Ok(dt) = NaiveDateTime::parse_from_str(timestamp_str, "%Y-%m-%d %H:%M:%S") {
+        return now.signed_duration_since(dt) > Duration::days(30);
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(timestamp_str) {
+        return chrono::Utc::now().signed_duration_since(dt) > Duration::days(30);
+    }
+    if let Ok(dt) = NaiveDateTime::parse_from_str(timestamp_str, "%Y-%m-%dT%H:%M:%S") {
+        return now.signed_duration_since(dt) > Duration::days(30);
+    }
+    if let Ok(d) = NaiveDate::parse_from_str(timestamp_str, "%Y-%m-%d")
+        && let Some(dt) = d.and_hms_opt(0, 0, 0)
+    {
+        return now.signed_duration_since(dt) > Duration::days(30);
+    }
+    false
+}
 
 /// Write a source-provided author sequence only when the paper has no canonical
 /// author metadata yet. Existing rows and their `position` values are authoritative.
@@ -159,6 +181,7 @@ impl Database {
         )?;
         let mut database = Self { connection };
         database.migrate()?;
+        database.reset_stale_reading_progress()?;
         Ok(database)
     }
 
@@ -1669,6 +1692,8 @@ impl Database {
     }
 
     /// Record a paper or PDF open in reading history and recent activity.
+    /// If the paper has not been opened for more than 30 days, its saved reading
+    /// position is reset to page 1.
     ///
     /// # Errors
     ///
@@ -1685,9 +1710,37 @@ impl Database {
             params![if pdf { "pdf_opened" } else { "paper_opened" }, paper_id],
         )?;
         if pdf {
-            transaction.execute(
-                "UPDATE papers SET last_opened_at = CURRENT_TIMESTAMP, reading_status = 'read' WHERE id = ?1",
+            let last_opened: Option<String> = transaction
+                .query_row(
+                    "SELECT last_opened_at FROM papers WHERE id = ?1",
+                    [paper_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten();
+
+            if let Some(ref last_opened_str) = last_opened
+                && is_older_than_30_days(last_opened_str)
+            {
+                transaction.execute(
+                    "UPDATE papers SET last_read_page = 1 WHERE id = ?1",
+                    [paper_id],
+                )?;
+            }
+
+            let current_status: String = transaction.query_row(
+                "SELECT reading_status FROM papers WHERE id = ?1",
                 [paper_id],
+                |row| row.get(0),
+            )?;
+            let new_status = if current_status == "unread" {
+                "reading"
+            } else {
+                &current_status
+            };
+            transaction.execute(
+                "UPDATE papers SET last_opened_at = CURRENT_TIMESTAMP, reading_status = ?1 WHERE id = ?2",
+                params![new_status, paper_id],
             )?;
         } else {
             transaction.execute(
@@ -1697,6 +1750,163 @@ impl Database {
         }
         transaction.commit()?;
         Ok(session_id)
+    }
+
+    /// Retrieve the saved reading position for a paper.
+    /// If the paper has not been opened for more than 30 days, its saved
+    /// reading position is automatically reset to page 1.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when querying or updating the database fails.
+    pub fn get_reading_position(&self, paper_id: i64) -> Result<usize, DatabaseError> {
+        let row: Option<(i64, Option<String>)> = self
+            .connection
+            .query_row(
+                "SELECT last_read_page, last_opened_at FROM papers WHERE id = ?1",
+                [paper_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
+        let Some((page, last_opened)) = row else {
+            return Ok(1);
+        };
+
+        if let Some(ref last_opened_str) = last_opened
+            && is_older_than_30_days(last_opened_str)
+        {
+            self.connection.execute(
+                "UPDATE papers SET last_read_page = 1 WHERE id = ?1",
+                [paper_id],
+            )?;
+            return Ok(1);
+        }
+
+        let page_usize = usize::try_from(page).unwrap_or(1).max(1);
+        Ok(page_usize)
+    }
+
+    /// Record the reading page reached in a PDF.
+    /// If the user reaches the final page (`page >= total_pages`), the paper is
+    /// marked as completed (`reading_status = 'read'`), which automatically removes
+    /// it from the reading queue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when updating the database fails.
+    pub fn record_reading_progress(
+        &self,
+        paper_id: i64,
+        page: usize,
+        total_pages: usize,
+    ) -> Result<(), DatabaseError> {
+        let page = page.max(1);
+        let page_i64 = i64::try_from(page).unwrap_or(i64::MAX);
+        let tx = self.connection.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE papers SET last_read_page = ?1 WHERE id = ?2",
+            params![page_i64, paper_id],
+        )?;
+
+        if total_pages > 0 && page >= total_pages {
+            // Reached final page: mark completed and remove from queue
+            tx.execute(
+                "UPDATE papers SET reading_status = 'read' WHERE id = ?1",
+                [paper_id],
+            )?;
+        } else {
+            // While reading, if unread, set to reading. If queued, keep queued.
+            let current_status: String = tx.query_row(
+                "SELECT reading_status FROM papers WHERE id = ?1",
+                [paper_id],
+                |row| row.get(0),
+            )?;
+            if current_status == "unread" {
+                tx.execute(
+                    "UPDATE papers SET reading_status = 'reading' WHERE id = ?1",
+                    [paper_id],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Record the active page reached during a specific reading history session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when updating reading history fails.
+    pub fn record_session_page(&self, session_id: i64, page: usize) -> Result<(), DatabaseError> {
+        let page_i64 = i64::try_from(page).unwrap_or(i64::MAX);
+        self.connection.execute(
+            "UPDATE reading_history SET page = ?1 WHERE id = ?2",
+            params![page_i64, session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Reset saved reading positions to page 1 for any paper not opened in > 30 days.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when querying or updating fails.
+    pub fn reset_stale_reading_progress(&self) -> Result<usize, DatabaseError> {
+        let mut stmt = self.connection.prepare(
+            "SELECT id, last_opened_at FROM papers WHERE last_read_page != 1 AND last_opened_at IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut reset_ids = Vec::new();
+        for row in rows {
+            let (id, last_opened_str) = row?;
+            if is_older_than_30_days(&last_opened_str) {
+                reset_ids.push(id);
+            }
+        }
+        let count = reset_ids.len();
+        for id in reset_ids {
+            self.connection
+                .execute("UPDATE papers SET last_read_page = 1 WHERE id = ?1", [id])?;
+        }
+        Ok(count)
+    }
+
+    /// Find a paper's identifier by its local PDF path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when querying the database fails.
+    pub fn paper_id_by_path(&self, path: &Path) -> Result<Option<i64>, DatabaseError> {
+        let path_str = path.to_string_lossy();
+        let direct: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT id FROM papers WHERE pdf_path = ?1 LIMIT 1",
+                [path_str.as_ref()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if direct.is_some() {
+            return Ok(direct);
+        }
+        if let Ok(canonical) = fs::canonicalize(path) {
+            let canon_str = canonical.to_string_lossy();
+            let canonical_match: Option<i64> = self
+                .connection
+                .query_row(
+                    "SELECT id FROM papers WHERE pdf_path = ?1 LIMIT 1",
+                    [canon_str.as_ref()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if canonical_match.is_some() {
+                return Ok(canonical_match);
+            }
+        }
+        Ok(None)
     }
 
     /// Record the duration of a reading session.
@@ -1716,15 +1926,32 @@ impl Database {
         Ok(())
     }
 
-    /// Reset a paper's current reading state to unread.
+    /// Reset a paper's current reading state to unread and reading position to page 1.
     ///
     /// # Errors
     ///
     /// Returns an error when the paper cannot be updated.
     pub fn mark_unread(&self, paper_id: i64) -> Result<(), DatabaseError> {
         self.connection.execute(
-            "UPDATE papers SET reading_status = 'unread' WHERE id = ?1",
+            "UPDATE papers SET reading_status = 'unread', last_read_page = 1 WHERE id = ?1",
             [paper_id],
+        )?;
+        Ok(())
+    }
+
+    /// Update a paper's `last_opened_at` timestamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database query fails.
+    pub fn update_paper_last_opened(
+        &self,
+        paper_id: i64,
+        timestamp: &str,
+    ) -> Result<(), DatabaseError> {
+        self.connection.execute(
+            "UPDATE papers SET last_opened_at = ?1 WHERE id = ?2",
+            params![timestamp, paper_id],
         )?;
         Ok(())
     }
@@ -3542,8 +3769,20 @@ mod tests {
         assert_eq!(queue[0].id, id2);
         assert_eq!(queue[1].id, id1);
 
-        // Record open for P1 (index 1) -> should mark read and remove P1 from queue
+        // Opening P1 -> remains in reading queue until final page reached
         database.record_open(id1, true)?;
+        let queue = database.reading_queue_papers_in_roots(std::slice::from_ref(&root))?;
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[0].id, id2);
+        assert_eq!(queue[1].id, id1);
+
+        // Reading intermediate page -> still remains in reading queue
+        database.record_reading_progress(id1, 1, 5)?;
+        let queue = database.reading_queue_papers_in_roots(std::slice::from_ref(&root))?;
+        assert_eq!(queue.len(), 2);
+
+        // Reaching final page -> completes paper and removes from reading queue
+        database.record_reading_progress(id1, 5, 5)?;
         let queue = database.reading_queue_papers_in_roots(std::slice::from_ref(&root))?;
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].id, id2);
@@ -3821,6 +4060,189 @@ mod tests {
 
         fs::remove_file(&new_path)?;
         fs::remove_dir(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn reading_position_remembered_and_updated() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        let id = database.insert_paper("Progress Tracking Paper", None)?;
+
+        // Default position should be page 1
+        assert_eq!(database.get_reading_position(id)?, 1);
+
+        // Open paper PDF
+        database.record_open(id, true)?;
+
+        // Advance to page 3
+        database.record_reading_progress(id, 3, 10)?;
+        assert_eq!(database.get_reading_position(id)?, 3);
+
+        // Advance to page 7
+        database.record_reading_progress(id, 7, 10)?;
+        assert_eq!(database.get_reading_position(id)?, 7);
+
+        // Check database column
+        let db_page: i64 = database.connection.query_row(
+            "SELECT last_read_page FROM papers WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(db_page, 7);
+
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_progress_reset_after_30_days() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        let id = database.insert_paper("Stale Paper", None)?;
+
+        // Read to page 5
+        database.record_reading_progress(id, 5, 10)?;
+        assert_eq!(database.get_reading_position(id)?, 5);
+
+        // Opened 10 days ago (< 30 days) -> should NOT reset
+        database.connection.execute(
+            "UPDATE papers SET last_opened_at = datetime('now', '-10 days') WHERE id = ?1",
+            [id],
+        )?;
+        assert_eq!(database.get_reading_position(id)?, 5);
+
+        // Opened 31 days ago (> 30 days) -> should reset to page 1
+        database.connection.execute(
+            "UPDATE papers SET last_opened_at = datetime('now', '-31 days') WHERE id = ?1",
+            [id],
+        )?;
+        assert_eq!(database.get_reading_position(id)?, 1);
+
+        // Verify database column was reset to 1
+        let db_page: i64 = database.connection.query_row(
+            "SELECT last_read_page FROM papers WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(db_page, 1);
+
+        // Test reset_stale_reading_progress batch cleanup
+        database.connection.execute(
+            "UPDATE papers SET last_read_page = 8, last_opened_at = datetime('now', '-45 days') WHERE id = ?1",
+            [id],
+        )?;
+        let reset_count = database.reset_stale_reading_progress()?;
+        assert_eq!(reset_count, 1);
+        let db_page: i64 = database.connection.query_row(
+            "SELECT last_read_page FROM papers WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(db_page, 1);
+
+        // Test record_open automatically resets progress if older than 30 days
+        database.connection.execute(
+            "UPDATE papers SET last_read_page = 4, last_opened_at = datetime('now', '-35 days') WHERE id = ?1",
+            [id],
+        )?;
+        database.record_open(id, true)?;
+        assert_eq!(database.get_reading_position(id)?, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn reading_queue_retains_paper_until_final_page_reached()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        let id = database.insert_paper("Queued Multi-Page Paper", None)?;
+
+        // Add to reading queue
+        database.add_to_queue(id)?;
+        let queue = database.reading_queue_papers()?;
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].id, id);
+        assert_eq!(queue[0].reading_status, "queued");
+
+        // Open paper -> remains in reading queue!
+        database.record_open(id, true)?;
+        let queue = database.reading_queue_papers()?;
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].id, id);
+
+        // Read intermediate pages (pages 2 and 3 of 4) -> remains in reading queue
+        database.record_reading_progress(id, 2, 4)?;
+        let queue = database.reading_queue_papers()?;
+        assert_eq!(queue.len(), 1);
+
+        database.record_reading_progress(id, 3, 4)?;
+        let queue = database.reading_queue_papers()?;
+        assert_eq!(queue.len(), 1);
+
+        // Reach final page 4 of 4 -> automatically marked completed and removed from queue!
+        database.record_reading_progress(id, 4, 4)?;
+        let queue = database.reading_queue_papers()?;
+        assert_eq!(queue.len(), 0);
+
+        let status: String = database.connection.query_row(
+            "SELECT reading_status FROM papers WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(status, "read");
+
+        // Single-page paper completes upon reaching page 1
+        let single_id = database.insert_paper("Single Page Paper", None)?;
+        database.add_to_queue(single_id)?;
+        assert_eq!(database.reading_queue_papers()?.len(), 1);
+
+        database.record_open(single_id, true)?;
+        database.record_reading_progress(single_id, 1, 1)?;
+        assert_eq!(database.reading_queue_papers()?.len(), 0);
+
+        let single_status: String = database.connection.query_row(
+            "SELECT reading_status FROM papers WHERE id = ?1",
+            [single_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(single_status, "read");
+
+        Ok(())
+    }
+
+    #[test]
+    fn reading_progress_and_timestamps_persisted_across_reconnect()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "papr-persist-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_micros()
+        ));
+        fs::create_dir_all(&root)?;
+        let db_file = root.join("papr.db");
+
+        let id = {
+            let database = Database::open(&db_file)?;
+            let id = database.insert_paper("Persistent Paper", None)?;
+            database.record_open(id, true)?;
+            database.record_reading_progress(id, 9, 20)?;
+            assert_eq!(database.get_reading_position(id)?, 9);
+            id
+        };
+
+        // Reopen database connection to simulate application restart
+        {
+            let database = Database::open(&db_file)?;
+            assert_eq!(database.get_reading_position(id)?, 9);
+
+            let (page, last_opened): (i64, Option<String>) = database.connection.query_row(
+                "SELECT last_read_page, last_opened_at FROM papers WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(page, 9);
+            assert!(last_opened.is_some());
+        }
+
+        let _ = fs::remove_dir_all(&root);
         Ok(())
     }
 }

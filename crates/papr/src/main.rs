@@ -1550,7 +1550,7 @@ impl ProjectCompiler {
         app.pdf_viewer_page = page.min(app.pdf_viewer_total_pages.max(1));
         if should_open_generated_pdf(&app.pdf_viewer, self.external_pdf_opened) {
             let viewer = app.pdf_viewer.clone();
-            let _ = open_pdf(&viewer, &pdf, app, None, None);
+            let _ = open_pdf(&viewer, &pdf, app, None, None, 1, None);
             self.external_pdf_opened = true;
         }
         true
@@ -1606,7 +1606,7 @@ fn open_project_workspace(app: &mut App, project: Project) {
             app.pdf_viewer_scroll_y = 0;
             if app.pdf_viewer != "internal" {
                 let viewer = app.pdf_viewer.clone();
-                let _ = open_pdf(&viewer, &pdf, app, None, None);
+                let _ = open_pdf(&viewer, &pdf, app, None, None, 1, None);
             }
         }
     }
@@ -2230,6 +2230,28 @@ async fn run(
                 &runtime.database_file,
                 &mut last_background,
             )?;
+        }
+
+        if app.mode == AppMode::PdfView
+            && let Some(paper_id) = app.active_pdf_paper_id
+        {
+            let current_page = app.pdf_viewer_page;
+            let total_pages = app.pdf_viewer_total_pages;
+            if current_page != app.pdf_viewer_saved_page {
+                let _ =
+                    runtime
+                        .database
+                        .record_reading_progress(paper_id, current_page, total_pages);
+                if let Some(session_id) = app.active_pdf_session_id {
+                    let _ = runtime
+                        .database
+                        .record_session_page(session_id, current_page);
+                }
+                app.pdf_viewer_saved_page = current_page;
+                if total_pages > 0 && current_page >= total_pages {
+                    let _ = refresh_paper_views(&runtime, app);
+                }
+            }
         }
 
         tokio::task::yield_now().await;
@@ -3466,13 +3488,22 @@ async fn apply_paper_metadata_action(
     match action {
         UiAction::OpenPdf { paper_id, path } => {
             let session_id = runtime.database.record_open(paper_id, true)?;
+            let saved_page = runtime.database.get_reading_position(paper_id).unwrap_or(1);
             open_pdf(
                 &runtime.pdf_viewer,
                 &path,
                 app,
                 Some(session_id),
+                Some(paper_id),
+                saved_page,
                 Some(senders.app_events.clone()),
             )?;
+            let current_page = app.pdf_viewer_page;
+            let total_pages = app.pdf_viewer_total_pages;
+            let _ = runtime
+                .database
+                .record_reading_progress(paper_id, current_page, total_pages);
+            app.pdf_viewer_saved_page = current_page;
             dispatch_plugin_events(runtime, app, &["paper_opened"], paper_id).await?;
             refresh_paper_views(runtime, app)?;
         }
@@ -3584,6 +3615,19 @@ fn apply_library_navigation_action(
 }
 
 fn close_pdf_viewer(runtime: &Runtime, app: &mut App) -> Result<()> {
+    if let Some(paper_id) = app.active_pdf_paper_id.take() {
+        runtime.database.record_reading_progress(
+            paper_id,
+            app.pdf_viewer_page,
+            app.pdf_viewer_total_pages,
+        )?;
+        if let Some(session_id) = app.active_pdf_session_id {
+            let _ = runtime
+                .database
+                .record_session_page(session_id, app.pdf_viewer_page);
+        }
+        refresh_paper_views(runtime, app)?;
+    }
     if let (Some(session_id), Some(start)) =
         (app.active_pdf_session_id, app.active_pdf_session_start)
     {
@@ -3593,7 +3637,9 @@ fn close_pdf_viewer(runtime: &Runtime, app: &mut App) -> Result<()> {
         refresh_dashboard(runtime, app)?;
     }
     app.active_pdf_session_id = None;
+    app.active_pdf_paper_id = None;
     app.active_pdf_session_start = None;
+    app.pdf_viewer_saved_page = 0;
     app.mode = AppMode::Normal;
     if let Some(path) = app.pdf_viewer_path.take() {
         pdf_viewer::release_document(&path);
@@ -3634,14 +3680,25 @@ fn open_download(
     let session_id = paper_id
         .map(|paper_id| runtime.database.record_open(paper_id, true))
         .transpose()?;
+    let saved_page = paper_id
+        .and_then(|id| runtime.database.get_reading_position(id).ok())
+        .unwrap_or(1);
     open_pdf(
         &runtime.pdf_viewer,
         &path,
         app,
         session_id,
+        paper_id,
+        saved_page,
         Some(senders.app_events.clone()),
     )?;
-    if paper_id.is_some() {
+    if let Some(id) = paper_id {
+        let current_page = app.pdf_viewer_page;
+        let total_pages = app.pdf_viewer_total_pages;
+        let _ = runtime
+            .database
+            .record_reading_progress(id, current_page, total_pages);
+        app.pdf_viewer_saved_page = current_page;
         refresh_paper_views(runtime, app)?;
     }
     Ok(())
@@ -4503,6 +4560,8 @@ fn open_pdf(
     path: &Path,
     app: &mut App,
     session_id: Option<i64>,
+    paper_id: Option<i64>,
+    initial_page: usize,
     event_sender: Option<mpsc::UnboundedSender<AppEvent>>,
 ) -> Result<()> {
     if !path.exists() {
@@ -4518,15 +4577,19 @@ fn open_pdf(
         // document.  This is the single place that guarantees the cache is
         // always consistent with whatever path is about to be stored in
         // `app.pdf_viewer_path`.
-        pdf_viewer::reset_for_new_document(path);
+        let total_pages = pdf_viewer::get_or_query_page_count(path);
+        let target_page = initial_page.clamp(1, total_pages.max(1));
+        pdf_viewer::reset_for_new_document_at_page(path, target_page);
         app.mode = AppMode::PdfView;
         app.pdf_viewer_path = Some(path.clone());
-        app.pdf_viewer_page = 1;
+        app.pdf_viewer_page = target_page;
         app.pdf_viewer_scroll_y = 0;
         app.pdf_viewer_page_pixel_h = 0;
         app.pdf_viewer_max_scroll_y = 0;
-        app.pdf_viewer_total_pages = pdf_viewer::page_count(path).unwrap_or(1);
+        app.pdf_viewer_total_pages = total_pages;
         app.active_pdf_session_id = session_id;
+        app.active_pdf_paper_id = paper_id;
+        app.pdf_viewer_saved_page = target_page;
         app.active_pdf_session_start = Some(std::time::Instant::now());
         app.toast = Some(format!(
             "Viewing PDF: {}",
@@ -4957,7 +5020,10 @@ fn discover_local_downloads(
 
             if let Some(ref path) = db_pdf_path {
                 let path_buf = std::path::PathBuf::from(path);
-                if !path_buf.starts_with(download_dir) {
+                let canonical_download = std::fs::canonicalize(download_dir)
+                    .unwrap_or_else(|_| download_dir.to_path_buf());
+                if !path_buf.starts_with(download_dir) && !path_buf.starts_with(&canonical_download)
+                {
                     // Stale download file (already moved to collection)! Remove it.
                     let _ = std::fs::remove_file(&pdf_path);
                     continue;
@@ -12237,6 +12303,158 @@ print(json.dumps({"actions": actions}))
                 .any(|c| c.name == "Machine Learning")
         );
 
+        std::fs::remove_dir_all(&temp_dir)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_reading_queue_and_progress_integration() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use super::{apply_paper_metadata_action, close_pdf_viewer, pdf_viewer};
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "papr-queue-progress-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir)?;
+        let temp_dir = std::fs::canonicalize(&temp_dir).unwrap_or(temp_dir);
+        let plugin_host = papr_core::PluginHost::discover(&temp_dir.join("plugins"), &[])?;
+        let mut runtime = test_runtime(&temp_dir, plugin_host)?;
+        runtime.pdf_viewer = "internal".into();
+        let senders = test_action_senders();
+
+        let pdf_path = temp_dir.join("test_multipage.pdf");
+        let five_page_pdf = b"%PDF-1.4\n\
+1 0 obj <</Type /Catalog /Pages 2 0 R>> endobj\n\
+2 0 obj <</Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R 7 0 R] /Count 5>> endobj\n\
+3 0 obj <</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>> endobj\n\
+4 0 obj <</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>> endobj\n\
+5 0 obj <</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>> endobj\n\
+6 0 obj <</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>> endobj\n\
+7 0 obj <</Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>> endobj\n\
+xref\n\
+0 8\n\
+0000000000 65535 f \n\
+0000000009 00000 n \n\
+0000000054 00000 n \n\
+0000000138 00000 n \n\
+0000000207 00000 n \n\
+0000000276 00000 n \n\
+0000000345 00000 n \n\
+0000000414 00000 n \n\
+trailer <</Size 8 /Root 1 0 R>>\n\
+startxref\n\
+483\n\
+%%EOF";
+        std::fs::write(&pdf_path, five_page_pdf)?;
+
+        let pdf = papr_core::library::LibraryIndexer::inspect_in_roots(
+            &pdf_path,
+            std::slice::from_ref(&temp_dir),
+        )?;
+        runtime.database.import_pdf(&pdf)?;
+
+        let papers = runtime.database.library_papers()?;
+        let paper_id = papers[0].id;
+
+        // Set up page count in cache
+        let canon = std::fs::canonicalize(&pdf_path).unwrap_or_else(|_| pdf_path.clone());
+        pdf_viewer::set_cached_page_count(&canon, 5);
+
+        // Add paper to reading queue
+        runtime.database.add_to_queue(paper_id)?;
+        let queue = runtime.database.reading_queue_papers()?;
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].id, paper_id);
+
+        let mut app = App {
+            page: Page::ReadingQueue,
+            ..App::default()
+        };
+        app.reading_queue_papers = queue;
+
+        // Open PDF from reading queue
+        apply_paper_metadata_action(
+            UiAction::OpenPdf {
+                paper_id,
+                path: pdf_path.clone(),
+            },
+            &mut runtime,
+            &senders,
+            &mut app,
+        )
+        .await?;
+
+        // 1. Should open at page 1
+        assert_eq!(app.mode, AppMode::PdfView);
+        assert_eq!(app.pdf_viewer_page, 1);
+        assert_eq!(app.active_pdf_paper_id, Some(paper_id));
+
+        // 2. Paper MUST remain in reading queue!
+        let queue = runtime.database.reading_queue_papers()?;
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].id, paper_id);
+
+        // 3. Navigate to page 3
+        app.pdf_viewer_page = 3;
+        close_pdf_viewer(&runtime, &mut app)?;
+        assert_eq!(app.mode, AppMode::Normal);
+
+        // Paper should STILL be in reading queue after closing on page 3
+        let queue = runtime.database.reading_queue_papers()?;
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].id, paper_id);
+        assert_eq!(runtime.database.get_reading_position(paper_id)?, 3);
+
+        // Reopen paper -> should reopen at page 3!
+        apply_paper_metadata_action(
+            UiAction::OpenPdf {
+                paper_id,
+                path: pdf_path.clone(),
+            },
+            &mut runtime,
+            &senders,
+            &mut app,
+        )
+        .await?;
+        assert_eq!(app.pdf_viewer_page, 3);
+        assert_eq!(runtime.database.reading_queue_papers()?.len(), 1);
+
+        // 4. Reach final page 5
+        app.pdf_viewer_page = 5;
+        close_pdf_viewer(&runtime, &mut app)?;
+
+        // Now paper MUST be automatically marked as completed and removed from reading queue!
+        let queue = runtime.database.reading_queue_papers()?;
+        assert_eq!(queue.len(), 0);
+
+        let paper = runtime.database.library_paper_by_id(paper_id)?.unwrap();
+        assert_eq!(paper.reading_status, "read");
+
+        // 5. Automatic progress reset after 30 days:
+        // Set last_opened_at to 31 days ago
+        runtime
+            .database
+            .update_paper_last_opened(paper_id, "2020-01-01 00:00:00")?;
+
+        // Reopen paper -> should reset to page 1!
+        apply_paper_metadata_action(
+            UiAction::OpenPdf {
+                paper_id,
+                path: pdf_path.clone(),
+            },
+            &mut runtime,
+            &senders,
+            &mut app,
+        )
+        .await?;
+        assert_eq!(app.pdf_viewer_page, 1);
+        assert_eq!(runtime.database.get_reading_position(paper_id)?, 1);
+
+        close_pdf_viewer(&runtime, &mut app)?;
         std::fs::remove_dir_all(&temp_dir)?;
         Ok(())
     }
