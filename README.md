@@ -9,206 +9,117 @@
 </p>
 
 <p align="center">
-  <img src="assets/papr2.gif" alt="Demo" width="900">
+  <img src="assets/papr2.gif" alt="Papr Demo" width="900">
 </p>
 
-Papr is a fast, terminal-based workspace built for academic research. It brings together a personalized daily papers feed, arXiv search, local PDF library management, reading, Markdown note-taking, automatic author-based paper organization, and manuscript editing with LaTeX and Typst.
+<p align="center">
+  <a href="https://crates.io/crates/papr-tui"><img src="https://img.shields.io/crates/v/papr-tui.svg?style=flat-square&color=orange" alt="Crates.io"></a>
+  <a href="https://github.com/AfrozSaqlain/Papr/releases"><img src="https://img.shields.io/github/v/release/AfrozSaqlain/Papr?style=flat-square&color=blue" alt="Latest Release"></a>
+  <a href="https://github.com/AfrozSaqlain/Papr/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg?style=flat-square" alt="License"></a>
+</p>
 
-Papr brings these tools together in a single, distraction-free environment, eliminating the need to constantly switch between web browsers, file managers, PDF viewers, and text editors. It seamlessly connects online paper discovery with local file organization, reading, note-taking, and manuscript writing, while keeping your research workflow entirely within the terminal. Under the hood, Papr is built with Rust using Ratatui, Tokio, Reqwest, and SQLite, providing a fast and lightweight experience with offline-first data storage and full control over your research library.
+Papr is an all-in-one terminal workspace engineered for academic researchers. It unifies daily research paper feed, arXiv search, local PDF library management, in-terminal reading, Markdown note-taking, and manuscript editing with LaTeX and Typst into a cohesive, keyboard-driven interface. By bringing discovery, reading, and writing into a single distraction-free environment, Papr eliminates context-switching between browsers, file managers, PDF viewers, and external editors.
 
----
-
-## Why Rust?
-
-Papr was written in Rust because an academic research workspace needs to be fast, reliable, and light on system resources:
-* **Performance:** Instant application startup and rapid indexing of thousands of local PDFs.
-* **Async Concurrency:** Powered by Tokio's async runtime, Papr downloads papers, watches filesystem changes, and handles network calls in the background without freezing the UI.
-* **Stability & Memory Safety:** Rust's strict safety guarantees eliminate memory leaks, race conditions, and unexpected crashes mid-session.
-* **Reliable Local Storage:** Everything is stored locally in SQLite with Write-Ahead Logging (WAL) enabled, ensuring fast, ACID-compliant database operations that won't corrupt your library.
-* **Zero-Overhead Single Binary:** Compiles down to a single, self-contained binary with minimal CPU and memory usage (no heavy runtimes or Electron bloat).
+Under the hood, Papr is built in Rust which gives researchers sub-millisecond interface responsiveness, low memory overhead, and safe concurrent execution for background downloads, directory indexing, and compilation without freezing the UI. With ACID-compliant local storage, full offline capability, and zero runtime dependencies, your research library remains fast, stable, and completely under your control.
 
 ---
 
 ## Key Features
 
-### Dashboard & Discovery
-* **Daily Research Dashboard:** Displays 10 new random papers daily into your feed, from your predefined keywords, (which you can customize in the **Settings** workspace to match your field of interest) helping you stay up to date with the latest advancements in your research area. Also lets you track reading time, active streaks, disk usage, and much more.
-* **Integrated arXiv Search:** Search arXiv directly by title, author, category, abstract, or DOI. Search results load incrementally, and lets you filter on the fly.
-* **Clean Filenames:** Downloads run in the background and are automatically saved with sanitized, human-readable titles instead of cryptic arXiv IDs (e.g., `2401.12345.pdf`).
-* **Smart Deduplication:** Resolves database conflicts across your library (matching arXiv ID, file path, or DOI) and merges records during downloads or scans without losing your existing notes, bookmarks, or reading progress.
-* **Workspace & Disk Sync:** Organizing papers into groups inside the TUI automatically mirrors those changes in your local folder structure on disk.
+### Discovery & Research Feed
+* **Daily Research Feed:** Get 10 fresh, randomized papers every day matching your customizable research keywords, helping you track field advancements alongside reading streaks and statistics.
+* **Integrated arXiv Search:** Query arXiv by title, author, category, abstract, or DOI with paginated browsing and on-the-fly local filtering (`>`).
+* **Clean File Management:** Automatically renames downloaded papers using clean, human-readable titles instead of cryptic identifier strings (e.g. `2401.12345.pdf`).
+* **Smart Deduplication:** Identifies cross-library duplicates via arXiv ID, DOI, or file path, merging metadata during scans and downloads without overwriting bookmarks, reading progress, or notes.
+* **Online Library Sync:** Optional GitHub-backed synchronization keeps your paper catalog, reading states, and metadata synchronized across multiple workstations.
 
-### Reading & Note-taking
-* **In-Terminal PDF Viewing:** Read papers directly inside the terminal with smooth scrolling using Kitty or Sixel graphics protocols.
-* **External Viewer & Browser Integration:** Open PDFs in external readers like Zathura or Okular or jump straight to the paper in your web browser.
-* **Markdown Annotations:** Write dedicated per-paper notes using a built-in Vim-inspired markdown editor with a live styled preview.
-* **Reading Queue:** Prioritize your reading list with a dedicated, sortable queue.
-> [!NOTE]
-> Reading time is tracked when papers are opened in Papr's in-terminal PDF viewer or supported external viewers such as Zathura and Okular. Papr can track these reader subprocesses, but reading time is not tracked when a paper is opened directly in a web browser.
+### Library Organization & Navigation
+* **Filesystem-Synced Collections:** Organize papers into custom groups that directly mirror your disk directory structure.
+* **Automatic Author Grouping:** Indexes your entire library by author name automatically for instant author-based cataloging.
+* **Flexible Sorting:** Sort papers in Library, Groups, and Author views by newest first, oldest first, or download date.
+* **Fast Bookmarking & History:** Toggle bookmarks with a single keypress and inspect a chronological log of recent searches, downloads, and builds.
 
+### Reading & Annotation
+* **In-Terminal PDF Viewing:** Render and read papers directly inside your terminal using Kitty or Sixel graphics protocols.
+* **Reading Progress Tracking:** Automatically remembers the last page you read and resumes from that exact page upon reopening.
+* **Reading Queue:** Prioritize reading backlogs; papers are automatically marked as completed and dequeued only when you reach the final page.
+* **External Viewer Fallback:** Seamlessly launch external readers (Zathura, Okular, or system defaults) when graphical windowing is preferred.
+* **Vim-Powered Markdown Notes:** Write per-paper Markdown annotations with a dual-mode editor and live styled preview.
+* **Reading Analytics:** Track active streaks, daily reading time, average session length, top authors, and a 12-week activity heatmap.
 
-### LaTeX and Typst Integration
-- **Built-in Writing Workspace:** Create, edit, and compile LaTeX and Typst manuscripts directly within the TUI.
-- **Real-time Compilation:** Compile asynchronously in the background using `latexmk` for LaTeX and Papr's embedded Typst compiler for Typst.
-- **No Typst Installation Required:** Typst compilation, PDF export, system and bundled fonts, and Typst Universe package support are built directly into Papr.
-- **Typst Package Support:** Import local `.typ` files from your project, published Typst Universe packages through the `@preview` namespace, or system-local packages through the `@local` namespace. Universe packages are downloaded automatically on first use and cached for subsequent builds, including offline builds.
-- **PDF-First Workflow:** View the live PDF preview alongside your editor and monitor compilation through integrated build logs.
-- **Smart Diagnostics:** View LaTeX and native Typst diagnostics with exact source locations, code snippets, diagnostic hints, and access to the raw compiler log.
-- **Full Project File Management:** Navigate project trees, create nested files and directories, rename entries, and edit source files using familiar Vim-style keybindings.
+### Writing Studio (LaTeX & Typst)
+* **Embedded Typst Compiler:** Write, compile, and preview Typst documents out of the box with zero external installation. Supports local imports, bundled system fonts, and automatic caching of Typst Universe (`@preview`) packages.
+* **LaTeX Integration:** Background compilation powered by `latexmk` with automatic artifact management.
+* **Split-Pane PDF Preview:** Live visual feedback of your compiled PDF directly alongside the editor.
+* **Compiler Diagnostics:** Jump directly to compilation errors with line numbers, source snippets, and raw build logs.
+* **BibTeX Citation Importer:** Search your local library and arXiv directly from the editor (`Ctrl+F`) to insert formatted citation keys.
+* **Project File Tree:** Full directory navigation to create, rename, and manage multi-file manuscripts using Vim keybindings.
 
-> [!NOTE]
-> Typst Universe packages are cached by namespace, package name, and version. By default, the cache is stored in `$XDG_CACHE_HOME/typst/packages` (or `~/.cache/typst/packages`) on Linux, `~/Library/Caches/typst/packages` on macOS, and `%LOCALAPPDATA%/typst/packages` on Windows. Cached packages do not expire automatically and remain available for offline builds until removed by the user or the operating system's cache-cleanup mechanism.
-
-### Extensibility
-* **Process-Isolated Plugins:** Extend workflows using language-agnostic, versioned JSON plugins running in isolated processes with bounded execution limits. Comes with an opt-in auto-tagging plugin out of the box.
+### Customization & Extensibility
+* **19 Built-in Themes:** Includes Catppuccin (Mocha, Macchiato, Frappé, Latte), Tokyo Night, Gruvbox, Nord, Dracula, Rose Pine, Everforest, Kanagawa, One Dark, and more.
+* **Transparent UI Mode:** Toggle transparent terminal backgrounds for clean integration with desktop styling.
+* **Process-Isolated Plugins:** Extend workflows via language-agnostic JSON plugins running in sandbox processes (includes an opt-in auto-tagging plugin).
 
 ---
 
-## Installation Guide
+## Installation
 
-### General System Requirements
+Pre-compiled binaries are available for Linux, macOS, and Windows. Choose your preferred installation method below.
 
-* A 64-bit Linux, macOS, or Windows system supported by Rust.
-* A modern terminal emulator with ANSI color and Unicode support (minimum **58 columns × 18 rows**).
-* Read/write access to Papr's configuration and data directories (you can although change data directories in Settings).
-* An internet connection (for arXiv search, metadata enrichment, and downloads). Local browsing works offline.
+### Quick Installers
 
-### Dependencies
+**Linux & macOS (Shell Script):**
+```sh
+curl --proto '=https' --tlsv1.2 -sSfL https://github.com/AfrozSaqlain/Papr/releases/latest/download/papr-tui-installer.sh | sh
+```
 
-**Required (to use Papr):**
-* **Linux Specific:** `pkg-config` and `xdg-utils`.
+**Windows (PowerShell):**
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+irm https://github.com/AfrozSaqlain/Papr/releases/latest/download/papr-tui-installer.ps1 | iex
+```
+*Installs `papr.exe` to `%USERPROFILE%\.cargo\bin`. Restart PowerShell if the command is not immediately recognized.*
 
-**Optional Feature Dependencies:**
+---
 
-| Feature | Dependencies |
-| :--- | :--- |
-| **Terminal PDF Viewer** | A Kitty- or Sixel-capable terminal, plus `poppler` (specifically `pdftoppm`). Kitty is optional and not installed automatically. |
-| **PDF Metadata & Text** | `poppler` (specifically `pdfinfo` and `pdftotext`). |
-| **LaTeX Workspace** | `latexmk` and a TeX distribution (e.g., TeX Live). |
-| **Typst Workspace** | None. The Typst compiler and baseline fonts are embedded. Typst projects can import local modules, compatible `@preview` Typst Universe packages, and system-local `@local` packages. Internet access is needed only when a project first downloads an uncached Universe package. |
-| **Linux Clipboard** | `wl-clipboard` (Wayland) or `xclip` (X11). Native `arboard` fallback is included if these are unavailable. |
-| **External PDF Viewer** | The configured viewer command and its required desktop environment integration. |
+### Package Managers
 
-> [!IMPORTANT]
-> Some features on Windows may not work, such as the internal PDF viewer, since the Kitty terminal is not available on Windows. However, you can still use your preferred PDF viewer to open PDFs. By default, PDFs are launched in Microsoft Edge (which you can change to Chrome, Brave, or any other PDF viewer), as Microsoft Edge is available on all Windows systems.
-> 
-> Windows users: Visual Studio Build Tools are only needed when building from source; MiKTeX (including `latexmk`) and Strawberry Perl are the Windows LaTeX workspace prerequisites documented in [docs/windows.md](docs/windows.md).
-
-**Install OS-specific prerequisites:**
-
-* **Ubuntu / Debian:**
-  ```sh
-  sudo apt update && sudo apt install -y build-essential pkg-config xdg-utils poppler-utils wl-clipboard texlive latexmk git
-  ```
-* **Fedora:**
-  ```sh
-  sudo dnf install -y gcc make pkgconf-pkg-config xdg-utils poppler-utils wl-clipboard texlive-scheme-basic latexmk git
-  ```
-* **Arch Linux:**
-  ```sh
-  sudo pacman -S --noconfirm base-devel pkgconf xdg-utils poppler wl-clipboard texlive-basic texlive-latexmk git
-  ```
-* **macOS:**
-  ```sh
-  xcode-select --install
-  brew install poppler basictex git
-  sudo tlmgr update --self
-  sudo tlmgr install latexmk
-  ```
-
-If you want to use kitty with Papr’s terminal PDF viewer, install it separately and register it as the terminal launcher where your OS supports that:
-
-* **Linux:**
-  ```sh
-  curl -L https://sw.kovidgoyal.net/kitty/installer.sh | sh /dev/stdin
-  ln -sf ~/.local/kitty.app/bin/kitty ~/.local/kitty.app/bin/kitten ~/.local/bin/
-  cp ~/.local/kitty.app/share/applications/kitty.desktop ~/.local/share/applications/
-  cp ~/.local/kitty.app/share/applications/kitty-open.desktop ~/.local/share/applications/
-  sed -i "s|Icon=kitty|Icon=$(readlink -f ~)/.local/kitty.app/share/icons/hicolor/256x256/apps/kitty.png|g" ~/.local/share/applications/kitty*.desktop
-  sed -i "s|Exec=kitty|Exec=$(readlink -f ~)/.local/kitty.app/bin/kitty|g" ~/.local/share/applications/kitty*.desktop
-  echo 'kitty.desktop' > ~/.config/xdg-terminals.list
-  ```
-* **macOS:**
-  ```sh
-  curl -L https://sw.kovidgoyal.net/kitty/installer.sh | sh /dev/stdin
-  open -a kitty
-  ```
-  macOS does not offer a single system-wide default-terminal setting, so use kitty directly from Applications, Spotlight, or the Dock.
-
-Select your preferred installation method below. Pre-built binaries are available for Linux, macOS, and Windows.
-
-## Cargo (crates.io)
-If you already have Rust installed, install Papr directly from crates.io (the crate is published under `papr-tui` and installs the binary command `papr`):
-
+#### Cargo (crates.io)
+If you have the Rust toolchain installed:
 ```sh
 cargo install papr-tui
 ```
+*(The crate is published as `papr-tui` and installs the binary `papr`.)*
 
-## Arch Linux (AUR)
-Arch Linux and Manjaro users can install the pre-compiled binary package from the Arch User Repository:
-
+#### Arch Linux (AUR)
 ```sh
 yay -S papr-bin
-```
-or
-```sh
+# or
 paru -S papr-bin
 ```
 
-## Fedora (COPR)
-Use COPR Repository to install Papr:
-```
+#### Fedora (COPR)
+```sh
 sudo dnf copr enable afrozsaqlain/Papr
 sudo dnf install papr-tui
 ```
+*To update an existing installation: `sudo dnf upgrade --refresh papr-tui`*
 
-and if already installed and you want to upgrade, then simply run:
-
-```
-sudo dnf upgrade --refresh papr-tui
-```
-
-## macOS Homebrew Tap
-Install Papr on macOS using Homebrew:
-
+#### macOS (Homebrew Tap)
 ```sh
 brew tap AfrozSaqlain/tap
 brew trust AfrozSaqlain/tap
 brew install papr
 ```
 
-## Shell Script Installer (Linux & macOS)
-Install the latest pre-compiled release binary automatically:
-
-```sh
-curl --proto '=https' --tlsv1.2 -sSfL https://github.com/AfrozSaqlain/Papr/releases/latest/download/papr-tui-installer.sh | sh
-```
-
-## PowerShell Installer (Windows)
-
-Run PowerShell as a user and execute:
-
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-irm https://github.com/AfrozSaqlain/Papr/releases/latest/download/papr-tui-installer.ps1 | iex
-```
-
-This installs `papr.exe` to:
-
-```text
-%USERPROFILE%\.cargo\bin
-```
-
-If `papr` is not recognized after installation, restart your PowerShell window so the updated `PATH` is loaded.
-
-## Debian / Ubuntu (.deb) & RHEL / CentOS (.rpm) / openSUSE (.rpm) Packages
-Download the `.deb` or `.rpm` package from the [Latest Release Page](https://github.com/AfrozSaqlain/Papr/releases/latest) and install:
+#### Debian, Ubuntu, & RPM Packages
+Download pre-built `.deb` or `.rpm` packages from the [GitHub Releases](https://github.com/AfrozSaqlain/Papr/releases/latest):
 
 * **Debian / Ubuntu / Mint:**
   ```sh
   sudo apt install ./papr_*.deb
   ```
-* **RHEL / CentOS:**
+* **Fedora / RHEL:**
   ```sh
   sudo dnf install ./papr-*.rpm
   ```
@@ -219,51 +130,77 @@ Download the `.deb` or `.rpm` package from the [Latest Release Page](https://git
 
 ---
 
-<details>
-<summary>Building from Source</summary>
+### System Dependencies & Extra Setup
 
-### Build Requirements
-* **Rust** (1.92 or newer) and Cargo (install via [rustup](https://rustup.rs/)).
-* Standard C compiler and system linker.
-* **Linux Specific:** `pkg-config` and `xdg-utils`.
+#### Recommended Tools
+While Papr runs out of the box, certain features rely on standard system utilities:
 
-### Step 1: Install Rust & Build Prerequisites
+| Feature | Dependency | Package Name |
+| :--- | :--- | :--- |
+| **In-terminal PDF Viewer** | Kitty or Sixel terminal + Poppler | `poppler-utils` (`pdftoppm`) |
+| **PDF Metadata Extraction** | Poppler | `poppler-utils` (`pdfinfo`, `pdftotext`) |
+| **LaTeX Compilation** | TeX Live + Latexmk | `texlive`, `latexmk` |
+| **Typst Compilation** | Embedded in Papr | *No external dependencies required* |
+| **System Clipboard (Linux)** | Wayland or X11 utility | `wl-clipboard` (Wayland) or `xclip` (X11) |
+| **External PDF Viewer** | Optional desktop viewer | `zathura`, `okular`, or system default |
 
-```sh
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-```
+#### **In-Terminal PDF Viewer Setup (Kitty)**
 
-### Step 2: Install System Dependencies
+For the best reading experience inside the terminal, use the [Kitty](https://sw.kovidgoyal.net/kitty/) terminal emulator:
 
-* **Ubuntu / Debian:**
+* **Linux:**
   ```sh
-  sudo apt update && sudo apt install -y build-essential pkg-config xdg-utils poppler-utils wl-clipboard texlive latexmk git
-  ```
-* **Fedora:**
-  ```sh
-  sudo dnf install -y gcc make pkgconf-pkg-config xdg-utils poppler-utils wl-clipboard texlive-scheme-basic latexmk git
-  ```
-* **Arch Linux:**
-  ```sh
-  sudo pacman -S --noconfirm base-devel pkgconf xdg-utils poppler wl-clipboard texlive-basic texlive-latexmk git
+  curl -L https://sw.kovidgoyal.net/kitty/installer.sh | sh /dev/stdin
+  ln -sf ~/.local/kitty.app/bin/kitty ~/.local/kitty.app/bin/kitten ~/.local/bin/
   ```
 * **macOS:**
   ```sh
-  xcode-select --install
-  brew install poppler basictex git
+  curl -L https://sw.kovidgoyal.net/kitty/installer.sh | sh /dev/stdin
+  ```
+  > [!NOTE]
+  > On macOS, configure Kitty to pass the Option key as Alt so window pane shortcuts work correctly: add `macos_option_as_alt yes` to `~/.config/kitty/kitty.conf`.
+
+#### **Install other system dependencies:**
+
+* **Ubuntu / Debian:**
+  ```sh
+  sudo apt update && sudo apt install -y poppler-utils wl-clipboard texlive latexmk xdg-utils
+  ```
+* **Fedora:**
+  ```sh
+  sudo dnf install -y poppler-utils wl-clipboard texlive-scheme-basic latexmk xdg-utils
+  ```
+* **Arch Linux:**
+  ```sh
+  sudo pacman -S --noconfirm poppler wl-clipboard texlive-basic texlive-latexmk xdg-utils
+  ```
+* **macOS:**
+  ```sh
+  brew install poppler basictex
+  sudo tlmgr update --self && sudo tlmgr install latexmk
   ```
 
-### Step 3: Clone & Install
+#### Windows Notes
+The internal Kitty terminal viewer is unavailable on Windows. By default, Papr launches external PDFs using Microsoft Edge (or your configured viewer). For LaTeX authoring on Windows, install MiKTeX and Strawberry Perl as detailed in [docs/windows.md](docs/windows.md).
 
+---
+
+<details>
+<summary><strong>Building from Source</strong></summary>
+
+### Prerequisites
+* Rust 1.92+ with Cargo ([rustup.rs](https://rustup.rs/))
+* C compiler and linker (`build-essential`, `gcc`, or Xcode command-line tools)
+* `pkg-config` (Linux)
+
+### Build & Install
 ```sh
 git clone https://github.com/AfrozSaqlain/Papr.git
 cd Papr
 cargo install --path crates/papr
 ```
 
-If typing `papr` shows `command not found`, add `$HOME/.cargo/bin` to your shell `PATH`:
-
+Ensure `~/.cargo/bin` is in your shell `PATH`:
 ```sh
 echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
@@ -273,51 +210,137 @@ source ~/.bashrc
 
 ---
 
-## Beginner Tutorial & App Workspaces
+## User Guide
 
-Launch Papr by typing its name in your terminal:
-
+Launch Papr by running:
 ```sh
 papr
 ```
 
-### Understanding Papr's Navigation & Workspaces
+### Workspaces Overview
+Papr organizes your research lifecycle into 14 specialized workspaces, accessible via the left sidebar or the quick navigator (`Ctrl+B`):
 
-Papr is divided into 14 specialized **workspaces** (sections), accessible via the sidebar menu on the left side of the screen.
-
-* **Sidebar Navigation:** Use the left sidebar to move through different workspaces and open the one you want.
-* **Workspaces:** Each workspace lets you interact with papers, notes, downloads, groups, reading queues, and projects from one place. Press `Ctrl+B` to open **Browse Papr** or `Ctrl+T` for the terminal command palette. [Note: When a project is open, commands in the terminal command palette runs from that project's directory.]
-
-Here is a complete breakdown of every section in Papr, what it does, and how to use it:
-
-| Workspace | Purpose & Description | How to Use |
+| Workspace | Purpose | Primary Actions |
 | :--- | :--- | :--- |
-| **Dashboard** | Shows your main research overview, including a daily arXiv feed, reading stats, streaks, and disk usage. | This is the default home screen. Set `dashboard_keywords` in `config.toml` to tailor your feed. Open a papepr's metadata with `Enter`, use `d` to download, `o` to open paper in browser, and `c` to just copy its citation. |
-| **Discover** | Lets you search arXiv by title, author, category, abstract, or DOI from within Papr. | Press `/` to go to search bar, type a query, and press `Enter`. Filter the results by pressing `>` and typing the keyword. Open a papepr's metadata with `Enter`, use `d` to download, `o` to open paper in browser, and `c` to just copy its citation. |
-| **Library** | Lists all local PDF files found in your configured library directories. |  See [Papr Actions](#paper-actions) for the working keybindings. |
-| **Reading Queue** | Holds the prioritized backlog of papers you plan to read next. |  See [Papr Actions](#paper-actions) and [Reading Queue](#queue) for the working keybindings.  |
-| **Groups** | Organizes papers into filesystem-synced folders and collections. |  See [Papr Actions](#paper-actions) and [Groups](#groups) for the working keybindings. |
-| **Bookmarks** | Collects papers you marked for quick retrieval later. | See [Papr Actions](#paper-actions) for the working keybindings. |
-| **Authors** | Groups all papers in your local library by author name automatically. | Select an author from the list to view every paper written by them in your library. |
-| **Notes** | Provides a searchable catalog of Markdown notes written for your papers. | Press `n` on any paper to open the Markdown editor. Press `Tab` to switch to live preview, `Esc` to save adn exit. |
-| **Downloads** | Tracks active, completed, and failed background PDF downloads in real time. | See [Papr Actions](#paper-actions) and [Downloads](#downloads) for the working keybindings. |
-| **Projects** | Lets you write LaTeX or Typst documents, continuously compile `main.tex` or `main.typ`, preview PDFs, and inspect build issues. | See [Project List](#project-list), [Project File Tree](#project-file-tree), [Project Panes](#project-panes), and [Project Editor](#project-editor-(normal-mode)) for the working keybindings. |
-| **History** | Logs a chronological timeline of recent activity, searches, downloads, and project builds. | This workspace is currently read-only and intended for viewing insights. **Any ideas are welcome.** |
-| **Statistics** | Shows reading habits, reading streak, total and average reading time, most readd author, most read journal, and a 12-week activity heatmap. | Track your research productivity and reading habits over time. This workspace is currently read-only and intended for viewing insights. **But ideas are welcome.** |
-| **Settings** | Provides an interactive workspace for preferences, paths, themes, and plugins. | Customize themes (with live preview), dashboard keywords, library/download/project paths, and plugin settings. Follow on-screen instructions. |
-| **Credits** | Shows Papr's version, maintainers, license, and core dependencies. | View application version metadata and component attribution. |
+| **Dashboard** | Daily arXiv feed tailored to your interests, reading streak, and activity stats. | `Enter` metadata, `d` download, `o` browser, `c` citation |
+| **Discover** | Search arXiv by title, author, category, abstract, or DOI with query filtering. | `/` search bar, `>` filter results, `d` download |
+| **Library** | Catalogs all local PDFs discovered across your configured library directories. | `Enter` read, `s` sort, `n` note, `g` group, `a` queue |
+| **Reading Queue**| Prioritized backlog of papers to read next; completes upon reaching the final page. | `Shift+↑/↓` reorder, `Enter` read, `a` remove |
+| **Groups** | Custom collections mirrored directly into your local filesystem folders. | `g` create/assign group, `Enter` explore papers |
+| **Bookmarks** | Quick-access collection of starred papers. | `B` toggle bookmark, `Enter` read |
+| **Authors** | Automatically clusters local papers by author name. | `s` sort, `Enter` view author catalog |
+| **Notes** | Centralized catalog of all Markdown notes attached to your papers. | `Enter` edit note, `Tab` toggle preview |
+| **Downloads** | Real-time queue showing active, completed, and failed background downloads. | `r` retry failed download |
+| **Projects** | Integrated LaTeX & Typst writing studio with file tree, editor, and PDF preview. | `n` create project/file, `Alt+1..4` switch panes |
+| **History** | Chronological timeline of recent searches, downloads, and compilation events. | Read-only activity audit |
+| **Statistics** | Analytics tracking total reading time, streaks, top authors, and a 12-week heatmap. | Visual research insights |
+| **Settings** | Configuration hub for themes, paths, research keywords, and GitHub sync. | Interactive preference management |
+| **Credits** | License, maintainer attributions, and core dependency information. | `Enter` open reference links |
+
+---
+
+### Core Workflows
+
+#### 1. Discovering & Downloading Papers
+* **Daily Feed:** Open **Dashboard** to see today's curated recommendations based on your `dashboard_keywords`. Press `Enter` to read the abstract, `d` to start a background download, `o` to view the paper on the web, or `c` to copy its BibTeX citation.
+* **arXiv Search:** Switch to **Discover** and press `/` to open the search bar. Enter search terms, categories (e.g. `cs.AI`), or authors. Use `>` to filter loaded results instantly.
+* **Command Line Download:** You can also download papers directly from your shell without opening the TUI:
+  ```sh
+  papr download 2401.12345
+  papr download https://arxiv.org/abs/2401.12345
+  ```
+
+#### 2. Reading, Queuing & Taking Notes
+* **Reading Progress:** Open any paper from **Library** or **Reading Queue** with `Enter`. Papr tracks your position so you resume on the exact page you last read.
+* **Managing the Queue:** Add papers to your reading backlog by pressing `a`. In the **Reading Queue** workspace, reorder items with `Shift+↑` and `Shift+↓`. A paper is automatically marked finished and cleared from the queue once you reach its final page.
+* **Taking Notes:** Press `n` on any paper row to open the Markdown editor. Jot down annotations, formulas, or summaries. Press `Tab` to toggle a styled preview and `Esc` to save and exit.
+
+#### 3. Writing Manuscripts (LaTeX & Typst)
+1. Open the **Projects** workspace and press `n` to create a new project. Choose between **Typst** (default) or **LaTeX**.
+2. Press `Enter` to enter the project workspace:
+   * **Pane Navigation:** Use `Alt+1` (File Tree), `Alt+2` (Editor), `Alt+3` (PDF Preview), or `Alt+4` (Compiler Log).
+   * **Editing:** Standard Vim motions are supported. Save with `Ctrl+S` to trigger instant background compilation.
+   * **Insert Citations:** Press `Ctrl+F` inside the editor to open the citation importer, search your library, and insert formatted BibTeX citations.
+   * **Error Inspection:** Compiler errors display inline diagnostic badges; inspect detailed logs in `Alt+4`.
+
+#### 4. Synchronizing Across Machines
+Enable GitHub sync to keep your research catalog consistent across devices:
+1. Navigate to **Settings** or edit `config.toml`.
+2. Configure your GitHub repository and Personal Access Token (or set `PAPR_GITHUB_TOKEN`).
+3. Papr will sync library papers and their metadata, allowing a fresh installation on another machine to restore your library effortlessly.
+
+---
+
+## Keyboard Reference
+
+<details>
+<summary><strong>View Keyboard Shortcuts Reference</strong></summary>
+
+### Global Navigation
+| Key | Action |
+| :--- | :--- |
+| `Ctrl+b` | Open workspace navigator |
+| `Ctrl+t` | Open terminal command palette |
+| `?` | Toggle context-sensitive help popup |
+| `/` | Focus search bar (in Discover/Dashboard) |
+| `Enter / → / l` | Open selected item / drill down |
+| `← / h` | Return to previous view / go up |
+| `Esc` | Clear search / close active modal |
+| `q` | Quit Papr (outside text inputs) |
+
+### Paper Actions
+*Applicable in Library, Reading Queue, Groups, Bookmarks, and Author views:*
+
+| Key | Action |
+| :--- | :--- |
+| `Enter / l` | Open PDF in viewer |
+| `o` | Open paper online in default browser |
+| `a` | Toggle paper in Reading Queue |
+| `B` | Toggle bookmark status |
+| `n` | Open per-paper Markdown note |
+| `g` | Assign paper to a Group |
+| `c` | Copy BibTeX citation to clipboard |
+| `s` | Cycle sort order (newest, oldest, download date) |
+| `>` | Open in-view filter bar |
+| `R` | Rename PDF file |
+| `u` | Mark paper as unread |
+| `x` | Delete PDF from disk and library |
+
+### Reading Queue & Downloads
+| Key | Action |
+| :--- | :--- |
+| `Shift+↑` | Move selected paper up in reading queue |
+| `Shift+↓` | Move selected paper down in reading queue |
+| `r` | Retry a failed download |
+
+### Writing Projects
+| Key | Action |
+| :--- | :--- |
+| `Alt+1` | Focus project file tree |
+| `Alt+2` | Focus manuscript editor |
+| `Alt+3` | Focus PDF preview pane |
+| `Alt+4` | Focus compilation output logs |
+| `n` | Create new file (append `/` to create directory) |
+| `Ctrl+s` | Save document and trigger build |
+| `Ctrl+f` | Search library and insert citation |
+| `Ctrl+Shift+v` | Paste clipboard text |
+| `Esc` | Return focus to file tree from editor |
+
+*For complete editor keybindings, see the [Project Editor Reference](docs/PROJECT_EDITOR_KEYBINDINGS.md).*
+
+</details>
 
 ---
 
 ## Configuration
 
-Papr generates a default configuration file (`config.toml`) on its first launch. You can find all resolved paths by running:
+Papr creates a default `config.toml` on first launch. Inspect your active paths anytime with:
 ```sh
 papr paths
 ```
 
-### Path Locations
-| OS | Configuration File | Database, Downloads & Plugins | Projects Directory |
+### Directory Locations
+| Platform | Configuration File | Data & Database Directory | Projects Directory |
 | :--- | :--- | :--- | :--- |
 | **Linux** | `~/.config/papr/config.toml` | `~/.local/share/papr/` | `~/.local/share/papr/projects/` |
 | **macOS** | `~/Library/Application Support/papr/config.toml` | `~/Library/Application Support/papr/` | `~/Library/Application Support/papr/projects/` |
@@ -325,184 +348,67 @@ papr paths
 
 ### Example `config.toml`
 ```toml
+# Appearance
 theme = "catppuccin-mocha"
-startup_page = "dashboard" # dashboard, discover, library, reading_queue, projects, etc.
-pdf_viewer = "zathura {path}" # Or "internal" for terminal viewer
+transparent_background = false
+startup_page = "dashboard" # dashboard, discover, library, reading_queue, projects
 
-# Paths to recursively scan for local PDFs
+# PDF Viewer: "internal" for terminal graphics, or an external command
+pdf_viewer = "zathura {path}"
+
+# Storage & Library Directories
 library_folders = [
   "/home/user/Documents/papers",
-  "/home/user/Downloads/research",
+  "/home/user/Downloads/research"
 ]
-
-# Destination directory for new downloads
 download_path = "/home/user/Documents/papers"
-
-# Default directory used to create and discover writing projects
 projects_directory = "/home/user/Documents/projects"
 
-# Comma-separated interests to populate the daily Dashboard arXiv feed
-dashboard_keywords = "machine learning, gravitational waves, astrophysics"
+# Research Interests for Daily Dashboard Recommendations
+dashboard_keywords = "machine learning, quantum computing, computer vision"
 
+# Writing Projects
+default_project_compiler = "typst" # "typst" or "latex"
+
+# GitHub Paper Synchronization
+[sync]
+enabled = false
+github_repo = "username/papr-library"
+branch = "main"
+# github_token = "ghp_..." # Or export PAPR_GITHUB_TOKEN in your environment
+
+# Plugins
 enabled_plugins = []
 ```
 
----
-
-## Keyboard Reference
-
-The table below summarizes the most useful keys for moving around Papr and opening the main workspaces.
-
-### Global Navigation
-| Key | Action |
-| :--- | :--- |
-| `?` | toggle reference |
-| `/` | toggle arXiv search |
-| `Ctrl+b` | toggle navigator |
-| `Ctrl+t` | terminal palette |
-| `Esc` | close local search |
-| `Enter / → / l` | open selected item |
-| `← / h` | return one level |
-| `q` | quit outside text input |
-
-### Paper Actions
-
-Paper rows include Library, Downloads, Bookmarks, Notes, Reading Queue, and the paper lists inside Groups or Authors.
-
-| Key | Action |
-| :--- | :--- |
-| `Enter / → / l` | open local PDF |
-| `o` | open paper online |
-| `B` | toggle bookmark |
-| `>` | toggle local search |
-| `n` | open note |
-| `g` | assign to group |
-| `R` | rename PDF |
-| `c` | copy citation |
-| `x` | confirm then delete PDF |
-| `a` | toggle reading queue |
-| `u` | mark PDF unread |
-
-### Library & Authors
-| Key | Action |
-| :--- | :--- |
-| `s` | sort papers |
-
-### Notes & PDF Viewer
-| Key | Action |
-| :--- | :--- |
-| `Tab` | toggle edit / preview |
-| `Esc` | save and leave note |
-
-### Internal PDF Viewer
-| Key | Action |
-| :--- | :--- |
-| `Esc / q` | close internal viewer |
-
-### Credits
-| Key | Action |
-| :--- | :--- |
-| `Enter` | open selected link |
-
-### Discover & Dashboard
-| Key | Action |
-| :--- | :--- |
-| `/` | toggle arXiv search |
-| `d` | download paper |
-| `Enter` | open downloaded PDF |
-
-### Discover
-| Key | Action |
-| :--- | :--- |
-| `/` | toggle arXiv search |
-| `Ctrl+←` | previous cached page |
-| `Ctrl+→` | next cached page |
-| `r` | retry loading failure |
-
-### Groups
-| Key | Action |
-| :--- | :--- |
-| `g` | create a group |
-
-### Queue
-| Key | Action |
-| :--- | :--- |
-| `Shift+↑` | move queued paper up |
-| `Shift+↓` | move queued paper down |
-
-### Downloads
-| Key | Action |
-| :--- | :--- |
-| `r` | retry failed download |
-
-### Project Workspace (Outside)
-| Key | Action |
-| :--- | :--- |
-| `n` | create named project |
-| `r` | refresh project list |
-| `R` | rename selected project |
-| `x` | delete selected project |
-
-### Project Workspace (Inside)
-
-Shows folders, source files, and supported image files.
-
-| Key | Action |
-| :--- | :--- |
-| `Enter / →` | open file or enter folder |
-| `←` | parent folder; exit at project root |
-| `n` | create file; add / for folder |
-| `R` | rename selected file or folder |
-| `x` | confirm then delete file or folder |
-| `Ctrl+f` | search and add citation |
-| `Esc` | return to project list at root |
-| `Alt+1` | focus file tree |
-| `Alt+2` | focus editor |
-| `Alt+3` | focus PDF preview |
-| `Alt+4` | focus compiler output |
-
-> [!NOTE]
-> On macOS, since the Option key produces special characters by default instead of Alt/Meta sequences, configure your terminal to treat Option as Alt (e.g., write `macos_option_as_alt yes` in `~/.config/kitty/kitty.conf` if you are using Kitty).
-
-### Project Editor 
-
-For the complete Normal, Insert, and Visual Line mode reference, see
-[Projects editor keyboard reference](docs/PROJECT_EDITOR_KEYBINDINGS.md).
-
-| Key | Action |
-| :--- | :--- |
-| `Esc` | focus file tree (when in editor or PDF preview pane) |
-| `Ctrl+s` | save current source |
-| `Ctrl+f` | search and add citation |
-| `Ctrl+Shift+v` | paste clipboard text |
+### Themes
+Papr ships with 19 built-in themes: `catppuccin-mocha` (default), `catppuccin-macchiato`, `catppuccin-frappe`, `catppuccin-latte`, `tokyo-night`, `gruvbox`, `nord`, `dracula`, `light`, `rose-pink-dark`, `rose-pink-light`, `everforest`, `kanagawa`, `one-dark`, `cyberpunk`, `ember`, `verdant`, `lavender`, and `parchment`. Themes can be previewed live in the **Settings** workspace.
 
 ---
 
-## Themes
+## Docker Setup
 
-Papr supports over a dozen built-in themes out of the box, including:
-`catppuccin-mocha` (default), `catppuccin-macchiato`, `catppuccin-frappe`, `catppuccin-latte`, `tokyo-night`, `gruvbox`, `nord`, `dracula`, `light`, `rose-pink-dark`, `rose-pink-light`, `everforest`, `kanagawa`, `one-dark`, `cyberpunk`, `ember`, `verdant`, `lavender`, and `parchment`.
+<details>
+<summary><strong>View Docker Instructions (Wayland, X11, macOS)</strong></summary>
 
----
+Papr can be containerized to run in an isolated environment while bind-mounting your local library and projects.
 
-## Running with Docker (Under Development)
-
+### Build Container
 ```sh
 docker build \
   --build-arg UID="$(id -u)" \
   --build-arg GID="$(id -g)" \
-  --tag papr:latest \
-  .
+  --tag papr:latest .
 ```
 
-Run Papr interactively. To ensure full functionality (like opening links in your host browser, system clipboard, and external PDF viewers like Zathura), you must pass your display and D-Bus sockets into the container.
+### Run Container
 
-First, create the required directories on your host so Docker can bind mount them successfully:
+First, initialize host directories:
 ```sh
 mkdir -p .papr/config .papr/data papers projects
 ```
 
-**For Wayland:**
+**Wayland:**
 ```sh
 docker run --rm -it \
   --name papr \
@@ -519,7 +425,7 @@ docker run --rm -it \
   papr:latest
 ```
 
-**For X11:**
+**X11 (Linux):**
 ```sh
 docker run --rm -it \
   --name papr \
@@ -535,57 +441,65 @@ docker run --rm -it \
   papr:latest
 ```
 
-**For macOS (using XQuartz for Clipboard & External Viewers):**
-macOS does not natively use X11. To sync the clipboard from the Docker container to your Mac and use external Linux GUI apps (like Zathura), you need XQuartz:
+**macOS (via XQuartz):**
 1. Install XQuartz: `brew install --cask xquartz`
-2. Open XQuartz, go to **Preferences > Security**, and check **"Allow connections from network clients"**. Restart XQuartz.
-3. In your macOS terminal, allow connections: `xhost + 127.0.0.1`
-4. Run the container and point the display to the host:
+2. Open XQuartz preferences (**Security** > check **"Allow connections from network clients"**) and restart XQuartz.
+3. Allow localhost access: `xhost + 127.0.0.1`
+4. Run:
+   ```sh
+   docker run --rm -it \
+     --name papr \
+     --env DISPLAY=host.docker.internal:0 \
+     --mount "type=bind,src=$PWD/.papr/config,dst=/home/papr/.config/papr" \
+     --mount "type=bind,src=$PWD/.papr/data,dst=/home/papr/.local/share/papr" \
+     --mount "type=bind,src=$PWD/papers,dst=/papers" \
+     --mount "type=bind,src=$PWD/projects,dst=/projects" \
+     papr:latest
+   ```
+   *(Note: Native Homebrew installation is recommended on macOS for seamless browser link handling and clipboard support.)*
 
-```sh
-docker run --rm -it \
-  --name papr \
-  --env DISPLAY=host.docker.internal:0 \
-  --mount "type=bind,src=$PWD/.papr/config,dst=/home/papr/.config/papr" \
-  --mount "type=bind,src=$PWD/.papr/data,dst=/home/papr/.local/share/papr" \
-  --mount "type=bind,src=$PWD/papers,dst=/papers" \
-  --mount "type=bind,src=$PWD/projects,dst=/projects" \
-  papr:latest
-```
-
-*(Note: Opening web links via the `o` key from Docker on macOS requires complex URL forwarding. For the best experience on macOS with all features working out of the box, we recommend using the native Homebrew installation instead of Docker.)*
-
+</details>
 
 ---
 
-## Architecture & CLI Utilities
+## Architecture & CLI
 
-Papr is split into two core crates:
-* **`papr-core`:** Handles database migrations, SQLite queries, configuration loading, downloading, indexing local directories, embedded Typst compilation, and plugin execution.
-* **`papr`:** Handles the terminal UI loop (Ratatui + Crossterm), input handling, async orchestration, PDF viewing, and launching external tools.
+Papr is engineered as a modular Cargo workspace:
+* **[`papr-core`](crates/papr-core):** Manages SQLite migrations, database transactions, background download scheduling, recursive library indexing, embedded Typst compilation, and external plugin execution.
+* **[`papr`](crates/papr):** Manages the terminal user interface lifecycle (Ratatui + Crossterm), event loop dispatch, graphics rendering protocols, and project editor states.
 
-**CLI Tools:**
+### Command-Line Interface
 ```sh
-papr                         # Start the TUI
-papr paths                   # Print where configs, databases, and folders reside
-papr download <ARXIV-ID>     # Download an arXiv paper by ID, URL, or Markdown link
+papr                         # Launch the interactive terminal workspace
+papr paths                   # Display active configuration, database, and library paths
+papr download <ARXIV-ID>     # Download a paper by arXiv ID, URL, or Markdown link
+papr plugin <ID> <EVENT>     # Execute a plugin event directly via JSON protocol
 ```
 
 ---
 
 ## Contributing
 
-Contributions are welcome! Before submitting a pull request, ensure all checks pass:
+Contributions, feature requests, and bug reports are welcome! Please ensure all code quality checks pass before opening a pull request:
 
 ```sh
+# Format check
 cargo fmt --all -- --check
+
+# Lints
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+# Test suite
 cargo test --workspace
+
+# Documentation
 cargo doc --workspace --no-deps
 ```
+
+Refer to [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/PLUGINS.md](docs/PLUGINS.md) for deeper technical details.
 
 ---
 
 ## License
 
-Papr is open-source software distributed under the [MIT License](LICENSE).
+Papr is open-source software licensed under the [MIT License](LICENSE).
