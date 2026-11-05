@@ -262,6 +262,8 @@ pub enum SettingsTab {
     Paths,
     /// Plugin management.
     Plugins,
+    /// GitHub paper synchronization.
+    Sync,
 }
 
 /// Source currently shown by the project citation search popup.
@@ -305,7 +307,13 @@ impl ProjectCitationResult {
 
 impl SettingsTab {
     /// All tabs in display order.
-    pub const ALL: [Self; 4] = [Self::Theme, Self::General, Self::Paths, Self::Plugins];
+    pub const ALL: [Self; 5] = [
+        Self::Theme,
+        Self::General,
+        Self::Paths,
+        Self::Plugins,
+        Self::Sync,
+    ];
 
     /// Human-readable tab label.
     #[must_use]
@@ -315,6 +323,7 @@ impl SettingsTab {
             Self::General => "General",
             Self::Paths => "Paths",
             Self::Plugins => "Plugins",
+            Self::Sync => "Sync",
         }
     }
 
@@ -412,6 +421,31 @@ pub struct PathSettingsEditing {
     pub projects_directory: bool,
 }
 
+/// Focus target within the Sync tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SyncTabFocus {
+    /// Sync enabled toggle.
+    #[default]
+    Enabled,
+    /// GitHub repository input field.
+    Repo,
+    /// GitHub Personal Access Token input field.
+    Token,
+    /// Git branch input field.
+    Branch,
+}
+
+/// Editing states for text fields in the Sync tab.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SyncSettingsEditing {
+    /// Whether the user is actively typing in the repo field.
+    pub repo: bool,
+    /// Whether the user is actively typing in the token field.
+    pub token: bool,
+    /// Whether the user is actively typing in the branch field.
+    pub branch: bool,
+}
+
 /// Staged (in-memory) settings being edited in the modal.
 #[derive(Debug, Clone)]
 pub struct SettingsModalState {
@@ -474,6 +508,25 @@ pub struct SettingsModalState {
     pub plugins_scroll: usize,
     /// Original theme before live preview started.
     pub original_theme: String,
+    // --- Sync tab ---
+    /// Staged `sync.enabled` value.
+    pub sync_enabled: bool,
+    /// Staged `sync.github_repo` value.
+    pub sync_repo: String,
+    /// Byte cursor in `sync_repo` text field.
+    pub sync_repo_cursor: usize,
+    /// Staged `sync.github_token` value.
+    pub sync_token: String,
+    /// Byte cursor in `sync_token` text field.
+    pub sync_token_cursor: usize,
+    /// Staged `sync.branch` value.
+    pub sync_branch: String,
+    /// Byte cursor in `sync_branch` text field.
+    pub sync_branch_cursor: usize,
+    /// Focus within the Sync tab.
+    pub sync_focus: SyncTabFocus,
+    /// Editing state for fields on the Sync tab.
+    pub sync_editing: SyncSettingsEditing,
 }
 
 impl Default for SettingsModalState {
@@ -507,6 +560,15 @@ impl Default for SettingsModalState {
             plugins_selected: 0,
             plugins_scroll: 0,
             original_theme: String::new(),
+            sync_enabled: false,
+            sync_repo: "papr-library".to_string(),
+            sync_repo_cursor: "papr-library".len(),
+            sync_token: String::new(),
+            sync_token_cursor: 0,
+            sync_branch: "main".to_string(),
+            sync_branch_cursor: "main".len(),
+            sync_focus: SyncTabFocus::default(),
+            sync_editing: SyncSettingsEditing::default(),
         }
     }
 }

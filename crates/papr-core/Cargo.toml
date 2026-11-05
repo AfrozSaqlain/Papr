@@ -12,6 +12,7 @@ default = ["bundled-sqlite"]
 bundled-sqlite = ["rusqlite/bundled"]
 
 [dependencies]
+base64.workspace = true
 chrono.workspace = true
 directories.workspace = true
 dunce.workspace = true

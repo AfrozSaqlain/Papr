@@ -94,6 +94,33 @@ pub struct Config {
     pub default_project_compiler: String,
     /// Plugin identifiers explicitly allowed to execute.
     pub enabled_plugins: Vec<String>,
+    /// GitHub paper synchronization settings.
+    pub sync: SyncConfig,
+}
+
+/// GitHub paper synchronization settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SyncConfig {
+    /// Whether sync is enabled.
+    pub enabled: bool,
+    /// GitHub repository name (e.g. "papr-library" or "username/papr-library").
+    pub github_repo: String,
+    /// GitHub Personal Access Token (PAT). If None, checks `PAPR_GITHUB_TOKEN` env var.
+    pub github_token: Option<String>,
+    /// Git branch to use (defaults to "main").
+    pub branch: String,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            github_repo: "papr-library".to_string(),
+            github_token: None,
+            branch: "main".to_string(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -119,11 +146,27 @@ impl Default for Config {
             dashboard_keywords: String::new(),
             default_project_compiler: "typst".into(),
             enabled_plugins: Vec::new(),
+            sync: SyncConfig::default(),
         }
     }
 }
 
 impl Config {
+    /// Return the active GitHub Personal Access Token if configured directly or via `PAPR_GITHUB_TOKEN`.
+    #[must_use]
+    pub fn resolved_github_token(&self) -> Option<String> {
+        self.sync
+            .github_token
+            .as_ref()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .or_else(|| {
+                std::env::var("PAPR_GITHUB_TOKEN")
+                    .ok()
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+            })
+    }
     /// Read an existing configuration file without creating or modifying it.
     ///
     /// This is used by the live-reload path: an editor may briefly expose a
@@ -220,6 +263,12 @@ default_project_compiler = "typst"
 
 # Plugin identifiers explicitly allowed to execute.
 enabled_plugins = []
+
+# GitHub paper synchronization settings.
+[sync]
+enabled = false
+github_repo = "papr-library"
+branch = "main"
 "#
         );
 

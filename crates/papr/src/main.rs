@@ -2069,6 +2069,18 @@ struct ActionSenders {
     today: mpsc::UnboundedSender<TodayResponse>,
     app_events: mpsc::UnboundedSender<AppEvent>,
     enrichment: mpsc::UnboundedSender<MetadataEnrichment>,
+    sync: mpsc::UnboundedSender<SyncEvent>,
+}
+
+#[derive(Debug)]
+enum SyncEvent {
+    Started,
+    Completed {
+        downloaded: usize,
+        uploaded: usize,
+    },
+    MissingPapers(Vec<papr_core::sync::SyncedPaper>),
+    Failed(String),
 }
 
 #[derive(Debug)]
@@ -2120,6 +2132,7 @@ async fn run(
     let (app_events_sender, mut app_events_receiver) = mpsc::unbounded_channel::<AppEvent>();
     let (enrichment_sender, mut enrichment_receiver) =
         mpsc::unbounded_channel::<MetadataEnrichment>();
+    let (sync_sender, mut sync_receiver) = mpsc::unbounded_channel::<SyncEvent>();
     let senders = ActionSenders {
         search: sender,
         index: index_sender,
@@ -2127,9 +2140,13 @@ async fn run(
         today: today_sender,
         app_events: app_events_sender,
         enrichment: enrichment_sender,
+        sync: sync_sender,
     };
     let mut pending_downloads = HashMap::<String, RemotePaper>::new();
     start_runtime_scan(&runtime, &senders, app);
+    if runtime.config.sync.enabled && runtime.config.resolved_github_token().is_some() {
+        spawn_sync(&runtime, &senders.sync);
+    }
     let mut last_date_check = std::time::Instant::now();
     let mut last_enrichment_check = std::time::Instant::now();
     let (mut last_page, mut last_toast, mut last_background) = (None, None, Some(theme.background));
@@ -2183,6 +2200,13 @@ async fn run(
         )
         .await?;
         state_changed |= process_app_events(&mut app_events_receiver, &runtime, app)?;
+        state_changed |= process_sync_updates(
+            &mut sync_receiver,
+            &mut pending_downloads,
+            &mut runtime,
+            &senders,
+            app,
+        );
         state_changed |= process_page_change(&runtime, app, &mut theme, &mut last_page)?;
         state_changed |= update_toast_and_download_cleanup(app, &mut last_toast);
 
@@ -2710,6 +2734,157 @@ fn apply_project_citation_search_result(
     }
     app.project_citation_selected = 0;
     app.project_citation_scroll = 0;
+}
+
+fn process_sync_updates(
+    receiver: &mut mpsc::UnboundedReceiver<SyncEvent>,
+    pending_downloads: &mut HashMap<String, RemotePaper>,
+    runtime: &mut Runtime,
+    senders: &ActionSenders,
+    app: &mut App,
+) -> bool {
+    let mut changed = false;
+    while let Ok(event) = receiver.try_recv() {
+        changed = true;
+        match event {
+            SyncEvent::Started => {
+                app.toast = Some("Synchronizing papers with GitHub...".to_string());
+            }
+            SyncEvent::MissingPapers(papers) => {
+                for paper in papers {
+                    let pdf_url = paper.pdf_url.clone().or_else(|| {
+                        paper
+                            .arxiv_id
+                            .as_ref()
+                            .map(|id| format!("https://arxiv.org/pdf/{id}.pdf"))
+                    });
+                    if let Some(url) = pdf_url {
+                        let remote = RemotePaper {
+                            id: paper
+                                .arxiv_id
+                                .clone()
+                                .unwrap_or_else(|| paper.title.clone()),
+                            title: paper.title.clone(),
+                            authors: Vec::new(),
+                            abstract_text: String::new(),
+                            published: chrono::Utc::now(),
+                            updated: chrono::Utc::now(),
+                            categories: Vec::new(),
+                            pdf_url: Some(url),
+                            doi: paper.doi.clone(),
+                            journal_ref: None,
+                        };
+                        start_download(
+                            remote,
+                            &runtime.download_dir,
+                            &runtime.downloads,
+                            &senders.download,
+                            pending_downloads,
+                            app,
+                        );
+                    }
+                }
+            }
+            SyncEvent::Completed {
+                downloaded,
+                uploaded,
+            } => {
+                if downloaded > 0 || uploaded > 0 {
+                    app.toast =
+                        Some(format!("Sync complete: {downloaded} added, {uploaded} uploaded."));
+                } else {
+                    app.toast = Some("Library is up to date with GitHub.".to_string());
+                }
+            }
+            SyncEvent::Failed(err) => {
+                app.toast = Some(format!("Sync failed: {err}"));
+            }
+        }
+    }
+    changed
+}
+
+fn spawn_sync(runtime: &Runtime, sync_sender: &mpsc::UnboundedSender<SyncEvent>) {
+    let Some(token) = runtime.config.resolved_github_token() else {
+        return;
+    };
+    let repo = runtime.config.sync.github_repo.clone();
+    let branch = runtime.config.sync.branch.clone();
+    let local_papers = match runtime.database.library_papers() {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = sync_sender.send(SyncEvent::Failed(format!("Database error: {e}")));
+            return;
+        }
+    };
+    let sync_sender = sync_sender.clone();
+
+    tokio::spawn(async move {
+        let _ = sync_sender.send(SyncEvent::Started);
+        let service = match papr_core::sync::GitHubSyncService::new(repo, token, branch) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = sync_sender.send(SyncEvent::Failed(e.to_string()));
+                return;
+            }
+        };
+
+        // 1. Ensure private repo exists
+        let (owner, repo_name) = match service.ensure_repository_exists().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                let _ = sync_sender.send(SyncEvent::Failed(format!("Repository setup failed: {e}")));
+                return;
+            }
+        };
+
+        // 2. Fetch remote manifest
+        let remote_manifest_and_sha = match service.fetch_manifest(&owner, &repo_name).await {
+            Ok(res) => res,
+            Err(e) => {
+                let _ = sync_sender.send(SyncEvent::Failed(format!("Fetch manifest failed: {e}")));
+                return;
+            }
+        };
+
+        let (remote_manifest, previous_sha) = match remote_manifest_and_sha {
+            Some((m, sha)) => (Some(m), Some(sha)),
+            None => (None, None),
+        };
+
+        // 3. Reconcile
+        let reconciliation =
+            papr_core::sync::GitHubSyncService::reconcile(&local_papers, remote_manifest);
+        let uploaded = reconciliation.new_locally.len();
+        let downloaded = reconciliation.missing_locally.len();
+
+        // 4. Push if new local papers exist or if repository was fresh
+        let should_push = uploaded > 0 || previous_sha.is_none();
+        if should_push {
+            let push_res = service
+                .push_manifest(
+                    &owner,
+                    &repo_name,
+                    &reconciliation.merged_manifest,
+                    previous_sha.as_deref(),
+                )
+                .await;
+            if let Err(e) = push_res {
+                let _ = sync_sender.send(SyncEvent::Failed(format!("Push manifest failed: {e}")));
+                return;
+            }
+        }
+
+        // 5. Send missing papers to be downloaded locally
+        if !reconciliation.missing_locally.is_empty() {
+            let _ = sync_sender.send(SyncEvent::MissingPapers(reconciliation.missing_locally));
+        }
+
+        let _ = sync_sender.send(SyncEvent::Completed {
+            downloaded,
+            uploaded,
+        });
+    });
 }
 
 fn process_page_change(
@@ -5178,6 +5353,9 @@ async fn apply_download_event(
                 usize::from(!downloaded_paper_was_already_indexed),
             ));
             refresh_dashboard(runtime, app)?;
+            if runtime.config.sync.enabled && runtime.config.resolved_github_token().is_some() {
+                spawn_sync(runtime, &senders.sync);
+            }
             if app.toast.is_none() {
                 app.toast = Some("Download complete. Press Enter to open the PDF.".to_owned());
             }
@@ -8466,6 +8644,11 @@ fn apply_config_update(
 
     if keywords_changed {
         refresh_dashboard_papers(runtime, senders, app)?;
+    }
+
+    let sync_changed = config.sync != previous.sync;
+    if sync_changed && config.sync.enabled && config.resolved_github_token().is_some() {
+        spawn_sync(runtime, &senders.sync);
     }
 
     runtime.config = config.clone();
@@ -12122,6 +12305,7 @@ mod tests {
         let (download, _) = tokio::sync::mpsc::unbounded_channel();
         let (today, _) = tokio::sync::mpsc::unbounded_channel();
         let (app_events, _) = tokio::sync::mpsc::unbounded_channel();
+        let (sync, _) = tokio::sync::mpsc::unbounded_channel();
         super::ActionSenders {
             search,
             index,
@@ -12129,6 +12313,7 @@ mod tests {
             today,
             app_events,
             enrichment,
+            sync,
         }
     }
 

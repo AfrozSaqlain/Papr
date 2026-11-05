@@ -2624,6 +2624,7 @@ name = "papr-core"
 version = "0.1.2"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "directories",
  "dunce",

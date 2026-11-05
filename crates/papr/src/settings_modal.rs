@@ -12,7 +12,7 @@
 use crate::editor::{next_word_boundary, prev_word_boundary};
 use crate::state::{
     App, AppMode, Command, GeneralTabFocus, Page, PathEntryState, PathsTabFocus,
-    SettingsModalState, SettingsTab,
+    SettingsModalState, SettingsTab, SyncSettingsEditing, SyncTabFocus,
 };
 use crate::theme::Theme;
 use std::path::PathBuf;
@@ -115,6 +115,17 @@ pub fn open_settings_modal(app: &mut App, config: &Config, current_theme_name: &
     modal.plugins_selected = 0;
     modal.plugins_scroll = 0;
 
+    // Sync tab
+    modal.sync_enabled = config.sync.enabled;
+    modal.sync_repo.clone_from(&config.sync.github_repo);
+    modal.sync_repo_cursor = modal.sync_repo.len();
+    modal.sync_token = config.sync.github_token.clone().unwrap_or_default();
+    modal.sync_token_cursor = modal.sync_token.len();
+    modal.sync_branch.clone_from(&config.sync.branch);
+    modal.sync_branch_cursor = modal.sync_branch.len();
+    modal.sync_focus = SyncTabFocus::Enabled;
+    modal.sync_editing = SyncSettingsEditing::default();
+
     // Start on Theme tab with Tab Bar Header focused
     modal.tab = SettingsTab::Theme;
     modal.tab_bar_focused = true;
@@ -158,6 +169,25 @@ pub fn staged_config(modal: &SettingsModalState, options: &[String], _base: &Con
     }
     let dashboard_keywords = keyword_list.join(", ");
 
+    let sync = papr_core::config::SyncConfig {
+        enabled: modal.sync_enabled,
+        github_repo: if modal.sync_repo.trim().is_empty() {
+            "papr-library".to_string()
+        } else {
+            modal.sync_repo.trim().to_string()
+        },
+        github_token: if modal.sync_token.trim().is_empty() {
+            None
+        } else {
+            Some(modal.sync_token.trim().to_string())
+        },
+        branch: if modal.sync_branch.trim().is_empty() {
+            "main".to_string()
+        } else {
+            modal.sync_branch.trim().to_string()
+        },
+    };
+
     Config {
         theme: Theme::BUILTIN_THEMES
             .get(modal.theme_selected)
@@ -173,6 +203,7 @@ pub fn staged_config(modal: &SettingsModalState, options: &[String], _base: &Con
         dashboard_keywords,
         default_project_compiler: modal.default_project_compiler.clone(),
         enabled_plugins: modal.enabled_plugins.clone(),
+        sync,
     }
 }
 
@@ -243,6 +274,12 @@ pub fn paste_into_active_field(app: &mut App, text: Option<&str>) -> bool {
             &mut modal.projects_directory_cursor,
         );
         modal.projects_directory_error = None;
+    } else if modal.sync_editing.repo {
+        insert(&mut modal.sync_repo, &mut modal.sync_repo_cursor);
+    } else if modal.sync_editing.token {
+        insert(&mut modal.sync_token, &mut modal.sync_token_cursor);
+    } else if modal.sync_editing.branch {
+        insert(&mut modal.sync_branch, &mut modal.sync_branch_cursor);
     }
     true
 }
@@ -339,6 +376,9 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
                     SettingsTab::Plugins => {
                         app.settings_modal.plugins_selected = 0;
                     }
+                    SettingsTab::Sync => {
+                        app.settings_modal.sync_focus = SyncTabFocus::Enabled;
+                    }
                 }
                 return SettingsKeyResult::Handled;
             }
@@ -352,6 +392,7 @@ pub fn handle_settings_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
         SettingsTab::General => handle_general_key(app, key),
         SettingsTab::Paths => handle_paths_key(app, key),
         SettingsTab::Plugins => handle_plugins_key(app, key),
+        SettingsTab::Sync => handle_sync_key(app, key),
     }
 }
 
@@ -406,6 +447,9 @@ fn any_field_editing(app: &App) -> bool {
         || m.paths_editing.library
         || m.paths_editing.download_path
         || m.paths_editing.projects_directory
+        || m.sync_editing.repo
+        || m.sync_editing.token
+        || m.sync_editing.branch
 }
 
 fn clear_edit_state(app: &mut App) {
@@ -415,6 +459,7 @@ fn clear_edit_state(app: &mut App) {
     m.paths_editing.library = false;
     m.paths_editing.download_path = false;
     m.paths_editing.projects_directory = false;
+    m.sync_editing = SyncSettingsEditing::default();
 }
 
 // --- Theme tab ---
@@ -1148,6 +1193,183 @@ fn handle_plugins_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
     SettingsKeyResult::Handled
 }
 
+// --- Sync tab ---
+
+fn handle_sync_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
+    let focus = app.settings_modal.sync_focus;
+
+    if app.settings_modal.sync_editing.repo {
+        return handle_sync_text_edit(app, SyncTabFocus::Repo, key);
+    }
+    if app.settings_modal.sync_editing.token {
+        return handle_sync_text_edit(app, SyncTabFocus::Token, key);
+    }
+    if app.settings_modal.sync_editing.branch {
+        return handle_sync_text_edit(app, SyncTabFocus::Branch, key);
+    }
+
+    match focus {
+        SyncTabFocus::Enabled => handle_sync_enabled_key(app, key),
+        SyncTabFocus::Repo => handle_sync_repo_nav_key(app, key),
+        SyncTabFocus::Token => handle_sync_token_nav_key(app, key),
+        SyncTabFocus::Branch => handle_sync_branch_nav_key(app, key),
+    }
+}
+
+fn handle_sync_enabled_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+            app.settings_modal.tab_bar_focused = true;
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+            app.settings_modal.sync_focus = SyncTabFocus::Repo;
+        }
+        KeyCode::Char(' ') | KeyCode::Enter => {
+            app.settings_modal.sync_enabled = !app.settings_modal.sync_enabled;
+            return SettingsKeyResult::Apply;
+        }
+        _ => {}
+    }
+    SettingsKeyResult::Handled
+}
+
+fn handle_sync_repo_nav_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+            app.settings_modal.sync_focus = SyncTabFocus::Enabled;
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+            app.settings_modal.sync_focus = SyncTabFocus::Token;
+        }
+        KeyCode::Enter => {
+            app.settings_modal.sync_editing.repo = true;
+        }
+        _ => {}
+    }
+    SettingsKeyResult::Handled
+}
+
+fn handle_sync_token_nav_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+            app.settings_modal.sync_focus = SyncTabFocus::Repo;
+        }
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+            app.settings_modal.sync_focus = SyncTabFocus::Branch;
+        }
+        KeyCode::Enter => {
+            app.settings_modal.sync_editing.token = true;
+        }
+        _ => {}
+    }
+    SettingsKeyResult::Handled
+}
+
+fn handle_sync_branch_nav_key(app: &mut App, key: KeyEvent) -> SettingsKeyResult {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+            app.settings_modal.sync_focus = SyncTabFocus::Token;
+        }
+        KeyCode::Enter => {
+            app.settings_modal.sync_editing.branch = true;
+        }
+        _ => {}
+    }
+    SettingsKeyResult::Handled
+}
+
+fn handle_sync_text_edit(
+    app: &mut App,
+    focus: SyncTabFocus,
+    key: KeyEvent,
+) -> SettingsKeyResult {
+    if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
+        match focus {
+            SyncTabFocus::Repo => app.settings_modal.sync_editing.repo = false,
+            SyncTabFocus::Token => app.settings_modal.sync_editing.token = false,
+            SyncTabFocus::Branch => app.settings_modal.sync_editing.branch = false,
+            SyncTabFocus::Enabled => {}
+        }
+        if key.code == KeyCode::Enter {
+            return SettingsKeyResult::Apply;
+        }
+        return SettingsKeyResult::Handled;
+    }
+
+    let (text, cursor) = match focus {
+        SyncTabFocus::Repo => (
+            &mut app.settings_modal.sync_repo,
+            &mut app.settings_modal.sync_repo_cursor,
+        ),
+        SyncTabFocus::Token => (
+            &mut app.settings_modal.sync_token,
+            &mut app.settings_modal.sync_token_cursor,
+        ),
+        SyncTabFocus::Branch => (
+            &mut app.settings_modal.sync_branch,
+            &mut app.settings_modal.sync_branch_cursor,
+        ),
+        SyncTabFocus::Enabled => return SettingsKeyResult::Handled,
+    };
+
+    match key.code {
+        KeyCode::Char(c) => {
+            let c = text_input_char(c);
+            let cur = *cursor;
+            text.insert(cur, c);
+            *cursor = cur + c.len_utf8();
+        }
+        KeyCode::Backspace => {
+            let cur = *cursor;
+            if cur > 0 {
+                let prev = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    prev_word_boundary(text, cur)
+                } else {
+                    prev_char_boundary(text, cur)
+                };
+                text.drain(prev..cur);
+                *cursor = prev;
+            }
+        }
+        KeyCode::Delete => {
+            let cur = *cursor;
+            if cur < text.len() {
+                let next = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    next_word_boundary(text, cur)
+                } else {
+                    next_char_boundary(text, cur)
+                };
+                text.drain(cur..next);
+            }
+        }
+        KeyCode::Left => {
+            let cur = *cursor;
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                *cursor = prev_word_boundary(text, cur);
+            } else if cur > 0 {
+                *cursor = prev_char_boundary(text, cur);
+            }
+        }
+        KeyCode::Right => {
+            let cur = *cursor;
+            let len = text.len();
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                *cursor = next_word_boundary(text, cur);
+            } else if cur < len {
+                *cursor = next_char_boundary(text, cur);
+            }
+        }
+        KeyCode::Home => {
+            *cursor = 0;
+        }
+        KeyCode::End => {
+            *cursor = text.len();
+        }
+        _ => {}
+    }
+    SettingsKeyResult::Handled
+}
+
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -1280,6 +1502,7 @@ fn render_tab_content(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
         SettingsTab::General => render_general_tab(frame, content_area, app, theme),
         SettingsTab::Paths => render_paths_tab(frame, content_area, app, theme),
         SettingsTab::Plugins => render_plugins_tab(frame, content_area, app, theme),
+        SettingsTab::Sync => render_sync_tab(frame, content_area, app, theme),
     }
 }
 
@@ -2178,6 +2401,136 @@ fn render_plugins_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
     app.settings_modal.plugins_scroll = state.offset();
 }
 
+// --- Sync tab rendering ---
+
+fn render_sync_tab(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Theme) {
+    let chunks = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Min(0),
+    ])
+    .margin(1)
+    .split(area);
+
+    let is_body_active = app.content_focused && !app.settings_modal.tab_bar_focused;
+
+    let enabled_focused = is_body_active && app.settings_modal.sync_focus == SyncTabFocus::Enabled;
+    let repo_focused = is_body_active && app.settings_modal.sync_focus == SyncTabFocus::Repo;
+    let token_focused = is_body_active && app.settings_modal.sync_focus == SyncTabFocus::Token;
+    let branch_focused = is_body_active && app.settings_modal.sync_focus == SyncTabFocus::Branch;
+
+    // Info banner
+    let banner_text = "Sync paper IDs across devices via your private GitHub repo (auto-created if missing).";
+    frame.render_widget(
+        Paragraph::new(Line::styled(banner_text, Style::default().fg(theme.muted)))
+            .block(focused_block(" GitHub Synchronization ", false, theme)),
+        chunks[0],
+    );
+
+    // Enabled toggle
+    let enabled_label = if app.settings_modal.sync_enabled {
+        "[✔] Enabled  (Space / Enter to toggle)"
+    } else {
+        "[ ] Disabled (Space / Enter to toggle)"
+    };
+    let enabled_style = if enabled_focused {
+        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+    } else if app.settings_modal.sync_enabled {
+        Style::default().fg(theme.success)
+    } else {
+        Style::default().fg(theme.muted)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::styled(enabled_label, enabled_style))
+            .block(focused_block(" Sync Status ", enabled_focused, theme)),
+        chunks[1],
+    );
+
+    // Repository input
+    render_single_path_field(
+        frame,
+        chunks[2],
+        " Repository Name (Enter to edit) ",
+        &app.settings_modal.sync_repo,
+        app.settings_modal.sync_repo_cursor,
+        app.settings_modal.sync_editing.repo,
+        repo_focused,
+        None,
+        theme,
+    );
+
+    // Token input
+    let token_display = if app.settings_modal.sync_token.is_empty() {
+        "None (or set PAPR_GITHUB_TOKEN environment variable)".to_string()
+    } else if app.settings_modal.sync_editing.token {
+        app.settings_modal.sync_token.clone()
+    } else {
+        let len = app.settings_modal.sync_token.len();
+        format!("ghp_•••••••••••••••• ({len} chars)")
+    };
+    render_single_path_field(
+        frame,
+        chunks[3],
+        " GitHub Personal Access Token (Enter to edit or Ctrl+V to paste) ",
+        &token_display,
+        app.settings_modal.sync_token_cursor,
+        app.settings_modal.sync_editing.token,
+        token_focused,
+        None,
+        theme,
+    );
+
+    // Branch input
+    render_single_path_field(
+        frame,
+        chunks[4],
+        " Git Branch (Enter to edit) ",
+        &app.settings_modal.sync_branch,
+        app.settings_modal.sync_branch_cursor,
+        app.settings_modal.sync_editing.branch,
+        branch_focused,
+        None,
+        theme,
+    );
+
+    update_sync_tab_cursor(frame, &chunks, app, repo_focused, token_focused, branch_focused);
+}
+
+fn update_sync_tab_cursor(
+    frame: &mut Frame<'_>,
+    chunks: &[Rect],
+    app: &App,
+    repo_focused: bool,
+    token_focused: bool,
+    branch_focused: bool,
+) {
+    if app.settings_modal.sync_editing.repo && repo_focused {
+        let cur = saturating_u16(
+            app.settings_modal.sync_repo[..app.settings_modal.sync_repo_cursor]
+                .chars()
+                .count(),
+        );
+        frame.set_cursor_position((chunks[2].x + 1 + cur, chunks[2].y + 1));
+    } else if app.settings_modal.sync_editing.token && token_focused {
+        let cur = saturating_u16(
+            app.settings_modal.sync_token[..app.settings_modal.sync_token_cursor]
+                .chars()
+                .count(),
+        );
+        frame.set_cursor_position((chunks[3].x + 1 + cur, chunks[3].y + 1));
+    } else if app.settings_modal.sync_editing.branch && branch_focused {
+        let cur = saturating_u16(
+            app.settings_modal.sync_branch[..app.settings_modal.sync_branch_cursor]
+                .chars()
+                .count(),
+        );
+        frame.set_cursor_position((chunks[4].x + 1 + cur, chunks[4].y + 1));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -2276,9 +2629,11 @@ mod tests {
         assert_eq!(SettingsTab::Theme.next(), SettingsTab::General);
         assert_eq!(SettingsTab::General.next(), SettingsTab::Paths);
         assert_eq!(SettingsTab::Paths.next(), SettingsTab::Plugins);
-        assert_eq!(SettingsTab::Plugins.next(), SettingsTab::Theme);
+        assert_eq!(SettingsTab::Plugins.next(), SettingsTab::Sync);
+        assert_eq!(SettingsTab::Sync.next(), SettingsTab::Theme);
 
-        assert_eq!(SettingsTab::Theme.prev(), SettingsTab::Plugins);
+        assert_eq!(SettingsTab::Theme.prev(), SettingsTab::Sync);
+        assert_eq!(SettingsTab::Sync.prev(), SettingsTab::Plugins);
         assert_eq!(SettingsTab::Plugins.prev(), SettingsTab::Paths);
     }
 
@@ -2515,16 +2870,53 @@ mod tests {
     #[test]
     fn test_universal_left_right_tab_cycling() {
         let mut app = App::default();
-        app.settings_modal.tab = SettingsTab::Plugins;
-        app.settings_modal.tab_bar_focused = false; // Focused in Plugins list
+        app.settings_modal.tab = SettingsTab::Sync;
+        app.settings_modal.tab_bar_focused = false; // Focused in Sync body
 
         let key_right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
         let res = handle_settings_key(&mut app, key_right);
 
-        // Right from Plugins wraps around to Theme
+        // Right from Sync wraps around to Theme
         assert_eq!(app.settings_modal.tab, SettingsTab::Theme);
         assert!(app.settings_modal.tab_bar_focused);
         assert!(matches!(res, SettingsKeyResult::Handled));
+    }
+
+    #[test]
+    fn test_sync_tab_toggle_and_edit() {
+        let mut app = App::default();
+        app.settings_modal.tab = SettingsTab::Sync;
+        app.settings_modal.tab_bar_focused = false;
+        app.settings_modal.sync_focus = SyncTabFocus::Enabled;
+        assert!(!app.settings_modal.sync_enabled);
+
+        // Space toggles sync_enabled and applies
+        let key_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+        let res = handle_settings_key(&mut app, key_space);
+        assert!(matches!(res, SettingsKeyResult::Apply));
+        assert!(app.settings_modal.sync_enabled);
+
+        // Down moves to Repo
+        let key_down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let _ = handle_settings_key(&mut app, key_down);
+        assert_eq!(app.settings_modal.sync_focus, SyncTabFocus::Repo);
+
+        // Enter starts editing repo
+        let key_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let _ = handle_settings_key(&mut app, key_enter);
+        assert!(app.settings_modal.sync_editing.repo);
+
+        // Typing into repo
+        app.settings_modal.sync_repo.clear();
+        app.settings_modal.sync_repo_cursor = 0;
+        let key_m = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE);
+        let _ = handle_settings_key(&mut app, key_m);
+        assert_eq!(app.settings_modal.sync_repo, "m");
+
+        // Enter commits edit and applies
+        let res_commit = handle_settings_key(&mut app, key_enter);
+        assert!(!app.settings_modal.sync_editing.repo);
+        assert!(matches!(res_commit, SettingsKeyResult::Apply));
     }
 
     #[test]

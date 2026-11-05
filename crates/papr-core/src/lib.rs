@@ -12,6 +12,7 @@ pub mod models;
 pub mod paths;
 pub mod plugins;
 pub mod projects;
+pub mod sync;
 pub mod typst;
 
 pub use api::arxiv::{ArxivClient, ArxivRetryPolicy, RankedCandidatePageRequest, parse_arxiv_id};
@@ -34,6 +35,9 @@ pub use models::{
 pub use paths::{
     InvalidCollectionName, canonicalize_path, get_pdf_page_count, move_pdf_file,
     sanitize_download_filename_component, validate_collection_name,
+};
+pub use sync::{
+    GitHubSyncService, SyncError, SyncManifest, SyncReconciliation, SyncedPaper,
 };
 pub use plugins::{
     PluginAction, PluginCapability, PluginDiagnostic, PluginHost, PluginInfo, PluginManifest,
