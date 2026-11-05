@@ -331,11 +331,14 @@ impl GitHubSyncService {
     ) -> SyncReconciliation {
         let remote_manifest = remote_manifest.unwrap_or_default();
         let mut merged_papers = remote_manifest.papers.clone();
+        for paper in &mut merged_papers {
+            sanitize_synced_paper(paper);
+        }
         let mut new_locally = Vec::new();
 
         // 1. Find local papers not present in remote manifest
         for local in local_papers {
-            let already_in_remote = remote_manifest.papers.iter().any(|remote| {
+            let already_in_remote = merged_papers.iter().any(|remote| {
                 matches_paper(
                     local.arxiv_id.as_deref(),
                     local.doi.as_deref(),
@@ -347,11 +350,27 @@ impl GitHubSyncService {
             });
 
             if !already_in_remote {
+                let clean_arxiv = local
+                    .arxiv_id
+                    .as_deref()
+                    .and_then(crate::api::arxiv::parse_arxiv_id);
+                let doi = local.doi.clone().or_else(|| {
+                    local.arxiv_id.as_ref().and_then(|id| {
+                        if (id.starts_with("10.") || id.contains('/')) && clean_arxiv.is_none() {
+                            Some(id.clone())
+                        } else {
+                            None
+                        }
+                    })
+                });
+                let pdf_url = clean_arxiv
+                    .as_ref()
+                    .map(|id| format!("https://arxiv.org/pdf/{id}.pdf"));
                 let synced = SyncedPaper {
-                    arxiv_id: local.arxiv_id.clone(),
-                    doi: local.doi.clone(),
+                    arxiv_id: clean_arxiv,
+                    doi,
                     title: local.title.clone(),
-                    pdf_url: local.arxiv_id.as_ref().map(|id| format!("https://arxiv.org/pdf/{id}.pdf")),
+                    pdf_url,
                 };
                 new_locally.push(synced.clone());
                 merged_papers.push(synced);
@@ -360,7 +379,7 @@ impl GitHubSyncService {
 
         // 2. Find remote papers not present in local library
         let mut missing_locally = Vec::new();
-        for remote in &remote_manifest.papers {
+        for remote in &merged_papers {
             let already_local = local_papers.iter().any(|local| {
                 matches_paper(
                     local.arxiv_id.as_deref(),
@@ -388,6 +407,39 @@ impl GitHubSyncService {
             new_locally,
             merged_manifest,
         }
+    }
+}
+
+/// Helper function to clean and fix an arXiv ID and PDF URL in a synced paper.
+fn sanitize_synced_paper(paper: &mut SyncedPaper) {
+    if let Some(ref aid) = paper.arxiv_id
+        && (aid.starts_with("10.")
+            || (aid.contains('/') && crate::api::arxiv::parse_arxiv_id(aid).is_none()))
+    {
+        if paper.doi.is_none() {
+            paper.doi = Some(aid.clone());
+        }
+        paper.arxiv_id = None;
+    }
+
+    let clean_arxiv = paper
+        .arxiv_id
+        .as_deref()
+        .and_then(crate::api::arxiv::parse_arxiv_id)
+        .or_else(|| {
+            paper
+                .pdf_url
+                .as_deref()
+                .and_then(crate::api::arxiv::parse_arxiv_id)
+        });
+    if let Some(clean_id) = clean_arxiv {
+        paper.pdf_url = Some(format!("https://arxiv.org/pdf/{clean_id}.pdf"));
+        paper.arxiv_id = Some(clean_id);
+    } else if let Some(ref url) = paper.pdf_url
+        && (url.contains("arxiv.org/pdf/10.")
+            || (url.contains("arxiv.org/pdf/") && crate::api::arxiv::parse_arxiv_id(url).is_none()))
+    {
+        paper.pdf_url = None;
     }
 }
 
@@ -500,6 +552,30 @@ mod tests {
         assert!(reconciliation.missing_locally.is_empty());
         assert!(reconciliation.new_locally.is_empty());
         assert_eq!(reconciliation.merged_manifest.papers.len(), 1);
+    }
+
+    #[test]
+    fn test_reconciliation_sanitizes_doi_in_arxiv_id() {
+        let remote_paper = SyncedPaper {
+            arxiv_id: Some("10.1103/physrevd.65.084011".to_string()),
+            doi: Some("10.1103/physrevd.65.084011".to_string()),
+            title: "Second post-Newtonian gravitational wave polarizations".to_string(),
+            pdf_url: Some("https://arxiv.org/pdf/10.1103/physrevd.65.084011.pdf".to_string()),
+        };
+
+        let remote_manifest = SyncManifest {
+            version: 1,
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            papers: vec![remote_paper],
+        };
+
+        let reconciliation = GitHubSyncService::reconcile(&[], Some(remote_manifest));
+
+        assert_eq!(reconciliation.missing_locally.len(), 1);
+        let sanitized = &reconciliation.missing_locally[0];
+        assert_eq!(sanitized.arxiv_id, None);
+        assert_eq!(sanitized.doi.as_deref(), Some("10.1103/physrevd.65.084011"));
+        assert_eq!(sanitized.pdf_url, None);
     }
 
     #[test]

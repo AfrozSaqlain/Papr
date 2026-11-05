@@ -836,6 +836,22 @@ impl Database {
         };
 
         let file_size = i64::try_from(pdf.file_size).unwrap_or(i64::MAX);
+        let is_arxiv = crate::api::arxiv::parse_arxiv_id(&paper.id).is_some()
+            || paper.id.starts_with("http://arxiv.org/")
+            || paper.id.starts_with("https://arxiv.org/");
+        let clean_arxiv = if is_arxiv {
+            Some(paper.id.clone())
+        } else {
+            None
+        };
+        let clean_doi = paper.doi.clone().or_else(|| {
+            if !is_arxiv && (paper.id.starts_with("10.") || paper.id.contains('/')) {
+                Some(paper.id.clone())
+            } else {
+                None
+            }
+        });
+
         let paper_id = if let Some(paper_id) = matching_ids.first().copied() {
             for id in matching_ids.into_iter().skip(1) {
                 transaction
@@ -856,8 +872,8 @@ impl Database {
                 params![
                     paper.title,
                     paper.abstract_text,
-                    paper.doi,
-                    paper.id,
+                    clean_doi,
+                    clean_arxiv,
                     paper.published.to_rfc3339(),
                     paper.updated.to_rfc3339(),
                     pdf.path.to_string_lossy(),
@@ -877,8 +893,8 @@ impl Database {
                 params![
                     paper.title,
                     paper.abstract_text,
-                    paper.doi,
-                    paper.id,
+                    clean_doi,
+                    clean_arxiv,
                     paper.published.to_rfc3339(),
                     paper.updated.to_rfc3339(),
                     pdf.path.to_string_lossy(),
@@ -2436,6 +2452,7 @@ impl Database {
     ///
     /// # Errors
     /// Returns an error when the update or author insertion fails.
+    #[allow(clippy::too_many_lines)]
     pub fn apply_arxiv_metadata(
         &mut self,
         paper_id: i64,

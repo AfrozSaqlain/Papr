@@ -2752,18 +2752,36 @@ fn process_sync_updates(
             }
             SyncEvent::MissingPapers(papers) => {
                 for paper in papers {
-                    let pdf_url = paper.pdf_url.clone().or_else(|| {
-                        paper
-                            .arxiv_id
-                            .as_ref()
-                            .map(|id| format!("https://arxiv.org/pdf/{id}.pdf"))
-                    });
+                    let clean_arxiv = paper
+                        .arxiv_id
+                        .as_deref()
+                        .and_then(papr_core::api::arxiv::parse_arxiv_id)
+                        .or_else(|| {
+                            paper
+                                .pdf_url
+                                .as_deref()
+                                .and_then(papr_core::api::arxiv::parse_arxiv_id)
+                        });
+                    let pdf_url = if let Some(ref clean_id) = clean_arxiv {
+                        Some(format!("https://arxiv.org/pdf/{clean_id}.pdf"))
+                    } else if let Some(ref url) = paper.pdf_url {
+                        if !url.contains("arxiv.org/pdf/10.")
+                            && (!url.contains("arxiv.org/pdf/")
+                                || papr_core::api::arxiv::parse_arxiv_id(url).is_some())
+                        {
+                            Some(url.clone())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
                     if let Some(url) = pdf_url {
+                        let remote_id = clean_arxiv
+                            .or_else(|| paper.arxiv_id.clone())
+                            .unwrap_or_else(|| paper.title.clone());
                         let remote = RemotePaper {
-                            id: paper
-                                .arxiv_id
-                                .clone()
-                                .unwrap_or_else(|| paper.title.clone()),
+                            id: remote_id,
                             title: paper.title.clone(),
                             authors: Vec::new(),
                             abstract_text: String::new(),
@@ -2782,6 +2800,8 @@ fn process_sync_updates(
                             pending_downloads,
                             app,
                         );
+                    } else {
+                        let _ = runtime.database.insert_paper(&paper.title, paper.doi.as_deref());
                     }
                 }
             }
@@ -2854,12 +2874,16 @@ fn spawn_sync(runtime: &Runtime, sync_sender: &mpsc::UnboundedSender<SyncEvent>)
 
         // 3. Reconcile
         let reconciliation =
-            papr_core::sync::GitHubSyncService::reconcile(&local_papers, remote_manifest);
+            papr_core::sync::GitHubSyncService::reconcile(&local_papers, remote_manifest.clone());
         let uploaded = reconciliation.new_locally.len();
         let downloaded = reconciliation.missing_locally.len();
 
-        // 4. Push if new local papers exist or if repository was fresh
-        let should_push = uploaded > 0 || previous_sha.is_none();
+        // 4. Push if new local papers exist, repository was fresh, or remote papers were sanitized
+        let remote_papers_changed = match &remote_manifest {
+            Some(m) => m.papers != reconciliation.merged_manifest.papers,
+            None => false,
+        };
+        let should_push = uploaded > 0 || previous_sha.is_none() || remote_papers_changed;
         if should_push {
             let push_res = service
                 .push_manifest(
