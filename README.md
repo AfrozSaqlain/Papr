@@ -27,38 +27,33 @@ Under the hood, Papr is built in Rust which gives researchers sub-millisecond in
 ## Key Features
 
 ### Discovery & Research Feed
-* **Daily Research Feed:** Get 10 fresh, randomized papers every day matching your customizable research keywords, helping you track field advancements alongside reading streaks and statistics.
-* **Integrated arXiv Search:** Query arXiv by title, author, category, abstract, or DOI with paginated browsing and on-the-fly local filtering (`>`).
-* **Clean File Management:** Automatically renames downloaded papers using clean, human-readable titles instead of cryptic identifier strings (e.g. `2401.12345.pdf`).
-* **Smart Deduplication:** Identifies cross-library duplicates via arXiv ID, DOI, or file path, merging metadata during scans and downloads without overwriting bookmarks, reading progress, or notes.
-* **Online Library Sync:** Optional GitHub-backed synchronization keeps your paper catalog, reading states, and metadata synchronized across multiple workstations.
+* **Daily Feed & Analytics:** Delivers 10 randomized papers daily matching your research keywords while tracking streaks, reading time, and disk usage.
+* **Integrated arXiv Search:** Browse arXiv by title, author, category, abstract, or DOI with paginated results and live in-view filtering (`>`).
+* **Clean Naming:** Saves downloads with human-readable titles (not raw IDs).
+* **GitHub Library Sync:** Synchronizes your paper catalog, reading states, and metadata to GitHub for seamless cross-device access.
 
-### Library Organization & Navigation
-* **Filesystem-Synced Collections:** Organize papers into custom groups that directly mirror your disk directory structure.
-* **Automatic Author Grouping:** Indexes your entire library by author name automatically for instant author-based cataloging.
-* **Flexible Sorting:** Sort papers in Library, Groups, and Author views by newest first, oldest first, or download date.
-* **Fast Bookmarking & History:** Toggle bookmarks with a single keypress and inspect a chronological log of recent searches, downloads, and builds.
+### Library & Organization
+* **Filesystem-Synced Groups:** Organize papers into collections that directly mirror folder directories on disk.
+* **Automatic Author Cataloging:** Automatically groups your entire local library by author name.
+* **Flexible Sorting & Bookmarks:** Order papers by newest, oldest, or download date; toggle bookmarks with a single keypress (`B`).
+* **Activity History:** Inspect a chronological audit log of recent searches, downloads, and compilation events.
 
 ### Reading & Annotation
-* **In-Terminal PDF Viewing:** Render and read papers directly inside your terminal using Kitty or Sixel graphics protocols.
-* **Reading Progress Tracking:** Automatically remembers the last page you read and resumes from that exact page upon reopening.
-* **Reading Queue:** Prioritize reading backlogs; papers are automatically marked as completed and dequeued only when you reach the final page.
-* **External Viewer Fallback:** Seamlessly launch external readers (Zathura, Okular, or system defaults) when graphical windowing is preferred.
-* **Vim-Powered Markdown Notes:** Write per-paper Markdown annotations with a dual-mode editor and live styled preview.
-* **Reading Analytics:** Track active streaks, daily reading time, average session length, top authors, and a 12-week activity heatmap.
+* **In-Terminal PDF Viewing:** Read papers directly in the terminal via Kitty or Sixel graphics protocols, or launch external viewers (Zathura, Okular).
+* **Reading Progress & Smart Queue:** Remembers your exact page to resume where you left off; queued papers auto-complete only upon reaching the final page.
+* **Markdown Notes:** Write per-paper annotations with a Vim-inspired editor and a live styled preview (`Tab`).
+* **Productivity Stats:** Track active reading streaks, session duration, top authors, and a 12-week activity heatmap.
 
 ### Writing Studio (LaTeX & Typst)
-* **Embedded Typst Compiler:** Write, compile, and preview Typst documents out of the box with zero external installation. Supports local imports, bundled system fonts, and automatic caching of Typst Universe (`@preview`) packages.
-* **LaTeX Integration:** Background compilation powered by `latexmk` with automatic artifact management.
-* **Split-Pane PDF Preview:** Live visual feedback of your compiled PDF directly alongside the editor.
-* **Compiler Diagnostics:** Jump directly to compilation errors with line numbers, source snippets, and raw build logs.
-* **BibTeX Citation Importer:** Search your local library and arXiv directly from the editor (`Ctrl+F`) to insert formatted citation keys.
-* **Project File Tree:** Full directory navigation to create, rename, and manage multi-file manuscripts using Vim keybindings.
+* **Embedded Typst Engine:** Zero-setup compiler with bundled fonts, local module imports, and cached Typst Universe (`@preview`) packages.
+* **LaTeX Support:** Asynchronous background compilation powered by `latexmk`.
+* **Split-Pane PDF Preview & Diagnostics:** Live preview alongside the editor with inline diagnostics, source line jumps, and build logs.
+* **BibTeX Citation Importer:** Search local papers or arXiv from inside the editor (`Ctrl+F`) to insert citation keys directly.
+* **Project File Tree:** Navigate, create, rename, and manage multi-file manuscripts using Vim keybindings.
 
 ### Customization & Extensibility
-* **19 Built-in Themes:** Includes Catppuccin (Mocha, Macchiato, Frappé, Latte), Tokyo Night, Gruvbox, Nord, Dracula, Rose Pine, Everforest, Kanagawa, One Dark, and more.
-* **Transparent UI Mode:** Toggle transparent terminal backgrounds for clean integration with desktop styling.
-* **Process-Isolated Plugins:** Extend workflows via language-agnostic JSON plugins running in sandbox processes (includes an opt-in auto-tagging plugin).
+* **19 Built-in Themes & Transparency:** Includes Catppuccin, Tokyo Night, Gruvbox, Nord, and Dracula, with transparent background support.
+* **Process-Isolated Plugins:** Extend functionality via sandboxed JSON plugins (includes an out-of-the-box auto-tagger).
 
 ---
 
