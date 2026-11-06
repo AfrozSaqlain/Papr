@@ -259,64 +259,69 @@ Papr organizes your research lifecycle into 14 specialized workspaces, accessibl
    * **Insert Citations:** Press `Ctrl+F` inside the editor to open the citation importer, search your library, and insert formatted BibTeX citations.
    * **Error Inspection:** Compiler errors display inline diagnostic badges; inspect detailed logs in `Alt+4`.
 
-#### 4. Synchronizing Across Machines (GitHub Sync)
+#### 4. Syncing Across Computers (GitHub)
 
-Papr can automatically synchronize your research library across multiple computers using a private GitHub repository. It maintains a lightweight manifest (`papers.json`) containing paper titles, arXiv IDs, DOIs, and PDF download URLs.
+You can sync your paper library across devices using a private GitHub repository. Papr keeps a `papers.json` file in that repo with your paper titles, arXiv IDs, DOIs, and download links.
 
-When enabled:
-* **Automatic Repository Creation:** If the repository does not exist on your GitHub account, Papr automatically creates it privately.
-* **Bidirectional Reconciliation:** Papers added locally are pushed to `papers.json`, while papers found in the remote repository that are missing locally are scheduled for automatic background download.
-* **Seamless Multi-Device Setup:** Setting up Papr on a second machine with the same repository and token immediately restores your library.
+How it works:
+* If the repo doesn't exist yet, Papr creates it as private automatically.
+* When you add papers on one computer, Papr pushes them to the repo.
+* When you open Papr on another computer, it sees what's missing and downloads the PDFs for you.
 
-##### Step 1: Generate a GitHub Personal Access Token (PAT)
-1. In your browser, open GitHub **Settings** > **Developer settings** > **Personal access tokens**.
-2. Generate a token:
-   * **Fine-grained Personal Access Token (Recommended):**
-     * **Repository access:** Choose *All repositories* (or *Only select repositories* if you create the repository beforehand).
-     * **Repository permissions:**
-       * `Contents`: **Read and write** (required to read and commit `papers.json`).
-       * `Administration`: **Read and write** (required if you want Papr to automatically create the private repository for you).
-   * **Classic Personal Access Token:**
-     * Select the **`repo`** scope (Full control of private repositories).
-3. Copy the generated token (`ghp_...`).
+<details>
+<summary><strong>How to set up GitHub sync</strong></summary>
 
-##### Step 2: Configure Synchronization in Papr
+##### 1. Get a GitHub Personal Access Token (PAT)
+1. Head over to GitHub: **Settings** > **Developer settings** > **Personal access tokens**.
+2. Create a token:
+   * **Fine-grained token (recommended):**
+     * **Repository access:** "All repositories" (or pick your repo if you created it yourself).
+     * **Permissions:**
+       * `Contents` -> **Read and write** (to save `papers.json`).
+       * `Administration` -> **Read and write** (only needed if you want Papr to create the private repo for you).
+   * **Classic token:**
+     * Check the **`repo`** scope.
+3. Copy the token (`ghp_...`).
 
-Choose whichever configuration method fits your workflow:
+##### 2. Configure Papr
 
-* **Option A: In the Terminal UI (Settings Workspace)**
-  1. Open Papr and navigate to **Settings** (`Ctrl+b` > **Settings**).
-  2. Use `Tab` or `→` to select the **Sync** tab.
-  3. On **Sync Status**, press `Space` to toggle to `[✓] Enabled`.
-  4. Navigate down (`↓`) to **GitHub Repository** (defaults to `papr-library` or enter `username/repo`), press `Enter` to edit, and press `Enter` to commit.
-  5. Navigate down (`↓`) to **GitHub Personal Access Token**, press `Enter` to type or `Ctrl+v` to paste your token, and press `Enter` to commit.
-  6. Press `Esc` to save and exit. Papr will immediately begin synchronization.
+You can set this up inside Papr or in your config file.
 
-* **Option B: In `config.toml`**
-  Edit your `config.toml` (run `papr paths` to see its location):
-  ```toml
-  [sync]
-  enabled = true
-  github_repo = "papr-library" # Or "username/custom-repo"
-  branch = "main"              # Default: "main"
-  github_token = "ghp_yourPersonalAccessToken"
-  ```
+**Option A: Inside Papr (easiest)**
+1. Open Papr and go to **Settings** (`Ctrl+b` > **Settings**).
+2. Switch to the **Sync** tab (`Tab` or `→`).
+3. Press `Space` on **Sync Status** to enable it.
+4. Move down (`↓`) to **GitHub Repository**. Hit `Enter` to change the name if you don't want the default `papr-library` (or type `username/repo`), then hit `Enter`.
+5. Move down (`↓`) to **GitHub Personal Access Token**. Hit `Enter` and type or paste your token (`Ctrl+v`), then press `Enter`.
+6. Press `Esc` to save and close. Papr will start syncing right away.
 
-* **Option C: Via Environment Variable (Recommended for Security)**
-  To avoid storing your token in plain text inside `config.toml`, export `PAPR_GITHUB_TOKEN` in your shell configuration (`~/.bashrc`, `~/.zshrc`, or shell profile):
-  ```sh
-  export PAPR_GITHUB_TOKEN="ghp_yourPersonalAccessToken"
-  ```
-  Then simply enable sync in `config.toml` without setting `github_token`:
-  ```toml
-  [sync]
-  enabled = true
-  github_repo = "papr-library"
-  branch = "main"
-  ```
+**Option B: In `config.toml`**
+Open your `config.toml` (run `papr paths` to find it) and add:
+```toml
+[sync]
+enabled = true
+github_repo = "papr-library" # Or "username/custom-repo"
+branch = "main"
+github_token = "ghp_yourTokenHere"
+```
+
+**Option C: Using an environment variable**
+If you prefer not to keep your token in `config.toml`, set `PAPR_GITHUB_TOKEN` in your `~/.bashrc` or `~/.zshrc`:
+```sh
+export PAPR_GITHUB_TOKEN="ghp_yourTokenHere"
+```
+Then in `config.toml`, you only need:
+```toml
+[sync]
+enabled = true
+github_repo = "papr-library"
+branch = "main"
+```
 
 > [!TIP]
-> To sync another machine, install Papr, enable sync with the same token and repository, and launch Papr. It will automatically detect any missing papers and download them in the background.
+> Setting up a new computer? Just install Papr, put the same token and repo in your settings, and open the app. Papr will pull down all your papers in the background.
+
+</details>
 
 ---
 
