@@ -259,11 +259,64 @@ Papr organizes your research lifecycle into 14 specialized workspaces, accessibl
    * **Insert Citations:** Press `Ctrl+F` inside the editor to open the citation importer, search your library, and insert formatted BibTeX citations.
    * **Error Inspection:** Compiler errors display inline diagnostic badges; inspect detailed logs in `Alt+4`.
 
-#### 4. Synchronizing Across Machines
-Enable GitHub sync to keep your research catalog consistent across devices:
-1. Navigate to **Settings** or edit `config.toml`.
-2. Configure your GitHub repository and Personal Access Token (or set `PAPR_GITHUB_TOKEN`).
-3. Papr will sync library papers and their metadata, allowing a fresh installation on another machine to restore your library effortlessly.
+#### 4. Synchronizing Across Machines (GitHub Sync)
+
+Papr can automatically synchronize your research library across multiple computers using a private GitHub repository. It maintains a lightweight manifest (`papers.json`) containing paper titles, arXiv IDs, DOIs, and PDF download URLs.
+
+When enabled:
+* **Automatic Repository Creation:** If the repository does not exist on your GitHub account, Papr automatically creates it privately.
+* **Bidirectional Reconciliation:** Papers added locally are pushed to `papers.json`, while papers found in the remote repository that are missing locally are scheduled for automatic background download.
+* **Seamless Multi-Device Setup:** Setting up Papr on a second machine with the same repository and token immediately restores your library.
+
+##### Step 1: Generate a GitHub Personal Access Token (PAT)
+1. In your browser, open GitHub **Settings** > **Developer settings** > **Personal access tokens**.
+2. Generate a token:
+   * **Fine-grained Personal Access Token (Recommended):**
+     * **Repository access:** Choose *All repositories* (or *Only select repositories* if you create the repository beforehand).
+     * **Repository permissions:**
+       * `Contents`: **Read and write** (required to read and commit `papers.json`).
+       * `Administration`: **Read and write** (required if you want Papr to automatically create the private repository for you).
+   * **Classic Personal Access Token:**
+     * Select the **`repo`** scope (Full control of private repositories).
+3. Copy the generated token (`ghp_...`).
+
+##### Step 2: Configure Synchronization in Papr
+
+Choose whichever configuration method fits your workflow:
+
+* **Option A: In the Terminal UI (Settings Workspace)**
+  1. Open Papr and navigate to **Settings** (`Ctrl+b` > **Settings**).
+  2. Use `Tab` or `→` to select the **Sync** tab.
+  3. On **Sync Status**, press `Space` to toggle to `[✓] Enabled`.
+  4. Navigate down (`↓`) to **GitHub Repository** (defaults to `papr-library` or enter `username/repo`), press `Enter` to edit, and press `Enter` to commit.
+  5. Navigate down (`↓`) to **GitHub Personal Access Token**, press `Enter` to type or `Ctrl+v` to paste your token, and press `Enter` to commit.
+  6. Press `Esc` to save and exit. Papr will immediately begin synchronization.
+
+* **Option B: In `config.toml`**
+  Edit your `config.toml` (run `papr paths` to see its location):
+  ```toml
+  [sync]
+  enabled = true
+  github_repo = "papr-library" # Or "username/custom-repo"
+  branch = "main"              # Default: "main"
+  github_token = "ghp_yourPersonalAccessToken"
+  ```
+
+* **Option C: Via Environment Variable (Recommended for Security)**
+  To avoid storing your token in plain text inside `config.toml`, export `PAPR_GITHUB_TOKEN` in your shell configuration (`~/.bashrc`, `~/.zshrc`, or shell profile):
+  ```sh
+  export PAPR_GITHUB_TOKEN="ghp_yourPersonalAccessToken"
+  ```
+  Then simply enable sync in `config.toml` without setting `github_token`:
+  ```toml
+  [sync]
+  enabled = true
+  github_repo = "papr-library"
+  branch = "main"
+  ```
+
+> [!TIP]
+> To sync another machine, install Papr, enable sync with the same token and repository, and launch Papr. It will automatically detect any missing papers and download them in the background.
 
 ---
 
@@ -369,7 +422,7 @@ default_project_compiler = "typst" # "typst" or "latex"
 # GitHub Paper Synchronization
 [sync]
 enabled = false
-github_repo = "username/papr-library"
+github_repo = "papr-library" # Or "username/papr-library"
 branch = "main"
 # github_token = "ghp_..." # Or export PAPR_GITHUB_TOKEN in your environment
 
