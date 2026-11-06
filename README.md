@@ -317,11 +317,10 @@ enabled = true
 github_repo = "papr-library"
 branch = "main"
 ```
+</details>
 
 > [!TIP]
 > Setting up a new computer? Just install Papr, put the same token and repo in your settings, and open the app. Papr will pull down all your papers in the background.
-
-</details>
 
 ---
 
