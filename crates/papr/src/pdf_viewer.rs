@@ -189,6 +189,7 @@ struct PageCache {
     target_scroll_px: f64,
     current_page: usize,
     current_scroll_px: f64,
+    initial_scroll_ratio: Option<f64>,
     last_update: Option<std::time::Instant>,
 
     // ── Encode cache ──────────────────────────────────────────────────────
@@ -281,6 +282,7 @@ fn get_cache() -> Arc<Mutex<PageCache>> {
                 target_scroll_px: 0.0,
                 current_page: 1,
                 current_scroll_px: 0.0,
+                initial_scroll_ratio: None,
                 last_update: None,
                 last_crop_key: None,
                 last_encoded: None,
@@ -358,11 +360,21 @@ fn drop_uploads(g: &mut PageCache, mut should_drop: impl FnMut(&PageKey) -> bool
 /// Flush all state that belongs to a different document than `new_path`.
 /// Always call this before entering `AppMode::PdfView` for a new file.
 pub fn reset_for_new_document(new_path: &Path) {
-    reset_for_new_document_at_page(new_path, 1);
+    reset_for_new_document_at_page_with_scroll(new_path, 1, 0.0);
 }
 
+#[allow(dead_code)]
 pub fn reset_for_new_document_at_page(new_path: &Path, initial_page: usize) {
+    reset_for_new_document_at_page_with_scroll(new_path, initial_page, 0.0);
+}
+
+pub fn reset_for_new_document_at_page_with_scroll(
+    new_path: &Path,
+    initial_page: usize,
+    initial_scroll_ratio: f64,
+) {
     let initial_page = initial_page.max(1);
+    let initial_scroll_ratio = initial_scroll_ratio.max(0.0);
     let cache = get_cache();
     if let Ok(mut g) = cache.lock() {
         cancel_render_jobs(&mut g, |(path, _, _, _, _)| path.as_path() != new_path);
@@ -399,6 +411,7 @@ pub fn reset_for_new_document_at_page(new_path: &Path, initial_page: usize) {
         g.target_scroll_px = 0.0;
         g.current_page = initial_page;
         g.current_scroll_px = 0.0;
+        g.initial_scroll_ratio = (initial_scroll_ratio > 0.0).then_some(initial_scroll_ratio);
         g.last_update = None;
     }
 }
@@ -1588,11 +1601,22 @@ fn prepare_viewer_frame(
         .map_or(f64::from(pixel_w) * 1.3, |(_, page)| {
             f64::from(page.pixel_h)
         });
+    if let Some(ratio) = cache.initial_scroll_ratio.take() {
+        if !page_fit {
+            let scroll_px = (ratio * cache.default_page_h).max(0.0);
+            cache.target_scroll_px = scroll_px;
+            cache.current_scroll_px = scroll_px;
+        }
+    }
     update_viewer_scroll(&mut cache, app.pdf_viewer_total_pages, page_fit);
     app.pdf_viewer_page = cache.current_page;
     app.pdf_viewer_scroll_y = (cache.current_scroll_px / f64::from(font_h))
         .to_u32()
         .unwrap_or(u32::MAX);
+    if cache.default_page_h > 0.0 {
+        app.pdf_viewer_scroll_ratio =
+            (cache.current_scroll_px / cache.default_page_h).clamp(0.0, 1.0);
+    }
     let key = (
         pdf_path.to_path_buf(),
         generation,
@@ -1739,6 +1763,9 @@ fn draw_cropped(
 
     let page_h = page_data.pixel_h;
     app.pdf_viewer_page_pixel_h = page_h;
+    if page_h > 0 {
+        app.pdf_viewer_scroll_ratio = (view.current_scroll_px / f64::from(page_h)).clamp(0.0, 1.0);
+    }
     let max_scroll_px = if page_fit {
         0
     } else {

@@ -1553,7 +1553,7 @@ impl ProjectCompiler {
         app.pdf_viewer_page = page.min(app.pdf_viewer_total_pages.max(1));
         if should_open_generated_pdf(&app.pdf_viewer, self.external_pdf_opened) {
             let viewer = app.pdf_viewer.clone();
-            let _ = open_pdf(&viewer, &pdf, app, None, None, 1, None);
+            let _ = open_pdf(&viewer, &pdf, app, None, None, 1, 0.0, None);
             self.external_pdf_opened = true;
         }
         true
@@ -1609,7 +1609,7 @@ fn open_project_workspace(app: &mut App, project: Project) {
             app.pdf_viewer_scroll_y = 0;
             if app.pdf_viewer != "internal" {
                 let viewer = app.pdf_viewer.clone();
-                let _ = open_pdf(&viewer, &pdf, app, None, None, 1, None);
+                let _ = open_pdf(&viewer, &pdf, app, None, None, 1, 0.0, None);
             }
         }
     }
@@ -2264,17 +2264,23 @@ async fn run(
         {
             let current_page = app.pdf_viewer_page;
             let total_pages = app.pdf_viewer_total_pages;
-            if current_page != app.pdf_viewer_saved_page {
-                let _ =
-                    runtime
-                        .database
-                        .record_reading_progress(paper_id, current_page, total_pages);
+            let current_ratio = app.pdf_viewer_scroll_ratio;
+            if current_page != app.pdf_viewer_saved_page
+                || (current_ratio - app.pdf_viewer_saved_scroll_ratio).abs() > 0.01
+            {
+                let _ = runtime.database.record_reading_progress_with_scroll(
+                    paper_id,
+                    current_page,
+                    current_ratio,
+                    total_pages,
+                );
                 if let Some(session_id) = app.active_pdf_session_id {
                     let _ = runtime
                         .database
                         .record_session_page(session_id, current_page);
                 }
                 app.pdf_viewer_saved_page = current_page;
+                app.pdf_viewer_saved_scroll_ratio = current_ratio;
                 if total_pages > 0 && current_page >= total_pages {
                     let _ = refresh_paper_views(&runtime, app);
                 }
@@ -3697,7 +3703,10 @@ async fn apply_paper_metadata_action(
     match action {
         UiAction::OpenPdf { paper_id, path } => {
             let session_id = runtime.database.record_open(paper_id, true)?;
-            let saved_page = runtime.database.get_reading_position(paper_id).unwrap_or(1);
+            let (saved_page, saved_scroll_ratio) = runtime
+                .database
+                .get_reading_position_with_scroll(paper_id)
+                .unwrap_or((1, 0.0));
             open_pdf(
                 &runtime.pdf_viewer,
                 &path,
@@ -3705,14 +3714,20 @@ async fn apply_paper_metadata_action(
                 Some(session_id),
                 Some(paper_id),
                 saved_page,
+                saved_scroll_ratio,
                 Some(senders.app_events.clone()),
             )?;
             let current_page = app.pdf_viewer_page;
+            let current_ratio = app.pdf_viewer_scroll_ratio;
             let total_pages = app.pdf_viewer_total_pages;
-            let _ = runtime
-                .database
-                .record_reading_progress(paper_id, current_page, total_pages);
+            let _ = runtime.database.record_reading_progress_with_scroll(
+                paper_id,
+                current_page,
+                current_ratio,
+                total_pages,
+            );
             app.pdf_viewer_saved_page = current_page;
+            app.pdf_viewer_saved_scroll_ratio = current_ratio;
             dispatch_plugin_events(runtime, app, &["paper_opened"], paper_id).await?;
             refresh_paper_views(runtime, app)?;
         }
@@ -3815,6 +3830,11 @@ fn apply_library_navigation_action(
         UiAction::OpenDownload(id) => open_download(runtime, senders, app, &id)?,
         UiAction::MarkUnread(paper_id) => {
             runtime.database.mark_unread(paper_id)?;
+            if app.active_pdf_paper_id == Some(paper_id) {
+                app.pdf_viewer_page = 1;
+                app.pdf_viewer_scroll_ratio = 0.0;
+                app.pdf_viewer_scroll_y = 0;
+            }
             refresh_paper_views(runtime, app)?;
             app.toast = Some("Marked unread".into());
         }
@@ -3825,9 +3845,10 @@ fn apply_library_navigation_action(
 
 fn close_pdf_viewer(runtime: &Runtime, app: &mut App) -> Result<()> {
     if let Some(paper_id) = app.active_pdf_paper_id.take() {
-        runtime.database.record_reading_progress(
+        runtime.database.record_reading_progress_with_scroll(
             paper_id,
             app.pdf_viewer_page,
+            app.pdf_viewer_scroll_ratio,
             app.pdf_viewer_total_pages,
         )?;
         if let Some(session_id) = app.active_pdf_session_id {
@@ -3849,6 +3870,8 @@ fn close_pdf_viewer(runtime: &Runtime, app: &mut App) -> Result<()> {
     app.active_pdf_paper_id = None;
     app.active_pdf_session_start = None;
     app.pdf_viewer_saved_page = 0;
+    app.pdf_viewer_scroll_ratio = 0.0;
+    app.pdf_viewer_saved_scroll_ratio = 0.0;
     app.mode = AppMode::Normal;
     if let Some(path) = app.pdf_viewer_path.take() {
         pdf_viewer::release_document(&path);
@@ -3889,9 +3912,9 @@ fn open_download(
     let session_id = paper_id
         .map(|paper_id| runtime.database.record_open(paper_id, true))
         .transpose()?;
-    let saved_page = paper_id
-        .and_then(|id| runtime.database.get_reading_position(id).ok())
-        .unwrap_or(1);
+    let (saved_page, saved_scroll_ratio) = paper_id
+        .and_then(|id| runtime.database.get_reading_position_with_scroll(id).ok())
+        .unwrap_or((1, 0.0));
     open_pdf(
         &runtime.pdf_viewer,
         &path,
@@ -3899,15 +3922,21 @@ fn open_download(
         session_id,
         paper_id,
         saved_page,
+        saved_scroll_ratio,
         Some(senders.app_events.clone()),
     )?;
     if let Some(id) = paper_id {
         let current_page = app.pdf_viewer_page;
+        let current_ratio = app.pdf_viewer_scroll_ratio;
         let total_pages = app.pdf_viewer_total_pages;
-        let _ = runtime
-            .database
-            .record_reading_progress(id, current_page, total_pages);
+        let _ = runtime.database.record_reading_progress_with_scroll(
+            id,
+            current_page,
+            current_ratio,
+            total_pages,
+        );
         app.pdf_viewer_saved_page = current_page;
+        app.pdf_viewer_saved_scroll_ratio = current_ratio;
         refresh_paper_views(runtime, app)?;
     }
     Ok(())
@@ -4804,6 +4833,7 @@ fn open_pdf(
     session_id: Option<i64>,
     paper_id: Option<i64>,
     initial_page: usize,
+    initial_scroll_ratio: f64,
     event_sender: Option<mpsc::UnboundedSender<AppEvent>>,
 ) -> Result<()> {
     if !path.exists() {
@@ -4821,11 +4851,14 @@ fn open_pdf(
         // `app.pdf_viewer_path`.
         let total_pages = pdf_viewer::get_or_query_page_count(path);
         let target_page = initial_page.clamp(1, total_pages.max(1));
-        pdf_viewer::reset_for_new_document_at_page(path, target_page);
+        let scroll_ratio = initial_scroll_ratio.max(0.0);
+        pdf_viewer::reset_for_new_document_at_page_with_scroll(path, target_page, scroll_ratio);
         app.mode = AppMode::PdfView;
         app.pdf_viewer_path = Some(path.clone());
         app.pdf_viewer_page = target_page;
         app.pdf_viewer_scroll_y = 0;
+        app.pdf_viewer_scroll_ratio = scroll_ratio;
+        app.pdf_viewer_saved_scroll_ratio = scroll_ratio;
         app.pdf_viewer_page_pixel_h = 0;
         app.pdf_viewer_max_scroll_y = 0;
         app.pdf_viewer_total_pages = total_pages;
@@ -12616,11 +12649,12 @@ startxref\n\
         let canon = std::fs::canonicalize(&pdf_path).unwrap_or_else(|_| pdf_path.clone());
         pdf_viewer::set_cached_page_count(&canon, 5);
 
-        // Add paper to reading queue
+        // Add paper to reading queue (initially "queued")
         runtime.database.add_to_queue(paper_id)?;
         let queue = runtime.database.reading_queue_papers()?;
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].id, paper_id);
+        assert_eq!(queue[0].reading_status, "queued");
 
         let mut app = App {
             page: Page::ReadingQueue,
@@ -12645,13 +12679,15 @@ startxref\n\
         assert_eq!(app.pdf_viewer_page, 1);
         assert_eq!(app.active_pdf_paper_id, Some(paper_id));
 
-        // 2. Paper MUST remain in reading queue!
+        // 2. Paper MUST remain in reading queue with status "queued & reading"!
         let queue = runtime.database.reading_queue_papers()?;
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].id, paper_id);
+        assert_eq!(queue[0].reading_status, "queued & reading");
 
-        // 3. Navigate to page 3
+        // 3. Navigate to page 3 and scroll down
         app.pdf_viewer_page = 3;
+        app.pdf_viewer_scroll_ratio = 0.6;
         close_pdf_viewer(&runtime, &mut app)?;
         assert_eq!(app.mode, AppMode::Normal);
 
@@ -12660,8 +12696,9 @@ startxref\n\
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].id, paper_id);
         assert_eq!(runtime.database.get_reading_position(paper_id)?, 3);
+        assert_eq!(runtime.database.get_reading_position_with_scroll(paper_id)?, (3, 0.6));
 
-        // Reopen paper -> should reopen at page 3!
+        // Reopen paper -> should reopen at page 3 with exact scroll ratio!
         apply_paper_metadata_action(
             UiAction::OpenPdf {
                 paper_id,
@@ -12673,7 +12710,38 @@ startxref\n\
         )
         .await?;
         assert_eq!(app.pdf_viewer_page, 3);
+        assert!((app.pdf_viewer_scroll_ratio - 0.6).abs() < 1e-4);
         assert_eq!(runtime.database.reading_queue_papers()?.len(), 1);
+
+        close_pdf_viewer(&runtime, &mut app)?;
+
+        // Pressing 'u' (MarkUnread) on a queued paper should NOT remove it from queue.
+        // It must keep the paper in queue, reset status to "queued", and reset position to page 1!
+        super::apply_library_navigation_action(
+            UiAction::MarkUnread(paper_id),
+            &mut runtime,
+            &senders,
+            &mut app,
+        )?;
+        let queue = runtime.database.reading_queue_papers()?;
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].id, paper_id);
+        assert_eq!(queue[0].reading_status, "queued");
+        assert_eq!(runtime.database.get_reading_position_with_scroll(paper_id)?, (1, 0.0));
+
+        // Reopening should now start back at page 1!
+        apply_paper_metadata_action(
+            UiAction::OpenPdf {
+                paper_id,
+                path: pdf_path.clone(),
+            },
+            &mut runtime,
+            &senders,
+            &mut app,
+        )
+        .await?;
+        assert_eq!(app.pdf_viewer_page, 1);
+        assert_eq!(app.pdf_viewer_scroll_ratio, 0.0);
 
         // 4. Reach final page 5
         app.pdf_viewer_page = 5;
@@ -12685,6 +12753,17 @@ startxref\n\
 
         let paper = runtime.database.library_paper_by_id(paper_id)?.unwrap();
         assert_eq!(paper.reading_status, "read");
+
+        // Marking unread on a "read" paper makes it "unread" and resets page to 1
+        super::apply_library_navigation_action(
+            UiAction::MarkUnread(paper_id),
+            &mut runtime,
+            &senders,
+            &mut app,
+        )?;
+        let paper = runtime.database.library_paper_by_id(paper_id)?.unwrap();
+        assert_eq!(paper.reading_status, "unread");
+        assert_eq!(runtime.database.get_reading_position_with_scroll(paper_id)?, (1, 0.0));
 
         // 5. Automatic progress reset after 30 days:
         // Set last_opened_at to 31 days ago

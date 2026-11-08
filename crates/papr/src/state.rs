@@ -1170,6 +1170,8 @@ pub struct AppWorkspaceState {
     pub(crate) active_pdf_session_start: Option<std::time::Instant>,
     pub(crate) pdf_viewer: String,
     pub(crate) pdf_viewer_saved_page: usize,
+    pub(crate) pdf_viewer_scroll_ratio: f64,
+    pub(crate) pdf_viewer_saved_scroll_ratio: f64,
 }
 
 impl Default for AppWorkspaceState {
@@ -1222,6 +1224,8 @@ impl Default for AppWorkspaceState {
             active_pdf_session_start: None,
             pdf_viewer: "internal".to_owned(),
             pdf_viewer_saved_page: 0,
+            pdf_viewer_scroll_ratio: 0.0,
+            pdf_viewer_saved_scroll_ratio: 0.0,
         }
     }
 }

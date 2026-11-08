@@ -65,6 +65,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         17,
         include_str!("../migrations/0017_dashboard_keyword_cache.sql"),
     ),
+    (
+        18,
+        include_str!("../migrations/0018_reading_scroll_position.sql"),
+    ),
 ];
 
 /// Paper identifier, optional arXiv identifier, and optional local PDF path.
@@ -436,7 +440,13 @@ impl Database {
                                     FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
                                     WHERE pa.paper_id = p.id
                                     ORDER BY pa.position)), ''),
-                    p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite,
+                    p.doi, p.arxiv_id, p.pdf_path, p.file_size,
+                    CASE
+                        WHEN p.reading_status = 'queued' AND (p.last_opened_at IS NOT NULL OR p.last_read_page > 1 OR p.last_read_scroll_ratio > 0.0)
+                        THEN 'queued & reading'
+                        ELSE p.reading_status
+                    END,
+                    p.is_favorite,
                     p.abstract, p.published_at,
                     COALESCE(
                         (SELECT a.occurred_at FROM activity_log a WHERE a.paper_id = p.id AND a.kind = 'downloaded' ORDER BY a.occurred_at DESC LIMIT 1),
@@ -487,7 +497,13 @@ impl Database {
                                     FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
                                     WHERE pa.paper_id = p.id
                                     ORDER BY pa.position)), ''),
-                    p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite,
+                    p.doi, p.arxiv_id, p.pdf_path, p.file_size,
+                    CASE
+                        WHEN p.reading_status = 'queued' AND (p.last_opened_at IS NOT NULL OR p.last_read_page > 1 OR p.last_read_scroll_ratio > 0.0)
+                        THEN 'queued & reading'
+                        ELSE p.reading_status
+                    END,
+                    p.is_favorite,
                     p.abstract, p.published_at,
                     COALESCE(
                         (SELECT a.occurred_at FROM activity_log a WHERE a.paper_id = p.id AND a.kind = 'downloaded' ORDER BY a.occurred_at DESC LIMIT 1),
@@ -555,7 +571,13 @@ impl Database {
                                     FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
                                     WHERE pa.paper_id = p.id
                                     ORDER BY pa.position)), ''),
-                    p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite,
+                    p.doi, p.arxiv_id, p.pdf_path, p.file_size,
+                    CASE
+                        WHEN p.reading_status = 'queued' AND (p.last_opened_at IS NOT NULL OR p.last_read_page > 1 OR p.last_read_scroll_ratio > 0.0)
+                        THEN 'queued & reading'
+                        ELSE p.reading_status
+                    END,
+                    p.is_favorite,
                     p.abstract, p.published_at,
                     COALESCE(
                         (SELECT a.occurred_at FROM activity_log a WHERE a.paper_id = p.id AND a.kind = 'downloaded' ORDER BY a.occurred_at DESC LIMIT 1),
@@ -647,9 +669,25 @@ impl Database {
                 |row| row.get(0),
             )
             .unwrap_or_else(|_| "unread".to_string());
+        let target_status = if previous_status == "unread" {
+            let was_opened: bool = transaction
+                .query_row(
+                    "SELECT (last_opened_at IS NOT NULL OR last_read_page > 1 OR last_read_scroll_ratio > 0.0) FROM papers WHERE id = ?1",
+                    [paper_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if was_opened {
+                "reading"
+            } else {
+                "unread"
+            }
+        } else {
+            &previous_status
+        };
         transaction.execute(
             "UPDATE papers SET reading_status = ?1 WHERE id = ?2",
-            params![previous_status, paper_id],
+            params![target_status, paper_id],
         )?;
         transaction.commit()?;
         Ok(())
@@ -1095,7 +1133,13 @@ impl Database {
                                     FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
                                     WHERE pa.paper_id = p.id
                                     ORDER BY pa.position)), ''),
-                    p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite,
+                    p.doi, p.arxiv_id, p.pdf_path, p.file_size,
+                    CASE
+                        WHEN p.reading_status = 'queued' AND (p.last_opened_at IS NOT NULL OR p.last_read_page > 1 OR p.last_read_scroll_ratio > 0.0)
+                        THEN 'queued & reading'
+                        ELSE p.reading_status
+                    END,
+                    p.is_favorite,
                     p.abstract, p.published_at,
                     COALESCE(
                         (SELECT a.occurred_at FROM activity_log a WHERE a.paper_id = p.id AND a.kind = 'downloaded' ORDER BY a.occurred_at DESC LIMIT 1),
@@ -1243,7 +1287,13 @@ impl Database {
                                     FROM paper_authors pa JOIN authors a ON a.id = pa.author_id
                                     WHERE pa.paper_id = p.id
                                     ORDER BY pa.position)), ''),
-                    p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite,
+                    p.doi, p.arxiv_id, p.pdf_path, p.file_size,
+                    CASE
+                        WHEN p.reading_status = 'queued' AND (p.last_opened_at IS NOT NULL OR p.last_read_page > 1 OR p.last_read_scroll_ratio > 0.0)
+                        THEN 'queued & reading'
+                        ELSE p.reading_status
+                    END,
+                    p.is_favorite,
                     p.abstract, p.published_at,
                     COALESCE(
                         (SELECT a.occurred_at FROM activity_log a WHERE a.paper_id = p.id AND a.kind = 'downloaded' ORDER BY a.occurred_at DESC LIMIT 1),
@@ -1841,31 +1891,46 @@ impl Database {
     ///
     /// Returns an error when querying or updating the database fails.
     pub fn get_reading_position(&self, paper_id: i64) -> Result<usize, DatabaseError> {
-        let row: Option<(i64, Option<String>)> = self
+        let (page, _) = self.get_reading_position_with_scroll(paper_id)?;
+        Ok(page)
+    }
+
+    /// Retrieve the saved reading position and scroll ratio for a paper.
+    /// If the paper has not been opened for more than 30 days, its saved
+    /// reading position is automatically reset to page 1, scroll 0.0.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when querying or updating the database fails.
+    pub fn get_reading_position_with_scroll(
+        &self,
+        paper_id: i64,
+    ) -> Result<(usize, f64), DatabaseError> {
+        let row: Option<(i64, f64, Option<String>)> = self
             .connection
             .query_row(
-                "SELECT last_read_page, last_opened_at FROM papers WHERE id = ?1",
+                "SELECT last_read_page, last_read_scroll_ratio, last_opened_at FROM papers WHERE id = ?1",
                 [paper_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
 
-        let Some((page, last_opened)) = row else {
-            return Ok(1);
+        let Some((page, scroll_ratio, last_opened)) = row else {
+            return Ok((1, 0.0));
         };
 
         if let Some(ref last_opened_str) = last_opened
             && is_older_than_30_days(last_opened_str)
         {
             self.connection.execute(
-                "UPDATE papers SET last_read_page = 1 WHERE id = ?1",
+                "UPDATE papers SET last_read_page = 1, last_read_scroll_ratio = 0.0 WHERE id = ?1",
                 [paper_id],
             )?;
-            return Ok(1);
+            return Ok((1, 0.0));
         }
 
         let page_usize = usize::try_from(page).unwrap_or(1).max(1);
-        Ok(page_usize)
+        Ok((page_usize, scroll_ratio.max(0.0)))
     }
 
     /// Record the reading page reached in a PDF.
@@ -1882,12 +1947,31 @@ impl Database {
         page: usize,
         total_pages: usize,
     ) -> Result<(), DatabaseError> {
+        self.record_reading_progress_with_scroll(paper_id, page, 0.0, total_pages)
+    }
+
+    /// Record the reading page and vertical scroll ratio reached in a PDF.
+    /// If the user reaches the final page (`page >= total_pages`), the paper is
+    /// marked as completed (`reading_status = 'read'`), which automatically removes
+    /// it from the reading queue.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when updating the database fails.
+    pub fn record_reading_progress_with_scroll(
+        &self,
+        paper_id: i64,
+        page: usize,
+        scroll_ratio: f64,
+        total_pages: usize,
+    ) -> Result<(), DatabaseError> {
         let page = page.max(1);
         let page_i64 = i64::try_from(page).unwrap_or(i64::MAX);
+        let scroll_ratio = scroll_ratio.max(0.0);
         let tx = self.connection.unchecked_transaction()?;
         tx.execute(
-            "UPDATE papers SET last_read_page = ?1 WHERE id = ?2",
-            params![page_i64, paper_id],
+            "UPDATE papers SET last_read_page = ?1, last_read_scroll_ratio = ?2 WHERE id = ?3",
+            params![page_i64, scroll_ratio, paper_id],
         )?;
 
         if total_pages > 0 && page >= total_pages {
@@ -1949,8 +2033,10 @@ impl Database {
         }
         let count = reset_ids.len();
         for id in reset_ids {
-            self.connection
-                .execute("UPDATE papers SET last_read_page = 1 WHERE id = ?1", [id])?;
+            self.connection.execute(
+                "UPDATE papers SET last_read_page = 1, last_read_scroll_ratio = 0.0 WHERE id = ?1",
+                [id],
+            )?;
         }
         Ok(count)
     }
@@ -2013,10 +2099,31 @@ impl Database {
     ///
     /// Returns an error when the paper cannot be updated.
     pub fn mark_unread(&self, paper_id: i64) -> Result<(), DatabaseError> {
-        self.connection.execute(
-            "UPDATE papers SET reading_status = 'unread', last_read_page = 1 WHERE id = ?1",
-            [paper_id],
-        )?;
+        let tx = self.connection.unchecked_transaction()?;
+        let is_queued: bool = tx
+            .query_row(
+                "SELECT 1 FROM reading_queue WHERE paper_id = ?1",
+                [paper_id],
+                |_| Ok(()),
+            )
+            .is_ok();
+
+        if is_queued {
+            tx.execute(
+                "UPDATE papers SET reading_status = 'queued', last_read_page = 1, last_read_scroll_ratio = 0.0, last_opened_at = NULL WHERE id = ?1",
+                [paper_id],
+            )?;
+            let _ = tx.execute(
+                "UPDATE reading_queue SET previous_status = 'unread' WHERE paper_id = ?1",
+                [paper_id],
+            );
+        } else {
+            tx.execute(
+                "UPDATE papers SET reading_status = 'unread', last_read_page = 1, last_read_scroll_ratio = 0.0, last_opened_at = NULL WHERE id = ?1",
+                [paper_id],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -2393,7 +2500,13 @@ impl Database {
                                     FROM paper_authors pa2 JOIN authors a ON a.id = pa2.author_id
                                     WHERE pa2.paper_id = p.id
                                     ORDER BY pa2.position)), ''),
-                    p.doi, p.arxiv_id, p.pdf_path, p.file_size, p.reading_status, p.is_favorite,
+                    p.doi, p.arxiv_id, p.pdf_path, p.file_size,
+                    CASE
+                        WHEN p.reading_status = 'queued' AND (p.last_opened_at IS NOT NULL OR p.last_read_page > 1 OR p.last_read_scroll_ratio > 0.0)
+                        THEN 'queued & reading'
+                        ELSE p.reading_status
+                    END,
+                    p.is_favorite,
                     p.abstract, p.published_at,
                     COALESCE(
                         (SELECT a.occurred_at FROM activity_log a WHERE a.paper_id = p.id AND a.kind = 'downloaded' ORDER BY a.occurred_at DESC LIMIT 1),
@@ -3912,8 +4025,20 @@ mod tests {
         assert_eq!(queue[1].id, id3);
         assert_eq!(queue[2].id, id1);
 
-        // Mark unread P3 (index 1) -> should remove P3 from queue
+        // Mark unread P3 (index 1) -> does not remove from queue, resets position to page 1
+        database.record_open(id3, true)?;
+        database.record_reading_progress(id3, 2, 5)?;
+        let queue = database.reading_queue_papers_in_roots(std::slice::from_ref(&root))?;
+        assert_eq!(queue[1].reading_status, "queued & reading");
         database.mark_unread(id3)?;
+        let queue = database.reading_queue_papers_in_roots(std::slice::from_ref(&root))?;
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue[1].id, id3);
+        assert_eq!(queue[1].reading_status, "queued");
+        assert_eq!(database.get_reading_position(id3)?, 1);
+
+        // Remove P3 from queue manually
+        database.remove_from_queue(id3)?;
         let queue = database.reading_queue_papers_in_roots(std::slice::from_ref(&root))?;
         assert_eq!(queue.len(), 2);
         assert_eq!(queue[0].id, id2);
@@ -4227,18 +4352,23 @@ mod tests {
         // Advance to page 3
         database.record_reading_progress(id, 3, 10)?;
         assert_eq!(database.get_reading_position(id)?, 3);
+        assert_eq!(database.get_reading_position_with_scroll(id)?, (3, 0.0));
 
-        // Advance to page 7
-        database.record_reading_progress(id, 7, 10)?;
+        // Advance to page 7 with scroll offset 0.45
+        database.record_reading_progress_with_scroll(id, 7, 0.45, 10)?;
         assert_eq!(database.get_reading_position(id)?, 7);
+        let (page, scroll) = database.get_reading_position_with_scroll(id)?;
+        assert_eq!(page, 7);
+        assert!((scroll - 0.45).abs() < 1e-4);
 
-        // Check database column
-        let db_page: i64 = database.connection.query_row(
-            "SELECT last_read_page FROM papers WHERE id = ?1",
+        // Check database columns
+        let (db_page, db_scroll): (i64, f64) = database.connection.query_row(
+            "SELECT last_read_page, last_read_scroll_ratio FROM papers WHERE id = ?1",
             [id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         assert_eq!(db_page, 7);
+        assert!((db_scroll - 0.45).abs() < 1e-4);
 
         Ok(())
     }
@@ -4312,20 +4442,23 @@ mod tests {
         assert_eq!(queue[0].id, id);
         assert_eq!(queue[0].reading_status, "queued");
 
-        // Open paper -> remains in reading queue!
+        // Open paper -> remains in reading queue with status "queued & reading"!
         database.record_open(id, true)?;
         let queue = database.reading_queue_papers()?;
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].id, id);
+        assert_eq!(queue[0].reading_status, "queued & reading");
 
-        // Read intermediate pages (pages 2 and 3 of 4) -> remains in reading queue
+        // Read intermediate pages (pages 2 and 3 of 4) -> remains in reading queue with status "queued & reading"
         database.record_reading_progress(id, 2, 4)?;
         let queue = database.reading_queue_papers()?;
         assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].reading_status, "queued & reading");
 
         database.record_reading_progress(id, 3, 4)?;
         let queue = database.reading_queue_papers()?;
         assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].reading_status, "queued & reading");
 
         // Reach final page 4 of 4 -> automatically marked completed and removed from queue!
         database.record_reading_progress(id, 4, 4)?;
@@ -4393,6 +4526,79 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn reading_queue_status_transitions() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        let id = database.insert_paper("Status Transition Paper", None)?;
+
+        // 1. Initially unread
+        let paper = database.library_paper_by_id(id)?.unwrap();
+        assert_eq!(paper.reading_status, "unread");
+
+        // 2. Add to reading queue -> unopened paper shows "queued"
+        database.add_to_queue(id)?;
+        let queue = database.reading_queue_papers()?;
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].reading_status, "queued");
+        let paper = database.library_paper_by_id(id)?.unwrap();
+        assert_eq!(paper.reading_status, "queued");
+
+        // 3. Open paper -> once opened, status transitions to "queued & reading"
+        database.record_open(id, true)?;
+        let queue = database.reading_queue_papers()?;
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].reading_status, "queued & reading");
+        let paper = database.library_paper_by_id(id)?.unwrap();
+        assert_eq!(paper.reading_status, "queued & reading");
+
+        // 4. Progress page 2 of 3 -> remains "queued & reading"
+        database.record_reading_progress(id, 2, 3)?;
+        let queue = database.reading_queue_papers()?;
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].reading_status, "queued & reading");
+
+        // 5. Reach final page 3 of 3 -> automatically completed and removed from queue, status becomes "read"
+        database.record_reading_progress(id, 3, 3)?;
+        let queue = database.reading_queue_papers()?;
+        assert_eq!(queue.len(), 0);
+        let paper = database.library_paper_by_id(id)?.unwrap();
+        assert_eq!(paper.reading_status, "read");
+
+        // 6. Re-adding a paper that was ever opened to the queue shows "queued & reading"
+        database.add_to_queue(id)?;
+        let queue = database.reading_queue_papers()?;
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].reading_status, "queued & reading");
+
+        // 7. Marking unread on a queued paper keeps it in queue and resets status to "queued" + page 1
+        database.mark_unread(id)?;
+        let queue = database.reading_queue_papers()?;
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].reading_status, "queued");
+        assert_eq!(database.get_reading_position(id)?, 1);
+
+        // 8. Removing from queue leaves it with unread status
+        database.remove_from_queue(id)?;
+        let queue = database.reading_queue_papers()?;
+        assert_eq!(queue.len(), 0);
+        let paper = database.library_paper_by_id(id)?.unwrap();
+        assert_eq!(paper.reading_status, "unread");
+
+        // 9. Marking unread on an unqueued paper (e.g. "reading") resets to "unread" + page 1
+        database.record_open(id, true)?;
+        database.record_reading_progress(id, 2, 5)?;
+        let paper = database.library_paper_by_id(id)?.unwrap();
+        assert_eq!(paper.reading_status, "reading");
+        assert_eq!(database.get_reading_position(id)?, 2);
+
+        database.mark_unread(id)?;
+        let paper = database.library_paper_by_id(id)?.unwrap();
+        assert_eq!(paper.reading_status, "unread");
+        assert_eq!(database.get_reading_position(id)?, 1);
+
         Ok(())
     }
 }
