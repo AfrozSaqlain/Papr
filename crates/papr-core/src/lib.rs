@@ -19,7 +19,8 @@ pub use api::arxiv::{ArxivClient, ArxivRetryPolicy, RankedCandidatePageRequest, 
 pub use completions::{CitationEntry, CitationSource, CompletionItem, CompletionSource};
 pub use config::{Config, Paths};
 pub use dashboard::{
-    DashboardFeedError, DashboardService, select_dashboard_papers, shuffle_daily_bucket,
+    DashboardFeedError, DashboardFetchOutcome, DashboardService, select_dashboard_papers,
+    shuffle_daily_bucket,
 };
 pub use database::Database;
 pub use downloads::{DownloadEvent, DownloadManager};

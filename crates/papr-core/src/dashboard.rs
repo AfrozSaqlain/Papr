@@ -16,6 +16,15 @@ pub enum DashboardFeedError {
     Task(String),
 }
 
+/// The outcome of assembling a Dashboard feed, including candidate papers per keyword.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashboardFetchOutcome {
+    /// Final balanced papers to display on the dashboard.
+    pub papers: Vec<RemotePaper>,
+    /// Candidates discovered for each keyword (or "" for default feed).
+    pub keyword_candidates: Vec<(String, Vec<RemotePaper>)>,
+}
+
 /// Reusable Dashboard recommendation workflow, independent of any frontend.
 #[derive(Debug, Clone, Copy)]
 pub struct DashboardService {
@@ -45,21 +54,65 @@ impl DashboardService {
         excluded_paper_ids: HashSet<String>,
         feed_date: &str,
     ) -> Result<Vec<RemotePaper>, DashboardFeedError> {
+        let outcome = self
+            .fetch_with_cached_buckets(
+                client,
+                keywords,
+                HashMap::new(),
+                excluded_paper_ids,
+                feed_date,
+            )
+            .await?;
+        Ok(outcome.papers)
+    }
+
+    /// Fetch, de-duplicate, balance, and daily-rank unseen Dashboard papers,
+    /// reusing any candidate paper buckets already cached locally for this date.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when every applicable arXiv request fails or a keyword
+    /// fetch task cannot complete.
+    pub async fn fetch_with_cached_buckets(
+        self,
+        client: ArxivClient,
+        keywords: Vec<String>,
+        cached_buckets: HashMap<String, Vec<RemotePaper>>,
+        excluded_paper_ids: HashSet<String>,
+        feed_date: &str,
+    ) -> Result<DashboardFetchOutcome, DashboardFeedError> {
         if keywords.is_empty() {
-            let mut papers = self
-                .candidate_page(&client, None, &excluded_paper_ids)
-                .await?;
+            let mut papers = if let Some(cached) = cached_buckets.get("") {
+                cached.clone()
+            } else {
+                self.candidate_page(&client, None, &excluded_paper_ids)
+                    .await?
+            };
+            let candidates = papers.clone();
             shuffle_daily_bucket(&mut papers, feed_date, "");
             papers.truncate(self.display_limit);
-            return Ok(papers);
+            return Ok(DashboardFetchOutcome {
+                papers,
+                keyword_candidates: vec![("".into(), candidates)],
+            });
         }
 
         let mut buckets = (0..keywords.len())
             .map(|_| None)
             .collect::<Vec<Option<(String, Vec<RemotePaper>)>>>();
+        let mut keyword_candidates = Vec::with_capacity(keywords.len());
         let mut last_error = None;
         let mut requests = JoinSet::new();
         for (index, keyword) in keywords.into_iter().enumerate() {
+            if let Some(cached) = cached_buckets.get(&keyword) {
+                let mut papers = cached.clone();
+                papers.retain(|paper| !excluded_paper_ids.contains(&paper.id));
+                keyword_candidates.push((keyword.clone(), papers.clone()));
+                shuffle_daily_bucket(&mut papers, feed_date, &keyword);
+                buckets[index] = Some((keyword, papers));
+                continue;
+            }
+
             let client = client.clone();
             let excluded_paper_ids = excluded_paper_ids.clone();
             requests.spawn(async move {
@@ -72,6 +125,7 @@ impl DashboardService {
         while let Some(result) = requests.join_next().await {
             match result {
                 Ok((index, keyword, Ok(mut papers))) => {
+                    keyword_candidates.push((keyword.clone(), papers.clone()));
                     shuffle_daily_bucket(&mut papers, feed_date, &keyword);
                     buckets[index] = Some((keyword, papers));
                 }
@@ -81,13 +135,21 @@ impl DashboardService {
         }
         let buckets = buckets.into_iter().flatten().collect::<Vec<_>>();
         if buckets.is_empty() {
-            return last_error.map_or_else(|| Ok(Vec::new()), Err);
+            return last_error.map_or_else(
+                || {
+                    Ok(DashboardFetchOutcome {
+                        papers: Vec::new(),
+                        keyword_candidates: Vec::new(),
+                    })
+                },
+                Err,
+            );
         }
-        Ok(select_dashboard_papers(
-            buckets,
-            self.display_limit,
-            feed_date,
-        ))
+        let selected = select_dashboard_papers(buckets, self.display_limit, feed_date);
+        Ok(DashboardFetchOutcome {
+            papers: selected,
+            keyword_candidates,
+        })
     }
 
     async fn candidate_page(
@@ -98,6 +160,7 @@ impl DashboardService {
     ) -> Result<Vec<RemotePaper>, DashboardFeedError> {
         let mut candidates = Vec::with_capacity(usize::from(self.candidate_limit));
         let mut start = 0_u16;
+        let min_required = self.display_limit.min(usize::from(self.candidate_limit));
         loop {
             let papers = match keyword {
                 Some(keyword) => {
@@ -114,7 +177,9 @@ impl DashboardService {
                     .filter(|paper| !excluded_paper_ids.contains(&paper.id)),
             );
             if candidates.len() >= usize::from(self.candidate_limit)
+                || candidates.len() >= min_required
                 || received < self.candidate_limit
+                || start > 0
             {
                 break;
             }
@@ -686,5 +751,30 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn dashboard_fetch_with_cached_buckets_skips_network_when_all_cached() {
+        let client = ArxivClient::new().unwrap();
+        let papers = (0..5)
+            .map(|index| remote_paper(&format!("https://arxiv.org/abs/alpha-{index}"), "Alpha paper"))
+            .collect::<Vec<_>>();
+        let mut cached = HashMap::new();
+        cached.insert("alpha".to_string(), papers);
+
+        let outcome = DashboardService::new(30, 10)
+            .fetch_with_cached_buckets(
+                client,
+                vec!["alpha".into()],
+                cached,
+                HashSet::new(),
+                "2026-07-19",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.papers.len(), 5);
+        assert_eq!(outcome.keyword_candidates.len(), 1);
+        assert_eq!(outcome.keyword_candidates[0].0, "alpha");
     }
 }

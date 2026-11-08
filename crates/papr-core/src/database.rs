@@ -61,6 +61,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0014_dashboard_feed_history.sql"),
     ),
     (16, include_str!("../migrations/0016_reading_progress.sql")),
+    (
+        17,
+        include_str!("../migrations/0017_dashboard_keyword_cache.sql"),
+    ),
 ];
 
 /// Paper identifier, optional arXiv identifier, and optional local PDF path.
@@ -766,6 +770,67 @@ impl Database {
             params![feed_date, keyword_signature, payload],
         )?;
         self.record_dashboard_feed_history(feed_date, keyword_signature, papers)?;
+        Ok(())
+    }
+
+    /// Load cached candidate papers for one local date and keyword.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the query or JSON decoding fails.
+    pub fn dashboard_keyword_cache(
+        &self,
+        feed_date: &str,
+        keyword: &str,
+    ) -> Result<Option<Vec<RemotePaper>>, DatabaseError> {
+        let papers = self
+            .connection
+            .query_row(
+                "SELECT payload FROM dashboard_keyword_cache
+                 WHERE feed_date = ?1 AND keyword = ?2",
+                params![feed_date, keyword],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|payload| serde_json::from_str(&payload).map_err(DatabaseError::from))
+            .transpose()?;
+
+        if papers.as_ref().is_some_and(Vec::is_empty) {
+            self.connection.execute(
+                "DELETE FROM dashboard_keyword_cache
+                 WHERE feed_date = ?1 AND keyword = ?2",
+                params![feed_date, keyword],
+            )?;
+            return Ok(None);
+        }
+
+        Ok(papers)
+    }
+
+    /// Save candidate papers for one local date and keyword.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when JSON encoding or persistence fails.
+    pub fn save_dashboard_keyword_cache(
+        &self,
+        feed_date: &str,
+        keyword: &str,
+        papers: &[RemotePaper],
+    ) -> Result<(), DatabaseError> {
+        if papers.is_empty() {
+            return Ok(());
+        }
+        let payload = serde_json::to_string(papers)?;
+        self.connection.execute(
+            "INSERT INTO dashboard_keyword_cache
+                (feed_date, keyword, payload, refreshed_at)
+             VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
+             ON CONFLICT(feed_date, keyword) DO UPDATE SET
+                payload = excluded.payload,
+                refreshed_at = CURRENT_TIMESTAMP",
+            params![feed_date, keyword, payload],
+        )?;
         Ok(())
     }
 
@@ -3436,6 +3501,74 @@ mod tests {
         let retained: i64 = database.connection.query_row(
             "SELECT COUNT(*) FROM dashboard_feed_cache
              WHERE feed_date = ?1 AND keyword_signature = ?2",
+            params!["2026-07-13", "legacy-empty"],
+            |row| row.get(0),
+        )?;
+        assert_eq!(retained, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn dashboard_keyword_cache_stores_and_retrieves_candidates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        let paper = RemotePaper {
+            id: "https://arxiv.org/abs/2607.00001".into(),
+            title: "Cached candidate paper".into(),
+            authors: vec!["Researcher".into()],
+            abstract_text: "Cached abstract".into(),
+            published: Utc::now(),
+            updated: Utc::now(),
+            categories: vec!["gr-qc".into()],
+            pdf_url: None,
+            doi: None,
+            journal_ref: None,
+        };
+        database.save_dashboard_keyword_cache("2026-07-13", "gravitational waves", &[paper])?;
+
+        let cached = database
+            .dashboard_keyword_cache("2026-07-13", "gravitational waves")?
+            .ok_or("keyword cache was not stored")?;
+        assert_eq!(cached[0].title, "Cached candidate paper");
+        assert!(
+            database
+                .dashboard_keyword_cache("2026-07-14", "gravitational waves")?
+                .is_none()
+        );
+        assert!(
+            database
+                .dashboard_keyword_cache("2026-07-13", "quantum gravity")?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn empty_dashboard_keyword_cache_is_not_retained_or_returned()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+
+        database.save_dashboard_keyword_cache("2026-07-13", "gravitational waves", &[])?;
+        assert!(
+            database
+                .dashboard_keyword_cache("2026-07-13", "gravitational waves")?
+                .is_none()
+        );
+
+        database.connection.execute(
+            "INSERT INTO dashboard_keyword_cache (feed_date, keyword, payload)
+             VALUES (?1, ?2, ?3)",
+            params!["2026-07-13", "legacy-empty", "[]"],
+        )?;
+        assert!(
+            database
+                .dashboard_keyword_cache("2026-07-13", "legacy-empty")?
+                .is_none()
+        );
+        let retained: i64 = database.connection.query_row(
+            "SELECT COUNT(*) FROM dashboard_keyword_cache
+             WHERE feed_date = ?1 AND keyword = ?2",
             params!["2026-07-13", "legacy-empty"],
             |row| row.get(0),
         )?;

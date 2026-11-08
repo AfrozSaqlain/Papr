@@ -41,7 +41,8 @@ use editor::{
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 use papr_core::{
     ArxivClient, ArxivRetryPolicy, CitationSource, CollectionDirectory, CompletionSource, Config,
-    DashboardService, Database, DownloadEvent, DownloadManager, ImportedPdf, LatexBuildEvent,
+    DashboardFetchOutcome, DashboardService, Database, DownloadEvent, DownloadManager, ImportedPdf,
+    LatexBuildEvent,
     LatexBuildProcess, LatexBuildSignal, LibraryIndexer, LibraryIngestionService, LibraryWatcher,
     MetadataCandidate, MetadataEnrichmentOutcome, MetadataEnrichmentService, PaperNote, Paths,
     PluginHost, Project, ProjectBuildDiagnostic, ProjectDiagnosticSeverity, ProjectManager,
@@ -253,9 +254,11 @@ fn prepare_dashboard_feed(
             feed_date: feed_date.clone(),
             keyword_signature: keyword_signature.clone(),
         };
+        let cached_buckets = load_cached_keyword_buckets(database, &feed_date, &keywords)?;
         start_dashboard_fetch(
             arxiv.clone(),
             keywords.clone(),
+            cached_buckets,
             dashboard_recent_paper_ids(database, &feed_date)?,
             key.clone(),
             sender.clone(),
@@ -704,7 +707,7 @@ const DISCOVERY_PAGE_RETRY_BASE_DELAY: std::time::Duration = std::time::Duration
 #[derive(Debug)]
 struct TodayResponse {
     key: DashboardFeedKey,
-    result: Result<Vec<RemotePaper>, String>,
+    result: Result<DashboardFetchOutcome, String>,
 }
 
 /// Identifies one daily feed request.  Responses are accepted only when both
@@ -2452,13 +2455,20 @@ fn process_dashboard_feed_updates(
         }
         runtime.active_dashboard_fetch = None;
         match result {
-            Ok(papers) => {
+            Ok(outcome) => {
+                for (keyword, candidates) in outcome.keyword_candidates {
+                    let _ = runtime.database.save_dashboard_keyword_cache(
+                        &key.feed_date,
+                        &keyword,
+                        &candidates,
+                    );
+                }
                 runtime.database.save_dashboard_feed_cache(
                     &key.feed_date,
                     &runtime.dashboard_keyword_signature,
-                    &papers,
+                    &outcome.papers,
                 )?;
-                app.today_papers = papers;
+                app.today_papers = outcome.papers;
                 app.today_selected = app
                     .today_selected
                     .min(app.today_papers.len().saturating_sub(1));
@@ -4583,9 +4593,15 @@ fn refresh_dashboard_papers(
     if runtime.active_dashboard_fetch.as_ref() == Some(&key) {
         return Ok(());
     }
+    let cached_buckets = load_cached_keyword_buckets(
+        &runtime.database,
+        &runtime.dashboard_feed_date,
+        &runtime.dashboard_keywords,
+    )?;
     start_dashboard_fetch(
         runtime.arxiv.clone(),
         runtime.dashboard_keywords.clone(),
+        cached_buckets,
         dashboard_recent_paper_ids(&runtime.database, &runtime.dashboard_feed_date)?,
         key.clone(),
         senders.today.clone(),
@@ -4594,16 +4610,43 @@ fn refresh_dashboard_papers(
     Ok(())
 }
 
+fn load_cached_keyword_buckets(
+    database: &Database,
+    feed_date: &str,
+    keywords: &[String],
+) -> Result<std::collections::HashMap<String, Vec<RemotePaper>>> {
+    let mut cached_buckets = std::collections::HashMap::new();
+    if keywords.is_empty() {
+        if let Some(cached) = database.dashboard_keyword_cache(feed_date, "")? {
+            cached_buckets.insert(String::new(), cached);
+        }
+    } else {
+        for keyword in keywords {
+            if let Some(cached) = database.dashboard_keyword_cache(feed_date, keyword)? {
+                cached_buckets.insert(keyword.clone(), cached);
+            }
+        }
+    }
+    Ok(cached_buckets)
+}
+
 fn start_dashboard_fetch(
     client: ArxivClient,
     keywords: Vec<String>,
+    cached_buckets: std::collections::HashMap<String, Vec<RemotePaper>>,
     excluded_paper_ids: HashSet<String>,
     key: DashboardFeedKey,
     sender: mpsc::UnboundedSender<TodayResponse>,
 ) {
     tokio::spawn(async move {
         let result = DashboardService::new(DASHBOARD_CANDIDATE_LIMIT, DASHBOARD_DISPLAY_LIMIT)
-            .fetch(client, keywords, excluded_paper_ids, &key.feed_date)
+            .fetch_with_cached_buckets(
+                client,
+                keywords,
+                cached_buckets,
+                excluded_paper_ids,
+                &key.feed_date,
+            )
             .await
             .map_err(|error| error.to_string());
         let _ = sender.send(TodayResponse { key, result });
