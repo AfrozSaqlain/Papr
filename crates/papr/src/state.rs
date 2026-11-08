@@ -248,6 +248,29 @@ pub enum AppMode {
     SettingsModal,
     /// Interactive citation search modal for the active project.
     ProjectCitationSearch,
+    /// Interactive encrypted collaboration and collaborator management modal for a project.
+    ProjectCollaborators,
+}
+
+/// Interactive state for the encrypted project collaborators modal.
+#[derive(Debug, Clone, Default)]
+pub struct ProjectCollabModalState {
+    /// Target project being managed.
+    pub project: Option<Project>,
+    /// Current loaded key envelope for the project, if initialized.
+    pub envelope: Option<papr_core::ProjectKeyEnvelope>,
+    /// Currently selected collaborator index in `envelope.collaborators`.
+    pub selected: usize,
+    /// Whether the user is currently typing a GitHub username to add.
+    pub adding_collaborator: bool,
+    /// Text buffer for adding a collaborator GitHub username.
+    pub input: String,
+    /// Byte cursor inside `input`.
+    pub input_cursor: usize,
+    /// Local SSH public key fingerprint (`SHA256:...`) displayed in the modal.
+    pub local_fingerprint: String,
+    /// Status or error message inside the modal.
+    pub status: Option<String>,
 }
 
 /// Tabs shown in the settings modal.
@@ -1318,6 +1341,8 @@ pub struct App {
     pub project_rename_cursor: usize,
     /// File or folder being renamed from the active project tree.
     pub project_entry_rename_path: Option<std::path::PathBuf>,
+    /// State of the encrypted project collaborators modal.
+    pub project_collab_modal: ProjectCollabModalState,
     /// Remote paper discovery state.
     pub discovery: DiscoveryState,
     /// Scroll offset within the currently open paper detail view.
@@ -1474,6 +1499,7 @@ impl Default for App {
             project_create_compiler: "latex".to_owned(),
             project_rename_cursor: 0,
             project_entry_rename_path: None,
+            project_collab_modal: ProjectCollabModalState::default(),
             discovery: DiscoveryState::default(),
             paper_detail_scroll: 0,
             library: LibraryState::default(),

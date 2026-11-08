@@ -659,6 +659,18 @@ enum UiAction {
         path: PathBuf,
         name: String,
     },
+    OpenProjectCollaborators(Project),
+    AddProjectCollaborator {
+        project: Project,
+        username: String,
+    },
+    RemoveProjectCollaborator {
+        project: Project,
+        username: String,
+    },
+    SyncProjects {
+        project: Option<Project>,
+    },
 }
 
 enum KeyHandling {
@@ -1264,6 +1276,8 @@ impl ProjectCompiler {
                             name != "main.pdf"
                                 && name != ".papr-main.pdf.tmp"
                                 && name != ".papr-projects.toml"
+                                && name != papr_core::LOCAL_COLLAB_FILE
+                                && name != papr_core::LOCAL_PROJECT_KEY_FILE
                         })
                     })
                 {
@@ -2080,6 +2094,15 @@ enum SyncEvent {
         uploaded: usize,
     },
     MissingPapers(Vec<papr_core::sync::SyncedPaper>),
+    ProjectCollabUpdated {
+        project_path: PathBuf,
+        envelope: papr_core::ProjectKeyEnvelope,
+        message: String,
+    },
+    ProjectSyncFinished {
+        summary: papr_core::ProjectSyncSummary,
+        single_project: Option<(PathBuf, papr_core::ProjectKeyEnvelope)>,
+    },
     Failed(String),
 }
 
@@ -2816,12 +2839,78 @@ fn process_sync_updates(
                     app.toast = Some("Library is up to date with GitHub.".to_string());
                 }
             }
+            SyncEvent::ProjectCollabUpdated {
+                project_path,
+                envelope,
+                message,
+            } => {
+                apply_project_collab_updated(app, &project_path, envelope, message);
+            }
+            SyncEvent::ProjectSyncFinished {
+                summary,
+                single_project,
+            } => {
+                apply_project_sync_finished(runtime, app, &summary, single_project);
+            }
             SyncEvent::Failed(err) => {
+                if app.mode == AppMode::ProjectCollaborators {
+                    app.project_collab_modal.status = Some(format!("Sync failed: {err}"));
+                }
                 app.toast = Some(format!("Sync failed: {err}"));
             }
         }
     }
     changed
+}
+
+fn apply_project_collab_updated(
+    app: &mut App,
+    project_path: &Path,
+    envelope: papr_core::ProjectKeyEnvelope,
+    message: String,
+) {
+    if app
+        .project_collab_modal
+        .project
+        .as_ref()
+        .is_some_and(|p| p.path == project_path)
+    {
+        app.project_collab_modal.envelope = Some(envelope);
+        app.project_collab_modal.status = Some(message.clone());
+    }
+    app.toast = Some(message);
+}
+
+fn apply_project_sync_finished(
+    runtime: &mut Runtime,
+    app: &mut App,
+    summary: &papr_core::sync::ProjectSyncSummary,
+    single_project: Option<(PathBuf, papr_core::ProjectKeyEnvelope)>,
+) {
+    refresh_project_filesystem(runtime, app);
+    if let Some((proj_path, env)) = single_project
+        && app
+            .project_collab_modal
+            .project
+            .as_ref()
+            .is_some_and(|p| p.path == proj_path)
+    {
+        app.project_collab_modal.envelope = Some(env);
+    }
+    let dl = summary.downloaded.len();
+    let ul = summary.uploaded.len();
+    let skipped = summary.skipped_unauthorized.len();
+    let msg = if dl > 0 || ul > 0 || skipped > 0 {
+        format!(
+            "Projects synced: {dl} decrypted, {ul} encrypted & pushed ({skipped} unauthorized skipped)."
+        )
+    } else {
+        "Encrypted projects are up to date with GitHub.".to_string()
+    };
+    if app.mode == AppMode::ProjectCollaborators {
+        app.project_collab_modal.status = Some(msg.clone());
+    }
+    app.toast = Some(msg);
 }
 
 fn spawn_sync(runtime: &Runtime, sync_sender: &mpsc::UnboundedSender<SyncEvent>) {
@@ -2830,6 +2919,11 @@ fn spawn_sync(runtime: &Runtime, sync_sender: &mpsc::UnboundedSender<SyncEvent>)
     };
     let repo = runtime.config.sync.github_repo.clone();
     let branch = runtime.config.sync.branch.clone();
+    let projects_root = runtime.project_manager.root().to_path_buf();
+    let papr_data_dir = runtime
+        .database_file
+        .parent()
+        .map_or_else(|| projects_root.clone(), Path::to_path_buf);
     let local_papers = match runtime.database.library_papers() {
         Ok(p) => p,
         Err(e) => {
@@ -2902,6 +2996,32 @@ fn spawn_sync(runtime: &Runtime, sync_sender: &mpsc::UnboundedSender<SyncEvent>)
         // 5. Send missing papers to be downloaded locally
         if !reconciliation.missing_locally.is_empty() {
             let _ = sync_sender.send(SyncEvent::MissingPapers(reconciliation.missing_locally));
+        }
+
+        // 6. Also synchronize encrypted collaborative projects in the same repository
+        if let Ok(local_keys) = papr_core::discover_or_create_local_keys(&papr_data_dir) {
+            let current_user = service
+                .fetch_authenticated_user()
+                .await
+                .unwrap_or_else(|_| owner.to_ascii_lowercase());
+            if let Ok(summary) = service
+                .sync_all_projects(
+                    &owner,
+                    &repo_name,
+                    &projects_root,
+                    &current_user,
+                    &local_keys,
+                )
+                .await
+                && (!summary.downloaded.is_empty()
+                    || !summary.uploaded.is_empty()
+                    || !summary.skipped_unauthorized.is_empty())
+            {
+                let _ = sync_sender.send(SyncEvent::ProjectSyncFinished {
+                    summary,
+                    single_project: None,
+                });
+            }
         }
 
         let _ = sync_sender.send(SyncEvent::Completed {
@@ -3242,7 +3362,13 @@ async fn apply_ui_action(
         }
         action @ (UiAction::RenameProject { .. }
         | UiAction::ConfirmDeleteProject(_)
-        | UiAction::DeleteProject(_)) => apply_project_management_action(action, runtime, app),
+        | UiAction::DeleteProject(_)
+        | UiAction::OpenProjectCollaborators(_)
+        | UiAction::AddProjectCollaborator { .. }
+        | UiAction::RemoveProjectCollaborator { .. }
+        | UiAction::SyncProjects { .. }) => {
+            apply_project_management_action(action, runtime, senders, app)
+        }
         action @ (UiAction::OpenPdf { .. }
         | UiAction::OpenNote(_)
         | UiAction::SaveNote(_)
@@ -3591,6 +3717,7 @@ fn delete_project_entry(app: &mut App, path: &Path) {
 fn apply_project_management_action(
     action: UiAction,
     runtime: &mut Runtime,
+    senders: &ActionSenders,
     app: &mut App,
 ) -> Result<()> {
     match action {
@@ -3600,9 +3727,442 @@ fn apply_project_management_action(
             app.mode = AppMode::ConfirmDelete;
         }
         UiAction::DeleteProject(project) => delete_project(runtime, app, &project)?,
+        UiAction::OpenProjectCollaborators(project) => {
+            open_project_collaborators_modal(runtime, app, project);
+        }
+        UiAction::AddProjectCollaborator { project, username } => {
+            add_project_collaborator(runtime, senders, app, &project, &username);
+        }
+        UiAction::RemoveProjectCollaborator { project, username } => {
+            remove_project_collaborator(runtime, senders, app, &project, &username);
+        }
+        UiAction::SyncProjects { project } => {
+            spawn_project_sync(runtime, &senders.sync, app, project);
+        }
         _ => unreachable!("project management action routed to the wrong handler"),
     }
     Ok(())
+}
+
+fn runtime_papr_data_dir(runtime: &Runtime) -> PathBuf {
+    runtime
+        .database_file
+        .parent()
+        .map_or_else(|| runtime.project_manager.root().to_path_buf(), Path::to_path_buf)
+}
+
+fn configured_owner_hint(config: &Config) -> String {
+    config
+        .sync
+        .github_repo
+        .trim()
+        .split_once('/')
+        .map_or_else(String::new, |(owner, _)| owner.trim().to_ascii_lowercase())
+}
+
+fn open_project_collaborators_modal(runtime: &Runtime, app: &mut App, project: Project) {
+    let data_dir = runtime_papr_data_dir(runtime);
+    let local_keys = match papr_core::discover_or_create_local_keys(&data_dir) {
+        Ok(keys) => keys,
+        Err(error) => {
+            app.toast = Some(format!("Could not initialize SSH keys: {error}"));
+            return;
+        }
+    };
+    let local_fingerprint = local_keys
+        .first()
+        .map_or_else(String::new, |k| k.public_key().fingerprint());
+    let owner_hint = configured_owner_hint(&runtime.config);
+
+    let envelope = match papr_core::ensure_local_project_collab(
+        &project.path,
+        &project.name,
+        &runtime.config.default_project_compiler,
+        &owner_hint,
+        &local_keys,
+    ) {
+        Ok((env, _)) => Some(env),
+        Err(error) => {
+            app.toast = Some(format!("Could not load project collaboration: {error}"));
+            return;
+        }
+    };
+
+    app.project_collab_modal = state::ProjectCollabModalState {
+        project: Some(project),
+        envelope,
+        selected: 0,
+        adding_collaborator: false,
+        input: String::new(),
+        input_cursor: 0,
+        local_fingerprint,
+        status: None,
+    };
+    app.mode = AppMode::ProjectCollaborators;
+}
+
+fn add_project_collaborator(
+    runtime: &Runtime,
+    senders: &ActionSenders,
+    app: &mut App,
+    project: &Project,
+    username: &str,
+) {
+    let clean_user = match papr_core::validate_github_username(username) {
+        Ok(u) => u,
+        Err(error) => {
+            app.project_collab_modal.status = Some(error.to_string());
+            app.toast = Some(error.to_string());
+            return;
+        }
+    };
+    let data_dir = runtime_papr_data_dir(runtime);
+    let Ok(local_keys) = papr_core::discover_or_create_local_keys(&data_dir) else {
+        app.toast = Some("Could not load local SSH keys.".into());
+        return;
+    };
+    let owner_hint = configured_owner_hint(&runtime.config);
+    let (mut envelope, project_key) = match papr_core::ensure_local_project_collab(
+        &project.path,
+        &project.name,
+        &runtime.config.default_project_compiler,
+        &owner_hint,
+        &local_keys,
+    ) {
+        Ok(pair) => pair,
+        Err(error) => {
+            app.project_collab_modal.status = Some(error.to_string());
+            app.toast = Some(error.to_string());
+            return;
+        }
+    };
+
+    if let Err(error) = envelope.add_collaborator(&clean_user, &[], &project_key) {
+        app.project_collab_modal.status = Some(error.to_string());
+        return;
+    }
+    let _ = papr_core::save_local_envelope(&project.path, &envelope, Some(&project_key));
+    app.project_collab_modal.envelope = Some(envelope);
+
+    let Some(token) = runtime.config.resolved_github_token() else {
+        let msg = format!(
+            "Added @{clean_user} locally. Configure a GitHub token to fetch their SSH key & sync."
+        );
+        app.project_collab_modal.status = Some(msg.clone());
+        app.toast = Some(msg);
+        return;
+    };
+
+    app.project_collab_modal.status = Some(format!(
+        "Fetching @{clean_user}'s SSH key from GitHub and encrypting project..."
+    ));
+    spawn_add_collaborator_sync(
+        runtime.config.sync.github_repo.clone(),
+        token,
+        runtime.config.sync.branch.clone(),
+        senders.sync.clone(),
+        project.path.clone(),
+        project.name.clone(),
+        clean_user,
+        local_keys,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_add_collaborator_sync(
+    repo: String,
+    token: String,
+    branch: String,
+    sync_sender: mpsc::UnboundedSender<SyncEvent>,
+    project_path: PathBuf,
+    project_name: String,
+    clean_user: String,
+    local_keys: Vec<papr_core::SshEd25519KeyPair>,
+) {
+    tokio::spawn(async move {
+        let service = match papr_core::sync::GitHubSyncService::new(repo, token, branch) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = sync_sender.send(SyncEvent::Failed(e.to_string()));
+                return;
+            }
+        };
+        let (owner, repo_name) = match service.ensure_repository_exists().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                let _ = sync_sender.send(SyncEvent::Failed(format!("Repository setup failed: {e}")));
+                return;
+            }
+        };
+        let current_user = service
+            .fetch_authenticated_user()
+            .await
+            .unwrap_or_else(|_| owner.to_ascii_lowercase());
+        let _ = service
+            .publish_user_public_key(&owner, &repo_name, &current_user, &local_keys)
+            .await;
+
+        let fetched_keys = service
+            .fetch_user_ssh_keys(&owner, &repo_name, &clean_user)
+            .await
+            .unwrap_or_default();
+        let _ = service
+            .invite_repo_collaborator(&owner, &repo_name, &clean_user)
+            .await;
+
+        match service
+            .push_encrypted_project(
+                &owner,
+                &repo_name,
+                &project_path,
+                &project_name,
+                &current_user,
+                &local_keys,
+            )
+            .await
+        {
+            Ok(updated_env) => {
+                let msg = if fetched_keys.is_empty() {
+                    format!(
+                        "Added @{clean_user} & synced. Key will wrap once @{clean_user} publishes an ssh-ed25519 key."
+                    )
+                } else {
+                    format!(
+                        "Added @{clean_user} ({} SSH key(s) wrapped) and synced encrypted project.",
+                        fetched_keys.len()
+                    )
+                };
+                let _ = sync_sender.send(SyncEvent::ProjectCollabUpdated {
+                    project_path,
+                    envelope: updated_env,
+                    message: msg,
+                });
+            }
+            Err(e) => {
+                let _ = sync_sender.send(SyncEvent::Failed(format!(
+                    "Failed to push encrypted project: {e}"
+                )));
+            }
+        }
+    });
+}
+
+fn remove_project_collaborator(
+    runtime: &Runtime,
+    senders: &ActionSenders,
+    app: &mut App,
+    project: &Project,
+    username: &str,
+) {
+    let data_dir = runtime_papr_data_dir(runtime);
+    let Ok(local_keys) = papr_core::discover_or_create_local_keys(&data_dir) else {
+        app.toast = Some("Could not load local SSH keys.".into());
+        return;
+    };
+    let owner_pubkeys: Vec<papr_core::SshEd25519PublicKey> =
+        local_keys.iter().map(|k| k.public_key().clone()).collect();
+    let owner_hint = configured_owner_hint(&runtime.config);
+
+    let (mut envelope, _) = match papr_core::ensure_local_project_collab(
+        &project.path,
+        &project.name,
+        &runtime.config.default_project_compiler,
+        &owner_hint,
+        &local_keys,
+    ) {
+        Ok(pair) => pair,
+        Err(error) => {
+            app.project_collab_modal.status = Some(error.to_string());
+            app.toast = Some(error.to_string());
+            return;
+        }
+    };
+
+    let new_key = match envelope.remove_collaborator_and_rotate(username, &owner_pubkeys) {
+        Ok(k) => k,
+        Err(error) => {
+            app.project_collab_modal.status = Some(error.to_string());
+            return;
+        }
+    };
+    let _ = papr_core::save_local_envelope(&project.path, &envelope, Some(&new_key));
+    app.project_collab_modal.selected = app
+        .project_collab_modal
+        .selected
+        .min(envelope.collaborators.len().saturating_sub(1));
+    let new_gen = envelope.key_generation;
+    app.project_collab_modal.envelope = Some(envelope);
+
+    let Some(token) = runtime.config.resolved_github_token() else {
+        let msg = format!("Revoked @{username} locally and rotated ProjectKey to v{new_gen}.");
+        app.project_collab_modal.status = Some(msg.clone());
+        app.toast = Some(msg);
+        return;
+    };
+
+    app.project_collab_modal.status = Some(format!(
+        "Revoked @{username}; re-encrypting project with v{new_gen} key..."
+    ));
+    let repo = runtime.config.sync.github_repo.clone();
+    let branch = runtime.config.sync.branch.clone();
+    let sync_sender = senders.sync.clone();
+    let project_path = project.path.clone();
+    let project_name = project.name.clone();
+    let removed_user = username.to_string();
+
+    tokio::spawn(async move {
+        let service = match papr_core::sync::GitHubSyncService::new(repo, token, branch) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = sync_sender.send(SyncEvent::Failed(e.to_string()));
+                return;
+            }
+        };
+        let (owner, repo_name) = match service.ensure_repository_exists().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                let _ = sync_sender.send(SyncEvent::Failed(format!("Repository setup failed: {e}")));
+                return;
+            }
+        };
+        let current_user = service
+            .fetch_authenticated_user()
+            .await
+            .unwrap_or_else(|_| owner.to_ascii_lowercase());
+
+        match service
+            .push_encrypted_project(
+                &owner,
+                &repo_name,
+                &project_path,
+                &project_name,
+                &current_user,
+                &local_keys,
+            )
+            .await
+        {
+            Ok(updated_env) => {
+                let _ = sync_sender.send(SyncEvent::ProjectCollabUpdated {
+                    project_path,
+                    envelope: updated_env,
+                    message: format!(
+                        "Revoked @{removed_user}, rotated key to v{new_gen}, and re-encrypted on GitHub."
+                    ),
+                });
+            }
+            Err(e) => {
+                let _ = sync_sender.send(SyncEvent::Failed(format!(
+                    "Failed to push rotated project bundle: {e}"
+                )));
+            }
+        }
+    });
+}
+
+fn spawn_project_sync(
+    runtime: &Runtime,
+    sync_sender: &mpsc::UnboundedSender<SyncEvent>,
+    app: &mut App,
+    project: Option<Project>,
+) {
+    let Some(token) = runtime.config.resolved_github_token() else {
+        let msg = "Configure a GitHub token in Settings -> Sync (or PAPR_GITHUB_TOKEN) to sync encrypted projects.".to_string();
+        if app.mode == AppMode::ProjectCollaborators {
+            app.project_collab_modal.status = Some(msg.clone());
+        }
+        app.toast = Some(msg);
+        return;
+    };
+
+    let data_dir = runtime_papr_data_dir(runtime);
+    let Ok(local_keys) = papr_core::discover_or_create_local_keys(&data_dir) else {
+        app.toast = Some("Could not initialize local SSH keys.".into());
+        return;
+    };
+
+    if app.mode == AppMode::ProjectCollaborators {
+        app.project_collab_modal.status =
+            Some("Syncing encrypted project(s) with GitHub...".into());
+    }
+    app.toast = Some("Syncing encrypted projects with GitHub...".into());
+
+    let repo = runtime.config.sync.github_repo.clone();
+    let branch = runtime.config.sync.branch.clone();
+    let projects_root = runtime.project_manager.root().to_path_buf();
+    let sync_sender = sync_sender.clone();
+
+    tokio::spawn(async move {
+        let service = match papr_core::sync::GitHubSyncService::new(repo, token, branch) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = sync_sender.send(SyncEvent::Failed(e.to_string()));
+                return;
+            }
+        };
+        let (owner, repo_name) = match service.ensure_repository_exists().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                let _ = sync_sender.send(SyncEvent::Failed(format!("Repository setup failed: {e}")));
+                return;
+            }
+        };
+        let current_user = service
+            .fetch_authenticated_user()
+            .await
+            .unwrap_or_else(|_| owner.to_ascii_lowercase());
+
+        let mut single_project = None;
+        if let Some(proj) = &project {
+            match service
+                .push_encrypted_project(
+                    &owner,
+                    &repo_name,
+                    &proj.path,
+                    &proj.name,
+                    &current_user,
+                    &local_keys,
+                )
+                .await
+            {
+                Ok(env) => {
+                    single_project = Some((proj.path.clone(), env));
+                }
+                Err(e) => {
+                    let _ = sync_sender.send(SyncEvent::Failed(format!(
+                        "Project encryption push failed: {e}"
+                    )));
+                    return;
+                }
+            }
+        }
+
+        match service
+            .sync_all_projects(
+                &owner,
+                &repo_name,
+                &projects_root,
+                &current_user,
+                &local_keys,
+            )
+            .await
+        {
+            Ok(mut summary) => {
+                if let Some((ref proj_path, _)) = single_project
+                    && let Some(name) = proj_path.file_name().and_then(|n| n.to_str())
+                    && !summary.uploaded.iter().any(|u| u == name)
+                {
+                    summary.uploaded.push(name.to_string());
+                }
+                let _ = sync_sender.send(SyncEvent::ProjectSyncFinished {
+                    summary,
+                    single_project,
+                });
+            }
+            Err(e) => {
+                let _ = sync_sender.send(SyncEvent::Failed(format!("Project sync failed: {e}")));
+            }
+        }
+    });
 }
 
 fn rename_project(
@@ -5474,6 +6034,7 @@ fn handle_active_mode_key(app: &mut App, key: KeyEvent) -> KeyHandling {
         AppMode::DiscoverFilter => handle_discover_filter_key(app, key),
         AppMode::WorkspaceSearch => handle_workspace_search_key(app, key),
         AppMode::ProjectCitationSearch => handle_project_citation_search_key(app, key),
+        AppMode::ProjectCollaborators => handle_project_collaborators_modal_key(app, key),
         _ => return KeyHandling::Ignored,
     };
     KeyHandling::Handled(action.map(Box::new))
@@ -5794,6 +6355,85 @@ fn handle_project_name_modal_key(app: &mut App, key: KeyEvent) -> Option<UiActio
     None
 }
 
+fn handle_project_collaborators_modal_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
+    if app.project_collab_modal.adding_collaborator {
+        match key.code {
+            KeyCode::Esc => {
+                app.project_collab_modal.adding_collaborator = false;
+                app.project_collab_modal.input.clear();
+                app.project_collab_modal.input_cursor = 0;
+            }
+            KeyCode::Enter => {
+                let username = app.project_collab_modal.input.trim().to_owned();
+                app.project_collab_modal.adding_collaborator = false;
+                app.project_collab_modal.input.clear();
+                app.project_collab_modal.input_cursor = 0;
+                if !username.is_empty()
+                    && let Some(project) = app.project_collab_modal.project.clone()
+                {
+                    return Some(UiAction::AddProjectCollaborator { project, username });
+                }
+            }
+            _ => {
+                let _ = edit_text(
+                    &mut app.project_collab_modal.input,
+                    &mut app.project_collab_modal.input_cursor,
+                    key,
+                );
+            }
+        }
+        return None;
+    }
+
+    let collab_len = app
+        .project_collab_modal
+        .envelope
+        .as_ref()
+        .map_or(0, |env| env.collaborators.len());
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.mode = AppMode::Normal;
+        }
+        KeyCode::Char('a' | 'n') | KeyCode::Enter => {
+            app.project_collab_modal.adding_collaborator = true;
+            app.project_collab_modal.input.clear();
+            app.project_collab_modal.input_cursor = 0;
+            app.project_collab_modal.status = None;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.project_collab_modal.selected =
+                app.project_collab_modal.selected.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.project_collab_modal.selected = (app.project_collab_modal.selected + 1)
+                .min(collab_len.saturating_sub(1));
+        }
+        KeyCode::Char('x' | 'd') | KeyCode::Delete => {
+            if let Some(project) = app.project_collab_modal.project.clone()
+                && let Some(username) = app
+                    .project_collab_modal
+                    .envelope
+                    .as_ref()
+                    .and_then(|env| {
+                        env.collaborators
+                            .get(app.project_collab_modal.selected)
+                            .cloned()
+                    })
+            {
+                return Some(UiAction::RemoveProjectCollaborator { project, username });
+            }
+        }
+        KeyCode::Char('s') => {
+            return Some(UiAction::SyncProjects {
+                project: app.project_collab_modal.project.clone(),
+            });
+        }
+        _ => {}
+    }
+    None
+}
+
 fn handle_command_palette_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => app.dispatch(Command::TogglePalette),
@@ -5885,10 +6525,12 @@ fn has_active_text_input(app: &App) -> bool {
             | AppMode::Search
             | AppMode::DiscoverFilter
             | AppMode::WorkspaceSearch
-    ) || (app.page == Page::Projects
-        && app.content_focused
-        && app.project_pane == ProjectPane::Editor
-        && app.project_editor_insert_mode)
+    ) || (app.mode == AppMode::ProjectCollaborators
+        && app.project_collab_modal.adding_collaborator)
+        || (app.page == Page::Projects
+            && app.content_focused
+            && app.project_pane == ProjectPane::Editor
+            && app.project_editor_insert_mode)
 }
 
 fn run_terminal_command(app: &mut App) {
@@ -6154,6 +6796,13 @@ fn handle_project_list_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
             app.mode = AppMode::ProjectCreate;
         }
         KeyCode::Char('r') => return Some(UiAction::RefreshProjects),
+        KeyCode::Char('c') => {
+            if let Some(project) = app.projects.get(app.projects_selected).cloned() {
+                return Some(UiAction::OpenProjectCollaborators(project));
+            }
+            app.toast = Some("Create or select a project first.".into());
+        }
+        KeyCode::Char('s') => return Some(UiAction::SyncProjects { project: None }),
         KeyCode::Char('R') => {
             if let Some(project) = app.projects.get(app.projects_selected) {
                 app.project_rename_input = project.name.clone();
@@ -6267,6 +6916,17 @@ fn handle_project_workspace_pane_key(app: &mut App, key: KeyEvent) -> Option<UiA
                 app.project_rename_input.clear();
                 app.project_rename_cursor = 0;
                 app.mode = AppMode::ProjectFileCreate;
+            }
+            KeyCode::Char('c') => {
+                return app
+                    .active_project
+                    .clone()
+                    .map(UiAction::OpenProjectCollaborators);
+            }
+            KeyCode::Char('s') => {
+                return Some(UiAction::SyncProjects {
+                    project: app.active_project.clone(),
+                });
             }
             KeyCode::Char('R') => {
                 if let Some(path) = app.project_files.get(app.project_file_selected).cloned() {
@@ -6631,6 +7291,10 @@ fn paste_text_into_active_input(app: &mut App, text: &str) -> bool {
         | AppMode::ProjectEntryRename => (
             &mut app.project_rename_input,
             &mut app.project_rename_cursor,
+        ),
+        AppMode::ProjectCollaborators if app.project_collab_modal.adding_collaborator => (
+            &mut app.project_collab_modal.input,
+            &mut app.project_collab_modal.input_cursor,
         ),
         AppMode::CommandPalette => {
             let workspace = &mut app.workspace;
@@ -10843,6 +11507,74 @@ mod tests {
         );
         assert_eq!(app.project_pane, ProjectPane::Editor);
         assert!(app.project_view_flags.build_visible);
+    }
+
+    #[test]
+    fn project_collaborators_modal_supports_add_remove_and_sync_actions() {
+        let mut app = project_editor_app("", 0);
+        app.project_pane = ProjectPane::ProjectList;
+        let project = Project {
+            name: "quantum-optics".into(),
+            path: std::path::PathBuf::from("/tmp/quantum-optics"),
+            opened_at: 1,
+        };
+        app.projects = vec![project.clone()];
+
+        let action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+        );
+        assert!(
+            matches!(action, Some(UiAction::OpenProjectCollaborators(ref selected)) if selected == &project)
+        );
+
+        app.mode = AppMode::ProjectCollaborators;
+        app.project_collab_modal.project = Some(project.clone());
+        app.project_collab_modal.envelope = Some(papr_core::ProjectKeyEnvelope {
+            version: 1,
+            project_name: "quantum-optics".into(),
+            compiler: "typst".into(),
+            owner: "alice".into(),
+            collaborators: vec!["bob".into()],
+            key_generation: 1,
+            updated_at: String::new(),
+            recipient_keys: Vec::new(),
+            public_key_cache: std::collections::BTreeMap::new(),
+        });
+
+        // Press 'a' to add a collaborator
+        let _ = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        );
+        assert!(app.project_collab_modal.adding_collaborator);
+        for ch in ['c', 'h', 'a', 'r', 'l', 'i', 'e'] {
+            let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        let add_action = handle_key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(add_action, Some(UiAction::AddProjectCollaborator { username, .. }) if username == "charlie")
+        );
+
+        // Press 'x' to revoke selected collaborator ("bob")
+        let remove_action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        );
+        assert!(
+            matches!(remove_action, Some(UiAction::RemoveProjectCollaborator { username, .. }) if username == "bob")
+        );
+
+        // Press 's' to sync
+        let sync_action = handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        );
+        assert!(matches!(sync_action, Some(UiAction::SyncProjects { .. })));
+
+        // Press Esc to close modal
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::Normal);
     }
 
     #[test]

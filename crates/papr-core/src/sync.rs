@@ -1,12 +1,22 @@
 //! GitHub paper synchronization client and reconciliation logic.
 
+use std::path::Path;
+
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::Utc;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::models::LibraryPaper;
+use crate::{
+    collab::{
+        CollabError, ProjectKeyEnvelope, SshEd25519KeyPair, SshEd25519PublicKey,
+        decrypt_project_bundle, encrypt_project_directory, ensure_local_project_collab,
+        load_local_envelope, save_local_envelope, unpack_project_archive,
+        validate_github_username,
+    },
+    models::LibraryPaper,
+};
 
 /// Errors produced during GitHub repository synchronization.
 #[derive(Debug, Error)]
@@ -31,6 +41,20 @@ pub enum SyncError {
     /// The configured repository string is invalid.
     #[error("invalid repository name: '{0}'")]
     InvalidRepo(String),
+    /// Project encryption or collaboration error.
+    #[error("{0}")]
+    Collab(#[from] CollabError),
+}
+
+/// Summary of a collaborative project synchronization pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectSyncSummary {
+    /// Names of encrypted projects pulled and decrypted locally.
+    pub downloaded: Vec<String>,
+    /// Names of local projects encrypted and pushed to the repository.
+    pub uploaded: Vec<String>,
+    /// Names of remote projects skipped because the current user is not an authorized collaborator.
+    pub skipped_unauthorized: Vec<String>,
 }
 
 /// A lightweight representation of a paper in the sync manifest.
@@ -125,6 +149,23 @@ struct PutFileRequest<'a> {
 #[derive(Debug, Deserialize)]
 struct GitHubUserResponse {
     login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubSshKeyObject {
+    key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubDirEntry {
+    name: String,
+    #[serde(rename = "type")]
+    entry_type: String,
+}
+
+#[derive(Debug, Serialize)]
+struct InviteCollaboratorRequest<'a> {
+    permission: &'a str,
 }
 
 /// Service that coordinates synchronization between Papr and a private GitHub repository.
@@ -429,6 +470,513 @@ impl GitHubSyncService {
             new_locally,
             merged_manifest,
         }
+    }
+
+    /// Discover the authenticated GitHub user's login (`GET /user`), normalized to lowercase.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if the network request or API authentication fails.
+    pub async fn fetch_authenticated_user(&self) -> Result<String, SyncError> {
+        let response = self
+            .client
+            .get("https://api.github.com/user")
+            .header("User-Agent", "papr")
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let message = response.text().await.unwrap_or_default();
+            return Err(SyncError::Api { status, message });
+        }
+
+        let user: GitHubUserResponse = serde_json::from_slice(&response.bytes().await?)?;
+        Ok(user.login.trim().to_ascii_lowercase())
+    }
+
+    /// Fetch raw file bytes and Git blob SHA at `path` inside `{owner}/{repo}`.
+    ///
+    /// Returns `Ok(None)` if the file does not exist (`404 Not Found`).
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if the request or base64 decoding fails.
+    pub async fn get_file_bytes(
+        &self,
+        owner: &str,
+        repo: &str,
+        path: &str,
+    ) -> Result<Option<(Vec<u8>, String)>, SyncError> {
+        let url = format!(
+            "https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={}",
+            self.branch
+        );
+        let res = self
+            .client
+            .get(&url)
+            .header("User-Agent", "papr")
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await?;
+
+        if res.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !res.status().is_success() {
+            let status = res.status().as_u16();
+            let message = res.text().await.unwrap_or_default();
+            return Err(SyncError::Api { status, message });
+        }
+
+        let content_resp: GitHubContentResponse = serde_json::from_slice(&res.bytes().await?)?;
+        let raw_b64 = content_resp
+            .content
+            .unwrap_or_default()
+            .replace(['\n', '\r'], "");
+        let decoded = if raw_b64.is_empty() {
+            Vec::new()
+        } else {
+            BASE64_STANDARD.decode(&raw_b64)?
+        };
+        Ok(Some((decoded, content_resp.sha)))
+    }
+
+    /// Create or update a file at `path` inside `{owner}/{repo}`.
+    ///
+    /// Automatically resolves the existing file's SHA when `previous_sha` is `None`.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if the GitHub Contents API rejects the update.
+    pub async fn put_file_bytes(
+        &self,
+        owner: &str,
+        repo: &str,
+        path: &str,
+        raw_bytes: &[u8],
+        message: &str,
+        previous_sha: Option<&str>,
+    ) -> Result<String, SyncError> {
+        let resolved_sha = if let Some(sha) = previous_sha {
+            Some(sha.to_string())
+        } else {
+            self.get_file_bytes(owner, repo, path)
+                .await?
+                .map(|(_, sha)| sha)
+        };
+
+        let url = format!("https://api.github.com/repos/{owner}/{repo}/contents/{path}");
+        let b64_content = BASE64_STANDARD.encode(raw_bytes);
+        let put_req = PutFileRequest {
+            message,
+            content: &b64_content,
+            sha: resolved_sha.as_deref(),
+            branch: &self.branch,
+        };
+        let put_payload = serde_json::to_vec(&put_req)?;
+
+        let res = self
+            .client
+            .put(&url)
+            .header("User-Agent", "papr")
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .header("Content-Type", "application/json")
+            .body(put_payload)
+            .send()
+            .await?;
+
+        if !res.status().is_success() {
+            let status = res.status().as_u16();
+            let msg = res.text().await.unwrap_or_default();
+            return Err(SyncError::Api {
+                status,
+                message: msg,
+            });
+        }
+
+        let put_resp: GitHubPutFileResponse = serde_json::from_slice(&res.bytes().await?)?;
+        let sha = put_resp
+            .content
+            .map(|c| c.sha)
+            .or_else(|| put_resp.commit.map(|c| c.sha))
+            .unwrap_or_default();
+        Ok(sha)
+    }
+
+    /// Fetch a GitHub user's `ssh-ed25519` public keys from:
+    /// 1. `GET https://api.github.com/users/{username}/keys`
+    /// 2. `GET https://github.com/{username}.keys`
+    /// 3. `projects/.keys/{username}.pub` inside `{owner}/{repo}` (Papr fallback key directory)
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if `username` is syntactically invalid.
+    pub async fn fetch_user_ssh_keys(
+        &self,
+        owner: &str,
+        repo: &str,
+        username: &str,
+    ) -> Result<Vec<SshEd25519PublicKey>, SyncError> {
+        let clean_user = validate_github_username(username)?;
+        let mut keys = Vec::new();
+
+        // 1. Authenticated GitHub API endpoint
+        let api_url = format!("https://api.github.com/users/{clean_user}/keys");
+        if let Ok(res) = self
+            .client
+            .get(&api_url)
+            .header("User-Agent", "papr")
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await
+            && res.status().is_success()
+            && let Ok(bytes) = res.bytes().await
+            && let Ok(list) = serde_json::from_slice::<Vec<GitHubSshKeyObject>>(&bytes)
+        {
+            for item in list {
+                if let Ok(parsed) = SshEd25519PublicKey::parse_openssh_line(&item.key)
+                    && !keys
+                        .iter()
+                        .any(|k: &SshEd25519PublicKey| k.ed25519_bytes() == parsed.ed25519_bytes())
+                {
+                    keys.push(parsed);
+                }
+            }
+        }
+
+        // 2. Public https://github.com/{username}.keys endpoint
+        if keys.is_empty() {
+            let web_url = format!("https://github.com/{clean_user}.keys");
+            if let Ok(res) = self
+                .client
+                .get(&web_url)
+                .header("User-Agent", "papr")
+                .send()
+                .await
+                && res.status().is_success()
+                && let Ok(text) = res.text().await
+            {
+                for parsed in SshEd25519PublicKey::parse_many_lines(&text) {
+                    if !keys
+                        .iter()
+                        .any(|k: &SshEd25519PublicKey| k.ed25519_bytes() == parsed.ed25519_bytes())
+                    {
+                        keys.push(parsed);
+                    }
+                }
+            }
+        }
+
+        // 3. Repository fallback directory `projects/.keys/{username}.pub`
+        let repo_key_path = format!("projects/.keys/{clean_user}.pub");
+        if let Ok(Some((bytes, _))) = self.get_file_bytes(owner, repo, &repo_key_path).await
+            && let Ok(text) = String::from_utf8(bytes)
+        {
+            for parsed in SshEd25519PublicKey::parse_many_lines(&text) {
+                if !keys
+                    .iter()
+                    .any(|k: &SshEd25519PublicKey| k.ed25519_bytes() == parsed.ed25519_bytes())
+                {
+                    keys.push(parsed);
+                }
+            }
+        }
+
+        Ok(keys)
+    }
+
+    /// Publish the current user's local `ssh-ed25519` public keys to `projects/.keys/{username}.pub`
+    /// inside `{owner}/{repo}` so collaborators can wrap keys even if the user hasn't uploaded
+    /// an SSH key to their GitHub profile settings yet.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if the upload fails.
+    pub async fn publish_user_public_key(
+        &self,
+        owner: &str,
+        repo: &str,
+        username: &str,
+        local_keys: &[SshEd25519KeyPair],
+    ) -> Result<(), SyncError> {
+        let clean_user = validate_github_username(username)?;
+        if local_keys.is_empty() {
+            return Ok(());
+        }
+        let mut lines = Vec::new();
+        for pair in local_keys {
+            let line = pair.public_key().to_openssh_line();
+            if !lines.contains(&line) {
+                lines.push(line);
+            }
+        }
+        let payload = format!("{}\n", lines.join("\n"));
+        let path = format!("projects/.keys/{clean_user}.pub");
+
+        let existing = self.get_file_bytes(owner, repo, &path).await?;
+        if let Some((ref current_bytes, _)) = existing
+            && current_bytes == payload.as_bytes()
+        {
+            return Ok(());
+        }
+        let prev_sha = existing.as_ref().map(|(_, sha)| sha.as_str());
+        let msg = format!("papr: publish public key for @{clean_user}");
+        let _ = self
+            .put_file_bytes(owner, repo, &path, payload.as_bytes(), &msg, prev_sha)
+            .await?;
+        Ok(())
+    }
+
+    /// Invite `username` as a repository collaborator on `{owner}/{repo}` so they can push/pull
+    /// encrypted project bundles stored in the shared repository.
+    ///
+    /// Note: Project-level read/write confidentiality is enforced cryptographically by each
+    /// project's [`ProjectKeyEnvelope`] (`keys.json`) and `ChaCha20-Poly1305` `bundle.enc`.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] only if `username` is invalid or a network failure occurs.
+    pub async fn invite_repo_collaborator(
+        &self,
+        owner: &str,
+        repo: &str,
+        username: &str,
+    ) -> Result<(), SyncError> {
+        let clean_user = validate_github_username(username)?;
+        if clean_user.eq_ignore_ascii_case(owner) {
+            return Ok(());
+        }
+        let url =
+            format!("https://api.github.com/repos/{owner}/{repo}/collaborators/{clean_user}");
+        let body = serde_json::to_vec(&InviteCollaboratorRequest { permission: "push" })?;
+        let _ = self
+            .client
+            .put(&url)
+            .header("User-Agent", "papr")
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await;
+        Ok(())
+    }
+
+    /// List all project directories under `projects/` in `{owner}/{repo}`.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if the GitHub API call fails.
+    pub async fn list_remote_projects(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Vec<String>, SyncError> {
+        let url = format!(
+            "https://api.github.com/repos/{owner}/{repo}/contents/projects?ref={}",
+            self.branch
+        );
+        let res = self
+            .client
+            .get(&url)
+            .header("User-Agent", "papr")
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await?;
+
+        if res.status() == StatusCode::NOT_FOUND {
+            return Ok(Vec::new());
+        }
+        if !res.status().is_success() {
+            let status = res.status().as_u16();
+            let message = res.text().await.unwrap_or_default();
+            return Err(SyncError::Api { status, message });
+        }
+
+        let entries: Vec<GitHubDirEntry> = serde_json::from_slice(&res.bytes().await?)?;
+        let mut names: Vec<String> = entries
+            .into_iter()
+            .filter(|e| e.entry_type == "dir" && !e.name.starts_with('.'))
+            .map(|e| e.name)
+            .collect();
+        names.sort();
+        Ok(names)
+    }
+
+    /// Encrypt and push a single local project (`project_root`) to `projects/{project_name}/`
+    /// in `{owner}/{repo}`.
+    ///
+    /// Resolves and wraps the project key for all collaborators in [`ProjectKeyEnvelope`]
+    /// using their GitHub `ssh-ed25519` public keys before uploading `keys.json` and `bundle.enc`.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if encryption or GitHub upload fails.
+    pub async fn push_encrypted_project(
+        &self,
+        owner: &str,
+        repo: &str,
+        project_root: &Path,
+        project_name: &str,
+        current_user: &str,
+        local_keys: &[SshEd25519KeyPair],
+    ) -> Result<ProjectKeyEnvelope, SyncError> {
+        let (mut envelope, project_key) = ensure_local_project_collab(
+            project_root,
+            project_name,
+            "typst",
+            current_user,
+            local_keys,
+        )?;
+
+        // Refresh SSH public keys and wrap ProjectKey for owner + all collaborators
+        for member in envelope.all_members() {
+            if let Ok(remote_keys) = self.fetch_user_ssh_keys(owner, repo, &member).await
+                && !remote_keys.is_empty()
+            {
+                envelope.wrap_keys_for_user(&member, &remote_keys, &project_key)?;
+            }
+        }
+        for collaborator in &envelope.collaborators {
+            let _ = self
+                .invite_repo_collaborator(owner, repo, collaborator)
+                .await;
+        }
+
+        envelope.updated_at = Utc::now().to_rfc3339();
+        save_local_envelope(project_root, &envelope, Some(&project_key))?;
+
+        let encrypted_bundle = encrypt_project_directory(
+            project_root,
+            project_name,
+            &envelope.compiler,
+            envelope.key_generation,
+            &project_key,
+        )?;
+
+        let keys_path = format!("projects/{project_name}/keys.json");
+        let bundle_path = format!("projects/{project_name}/bundle.enc");
+
+        let keys_json = serde_json::to_vec_pretty(&envelope)?;
+        let keys_msg = format!(
+            "papr: update key envelope for project '{project_name}' (gen {})",
+            envelope.key_generation
+        );
+        self.put_file_bytes(owner, repo, &keys_path, &keys_json, &keys_msg, None)
+            .await?;
+
+        let bundle_msg = format!(
+            "papr: sync encrypted project '{project_name}' (gen {})",
+            envelope.key_generation
+        );
+        self.put_file_bytes(
+            owner,
+            repo,
+            &bundle_path,
+            &encrypted_bundle,
+            &bundle_msg,
+            None,
+        )
+        .await?;
+
+        Ok(envelope)
+    }
+
+    /// Synchronize all collaborative encrypted projects between `projects_root` and `{owner}/{repo}`.
+    ///
+    /// 1. Publishes the current user's `ssh-ed25519` public key to `projects/.keys/{current_user}.pub`.
+    /// 2. Pulls remote projects under `projects/`:
+    ///    - If the current user's local keys unlock `keys.json`, decrypts `bundle.enc` and unpacks
+    ///      new or updated projects locally.
+    ///    - If the current user is not an authorized collaborator on a remote project, skips it
+    ///      and records it in [`ProjectSyncSummary::skipped_unauthorized`].
+    /// 3. Pushes local collaborative projects (those with `.papr-collab.json`) that are new
+    ///    remotely or modified locally.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if listing or transferring repository contents fails.
+    pub async fn sync_all_projects(
+        &self,
+        owner: &str,
+        repo: &str,
+        projects_root: &Path,
+        current_user: &str,
+        local_keys: &[SshEd25519KeyPair],
+    ) -> Result<ProjectSyncSummary, SyncError> {
+        let mut summary = ProjectSyncSummary::default();
+        let _ = self
+            .publish_user_public_key(owner, repo, current_user, local_keys)
+            .await;
+
+        let remote_projects = self.list_remote_projects(owner, repo).await?;
+
+        for proj_name in &remote_projects {
+            let keys_path = format!("projects/{proj_name}/keys.json");
+            let Some((keys_bytes, _)) = self.get_file_bytes(owner, repo, &keys_path).await? else {
+                continue;
+            };
+            let Ok(remote_envelope) = serde_json::from_slice::<ProjectKeyEnvelope>(&keys_bytes)
+            else {
+                continue;
+            };
+
+            let Ok(project_key) = remote_envelope.unwrap_project_key(local_keys) else {
+                summary.skipped_unauthorized.push(proj_name.clone());
+                continue;
+            };
+
+            let local_dir = projects_root.join(proj_name);
+            let local_env = load_local_envelope(&local_dir).ok().flatten();
+            let should_pull = match &local_env {
+                None => true,
+                Some(local) => {
+                    remote_envelope.key_generation > local.key_generation
+                        || remote_envelope.updated_at > local.updated_at
+                        || remote_envelope.collaborators != local.collaborators
+                }
+            };
+
+            if should_pull {
+                let bundle_path = format!("projects/{proj_name}/bundle.enc");
+                if let Some((bundle_bytes, _)) =
+                    self.get_file_bytes(owner, repo, &bundle_path).await?
+                    && let Ok(archive) =
+                        decrypt_project_bundle(&bundle_bytes, proj_name, &project_key)
+                {
+                    unpack_project_archive(&archive, &local_dir)?;
+                    save_local_envelope(&local_dir, &remote_envelope, Some(&project_key))?;
+                    summary.downloaded.push(proj_name.clone());
+                }
+            }
+        }
+
+        // Push local collaborative projects (those with .papr-collab.json)
+        if let Ok(entries) = std::fs::read_dir(projects_root) {
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let Some(proj_name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if proj_name.starts_with('.') || summary.downloaded.iter().any(|d| d == proj_name)
+                {
+                    continue;
+                }
+                let Ok(Some(_local_env)) = load_local_envelope(&path) else {
+                    continue;
+                };
+                if self
+                    .push_encrypted_project(owner, repo, &path, proj_name, current_user, local_keys)
+                    .await
+                    .is_ok()
+                {
+                    summary.uploaded.push(proj_name.to_string());
+                }
+            }
+        }
+
+        Ok(summary)
     }
 }
 

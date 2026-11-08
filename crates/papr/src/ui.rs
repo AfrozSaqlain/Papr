@@ -581,8 +581,11 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         && app.active_project.is_some()
         && app.project_pane != ProjectPane::ProjectList;
     if project_open {
-        let pdf_occlusion = (app.mode == AppMode::ProjectCitationSearch)
-            .then(|| project_citation_search_area(area));
+        let pdf_occlusion = match app.mode {
+            AppMode::ProjectCitationSearch => Some(project_citation_search_area(area)),
+            AppMode::ProjectCollaborators => Some(project_collaborators_modal_area(area)),
+            _ => None,
+        };
         render_projects(frame, rows[1], app, theme, pdf_occlusion);
     } else {
         let columns = Layout::default()
@@ -607,6 +610,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
         | AppMode::ProjectFileCreate
         | AppMode::ProjectEntryRename => render_project_name_prompt(frame, app, theme),
         AppMode::ProjectCitationSearch => render_project_citation_search(frame, app, theme),
+        AppMode::ProjectCollaborators => render_project_collaborators_modal(frame, app, theme),
         AppMode::Normal
         | AppMode::Search
         | AppMode::DiscoverFilter
@@ -931,12 +935,30 @@ fn render_projects(
 fn render_project_list(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &Theme) {
     let selected = workspace_highlight_selection(app, app.projects_selected);
     let items = app.projects.iter().enumerate().map(|(index, project)| {
+        let mut title_spans = vec![Span::styled(
+            project.name.clone(),
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        )];
+        if let Ok(Some(env)) = papr_core::load_local_envelope(&project.path) {
+            let collab_summary = if env.collaborators.is_empty() {
+                format!("  [encrypted v{} · private]", env.key_generation)
+            } else {
+                let list = env
+                    .collaborators
+                    .iter()
+                    .map(|c| format!("@{c}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("  [encrypted v{} · {list}]", env.key_generation)
+            };
+            title_spans.push(Span::styled(
+                collab_summary,
+                Style::default().fg(theme.accent),
+            ));
+        }
         workspace_list_item_for(
             vec![
-                Line::styled(
-                    &project.name,
-                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-                ),
+                Line::from(title_spans),
                 Line::styled(
                     project.path.display().to_string(),
                     Style::default().fg(theme.muted),
@@ -948,7 +970,7 @@ fn render_project_list(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &The
         )
     });
     let block = focus_block(
-        " PROJECTS — n NEW  ENTER/RIGHT OPEN  x DELETE  r REFRESH ",
+        " PROJECTS — n NEW  c COLLAB  s SYNC  ENTER/RIGHT OPEN  x DELETE  r REFRESH ",
         app.content_focused,
         theme,
     );
@@ -965,7 +987,7 @@ fn render_project_list(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &The
     frame.render_stateful_widget(list, area, &mut state);
     if app.projects.is_empty() {
         frame.render_widget(
-            Paragraph::new("No projects yet. Press n to create one.")
+            Paragraph::new("No projects yet. Press n to create one, or s to sync from GitHub.")
                 .alignment(Alignment::Center)
                 .style(Style::default().fg(theme.muted)),
             inner,
@@ -1015,7 +1037,7 @@ fn render_project_file_tree(
     });
     let tree_block = focus_block(" FILE TREE [ALT+1] ", file_tree_focused, theme).title_bottom(
         Line::styled(
-            " n new · ↵/→ open ",
+            " n new · c collab · s sync ",
             if file_tree_focused {
                 Style::default()
                     .fg(theme.accent)
@@ -4614,6 +4636,206 @@ fn render_project_citation_results(
 
 fn project_citation_search_area(area: Rect) -> Rect {
     centered(90, 24, area)
+}
+
+fn project_collaborators_modal_area(area: Rect) -> Rect {
+    centered(76, 20, area)
+}
+
+fn render_project_collaborators_modal(frame: &mut Frame<'_>, app: &App, theme: &Theme) {
+    let area = project_collaborators_modal_area(frame.area());
+    prepare_popup_surface(frame, area, theme);
+    let bg = popup_bg(theme);
+
+    let modal = &app.project_collab_modal;
+    let project_name = modal
+        .project
+        .as_ref()
+        .map_or("Project", |p| p.name.as_str());
+
+    let outer_title = if modal.adding_collaborator {
+        format!(" ENCRYPTED COLLABORATION ({project_name}) — ENTER ADD  ESC CANCEL ")
+    } else {
+        format!(" ENCRYPTED COLLABORATION ({project_name}) — a ADD  x REMOVE  s SYNC  ESC CLOSE ")
+    };
+
+    let outer_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent))
+        .style(Style::default().bg(bg))
+        .title(outer_title);
+    let inner = outer_block.inner(area);
+    frame.render_widget(outer_block, area);
+
+    let chunks = Layout::vertical([
+        Constraint::Length(4),
+        Constraint::Min(5),
+        Constraint::Length(3),
+    ])
+    .split(inner);
+
+    render_project_collab_header(frame, chunks[0], modal, theme, bg);
+    render_project_collab_list(frame, chunks[1], modal, theme, bg);
+    render_project_collab_footer(frame, chunks[2], modal, theme, bg);
+}
+
+fn render_project_collab_header(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    modal: &crate::state::ProjectCollabModalState,
+    theme: &Theme,
+    bg: ratatui::style::Color,
+) {
+    let (owner_str, gen_str, compiler_str) = modal.envelope.as_ref().map_or_else(
+        || ("local".to_string(), "v1".to_string(), "typst/latex".to_string()),
+        |env| {
+            let owner = if env.owner.is_empty() {
+                "you".to_string()
+            } else {
+                format!("@{}", env.owner)
+            };
+            (owner, format!("v{}", env.key_generation), env.compiler.clone())
+        },
+    );
+    let fp_str = if modal.local_fingerprint.is_empty() {
+        "auto-managed ssh-ed25519".to_string()
+    } else {
+        modal.local_fingerprint.clone()
+    };
+
+    let summary_lines = vec![
+        Line::from(vec![
+            Span::styled(" Cipher: ", Style::default().fg(theme.muted)),
+            Span::styled(
+                "ChaCha20-Poly1305 + X25519 (GitHub SSH Ed25519)",
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("   Key Gen: ", Style::default().fg(theme.muted)),
+            Span::styled(gen_str, Style::default().fg(theme.accent)),
+        ]),
+        Line::from(vec![
+            Span::styled(" Owner:  ", Style::default().fg(theme.muted)),
+            Span::styled(owner_str, Style::default().fg(theme.text)),
+            Span::styled("   Compiler: ", Style::default().fg(theme.muted)),
+            Span::styled(compiler_str, Style::default().fg(theme.text)),
+        ]),
+        Line::from(vec![
+            Span::styled(" Local SSH Key: ", Style::default().fg(theme.muted)),
+            Span::styled(fp_str, Style::default().fg(theme.secondary)),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(summary_lines).style(Style::default().bg(bg)),
+        area,
+    );
+}
+
+fn render_project_collab_list(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    modal: &crate::state::ProjectCollabModalState,
+    theme: &Theme,
+    bg: ratatui::style::Color,
+) {
+    let collaborators = modal
+        .envelope
+        .as_ref()
+        .map_or(&[][..], |env| env.collaborators.as_slice());
+
+    let list_block = focus_block(
+        " AUTHORIZED COLLABORATORS (Per-Project Key Envelope) ",
+        !modal.adding_collaborator,
+        theme,
+    );
+    let list_inner = list_block.inner(area);
+
+    if collaborators.is_empty() {
+        frame.render_widget(list_block, area);
+        frame.render_widget(
+            Paragraph::new(
+                "No collaborators yet. Press 'a' to add a collaborator by their GitHub username.",
+            )
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(theme.muted).bg(bg)),
+            list_inner,
+        );
+        return;
+    }
+
+    let selected_idx = (!modal.adding_collaborator)
+        .then(|| modal.selected.min(collaborators.len().saturating_sub(1)));
+    let items = collaborators.iter().enumerate().map(|(idx, username)| {
+        let wrapped_count = modal.envelope.as_ref().map_or(0, |env| {
+            env.recipient_keys
+                .iter()
+                .filter(|rk| &rk.username == username)
+                .count()
+        });
+        let status_badge = if wrapped_count > 0 {
+            format!("  [{wrapped_count} SSH key(s) wrapped]")
+        } else {
+            "  [pending SSH key wrap on next sync]".to_string()
+        };
+        let line = Line::from(vec![
+            Span::styled(
+                format!("@{username}"),
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(status_badge, Style::default().fg(theme.accent)),
+        ]);
+        single_line_list_item(line, idx, selected_idx, theme)
+    });
+    let list = List::new(items)
+        .block(list_block)
+        .highlight_style(list_highlight_style(theme, theme.surface, Some(theme.accent)))
+        .highlight_symbol("> ");
+    let mut state = ListState::default().with_selected(selected_idx);
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_project_collab_footer(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    modal: &crate::state::ProjectCollabModalState,
+    theme: &Theme,
+    bg: ratatui::style::Color,
+) {
+    let input_block = focus_block(
+        if modal.adding_collaborator {
+            " Add GitHub Username (fetches https://github.com/<user>.keys) "
+        } else {
+            " Status / Actions (a: add collaborator · x: revoke & rotate key · s: sync) "
+        },
+        modal.adding_collaborator,
+        theme,
+    );
+
+    if modal.adding_collaborator {
+        frame.render_widget(
+            Paragraph::new(modal.input.as_str())
+                .style(Style::default().fg(theme.text).bg(bg))
+                .block(input_block),
+            area,
+        );
+        let cursor_columns = modal.input[..modal.input_cursor.min(modal.input.len())]
+            .chars()
+            .count();
+        let cursor_columns = saturating_u16(cursor_columns);
+        frame.set_cursor_position((
+            area.x.saturating_add(1 + cursor_columns),
+            area.y + 1,
+        ));
+    } else {
+        let status_text = modal.status.as_deref().unwrap_or(
+            "Only listed collaborators can decrypt this project in your shared GitHub repo.",
+        );
+        frame.render_widget(
+            Paragraph::new(status_text)
+                .style(Style::default().fg(theme.muted).bg(bg))
+                .block(input_block),
+            area,
+        );
+    }
 }
 
 fn render_palette(frame: &mut Frame<'_>, app: &mut App, theme: &Theme) {
