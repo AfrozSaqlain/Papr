@@ -30,8 +30,9 @@ pub use library::{
     LibraryIngestionService, LibraryWatcher,
 };
 pub use models::{
-    ActivityItem, BookmarkSummary, CollectionSummary, LibraryPaper, PaperNote, ReadingDay,
-    ReadingStatistics, RemotePaper, ResearchDashboard,
+    ActivityItem, BookmarkSummary, CollectionSummary, LibraryPaper, PaperNote,
+    PdfDocumentHighlights, PdfHighlightStroke, ReadingDay, ReadingStatistics, RemotePaper,
+    ResearchDashboard,
 };
 pub use paths::{
     InvalidCollectionName, canonicalize_path, get_pdf_page_count, move_pdf_file,

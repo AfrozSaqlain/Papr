@@ -637,6 +637,9 @@ enum UiAction {
     MoveQueueItemUp(i64),
     MoveQueueItemDown(i64),
     ClosePdf,
+    SavePdfHighlights {
+        page: usize,
+    },
     CloseProject,
     RetryDownload {
         id: String,
@@ -3275,6 +3278,7 @@ async fn apply_ui_action(
         | UiAction::MoveQueueItemUp(_)
         | UiAction::MoveQueueItemDown(_)
         | UiAction::ClosePdf
+        | UiAction::SavePdfHighlights { .. }
         | UiAction::OpenCollection(_)
         | UiAction::OpenAuthor(_)
         | UiAction::OpenDownload(_)
@@ -3717,6 +3721,7 @@ async fn apply_paper_metadata_action(
                 saved_scroll_ratio,
                 Some(senders.app_events.clone()),
             )?;
+            load_active_pdf_highlights(&runtime.database, app);
             let current_page = app.pdf_viewer_page;
             let current_ratio = app.pdf_viewer_scroll_ratio;
             let total_pages = app.pdf_viewer_total_pages;
@@ -3823,6 +3828,17 @@ fn apply_library_navigation_action(
                 .min(app.reading_queue_papers.len().saturating_sub(1));
         }
         UiAction::ClosePdf => close_pdf_viewer(runtime, app)?,
+        UiAction::SavePdfHighlights { page } => {
+            if let Some(path) = app.pdf_viewer_path.as_deref() {
+                let strokes = pdf_viewer::page_highlights(path, page);
+                runtime.database.save_pdf_page_highlights(
+                    app.active_pdf_paper_id,
+                    path,
+                    page,
+                    &strokes,
+                )?;
+            }
+        }
         UiAction::OpenCollection(id) => open_collection(&runtime.database, app, id)?,
         UiAction::OpenAuthor(id) => {
             open_author(&runtime.database, &runtime.library_roots, app, id)?;
@@ -3843,7 +3859,26 @@ fn apply_library_navigation_action(
     Ok(())
 }
 
+fn load_active_pdf_highlights(database: &Database, app: &App) {
+    if let Some(path) = app.pdf_viewer_path.as_deref()
+        && let Ok(highlights) = database.load_pdf_highlights(app.active_pdf_paper_id, path)
+    {
+        pdf_viewer::set_document_highlights(path, highlights);
+    }
+}
+
 fn close_pdf_viewer(runtime: &Runtime, app: &mut App) -> Result<()> {
+    if let Some(path) = app.pdf_viewer_path.as_deref()
+        && let Some(page) = pdf_viewer::finish_active_stroke(path)
+    {
+        let strokes = pdf_viewer::page_highlights(path, page);
+        runtime.database.save_pdf_page_highlights(
+            app.active_pdf_paper_id,
+            path,
+            page,
+            &strokes,
+        )?;
+    }
     if let Some(paper_id) = app.active_pdf_paper_id.take() {
         runtime.database.record_reading_progress_with_scroll(
             paper_id,
@@ -3872,6 +3907,7 @@ fn close_pdf_viewer(runtime: &Runtime, app: &mut App) -> Result<()> {
     app.pdf_viewer_saved_page = 0;
     app.pdf_viewer_scroll_ratio = 0.0;
     app.pdf_viewer_saved_scroll_ratio = 0.0;
+    app.pdf_annotation_tool = PdfAnnotationTool::None;
     app.mode = AppMode::Normal;
     if let Some(path) = app.pdf_viewer_path.take() {
         pdf_viewer::release_document(&path);
@@ -3925,6 +3961,7 @@ fn open_download(
         saved_scroll_ratio,
         Some(senders.app_events.clone()),
     )?;
+    load_active_pdf_highlights(&runtime.database, app);
     if let Some(id) = paper_id {
         let current_page = app.pdf_viewer_page;
         let current_ratio = app.pdf_viewer_scroll_ratio;
@@ -4785,6 +4822,13 @@ fn pdf_scroll(app: &mut App, delta: i64) {
 
 fn handle_mouse(app: &mut App, mouse: MouseEvent) -> Option<UiAction> {
     match mouse.kind {
+        MouseEventKind::Down(_) | MouseEventKind::Drag(_) | MouseEventKind::Up(_)
+            if app.mode == AppMode::PdfView =>
+        {
+            if let Some(page) = pdf_viewer::handle_annotation_mouse(app, mouse) {
+                return Some(UiAction::SavePdfHighlights { page });
+            }
+        }
         MouseEventKind::ScrollUp => {
             if app.mode == AppMode::PdfView {
                 pdf_scroll(app, -3);
@@ -4866,6 +4910,7 @@ fn open_pdf(
         app.active_pdf_paper_id = paper_id;
         app.pdf_viewer_saved_page = target_page;
         app.active_pdf_session_start = Some(std::time::Instant::now());
+        app.pdf_annotation_tool = PdfAnnotationTool::None;
         app.toast = Some(format!(
             "Viewing PDF: {}",
             path.file_name().unwrap_or_default().to_string_lossy()
@@ -5800,6 +5845,30 @@ fn handle_pdf_viewer_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') if key.kind == KeyEventKind::Press => {
             Some(UiAction::ClosePdf)
+        }
+        KeyCode::Char('p') if key.kind == KeyEventKind::Press => {
+            let saved = app
+                .pdf_viewer_path
+                .as_deref()
+                .and_then(pdf_viewer::finish_active_stroke);
+            app.pdf_annotation_tool = if app.pdf_annotation_tool == PdfAnnotationTool::Highlight {
+                PdfAnnotationTool::None
+            } else {
+                PdfAnnotationTool::Highlight
+            };
+            saved.map(|page| UiAction::SavePdfHighlights { page })
+        }
+        KeyCode::Char('e') if key.kind == KeyEventKind::Press => {
+            let saved = app
+                .pdf_viewer_path
+                .as_deref()
+                .and_then(pdf_viewer::finish_active_stroke);
+            app.pdf_annotation_tool = if app.pdf_annotation_tool == PdfAnnotationTool::Eraser {
+                PdfAnnotationTool::None
+            } else {
+                PdfAnnotationTool::Eraser
+            };
+            saved.map(|page| UiAction::SavePdfHighlights { page })
         }
         KeyCode::Up | KeyCode::Char('k') if is_scroll_event => {
             pdf_scroll(app, -1);
@@ -13075,5 +13144,26 @@ startxref\n\
         assert!(res_url.is_ok());
 
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn pdf_viewer_keys_p_and_e_toggle_highlight_and_eraser_modes() {
+        let mut app = App::default();
+        app.mode = AppMode::PdfView;
+        assert_eq!(app.pdf_annotation_tool, PdfAnnotationTool::None);
+
+        // 'p' toggles Highlight on, then off
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        assert_eq!(app.pdf_annotation_tool, PdfAnnotationTool::Highlight);
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        assert_eq!(app.pdf_annotation_tool, PdfAnnotationTool::None);
+
+        // 'p' then 'e' switches from Highlight to Eraser, then 'e' toggles off
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        assert_eq!(app.pdf_annotation_tool, PdfAnnotationTool::Highlight);
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert_eq!(app.pdf_annotation_tool, PdfAnnotationTool::Eraser);
+        let _ = handle_key(&mut app, KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert_eq!(app.pdf_annotation_tool, PdfAnnotationTool::None);
     }
 }

@@ -262,3 +262,10 @@ pub struct ResearchDashboard {
     /// Most recent user activity.
     pub recent_activity: Vec<ActivityItem>,
 }
+
+/// Normalized `(x, y)` coordinates in `[0.0, 1.0]` for a single highlight stroke on a PDF page.
+pub type PdfHighlightStroke = Vec<(f32, f32)>;
+
+/// Per-page collection of highlight strokes for a PDF document (`page_number -> strokes`).
+pub type PdfDocumentHighlights = std::collections::HashMap<usize, Vec<PdfHighlightStroke>>;
+

@@ -14,7 +14,8 @@ use crate::{
     library::{CollectionDirectory, ImportedPdf},
     models::{
         ActivityItem, AuthorSummary, BookmarkSummary, CollectionSummary, DashboardStats,
-        LibraryPaper, PaperNote, ReadingDay, ReadingStatistics, RemotePaper, ResearchDashboard,
+        LibraryPaper, PaperNote, PdfDocumentHighlights, PdfHighlightStroke, ReadingDay,
+        ReadingStatistics, RemotePaper, ResearchDashboard,
     },
 };
 
@@ -69,6 +70,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         18,
         include_str!("../migrations/0018_reading_scroll_position.sql"),
     ),
+    (19, include_str!("../migrations/0019_pdf_highlights.sql")),
 ];
 
 /// Paper identifier, optional arXiv identifier, and optional local PDF path.
@@ -2009,6 +2011,105 @@ impl Database {
             "UPDATE reading_history SET page = ?1 WHERE id = ?2",
             params![page_i64, session_id],
         )?;
+        Ok(())
+    }
+
+    /// Load all persisted highlight strokes for a PDF document, keyed by 1-based page number.
+    ///
+    /// When `paper_id` is provided, strokes matching either `paper_id` or `pdf_path` are returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when querying `SQLite` or decoding stroke JSON fails.
+    pub fn load_pdf_highlights(
+        &self,
+        paper_id: Option<i64>,
+        pdf_path: &Path,
+    ) -> Result<PdfDocumentHighlights, DatabaseError> {
+        let path_str = pdf_path.to_string_lossy();
+        let mut highlights: PdfDocumentHighlights = HashMap::new();
+        if let Some(pid) = paper_id {
+            let mut stmt = self.connection.prepare(
+                "SELECT page, points_json FROM pdf_highlights
+                 WHERE paper_id = ?1 OR pdf_path = ?2
+                 ORDER BY id ASC",
+            )?;
+            let rows = stmt.query_map(params![pid, path_str], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (page_i64, points_json) = row?;
+                if let Ok(page) = usize::try_from(page_i64)
+                    && page >= 1
+                {
+                    let stroke: PdfHighlightStroke = serde_json::from_str(&points_json)?;
+                    if !stroke.is_empty() {
+                        highlights.entry(page).or_default().push(stroke);
+                    }
+                }
+            }
+        } else {
+            let mut stmt = self.connection.prepare(
+                "SELECT page, points_json FROM pdf_highlights
+                 WHERE pdf_path = ?1
+                 ORDER BY id ASC",
+            )?;
+            let rows = stmt.query_map(params![path_str], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (page_i64, points_json) = row?;
+                if let Ok(page) = usize::try_from(page_i64)
+                    && page >= 1
+                {
+                    let stroke: PdfHighlightStroke = serde_json::from_str(&points_json)?;
+                    if !stroke.is_empty() {
+                        highlights.entry(page).or_default().push(stroke);
+                    }
+                }
+            }
+        }
+        Ok(highlights)
+    }
+
+    /// Replace all persisted highlight strokes for a single page of a PDF document.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when encoding stroke JSON or updating `SQLite` fails.
+    pub fn save_pdf_page_highlights(
+        &self,
+        paper_id: Option<i64>,
+        pdf_path: &Path,
+        page: usize,
+        strokes: &[PdfHighlightStroke],
+    ) -> Result<(), DatabaseError> {
+        let page_i64 = i64::try_from(page.max(1)).unwrap_or(i64::MAX);
+        let path_str = pdf_path.to_string_lossy();
+        let tx = self.connection.unchecked_transaction()?;
+        if let Some(pid) = paper_id {
+            tx.execute(
+                "DELETE FROM pdf_highlights WHERE page = ?1 AND (paper_id = ?2 OR pdf_path = ?3)",
+                params![page_i64, pid, path_str],
+            )?;
+        } else {
+            tx.execute(
+                "DELETE FROM pdf_highlights WHERE page = ?1 AND pdf_path = ?2",
+                params![page_i64, path_str],
+            )?;
+        }
+        for stroke in strokes {
+            if stroke.is_empty() {
+                continue;
+            }
+            let points_json = serde_json::to_string(stroke)?;
+            tx.execute(
+                "INSERT INTO pdf_highlights (paper_id, pdf_path, page, points_json)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![paper_id, path_str, page_i64, points_json],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -4598,6 +4699,45 @@ mod tests {
         let paper = database.library_paper_by_id(id)?.unwrap();
         assert_eq!(paper.reading_status, "unread");
         assert_eq!(database.get_reading_position(id)?, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn pdf_highlights_persist_and_replace_per_page() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::in_memory()?;
+        let paper_id = database.insert_paper("Highlighted Paper", None)?;
+        let path = std::path::Path::new("/tmp/highlighted-paper.pdf");
+        let stroke1 = vec![(0.1_f32, 0.2_f32), (0.5_f32, 0.2_f32)];
+        let stroke2 = vec![(0.2_f32, 0.6_f32), (0.8_f32, 0.6_f32)];
+
+        database.save_pdf_page_highlights(
+            Some(paper_id),
+            path,
+            1,
+            &[stroke1.clone(), stroke2.clone()],
+        )?;
+        database.save_pdf_page_highlights(
+            Some(paper_id),
+            path,
+            2,
+            std::slice::from_ref(&stroke1),
+        )?;
+
+        let loaded = database.load_pdf_highlights(Some(paper_id), path)?;
+        assert_eq!(loaded.get(&1), Some(&vec![stroke1.clone(), stroke2.clone()]));
+        assert_eq!(loaded.get(&2), Some(&vec![stroke1.clone()]));
+
+        // Erasing stroke1 on page 1 and saving keeps only stroke2 on page 1
+        database.save_pdf_page_highlights(
+            Some(paper_id),
+            path,
+            1,
+            std::slice::from_ref(&stroke2),
+        )?;
+        let after_erase = database.load_pdf_highlights(Some(paper_id), path)?;
+        assert_eq!(after_erase.get(&1), Some(&vec![stroke2]));
+        assert_eq!(after_erase.get(&2), Some(&vec![stroke1]));
 
         Ok(())
     }

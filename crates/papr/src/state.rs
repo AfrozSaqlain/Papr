@@ -1120,6 +1120,18 @@ pub struct OverlayFlags {
     pub config_editor_insert_mode: bool,
 }
 
+/// Active annotation tool in the internal PDF viewer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PdfAnnotationTool {
+    /// Normal navigation mode (no drawing or erasing).
+    #[default]
+    None,
+    /// Freehand highlighter tool toggled with `p`.
+    Highlight,
+    /// Whole-stroke eraser tool toggled with `e`.
+    Eraser,
+}
+
 /// Secondary workspace state exposed through [`App`]'s dereference implementation.
 #[derive(Debug)]
 pub struct AppWorkspaceState {
@@ -1172,6 +1184,7 @@ pub struct AppWorkspaceState {
     pub(crate) pdf_viewer_saved_page: usize,
     pub(crate) pdf_viewer_scroll_ratio: f64,
     pub(crate) pdf_viewer_saved_scroll_ratio: f64,
+    pub(crate) pdf_annotation_tool: PdfAnnotationTool,
 }
 
 impl Default for AppWorkspaceState {
@@ -1226,6 +1239,7 @@ impl Default for AppWorkspaceState {
             pdf_viewer_saved_page: 0,
             pdf_viewer_scroll_ratio: 0.0,
             pdf_viewer_saved_scroll_ratio: 0.0,
+            pdf_annotation_tool: PdfAnnotationTool::None,
         }
     }
 }

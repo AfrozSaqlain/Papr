@@ -54,7 +54,7 @@
 //!   The default is `file`, except in SSH sessions where the terminal cannot
 //!   read local files.
 
-use crate::state::{App, Page};
+use crate::state::{App, Page, PdfAnnotationTool};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as FmtWrite;
@@ -68,9 +68,11 @@ use std::sync::{
 use std::thread;
 
 use anyhow::{Context, Result};
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use flate2::{Compression, write::ZlibEncoder};
 use image::{DynamicImage, Rgba, RgbaImage};
 use num_traits::ToPrimitive;
+use papr_core::{PdfDocumentHighlights, PdfHighlightStroke};
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -103,8 +105,9 @@ fn path_fingerprint(path: &Path) -> u64 {
 #[derive(Clone)]
 struct RenderedPage {
     pixel_h: u32,
-    /// Full-page image already scaled to the terminal pixel width at the time
-    /// of rendering.  Protected behind `Arc` so cloning is O(1).
+    /// Unannotated full-page image scaled to the terminal pixel width.
+    base_image: Arc<RgbaImage>,
+    /// Full-page image with highlight strokes composited on top.
     image: Arc<RgbaImage>,
 }
 
@@ -163,6 +166,14 @@ struct RenderJob {
     pixel_w: u32,
     priority: bool,
     cancelled: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct LastViewerGeometry {
+    pdf_area: Option<Rect>,
+    page_fit: bool,
+    continuous: bool,
+    total_pages: usize,
 }
 
 /// Everything that lives inside the global singleton lock.
@@ -229,6 +240,12 @@ struct PageCache {
     continuous_pending: bool,
     /// Last page intersecting the viewport during the previous draw.
     visible_last_page: usize,
+
+    // ── Highlights & annotations ─────────────────────────────────────────
+    highlights: HashMap<(PathBuf, usize), Vec<PdfHighlightStroke>>,
+    active_stroke: Option<(PathBuf, usize, PdfHighlightStroke)>,
+    last_eraser_pos: Option<(PathBuf, usize, (f32, f32))>,
+    last_geometry: LastViewerGeometry,
 }
 
 /// Lifecycle of a whole-page Kitty image used by continuous scrolling.
@@ -297,6 +314,10 @@ fn get_cache() -> Arc<Mutex<PageCache>> {
                 continuous_drawn: false,
                 continuous_pending: false,
                 visible_last_page: 0,
+                highlights: HashMap::new(),
+                active_stroke: None,
+                last_eraser_pos: None,
+                last_geometry: LastViewerGeometry::default(),
             }))
         })
         .clone()
@@ -413,6 +434,8 @@ pub fn reset_for_new_document_at_page_with_scroll(
         g.current_scroll_px = 0.0;
         g.initial_scroll_ratio = (initial_scroll_ratio > 0.0).then_some(initial_scroll_ratio);
         g.last_update = None;
+        g.active_stroke = None;
+        g.last_eraser_pos = None;
     }
 }
 
@@ -491,6 +514,19 @@ pub fn release_document(path: &Path) {
             .any(|(cached, _, _, _, _)| cached.as_path() == path)
         {
             g.document_generations.remove(path);
+        }
+        g.highlights.retain(|(cached, _), _| cached.as_path() != path);
+        if g.active_stroke
+            .as_ref()
+            .is_some_and(|(cached, _, _)| cached.as_path() == path)
+        {
+            g.active_stroke = None;
+        }
+        if g.last_eraser_pos
+            .as_ref()
+            .is_some_and(|(cached, _, _)| cached.as_path() == path)
+        {
+            g.last_eraser_pos = None;
         }
     }
 }
@@ -768,7 +804,18 @@ fn pump_render_queue() {
                         // Do not let its disk raster outlive the document either.
                         let _ = std::fs::remove_file(&raster);
                     }
-                    Ok(page_data) => {
+                    Ok(mut page_data) => {
+                        let strokes = g
+                            .highlights
+                            .get(&(pdf_path.clone(), page))
+                            .map_or(&[][..], Vec::as_slice);
+                        let active = g
+                            .active_stroke
+                            .as_ref()
+                            .filter(|(p, pg, _)| p == &pdf_path && *pg == page)
+                            .map(|(_, _, pts)| pts.as_slice());
+                        page_data.image =
+                            composite_page_highlights(&page_data.base_image, strokes, active);
                         g.pages.insert(key, page_data);
                         if raster.exists() && !g.temp_files.iter().any(|(_, file)| file == &raster)
                         {
@@ -879,10 +926,12 @@ fn render_page_blocking(
         img.resize_exact(pixel_w, scaled_h, image::imageops::FilterType::Triangle)
     };
     let rgba = scaled.into_rgba8();
+    let base_image = Arc::new(rgba);
 
     Ok(RenderedPage {
-        pixel_h: rgba.height(),
-        image: Arc::new(rgba),
+        pixel_h: base_image.height(),
+        image: Arc::clone(&base_image),
+        base_image,
     })
 }
 
@@ -1585,6 +1634,12 @@ fn prepare_viewer_frame(
         path == pdf_path && *cached_width != pixel_w
     });
     cache.last_viewport_h = pixel_h;
+    cache.last_geometry = LastViewerGeometry {
+        pdf_area: Some(pdf_area),
+        page_fit,
+        continuous,
+        total_pages: app.pdf_viewer_total_pages.max(1),
+    };
     cache.page_gap = if continuous {
         f64::from((font_h / 2).max(4))
     } else {
@@ -2287,7 +2342,7 @@ fn render_status_bar(
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
-    let status = Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             format!(" {filename} "),
             Style::default()
@@ -2302,11 +2357,35 @@ fn render_status_bar(
             format!(" │ {scroll}/{max_scroll} rows "),
             Style::default().fg(Color::DarkGray),
         ),
-        Span::styled(
-            " │ Esc:exit  ↑↓/jk:scroll  PgUp/Dn:page ",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]);
+    ];
+    match app.pdf_annotation_tool {
+        PdfAnnotationTool::None => {}
+        PdfAnnotationTool::Highlight => {
+            spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                " HIGHLIGHT ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        PdfAnnotationTool::Eraser => {
+            spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                " ERASER ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+    spans.push(Span::styled(
+        " │ Esc:exit  ↑↓/jk:scroll  PgUp/Dn:page  p:highlight  e:eraser ",
+        Style::default().fg(Color::DarkGray),
+    ));
+    let status = Line::from(spans);
     let status_bg = if app.settings_modal.transparent_background {
         Color::Reset
     } else {
@@ -2316,6 +2395,516 @@ fn render_status_bar(
         Paragraph::new(status).style(Style::default().bg(status_bg)),
         area,
     );
+}
+
+// ---------------------------------------------------------------------------
+// Highlights & stroke eraser
+// ---------------------------------------------------------------------------
+
+const HIGHLIGHT_RADIUS_NORM: f32 = 0.009;
+const ERASER_HIT_RADIUS_NORM: f32 = 0.022;
+const MIN_STROKE_STEP_SQ: f32 = 0.000_004;
+
+/// Load persisted highlights for `path` into the viewer cache and re-composite
+/// any cached pages for that document.
+pub fn set_document_highlights(path: &Path, highlights: PdfDocumentHighlights) {
+    let cache = get_cache();
+    let Ok(mut g) = cache.lock() else {
+        return;
+    };
+    g.highlights
+        .retain(|(cached_path, _), _| cached_path.as_path() != path);
+    if g.active_stroke
+        .as_ref()
+        .is_some_and(|(cached_path, _, _)| cached_path.as_path() == path)
+    {
+        g.active_stroke = None;
+    }
+    if g.last_eraser_pos
+        .as_ref()
+        .is_some_and(|(cached_path, _, _)| cached_path.as_path() == path)
+    {
+        g.last_eraser_pos = None;
+    }
+    let mut touched_pages = HashSet::new();
+    for (page, strokes) in highlights {
+        if !strokes.is_empty() {
+            touched_pages.insert(page);
+            g.highlights.insert((path.to_path_buf(), page), strokes);
+        }
+    }
+    let cached_pages = g
+        .pages
+        .keys()
+        .filter(|(p, _, _, _, _)| p.as_path() == path)
+        .map(|(_, _, pg, _, _)| *pg)
+        .collect::<Vec<_>>();
+    for page in cached_pages {
+        touched_pages.insert(page);
+    }
+    for page in touched_pages {
+        refresh_page_highlights(&mut g, path, page);
+    }
+}
+
+/// Return the committed highlight strokes for `(path, page)`.
+#[must_use]
+pub fn page_highlights(path: &Path, page: usize) -> Vec<PdfHighlightStroke> {
+    let cache = get_cache();
+    let Ok(g) = cache.lock() else {
+        return Vec::new();
+    };
+    g.highlights
+        .get(&(path.to_path_buf(), page))
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Commit an in-progress highlight stroke for `path` (if any) and return the
+/// affected page number so it can be persisted.
+pub fn finish_active_stroke(path: &Path) -> Option<usize> {
+    let cache = get_cache();
+    let Ok(mut g) = cache.lock() else {
+        return None;
+    };
+    g.last_eraser_pos = None;
+    let (stroke_path, page, points) = g.active_stroke.take()?;
+    if stroke_path.as_path() != path || points.is_empty() {
+        return None;
+    }
+    g.highlights
+        .entry((stroke_path.clone(), page))
+        .or_default()
+        .push(points);
+    refresh_page_highlights(&mut g, &stroke_path, page);
+    Some(page)
+}
+
+/// Process a mouse event when a PDF annotation tool (`Highlight` or `Eraser`)
+/// is active. Returns `Some(page)` when committed highlights on `page` were
+/// modified and should be persisted to the database.
+pub fn handle_annotation_mouse(app: &App, mouse: MouseEvent) -> Option<usize> {
+    let pdf_path = app.pdf_viewer_path.as_ref()?;
+    match app.pdf_annotation_tool {
+        PdfAnnotationTool::None => None,
+        PdfAnnotationTool::Highlight => handle_highlight_mouse(pdf_path, mouse),
+        PdfAnnotationTool::Eraser => handle_eraser_mouse(pdf_path, mouse),
+    }
+}
+
+fn handle_highlight_mouse(pdf_path: &Path, mouse: MouseEvent) -> Option<usize> {
+    let cache = get_cache();
+    let Ok(mut g) = cache.lock() else {
+        return None;
+    };
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let (page, pt) = map_mouse_to_page(&g, pdf_path, mouse.column, mouse.row, None)?;
+            g.active_stroke = Some((pdf_path.to_path_buf(), page, vec![pt]));
+            refresh_page_highlights(&mut g, pdf_path, page);
+            None
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            let (stroke_path, stroke_page) = g
+                .active_stroke
+                .as_ref()
+                .map(|(p, pg, _)| (p.clone(), *pg))?;
+            if stroke_path.as_path() != pdf_path {
+                return None;
+            }
+            let (_, pt) =
+                map_mouse_to_page(&g, pdf_path, mouse.column, mouse.row, Some(stroke_page))?;
+            let should_refresh = if let Some((_, _, points)) = g.active_stroke.as_mut() {
+                let moved = points.last().is_none_or(|prev| {
+                    let dx = pt.0 - prev.0;
+                    let dy = pt.1 - prev.1;
+                    dx * dx + dy * dy >= MIN_STROKE_STEP_SQ
+                });
+                if moved {
+                    points.push(pt);
+                }
+                moved
+            } else {
+                false
+            };
+            if should_refresh {
+                refresh_page_highlights(&mut g, pdf_path, stroke_page);
+            }
+            None
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            let (stroke_path, page, mut points) = g.active_stroke.take()?;
+            if stroke_path.as_path() != pdf_path || points.is_empty() {
+                return None;
+            }
+            if let Some((_, pt)) =
+                map_mouse_to_page(&g, pdf_path, mouse.column, mouse.row, Some(page))
+                && points.last().is_some_and(|prev| {
+                    let dx = pt.0 - prev.0;
+                    let dy = pt.1 - prev.1;
+                    dx * dx + dy * dy >= MIN_STROKE_STEP_SQ
+                })
+            {
+                points.push(pt);
+            }
+            g.highlights
+                .entry((stroke_path.clone(), page))
+                .or_default()
+                .push(points);
+            refresh_page_highlights(&mut g, &stroke_path, page);
+            Some(page)
+        }
+        _ => None,
+    }
+}
+
+fn handle_eraser_mouse(pdf_path: &Path, mouse: MouseEvent) -> Option<usize> {
+    let cache = get_cache();
+    let Ok(mut g) = cache.lock() else {
+        return None;
+    };
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let (page, pt) = map_mouse_to_page(&g, pdf_path, mouse.column, mouse.row, None)?;
+            g.last_eraser_pos = Some((pdf_path.to_path_buf(), page, pt));
+            erase_strokes_along(&mut g, pdf_path, page, pt, pt).then_some(page)
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            let (page, pt) = map_mouse_to_page(&g, pdf_path, mouse.column, mouse.row, None)?;
+            let start_pt = g
+                .last_eraser_pos
+                .as_ref()
+                .filter(|(p, pg, _)| p.as_path() == pdf_path && *pg == page)
+                .map_or(pt, |(_, _, prev)| *prev);
+            g.last_eraser_pos = Some((pdf_path.to_path_buf(), page, pt));
+            erase_strokes_along(&mut g, pdf_path, page, start_pt, pt).then_some(page)
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            g.last_eraser_pos = None;
+            None
+        }
+        _ => None,
+    }
+}
+
+fn erase_strokes_along(
+    g: &mut PageCache,
+    pdf_path: &Path,
+    page: usize,
+    e0: (f32, f32),
+    e1: (f32, f32),
+) -> bool {
+    let key = (pdf_path.to_path_buf(), page);
+    let Some(strokes) = g.highlights.get_mut(&key) else {
+        return false;
+    };
+    let radius_sq = ERASER_HIT_RADIUS_NORM * ERASER_HIT_RADIUS_NORM;
+    let before = strokes.len();
+    strokes.retain(|stroke| !stroke_hits_eraser_segment(stroke, e0, e1, radius_sq));
+    let changed = strokes.len() != before;
+    if strokes.is_empty() {
+        g.highlights.remove(&key);
+    }
+    if changed {
+        refresh_page_highlights(g, pdf_path, page);
+    }
+    changed
+}
+
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+fn map_mouse_to_page(
+    g: &PageCache,
+    pdf_path: &Path,
+    col: u16,
+    row: u16,
+    locked_page: Option<usize>,
+) -> Option<(usize, (f32, f32))> {
+    let pdf_area = g.last_geometry.pdf_area?;
+    if pdf_area.width == 0 || pdf_area.height == 0 {
+        return None;
+    }
+    if locked_page.is_none()
+        && (col < pdf_area.x
+            || col >= pdf_area.x.saturating_add(pdf_area.width)
+            || row < pdf_area.y
+            || row >= pdf_area.y.saturating_add(pdf_area.height))
+    {
+        return None;
+    }
+    let clamped_col = col.clamp(
+        pdf_area.x,
+        pdf_area.x.saturating_add(pdf_area.width).saturating_sub(1),
+    );
+    let clamped_row = row.clamp(
+        pdf_area.y,
+        pdf_area.y.saturating_add(pdf_area.height).saturating_sub(1),
+    );
+    let (font_w, font_h) = g.picker.as_ref().map_or((8, 16), Picker::font_size);
+    let pixel_w = u32::from(pdf_area.width) * u32::from(font_w);
+    let pixel_h = u32::from(pdf_area.height) * u32::from(font_h);
+    if pixel_w == 0 || pixel_h == 0 {
+        return None;
+    }
+    let vx = (f64::from(clamped_col - pdf_area.x) + 0.5) * f64::from(font_w);
+    let vy = (f64::from(clamped_row - pdf_area.y) + 0.5) * f64::from(font_h);
+    let nx = (vx / f64::from(pixel_w)).clamp(0.0, 1.0) as f32;
+
+    if g.last_geometry.page_fit {
+        let ny = (vy / f64::from(pixel_h)).clamp(0.0, 1.0) as f32;
+        return Some((locked_page.unwrap_or(g.current_page), (nx, ny)));
+    }
+
+    let generation = *g.document_generations.get(pdf_path).unwrap_or(&0);
+    let key_for = |page: usize| (pdf_path.to_path_buf(), generation, page, DPI, pixel_w);
+    let gap = if g.last_geometry.continuous {
+        g.page_gap.round().to_i64().unwrap_or(0)
+    } else {
+        0
+    };
+    let default_h = g.default_page_h.round().to_i64().unwrap_or(1000).max(1);
+    let slots = layout_continuous_pages(
+        g.current_page,
+        g.current_scroll_px,
+        g.last_geometry.total_pages.max(g.current_page).max(1),
+        i64::from(pixel_h),
+        gap,
+        default_h,
+        |page| {
+            g.pages
+                .get(&key_for(page))
+                .map(|rendered| i64::from(rendered.pixel_h))
+        },
+    );
+
+    if let Some(target_page) = locked_page {
+        if let Some(slot) = slots.iter().find(|s| s.page == target_page) {
+            let ny = ((vy - slot.top as f64) / (slot.height.max(1) as f64)).clamp(0.0, 1.0) as f32;
+            return Some((target_page, (nx, ny)));
+        }
+        return None;
+    }
+
+    for slot in &slots {
+        let top = slot.top as f64;
+        let bottom = (slot.top + slot.height) as f64;
+        if vy >= top && vy <= bottom {
+            let ny = ((vy - top) / (slot.height.max(1) as f64)).clamp(0.0, 1.0) as f32;
+            return Some((slot.page, (nx, ny)));
+        }
+    }
+    None
+}
+
+fn refresh_page_highlights(g: &mut PageCache, pdf_path: &Path, page: usize) {
+    let strokes = g
+        .highlights
+        .get(&(pdf_path.to_path_buf(), page))
+        .cloned()
+        .unwrap_or_default();
+    let active = g
+        .active_stroke
+        .as_ref()
+        .filter(|(p, pg, _)| p.as_path() == pdf_path && *pg == page)
+        .map(|(_, _, pts)| pts.clone());
+
+    let matching_keys = g
+        .pages
+        .keys()
+        .filter(|(p, _, pg, _, _)| p.as_path() == pdf_path && *pg == page)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let use_file = kitty_file_transfer_enabled();
+    for key in matching_keys {
+        let updated_image = if let Some(rendered) = g.pages.get_mut(&key) {
+            rendered.image =
+                composite_page_highlights(&rendered.base_image, &strokes, active.as_deref());
+            Some(Arc::clone(&rendered.image))
+        } else {
+            None
+        };
+        if let Some(image) = updated_image
+            && g.uploads.contains_key(&key)
+        {
+            drop_uploads(g, |k| k == &key);
+            let id = g.next_kitty_id;
+            g.next_kitty_id = g.next_kitty_id.wrapping_add(1).max(1);
+            let upload = make_kitty_upload_ready(pdf_path, id, &image, use_file, &mut g.temp_files);
+            g.uploads.insert(key, upload);
+        }
+    }
+    g.last_crop_key = None;
+    g.last_encoded = None;
+}
+
+fn make_kitty_upload_ready(
+    pdf_path: &Path,
+    id: u32,
+    image: &RgbaImage,
+    use_file: bool,
+    temp_files: &mut Vec<(PathBuf, PathBuf)>,
+) -> KittyUpload {
+    let (width, height) = image.dimensions();
+    let rgb = rgba_to_rgb(image);
+    let mut file = None;
+    let command = if use_file {
+        let path = std::env::temp_dir().join(format!(
+            "papr-tty-graphics-protocol-{}-{id}.rgb",
+            std::process::id()
+        ));
+        if std::fs::write(&path, &rgb).is_ok() {
+            let command = kitty_upload_file(&path, id, width, height);
+            temp_files.push((pdf_path.to_path_buf(), path.clone()));
+            file = Some(path);
+            command
+        } else {
+            let _ = std::fs::remove_file(&path);
+            kitty_upload_direct(&rgb, id, width, height)
+        }
+    } else {
+        kitty_upload_direct(&rgb, id, width, height)
+    };
+    KittyUpload::Ready { id, command, file }
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn composite_page_highlights(
+    base: &Arc<RgbaImage>,
+    strokes: &[PdfHighlightStroke],
+    active: Option<&[(f32, f32)]>,
+) -> Arc<RgbaImage> {
+    if strokes.is_empty() && active.is_none_or(<[_]>::is_empty) {
+        return Arc::clone(base);
+    }
+    let (width, height) = base.dimensions();
+    if width == 0 || height == 0 {
+        return Arc::clone(base);
+    }
+    let mut img = (**base).clone();
+    let w_f = width as f32;
+    let h_f = height as f32;
+    let limit_x = (w_f - 1.0).max(0.0);
+    let limit_y = (h_f - 1.0).max(0.0);
+    let radius_px = (h_f * HIGHLIGHT_RADIUS_NORM).max(4.0);
+    let radius_sq = radius_px * radius_px;
+    let mut visited = vec![false; (width as usize).saturating_mul(height as usize)];
+
+    for stroke in strokes.iter().map(Vec::as_slice).chain(active) {
+        if stroke.is_empty() {
+            continue;
+        }
+        let to_px = |(nx, ny): (f32, f32)| {
+            (
+                nx.clamp(0.0, 1.0) * limit_x,
+                ny.clamp(0.0, 1.0) * limit_y,
+            )
+        };
+        if stroke.len() == 1 {
+            let p = to_px(stroke[0]);
+            rasterize_highlight_segment(&mut img, &mut visited, p, p, radius_px, radius_sq);
+        } else {
+            for pair in stroke.windows(2) {
+                let a = to_px(pair[0]);
+                let b = to_px(pair[1]);
+                rasterize_highlight_segment(&mut img, &mut visited, a, b, radius_px, radius_sq);
+            }
+        }
+    }
+    Arc::new(img)
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn rasterize_highlight_segment(
+    img: &mut RgbaImage,
+    visited: &mut [bool],
+    a: (f32, f32),
+    b: (f32, f32),
+    radius_px: f32,
+    radius_sq: f32,
+) {
+    let (width, height) = img.dimensions();
+    let left = (a.0.min(b.0) - radius_px).floor().max(0.0) as u32;
+    let right = ((a.0.max(b.0) + radius_px).ceil().max(0.0) as u32).min(width.saturating_sub(1));
+    let top = (a.1.min(b.1) - radius_px).floor().max(0.0) as u32;
+    let bottom = ((a.1.max(b.1) + radius_px).ceil().max(0.0) as u32).min(height.saturating_sub(1));
+    let width_usize = width as usize;
+
+    for py in top..=bottom {
+        let row_offset = (py as usize) * width_usize;
+        let py_f = py as f32;
+        for px in left..=right {
+            let idx = row_offset + (px as usize);
+            if visited[idx] {
+                continue;
+            }
+            if point_to_segment_dist_sq((px as f32, py_f), a, b) <= radius_sq {
+                visited[idx] = true;
+                let pixel = img.get_pixel_mut(px, py);
+                pixel.0[1] = u8::try_from((u16::from(pixel.0[1]) * 240) / 255).unwrap_or(pixel.0[1]);
+                pixel.0[2] = u8::try_from((u16::from(pixel.0[2]) * 96) / 255).unwrap_or(pixel.0[2]);
+            }
+        }
+    }
+}
+
+fn point_to_segment_dist_sq(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+    let dx = b.0 - a.0;
+    let dy = b.1 - a.1;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq <= f32::EPSILON {
+        let px = p.0 - a.0;
+        let py = p.1 - a.1;
+        return px * px + py * py;
+    }
+    let t = (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len_sq).clamp(0.0, 1.0);
+    let proj_x = a.0 + t * dx;
+    let proj_y = a.1 + t * dy;
+    let ex = p.0 - proj_x;
+    let ey = p.1 - proj_y;
+    ex * ex + ey * ey
+}
+
+fn ccw(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
+    (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
+}
+
+fn segments_dist_sq(a0: (f32, f32), a1: (f32, f32), b0: (f32, f32), b1: (f32, f32)) -> f32 {
+    let d1 = ccw(a0, a1, b0);
+    let d2 = ccw(a0, a1, b1);
+    let d3 = ccw(b0, b1, a0);
+    let d4 = ccw(b0, b1, a1);
+    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
+        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
+    {
+        return 0.0;
+    }
+    point_to_segment_dist_sq(a0, b0, b1)
+        .min(point_to_segment_dist_sq(a1, b0, b1))
+        .min(point_to_segment_dist_sq(b0, a0, a1))
+        .min(point_to_segment_dist_sq(b1, a0, a1))
+}
+
+fn stroke_hits_eraser_segment(
+    stroke: &[(f32, f32)],
+    e0: (f32, f32),
+    e1: (f32, f32),
+    radius_sq: f32,
+) -> bool {
+    match stroke {
+        [] => false,
+        [only] => point_to_segment_dist_sq(*only, e0, e1) <= radius_sq,
+        points => points
+            .windows(2)
+            .any(|pair| segments_dist_sq(e0, e1, pair[0], pair[1]) <= radius_sq),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2766,9 +3355,11 @@ mod kitty_placeholder_tests {
         let other_temp = std::env::temp_dir().join(format!("papr-other-raster-{suffix}.png"));
         std::fs::write(&closed_temp, [])?;
         std::fs::write(&other_temp, [])?;
+        let base_image = Arc::new(RgbaImage::new(1, 1));
         let page = RenderedPage {
             pixel_h: 1,
-            image: Arc::new(RgbaImage::new(1, 1)),
+            image: Arc::clone(&base_image),
+            base_image,
         };
         let active_key = (closed.clone(), 0, 2, DPI, 1);
         let active_cancelled = Arc::new(AtomicBool::new(false));
@@ -3010,5 +3601,138 @@ mod kitty_placeholder_tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn highlight_and_stroke_eraser_modify_and_restore_page_pixels() -> anyhow::Result<()> {
+        use crossterm::event::KeyModifiers;
+
+        let path = PathBuf::from("/tmp/papr-highlight-eraser-test.pdf");
+        reset_for_new_document(&path);
+
+        // Prepare a 100x100 white page with a black text pixel in the middle
+        let mut raw = RgbaImage::from_pixel(100, 100, Rgba([255, 255, 255, 255]));
+        raw.put_pixel(50, 50, Rgba([0, 0, 0, 255]));
+        let base_image = Arc::new(raw);
+        let cache = get_cache();
+        {
+            let mut g = cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("PDF cache lock poisoned"))?;
+            let generation = *g.document_generations.entry(path.clone()).or_default();
+            let font_w = g.picker.as_ref().map_or(8, |p| p.font_size().0);
+            let font_h = g.picker.as_ref().map_or(16, |p| p.font_size().1);
+            let area = Rect::new(0, 0, 20, 10);
+            let pixel_w = u32::from(area.width) * u32::from(font_w);
+            g.last_geometry = LastViewerGeometry {
+                pdf_area: Some(area),
+                page_fit: false,
+                continuous: false,
+                total_pages: 1,
+            };
+            g.current_page = 1;
+            g.current_scroll_px = 0.0;
+            g.default_page_h = f64::from(u32::from(area.height) * u32::from(font_h));
+            g.pages.insert(
+                (path.clone(), generation, 1, DPI, pixel_w),
+                RenderedPage {
+                    pixel_h: u32::from(area.height) * u32::from(font_h),
+                    image: Arc::clone(&base_image),
+                    base_image: Arc::clone(&base_image),
+                },
+            );
+        }
+
+        let mut app = App::default();
+        app.pdf_viewer_path = Some(path.clone());
+        app.pdf_annotation_tool = PdfAnnotationTool::Highlight;
+
+        // Drag across row 5 from col 2 to col 18 (passes through center (50, 50))
+        assert_eq!(
+            handle_annotation_mouse(
+                &app,
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 2,
+                    row: 5,
+                    modifiers: KeyModifiers::NONE,
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            handle_annotation_mouse(
+                &app,
+                MouseEvent {
+                    kind: MouseEventKind::Drag(MouseButton::Left),
+                    column: 10,
+                    row: 5,
+                    modifiers: KeyModifiers::NONE,
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            handle_annotation_mouse(
+                &app,
+                MouseEvent {
+                    kind: MouseEventKind::Up(MouseButton::Left),
+                    column: 18,
+                    row: 5,
+                    modifiers: KeyModifiers::NONE,
+                }
+            ),
+            Some(1)
+        );
+
+        let strokes = page_highlights(&path, 1);
+        assert_eq!(strokes.len(), 1);
+        {
+            let g = cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("PDF cache lock poisoned"))?;
+            let rendered = g
+                .pages
+                .iter()
+                .find(|((p, _, pg, _, _), _)| p == &path && *pg == 1)
+                .map(|(_, page)| Arc::clone(&page.image))
+                .ok_or_else(|| anyhow::anyhow!("missing cached page"))?;
+            // White pixel along the stroke path is now highlighter yellow
+            assert_eq!(*rendered.get_pixel(40, 55), Rgba([255, 240, 96, 255]));
+            // Black text pixel stays black under multiply blending
+            assert_eq!(*rendered.get_pixel(50, 50), Rgba([0, 0, 0, 255]));
+        }
+
+        // Switch to stroke eraser and click on the stroke at (10, 5)
+        app.pdf_annotation_tool = PdfAnnotationTool::Eraser;
+        assert_eq!(
+            handle_annotation_mouse(
+                &app,
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 10,
+                    row: 5,
+                    modifiers: KeyModifiers::NONE,
+                }
+            ),
+            Some(1)
+        );
+        assert!(page_highlights(&path, 1).is_empty());
+        {
+            let g = cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("PDF cache lock poisoned"))?;
+            let rendered = g
+                .pages
+                .iter()
+                .find(|((p, _, pg, _, _), _)| p == &path && *pg == 1)
+                .map(|(_, page)| Arc::clone(&page.image))
+                .ok_or_else(|| anyhow::anyhow!("missing cached page"))?;
+            // Pixel is restored to white
+            assert_eq!(*rendered.get_pixel(40, 55), Rgba([255, 255, 255, 255]));
+        }
+
+        release_document(&path);
+        Ok(())
     }
 }
