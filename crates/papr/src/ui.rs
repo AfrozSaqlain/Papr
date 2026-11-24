@@ -934,7 +934,15 @@ fn render_project_list(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &The
         workspace_list_item_for(
             vec![
                 Line::styled(
-                    &project.name,
+                    format!(
+                        "{} [{}]",
+                        project.name,
+                        if project.path.join("main.typ").exists() {
+                            "Typst"
+                        } else {
+                            "LaTeX"
+                        }
+                    ),
                     Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
                 ),
                 Line::styled(

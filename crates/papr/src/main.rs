@@ -79,6 +79,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    /// Compile a Typst file to a PDF using Papr's embedded Typst compiler.
+    Compile {
+        /// Typst source file to compile.
+        #[arg(value_name = "TYPST-FILE")]
+        file: PathBuf,
+    },
     /// Print resolved configuration and data paths.
     Paths,
     /// Download an arXiv paper by ID, URL, or Markdown link and add it to the library.
@@ -111,11 +117,30 @@ fn main() -> Result<()> {
     if let Some(CliCommand::TypstWorker { project }) = &cli.command {
         return run_typst_worker_process(project);
     }
+    if let Some(CliCommand::Compile { file }) = &cli.command {
+        return compile_typst_cli(file);
+    }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("failed to initialize the Papr async runtime")?
         .block_on(run_app(cli))
+}
+
+fn compile_typst_cli(file: &Path) -> Result<()> {
+    anyhow::ensure!(
+        file.extension().is_some_and(|extension| extension == "typ"),
+        "input file must have a .typ extension"
+    );
+    let mut compiler = TypstCompiler::for_file(file)?;
+    let result = compiler.compile();
+    for line in &result.raw_log {
+        println!("{line}");
+    }
+    if !result.success {
+        anyhow::bail!("Typst compilation failed");
+    }
+    Ok(())
 }
 
 async fn run_app(cli: Cli) -> Result<()> {
@@ -6273,6 +6298,9 @@ fn handle_projects_key(app: &mut App, key: KeyEvent) -> Option<UiAction> {
     // Match the shared workspace command map in every non-text-input Projects
     // context. Insert mode returned above, so its `q` remains ordinary text.
     if key.code == KeyCode::Char('q') {
+        if app.active_project.is_some() {
+            return prepare_project_close(app).then_some(UiAction::CloseProject);
+        }
         app.dispatch(Command::Quit);
         return None;
     }

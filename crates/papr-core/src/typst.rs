@@ -47,6 +47,7 @@ pub struct TypstCompileResult {
 /// Reusing the world preserves Typst's source cache between live builds.
 pub struct TypstCompiler {
     root: PathBuf,
+    entry: PathBuf,
     world: PaprTypstWorld,
 }
 
@@ -58,14 +59,52 @@ impl TypstCompiler {
     /// Returns an error when the project root cannot be resolved or the
     /// embedded compiler's filesystem and package services cannot initialize.
     pub fn new(project_root: &Path) -> Result<Self> {
+        Self::with_entry(project_root, Path::new("main.typ"))
+    }
+
+    /// Prepare an embedded compiler for a Typst file inside `project_root`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the project root cannot be resolved or the
+    /// embedded compiler's filesystem and package services cannot initialize.
+    pub fn with_entry(project_root: &Path, entry: &Path) -> Result<Self> {
         let root = project_root
             .canonicalize()
             .with_context(|| format!("could not open Typst project {}", project_root.display()))?;
-        let world = PaprTypstWorld::new(&root)?;
-        Ok(Self { root, world })
+        let entry = if entry.is_absolute() {
+            entry.strip_prefix(&root).with_context(|| {
+                format!("Typst entry file {} is outside the project", entry.display())
+            })?
+        } else {
+            entry
+        };
+        let entry = entry
+            .to_str()
+            .context("Typst entry file path is not valid UTF-8")?;
+        let world = PaprTypstWorld::new(&root, entry)?;
+        Ok(Self {
+            root,
+            entry: PathBuf::from(entry),
+            world,
+        })
     }
 
-    /// Compile `main.typ` and publish a complete build result to the UI.
+    /// Prepare the embedded compiler for a standalone Typst file.
+    ///
+    /// Its containing directory becomes the project root, so relative imports
+    /// and assets resolve next to the input file.
+    pub fn for_file(file: &Path) -> Result<Self> {
+        let file = file
+            .canonicalize()
+            .with_context(|| format!("could not open Typst file {}", file.display()))?;
+        let root = file
+            .parent()
+            .context("Typst file has no containing directory")?;
+        Self::with_entry(root, &file)
+    }
+
+    /// Compile the configured entry file and publish a complete PDF build result.
     /// A failed build leaves the last successful PDF in place.
     pub fn compile(&mut self) -> TypstCompileResult {
         self.world.reset();
@@ -92,7 +131,7 @@ impl TypstCompiler {
             .collect::<Vec<_>>();
         let mut success = false;
         if let Some(pdf) = pdf {
-            let output = self.root.join("main.pdf");
+            let output = self.root.join(self.entry.with_extension("pdf"));
             match publish_pdf(&output, &pdf) {
                 Ok(()) => success = true,
                 Err(error) => diagnostics.push(ProjectBuildDiagnostic {
@@ -108,7 +147,7 @@ impl TypstCompiler {
             }
         }
 
-        let mut raw_log = vec!["compiling main.typ with embedded Typst".into()];
+        let mut raw_log = vec![format!("compiling {} with embedded Typst", self.entry.display())];
         raw_log.extend(diagnostics.iter().flat_map(format_diagnostic));
         raw_log.push(if success {
             "compiled successfully".into()
@@ -124,7 +163,10 @@ impl TypstCompiler {
 }
 
 fn publish_pdf(output: &Path, pdf: &[u8]) -> io::Result<()> {
-    let temporary = output.with_file_name(".papr-main.pdf.tmp");
+    let temporary = output.with_file_name(format!(
+        ".papr-{}.pdf.tmp",
+        output.file_stem().and_then(|stem| stem.to_str()).unwrap_or("output")
+    ));
     std::fs::write(&temporary, pdf)?;
 
     #[cfg(windows)]
@@ -157,9 +199,9 @@ struct PaprTypstWorld {
 }
 
 impl PaprTypstWorld {
-    fn new(root: &Path) -> Result<Self> {
-        let virtual_main =
-            VirtualPath::new("main.typ").context("main.typ is not a valid Typst virtual path")?;
+    fn new(root: &Path, entry: &str) -> Result<Self> {
+        let virtual_main = VirtualPath::new(entry)
+            .with_context(|| format!("{entry} is not a valid Typst virtual path"))?;
         let main = RootedPath::new(VirtualRoot::Project, virtual_main).intern();
 
         let downloader = HttpDownloader::new()?;
